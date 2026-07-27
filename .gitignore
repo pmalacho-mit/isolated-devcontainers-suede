@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# Secrets and machine-local state
+# ---------------------------------------------------------------------------
+# release/.env holds VSCODE_TOKEN, the only thing standing between a browser on
+# this machine and a full editor session. cli.sh writes it on first `up`.
+# tests/static/04-hygiene.sh asserts this pattern is here.
+.env
+.env.*
+!.env.example
+
+# Deploy keys generated per-repo by `cli.sh repo add`. These live inside the
+# editor container, but a stray copy on the host must never be committed.
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.pem
+*.key
+deploy_*
+
+# ---------------------------------------------------------------------------
+# Build / tooling artifacts
+# ---------------------------------------------------------------------------
+node_modules/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Editor and OS noise
+# ---------------------------------------------------------------------------
+.DS_Store
+*.swp
+.idea/
+
+# ---------------------------------------------------------------------------
+# Personal scratch
+# ---------------------------------------------------------------------------
+todo.txt
+
+# Deliberately NOT ignored:
+#   samples/     -- fixtures the test suite asserts against
+#   release/     -- the shipped tree; all of it is meant to be committed
+#   HANDOFF.md   -- working notes for whoever picks this up next

@@ -1,0 +1,15 @@
+# Overrides that let a TEST stack run beside a real one: different project
+# name (passed with -p), different host ports, no clash on 3000/8080-8090.
+#
+# The inner-side port numbers are deliberately unchanged. desolate allocates
+# relay ports from DESOLATE_PORT_MIN..MAX inside dind's namespace, so only the
+# Mac-facing half of the mapping is moved. Keep it that way: moving the
+# container side without moving the orchestrator's env is exactly the drift
+# that tests/static/02-compose-invariants.sh exists to catch.
+services:
+  dind:
+    ports: !override
+      - "127.0.0.1:8180-8190:8080-8090"
+  vscode:
+    ports: !override
+      - "127.0.0.1:3100:3000"

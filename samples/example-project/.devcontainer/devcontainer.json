@@ -1,0 +1,47 @@
+{
+  "name": "example-hardened-devcontainer",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  // Runs on the INNER dockerd. The path exists in both the vscode container
+  // and dind because the `workspaces` volume is mounted at /workspaces in both.
+  "workspaceFolder": "/workspaces/example-project",
+  "workspaceMount": "source=/workspaces/example-project,target=/workspaces/example-project,type=bind",
+
+  // NOTE: do NOT add "appPort" here. desolate allocates host ports dynamically
+  // and its relay binds them on the inner daemon; an appPort publish would
+  // occupy the same port and the relay would fail with "address in use".
+  // Declare CONTAINER-side ports in customizations.desolate.ports instead.
+
+  "runArgs": [
+    "--security-opt", "no-new-privileges:true",
+    "--cap-drop", "ALL",
+    "--pids-limit", "1024"
+  ],
+
+  // Belt-and-suspenders hygiene from the Red Guild article. In this stack no
+  // host agents are forwarded anyway (the browser model doesn't do it), but
+  // blanking these keeps the config safe even if someone later opens this
+  // repo from desktop VS Code.
+  "remoteEnv": {
+    "SSH_AUTH_SOCK": "",
+    "GPG_AGENT_INFO": "",
+    "GIT_ASKPASS": ""
+  },
+
+  "customizations": {
+    // desolate reads container-side ports here and allocates host ports
+    // dynamically -- NO machine-specific host ports live in this file, so it
+    // never conflicts between machines or teammates.
+    "desolate": { "ports": [5173] },
+    "vscode": {
+      "settings": {
+        "remote.containers.copyGitConfig": false,
+        "security.workspace.trust.enabled": true,
+        "extensions.autoUpdate": false,
+        "extensions.autoCheckUpdates": false
+      },
+      // Installed inside the devcontainer by `desolate`, from Open VSX.
+      "extensions": []
+    }
+  }
+}

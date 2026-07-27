@@ -1,0 +1,24 @@
+[Unit]
+Description=desolate secret-injection proxy (mitmproxy, transparent mode)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=desolate-proxy
+Group=desolate-proxy
+Environment=DESOLATE_SETTINGS=/etc/desolate-proxy/settings.json
+ExecStart=/opt/desolate-proxy/venv/bin/mitmdump \
+    --mode transparent \
+    --listen-host 0.0.0.0 --listen-port 18080 \
+    --set confdir=/var/lib/desolate-proxy \
+    --set block_global=false \
+    -s /opt/desolate-proxy/addon.py
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/desolate-proxy
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+# Run from INSIDE the devcontainer's terminal:
+#   cd /workspaces/sample-fastapi && docker compose up --build
+#
+# Level-3: this runs on the devcontainer's OWN docker daemon. The API key is a
+# PLACEHOLDER inherited from the devcontainer environment -- the real value is
+# substituted by the VM proxy on the way out, and only toward api.openai.com.
+services:
+  api:
+    build: .
+    environment:
+      # Placeholder passthrough. Contains no secret material.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-SAMPLE-FASTAPI-OPENAI-KEY}
+    volumes:
+      # Proxy CA so this container trusts the intercepted TLS. The path exists
+      # inside the devcontainer because desolate mounted it there.
+      - /devenv-ca:/devenv-ca:ro
+    ports:
+      - "0.0.0.0:8000:8000"

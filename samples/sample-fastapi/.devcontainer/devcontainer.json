@@ -1,0 +1,47 @@
+{
+  "name": "sample-fastapi",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  // Enables THIS devcontainer to run its own Docker daemon (level 3), so it
+  // can start the FastAPI container the same way production compose would.
+  // Under sysbox this nested daemon runs UNPRIVILEGED -- no privileged flag,
+  // no cgroup workaround needed (sysbox virtualizes /sys/fs/cgroup for it).
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+
+  "workspaceFolder": "/workspaces/sample-fastapi",
+  "workspaceMount": "source=/workspaces/sample-fastapi,target=/workspaces/sample-fastapi,type=bind",
+
+  // Container-side ports desolate should forward to your Mac browser.
+  // 8000 = the FastAPI app (published by the level-3 container).
+  "customizations": {
+    "desolate": {
+      "ports": [8000],
+      // The docker-in-docker feature declares privileged: true in its own
+      // metadata. The broker refuses privilege that arrives implicitly from a
+      // feature, so it has to be acknowledged HERE, in the project's own file,
+      // where code review and `git log` can see it.
+      //
+      // What you are accepting: a privileged container on the inner daemon can
+      // reach that daemon's /var/lib/docker, i.e. sibling projects' on-disk
+      // data. sysbox still contains it to the VM, and the VM still contains it
+      // to your Mac -- but this project is no longer isolated from its
+      // siblings. Do not run untrusted code in a project with this flag.
+      "allowPrivileged": true
+    },
+    "vscode": { "extensions": [] }
+  },
+
+  // Secrets are PLACEHOLDERS -- safe to commit. The real values live only in
+  // the Colima VM; the proxy substitutes them in-flight and only toward each
+  // secret's allowlisted hosts. Nothing secret ever enters this container.
+  //   ./cli.sh secret add SAMPLE-FASTAPI-OPENAI-KEY --hosts api.openai.com
+  "containerEnv": {
+    "OPENAI_API_KEY": "SAMPLE-FASTAPI-OPENAI-KEY"
+  },
+
+  // Belt-and-suspenders: no host agents forwarded (browser model doesn't, but
+  // keeps the file safe if opened from desktop VS Code).
+  "remoteEnv": { "SSH_AUTH_SOCK": "", "GPG_AGENT_INFO": "", "GIT_ASKPASS": "" }
+}
