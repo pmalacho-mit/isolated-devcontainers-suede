@@ -1,0 +1,18 @@
+{
+  "default_action": "allow",
+
+  "secrets": {
+    "DESOLATE-SELFTEST-PLACEHOLDER": {
+      "value": "injected-selftest-value-93f2",
+      "hosts": ["httpbin.org"]
+    }
+  },
+
+  "network": [
+    { "action": "allow", "host": "*" }
+  ],
+
+  "tls_passthrough": [],
+
+  "scrub_responses": true
+}

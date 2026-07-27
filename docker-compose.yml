@@ -1,0 +1,268 @@
+# Safe browser-based dev environment
+#
+#   browser ──127.0.0.1:3000──▶ [vscode: OpenVSCode Server]
+#                                     │  NO docker socket -- broker client only
+#                                     │  unix socket (broker-run volume)
+#                                     ▼
+#                               [orchestrator: broker.ts]
+#                                     │  DOCKER_HOST=unix:///run/inner/docker.sock
+#                                     ▼
+#                               [dind: inner dockerd]  ◀── devcontainers live HERE
+#                                     │  unix socket (shared volume, never TCP)
+#                                     ▼
+#                               observe.sh, via `docker exec` on the orchestrator
+#
+# Invariants:
+#   - The HOST docker socket is never mounted anywhere.
+#   - The inner dockerd listens ONLY on a unix socket inside a named volume.
+#   - Only the orchestrator mounts that socket. The editor reaches the daemon
+#     solely through the broker's fixed op vocabulary, never directly.
+#   - The only host-reachable surface is 3000 (the editor, token-gated), bound
+#     to 127.0.0.1. Nothing else is published except the dev-server range.
+#
+# There used to be a GET-only socket proxy on 127.0.0.1:2375 here, for host-side
+# observability. It was removed deliberately, and re-adding one is a decision,
+# not a convenience: its read-only guarantee constrained only the Mac, which is
+# already the trust root and can drive the inner daemon through the orchestrator
+# anyway -- while an unauthenticated HTTP port on loopback is reachable from any
+# browser you point at a hostile page (DNS rebinding), which a unix socket never
+# is. It bought nothing and cost that. observe.sh covers the use case.
+
+name: desolate
+
+services:
+  # ── One-shot volume initializer ───────────────────────────────────────
+  # dind is created first and would otherwise create the shared volumes as
+  # empty, root-owned dirs: uid 1000 couldn't write /workspaces or bind the
+  # broker socket in /run/broker, and server-dist would never receive the
+  # server (auto-seed only fires for the volume-creating container). This runs
+  # once as root, fixes ownership, and seeds or upgrades the server copy, then
+  # exits.
+  volume-init:
+    build: ./vscode-image
+    container_name: desolate-volume-init
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        chown 1000:1000 /workspaces
+        # Defensive: dockerd currently runs as container-root (sysbox maps that
+        # to an unprivileged VM uid), so root creates the socket regardless and
+        # this is a no-op. It only bites if dind is ever swapped for the
+        # dind-rootless image, where dockerd itself is uid 1000 and would get
+        # EACCES creating the socket in a root-owned dir.
+        chown 1000:1000 /run/inner
+        # NOT defensive -- required. The orchestrator runs as uid 1000 and
+        # binds /run/broker/desolate.sock here; root-owned means no broker.
+        chown 1000:1000 /run/broker
+        VER=$$(cat /home/.openvscode-server/package.json 2>/dev/null | head -c 512)
+        CUR=$$(cat /server-dist/.seeded-version 2>/dev/null || true)
+        if [ ! -x /server-dist/bin/openvscode-server ] || [ "$$VER" != "$$CUR" ]; then
+          echo "seeding openvscode-server into server-dist volume..."
+          rm -rf /server-dist/* 2>/dev/null || true
+          cp -a /home/.openvscode-server/. /server-dist/
+          printf '%s' "$$VER" > /server-dist/.seeded-version
+        fi
+        chown -R 1000:1000 /server-dist
+        echo "volume-init: done"
+    volumes:
+      - workspaces:/workspaces
+      - server-dist:/server-dist
+      - inner-run:/run/inner
+      - broker-run:/run/broker
+    restart: "no"
+
+  # ── Inner Docker daemon (docker-in-docker) ────────────────────────────
+  dind:
+    # Floating major on purpose: patch/minor rebuilds carry the Alpine security
+    # fixes, and a hard pin here rots silently (27 was last pushed 2025-02-15
+    # and is EOL upstream -- no rebuilds at all).
+    #
+    # Two things about 28+ that do NOT announce themselves, both handled below:
+    #   - it needs the kernel's `ipset` in the VM, because dind under sysbox
+    #     cannot load modules itself (vm/install.sh checks for it);
+    #   - containerd 2.x dropped the default LimitNOFILE from ~1M to 1024,
+    #     which surfaces as EMFILE in file watchers inside devcontainers rather
+    #     than as anything resembling a docker error (--default-ulimit below).
+    image: docker:29-dind
+    container_name: desolate-dind
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    # Runs UNPRIVILEGED under the sysbox runtime: container-root maps to an
+    # unprivileged VM user, so a compromised dind cannot reach the VM/host, and
+    # the docker-in-docker feature works nested without privilege. This is the
+    # ONLY supported mode -- cli.sh refuses to start if sysbox-runc is absent.
+    runtime: sysbox-runc
+    # Install the proxy CA before dockerd starts: image pulls traverse the
+    # intercepting proxy, so the daemon must trust it. No-op if not installed.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - '[ -x /desolate-ca/install-ca.sh ] && /desolate-ca/install-ca.sh >/dev/null 2>&1 || true; exec dockerd-entrypoint.sh "$$@"'
+      - --
+    environment:
+      DOCKER_TLS_CERTDIR: ""          # no TCP listener at all -> no TLS needed
+    command:
+      - dockerd
+      - --host=unix:///run/inner/docker.sock
+      - --group=1000                  # gid of the openvscode user, grants socket access
+      - --icc=true
+      # What the INNER daemon hands its containers. containerd 2.x defaults this
+      # to 1024, which is far below what a language server + bundler + watcher
+      # in one devcontainer needs; the failure is EMFILE deep inside a toolchain,
+      # nowhere near anything that says "docker".
+      #
+      # 65536, NOT the 1048576 that dockerd conventionally uses on a bare host.
+      # dind runs under sysbox in a user namespace, so it has no
+      # CAP_SYS_RESOURCE in the initial namespace and cannot raise a hard limit
+      # past what it inherited -- and setrlimit(RLIMIT_NOFILE) above
+      # /proc/sys/fs/nr_open returns EPERM regardless. Asking for 1048576 makes
+      # EVERY inner container fail at creation with:
+      #   error setting rlimit type 7: operation not permitted
+      # which names neither ulimits nor sysbox. Raise it only as far as the
+      # containment allows; the point is to clear 1024, not to match a host.
+      - --default-ulimit=nofile=${DESOLATE_NOFILE:-65536}:${DESOLATE_NOFILE:-65536}
+    # dockerd/containerd's OWN limits inside dind. Separate from the flag above:
+    # that one is the default for containers, this is the headroom for the
+    # daemon holding every one of their fds.
+    ulimits:
+      nofile:
+        soft: ${DESOLATE_NOFILE:-65536}
+        hard: ${DESOLATE_NOFILE:-65536}
+    volumes:
+      - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
+      - inner-run:/run/inner          # the inner socket lives here
+      - dind-sysbox-data:/var/lib/docker  # inner images/containers
+      - workspaces:/workspaces        # MUST match the vscode mount path so
+                                      # devcontainer bind mounts resolve
+      - server-dist:/server-dist      # OpenVSCode tarball, bind-mounted into
+                                      # each devcontainer by `desolate`
+    healthcheck:
+      # Healthy only once dockerd is up and the socket exists -- dependents
+      # wait on this, which fixes the startup race on first boot.
+      test: ["CMD", "docker", "-H", "unix:///run/inner/docker.sock", "info"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+    ports:
+      # Reaches editors/apps running INSIDE devcontainers. Chain:
+      #   Mac 127.0.0.1:PORT -> dind's netns :PORT -> socat relay container
+      #   (joined to the devcontainer's network) -> devcontainer bridge IP.
+      # This range publish is the ONLY Mac<->dind port bridge. Relays publish
+      # on the INNER daemon, so their listener lands in dind's netns -- which
+      # is exactly where this mapping forwards. Anything else publishing the
+      # same port in that netns takes the address the relay needs, so
+      # desolate.ts hard-refuses devcontainer.json "appPort".
+      #
+      # Widen it in .env (both containers below are recreated when it changes):
+      #   DESOLATE_PORT_MIN=8080
+      #   DESOLATE_PORT_MAX=8120
+      # The SAME two variables are handed to the orchestrator, which is what
+      # desolate.ts allocates from. Do not hardcode either side: a range wider
+      # here than there just wastes publishes, but wider THERE than here means
+      # relays that bind fine inside dind and are unreachable from the Mac.
+      # tests/static/02-compose-invariants.sh asserts the two cannot drift.
+      - "127.0.0.1:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8090}:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8090}"
+    networks: [devnet]
+    restart: unless-stopped
+
+  # ── Orchestrator: the ONLY container with inner-daemon access ─────────
+  # Runs the broker, a narrow request API over a unix socket. The editor can
+  # ask it to start/stop/inspect a project's devcontainer -- nothing else. It
+  # validates both the project name AND the project's devcontainer.json spec
+  # before acting (enforcePolicy in vscode-image/policy.ts, called from
+  # broker.ts), so a project cannot request another project's volumes, bind
+  # mounts, or privilege escalation.
+  orchestrator:
+    build: ./vscode-image           # same image; different entrypoint
+    container_name: desolate-orchestrator
+    depends_on:
+      dind:
+        condition: service_healthy
+    user: "1000:1000"
+    environment:
+      DOCKER_HOST: unix:///run/inner/docker.sock
+      DESOLATE_BROKER: /run/broker/desolate.sock
+      # The range desolate.ts allocates relay ports from. MUST be the same two
+      # variables dind publishes above -- see the comment on its `ports:`.
+      DESOLATE_PORT_MIN: ${DESOLATE_PORT_MIN:-8080}
+      DESOLATE_PORT_MAX: ${DESOLATE_PORT_MAX:-8090}
+    entrypoint: ["/usr/local/bin/with-ca", "tsx", "/usr/local/lib/desolate/broker.ts"]
+    volumes:
+      - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
+      - inner-run:/run/inner        # the daemon socket lives HERE only
+      - workspaces:/workspaces
+      - server-dist:/server-dist
+      - broker-run:/run/broker
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 2048
+    networks: [devnet]
+    restart: unless-stopped
+
+  vscode:
+    build: ./vscode-image
+    container_name: desolate-vscode
+    depends_on:
+      dind:
+        condition: service_healthy
+      orchestrator:
+        condition: service_started    # broker socket must exist
+    user: "1000:1000"
+    environment:
+      # NO DOCKER_HOST. The editor has no daemon access at all -- it is a file
+      # viewer/editor over /workspaces plus a broker CLIENT. Starting
+      # devcontainers goes through the orchestrator's narrow broker API, so a
+      # malicious extension here cannot create containers, mount other
+      # projects' volumes, or exec into siblings.
+      DESOLATE_BROKER: /run/broker/desolate.sock
+      # Deliberately NOT set: SSH_AUTH_SOCK, GPG_AGENT_INFO, GIT_ASKPASS.
+      # Nothing forwards your host agents into this stack.
+    # The base image's ENTRYPOINT wraps the server with its own defaults,
+    # including --without-connection-token, and compose `command:` args are
+    # APPENDED to those -- which conflicts fatally with --connection-token
+    # (crash/restart loop). Overriding the entrypoint runs the binary with
+    # exactly these flags and nothing else.
+    entrypoint: ["/usr/local/bin/with-ca", "/home/.openvscode-server/bin/openvscode-server"]
+    command:
+      - --host=0.0.0.0                # inside the container; host binding is 127.0.0.1 below
+      - --port=3000
+      - --connection-token=${VSCODE_TOKEN:?set VSCODE_TOKEN in .env}
+    volumes:
+      # NOTE: inner-run is deliberately ABSENT -- no docker socket here.
+      - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
+      - workspaces:/workspaces        # full read/write: the universal editor
+      - vscode-home:/home/workspace   # settings + extensions persist here
+      - broker-run:/run/broker        # narrow request channel to orchestrator
+    ports:
+      - "127.0.0.1:3000:3000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 2048
+    networks: [devnet]
+    restart: unless-stopped
+
+volumes:
+  inner-run:
+  broker-run:
+  dind-sysbox-data:
+  workspaces:
+  vscode-home:
+  server-dist:
+
+networks:
+  devnet:
+    driver: bridge
+    driver_opts:
+      # PIN THE BRIDGE NAME. Without this, docker derives it from the network
+      # id (br-<hash>), so `cli.sh down && cli.sh up` produces a NEW name --
+      # and the VM's nftables rules, which match on iifname, silently stop
+      # matching. Egress interception would then be off while everything still
+      # appeared to work: no error, no failed request, just no proxy. A fixed
+      # name makes the rules survive recreation.
+      com.docker.network.bridge.name: br-desolate

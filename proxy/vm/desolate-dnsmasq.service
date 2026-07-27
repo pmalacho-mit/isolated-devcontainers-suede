@@ -1,0 +1,23 @@
+[Unit]
+Description=desolate container resolver (dnsmasq on :5353)
+Documentation=man:dnsmasq(8)
+After=network-online.target
+Wants=network-online.target
+# Deliberately NOT Conflicts=dnsmasq.service. The VM's own resolver is a
+# separate dnsmasq on :53 (Colima has no systemd-resolved) and must keep
+# running; this instance serves containers only. Two processes, two ports.
+
+[Service]
+Type=simple
+# -k keeps it in the foreground for systemd; -C makes it read ONLY our config,
+# never /etc/dnsmasq.conf or /etc/dnsmasq.d, so Colima's resolver settings and
+# ours cannot leak into each other.
+ExecStart=/usr/sbin/dnsmasq -k -C /etc/desolate-proxy/dnsmasq.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+# Root at start so it can install nft set entries (CAP_NET_ADMIN); dnsmasq
+# drops to its own unprivileged user itself once the sockets are bound.
+
+[Install]
+WantedBy=multi-user.target
