@@ -78,6 +78,10 @@ docker context use colima-desolate
 One command, run from the Mac. It sshes into the VM and installs both VM-side
 layers, in order:
 
+**The repo must live under `$HOME`.** Colima mounts only your home directory
+into the VM, and this step runs scripts from the repo *inside* the VM. Anywhere
+else and it cannot see them; `./cli.sh vm status` reports whether the VM can.
+
 1. **sysbox** ([`vm/install-sysbox.sh`](vm/install-sysbox.sh)) -- the
    containment boundary. `cli.sh up` refuses to start until `docker info`
    lists `sysbox-runc`.
@@ -604,6 +608,24 @@ chain plus secrets). They are fixtures and documentation, deliberately outside
 this shipped tree, so they are not part of an install. Copy one into
 `/workspaces/<name>` to try it.
 
+## Configuration
+
+Everything tunable lives in the `.env` next to `docker-compose.yml`, except
+`COLIMA_PROFILE`, which is an environment variable for `cli.sh` itself. Defaults
+are chosen to work unmodified; you should not need any of this on a normal
+machine.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `VSCODE_TOKEN` | *(required)* | Gates the editor on `127.0.0.1:3000`. `cli.sh up` refuses to start without it. |
+| `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8090` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else. |
+| `DESOLATE_NOFILE` | `65536` | File-descriptor limit the inner daemon gives each container. Raises containerd's 1024 default, which is low enough to break file watchers. |
+| `COLIMA_PROFILE` | `desolate` | Which Colima VM `cli.sh` talks to. Set it if you run more than one. |
+| `DESOLATE_SKIP_VM_CHECK` | unset | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
+
+Changing any of the `DESOLATE_*` values takes effect on the next `./cli.sh up`,
+which recreates the affected containers.
+
 ## Troubleshooting
 
 - **`cli.sh up` says sysbox is missing** -- you're either not on the Colima
@@ -631,6 +653,28 @@ this shipped tree, so they are not part of an install. Copy one into
   a placeholder token, or add a blanket rule:
   `nft add rule inet desolate forward iifname <bridge> tcp dport 22 accept`
   (weaker: any host becomes reachable on 22).
+- **Pulls fail with "no such host" / "connection refused ... :53"** -- the VM's
+  own resolver is down. Two dnsmasq instances are meant to run and they are not
+  alternatives: `desolate-dnsmasq` on `:5353` serves *containers* (via the
+  nftables redirect), while Colima's `dnsmasq` on `:53` serves *the VM itself*
+  and is what `/etc/resolv.conf` points at. If something set a global `port=`
+  on the system one -- a stray drop-in in `/etc/dnsmasq.d/` -- `:53` is left
+  unserved and every image pull fails with an error that sounds like Docker.
+  `./cli.sh vm status` shows `vm dns:`; `./cli.sh vm install` re-asserts both.
+- **Commands act on the wrong machine** -- `cli.sh` reaches the VM two ways:
+  `docker` (your current context) and `colima ssh -p $COLIMA_PROFILE`. If those
+  are different VMs, `down` removes containers the installer cannot see and
+  `vm install` provisions a VM your stack is not on. `./cli.sh vm status` prints
+  both; `vm install` refuses outright when they disagree.
+- **`error setting rlimit type 7: operation not permitted`** -- `DESOLATE_NOFILE`
+  is above what sysbox lets the inner daemon set. Type 7 is `RLIMIT_NOFILE`; dind
+  is user-namespaced, so it cannot raise a hard limit past what it inherited.
+  Check the ceiling and set below it:
+  `docker exec desolate-dind sh -c 'ulimit -Hn; cat /proc/sys/fs/nr_open'`.
+- **A Feature fails to install with a certificate error** -- that should not
+  happen for `"image"`-based projects; `desolate` derives a CA-trusting base for
+  them (see "Features and build-time downloads"). It *is* expected for projects
+  that build from their own `Dockerfile`, which are not covered.
 - **Everything broke, need internet now** -- in the VM:
   `sudo nft delete table inet desolate` removes interception;
   `sudo systemctl restart desolate-nft` puts it back.

@@ -29,6 +29,39 @@ They are regression tests. If one starts passing again, that escape is live.
 
 `static` and `unit` are the CI set: no daemon, no VM, no network.
 
+## Where each suite can actually run
+
+This matters more than it looks, because several suites cannot run in the
+`.devcontainer/` you are probably reading this from.
+
+| Suite | Runs in | Why |
+|---|---|---|
+| `static` | devcontainer or Mac | `docker compose config` needs **no** daemon |
+| `unit` | devcontainer or Mac | pure node + python |
+| `integration/broker` | devcontainer or Mac | needs the `devcontainer` CLI on PATH |
+| `integration/proxy` | Linux, as root | loads real nftables rules; skips elsewhere |
+| `integration/stack` | **Mac only** | needs Colima + sysbox; refuses to fake it |
+
+The devcontainer has `docker-outside-of-docker`, so `docker` there talks to
+whatever daemon the Mac exposes. That is fine for rendering compose and for the
+broker tests, but it is **not** the sysbox daemon -- do not expect the stack to
+come up from inside it.
+
+## Three roots -- pick the right one
+
+`tests/lib/harness.sh` defines three, and they are not interchangeable:
+
+```
+ROOT     the repo    -- only for repo-wide concerns (git hygiene)
+RELEASE  release/    -- everything under test
+SAMPLES  samples/    -- example devcontainers; fixtures, not shipped
+```
+
+Conflating `ROOT` and `RELEASE` is exactly the bug that once silently disabled
+21 assertions: paths resolved, files were found, every assertion passed, and
+none of them was looking at the shipped tree. If you add a case, pick
+deliberately.
+
 ## Setting up the optional dependencies
 
 ```bash
@@ -50,7 +83,7 @@ you run is testing the wrong thing.
 ## The full-stack test
 
 `integration/stack/` brings up a second, isolated copy of the stack
-(project `desolate-test`, ports 3100 / 2475 / 8180-8190) so it can run
+(project `desolate-test`, ports 3100 and 8180-8190) so it can run
 beside a live one. It **skips rather than degrades** when `sysbox-runc` is
 absent: running dind privileged to make the test pass would be asserting the
 opposite of what the test is for.
