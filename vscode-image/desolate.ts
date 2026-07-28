@@ -39,8 +39,9 @@ process.stdout.on("error", (err: NodeJS.ErrnoException) => {
   throw err;
 });
 
-const SERVER_SRC = "/server-dist";      // shared volume, bind source inside dind
+const SERVER_SRC = "/server-dist";      // the pristine server; OVERLAY LOWER only
 const SERVER_DST = "/vscode-server";    // where it lands in the devcontainer
+const HELPER_IMAGE = "alpine:3";        // tiny, for volume setup + verification
 
 /** The host-port range relays are allocated from.
  *
@@ -236,6 +237,146 @@ function specFingerprint(dir: string, config: string): string {
   walk(`${dir}/.devcontainer.json`, ".devcontainer.json");
   if (config) walk(config, "override");
   return createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 16);
+}
+
+// ---------------------------------------------------------------------------
+// The editor server: a PER-PROJECT copy-on-write view, never a shared mount.
+//
+// Every devcontainer EXECUTES ${SERVER_DST}/bin/openvscode-server. Handing them
+// all one mount of the same directory makes that a shared, writable, executed
+// path: one project overwrites the binary, and every other project runs it as
+// its own user on next start. A privileged project could do that even to a
+// read-only bind -- MS_RDONLY is a per-mount flag, and CAP_SYS_ADMIN in dind's
+// user namespace can `mount -o remount,rw` it away.
+//
+// So each project gets an overlayfs volume whose LOWER is the pristine server.
+// overlayfs never writes down: modifications are copied up into that project's
+// own upper. The lower is therefore protected by how the filesystem works
+// rather than by a flag someone can clear, and the cost is ~8K per project
+// instead of a full copy of the server tree.
+//
+// Verified viable on dind-under-sysbox by tests/probes/dind-overlay-volume.sh:
+// dind's storage driver is overlayfs, but /var/lib/docker (where the upper
+// lives) is ext4 -- overlayfs cannot be an upperdir, and this satisfies that.
+//
+// There is deliberately NO fallback to a shared mount. If the overlay cannot be
+// built, `desolate` refuses to start the project.
+// ---------------------------------------------------------------------------
+interface OverlayMount {
+  /** Short label; the volumes are `<project>-<name>` and `<project>-<name>-data`,
+   *  both of which policy.ts already permits under its `<project>-*` rule. */
+  name: string;
+  /** The pristine directory on dind's filesystem -- the overlay LOWER. */
+  lower: string;
+  /** Where it appears inside the devcontainer. */
+  target: string;
+  /** Identity of the lower's contents. When this changes the view is rebuilt,
+   *  so a file left in a project's upper can never shadow newer content below. */
+  key: () => string;
+  /** A path that must exist through the mount, proving it really mounted. */
+  proof: string;
+  /** Why this one matters, quoted verbatim when it cannot be built. */
+  why: string;
+}
+
+const sha16 = (raw: string) => createHash("sha256").update(raw).digest("hex").slice(0, 16);
+
+function readOrDie(path: string, hint: string): string {
+  try { return fs.readFileSync(path, "utf8"); }
+  catch { die(`cannot read ${path} -- ${hint}`); }
+}
+
+/** Everything a devcontainer receives from OUTSIDE its own project.
+ *
+ *  Both are shared, both are EXECUTED, and neither passes through the broker's
+ *  mount policy -- desolate injects them. Handed over as plain binds they are
+ *  the stack's sharpest cross-project edge: whoever can write one runs code in
+ *  every other project. So each project gets its own overlay view instead. */
+function overlayMounts(): OverlayMount[] {
+  const mounts: OverlayMount[] = [{
+    name: "vscode-server",
+    lower: SERVER_SRC,
+    target: SERVER_DST,
+    proof: `${SERVER_DST}/bin/openvscode-server`,
+    key: () => sha16(readOrDie(`${SERVER_SRC}/.seeded-version`,
+      "the editor server is not seeded. volume-init populates it at stack start:\n" +
+      "      docker logs desolate-volume-init")),
+    why: `${SERVER_DST} is EXECUTED by every project. A shared writable copy would let\n` +
+         `      any project overwrite the binary every other project runs.`,
+  }];
+
+  // Only when the proxy is installed; the stack works without it.
+  if (fs.existsSync(`${CA_DIR}/ca.pem`)) {
+    mounts.push({
+      name: "desolate-ca",
+      lower: CA_DIR,
+      target: CA_DIR,
+      proof: `${CA_DIR}/ca.pem`,
+      key: () => sha16(readOrDie(`${CA_DIR}/ca.pem`, "the proxy CA is missing")),
+      // Worse than the server, and less obvious: installProxyCa() runs
+      // install-ca.sh with `docker exec -u 0` in EVERY devcontainer, and dind's
+      // own entrypoint runs it too. Poisoning it once buys root execution in
+      // every project and in the daemon that holds them all.
+      why: `${CA_DIR}/install-ca.sh is executed AS ROOT in every devcontainer (and in\n` +
+           `      dind's entrypoint). A shared writable copy would be root code execution\n` +
+           `      across every project.`,
+    });
+  }
+  return mounts;
+}
+
+/** Build (or reuse) one project's copy-on-write view of a shared directory.
+ *  Returns the volume name; dies loudly rather than degrading to a shared mount. */
+function ensureOverlayVolume(project: string, m: OverlayMount): string {
+  const vol  = `${project}-${m.name}`;
+  const data = `${project}-${m.name}-data`;
+  const want = m.key();
+
+  const have = run("docker", ["volume", "inspect", vol, "-f",
+                              '{{index .Labels "desolate.overlay.key"}}'], true);
+  if (have === want) return vol;
+  if (have) console.log(`desolate: ${m.lower} changed -- rebuilding ${project}'s view of it`);
+
+  // Both, together: the stale upper lives in the data volume, and keeping it is
+  // exactly what invalidation exists to prevent.
+  run("docker", ["volume", "rm", "-f", vol, data], true);
+
+  const fail = (reason: string): never =>
+    die(`could not build ${project}'s copy-on-write view of ${m.lower}: ${reason}.\n\n` +
+        `      ${m.why}\n\n` +
+        `      This is not optional and there is no fallback -- desolate refuses to start\n` +
+        `      rather than quietly hand out a shared mount instead.\n\n` +
+        `      Diagnose with:  ./tests/probes/dind-overlay-volume.sh`);
+
+  if (runStatus("docker", ["volume", "create", data], true) !== 0)
+    fail(`could not create the volume '${data}'`);
+
+  // upper/ and work/ must EXIST before the overlay can mount, and only a
+  // container can create them inside the volume.
+  if (runStatus("docker", ["run", "--rm", "-v", `${data}:/d`, HELPER_IMAGE,
+                           "sh", "-c", "mkdir -p /d/upper /d/work"], true) !== 0)
+    fail(`could not prepare upper/work in '${data}' (is ${HELPER_IMAGE} pullable?)`);
+
+  const mp = run("docker", ["volume", "inspect", data, "-f", "{{.Mountpoint}}"], true);
+  if (!mp) fail(`could not resolve the mountpoint of '${data}'`);
+
+  const opts = `lowerdir=${m.lower},upperdir=${mp}/upper,workdir=${mp}/work`;
+  if (runStatus("docker", ["volume", "create", "--driver", "local",
+                           "--opt", "type=overlay", "--opt", "device=overlay",
+                           "--opt", `o=${opts}`,
+                           "--label", `desolate.overlay.key=${want}`, vol], true) !== 0)
+    fail(`the daemon refused the overlay options (${opts})`);
+
+  // `docker volume create` is LAZY: it succeeds without mounting anything, so
+  // the only real proof is a container that mounts it. Do that HERE, where the
+  // failure can still be explained, rather than letting `devcontainer up` fail
+  // later with a message about something else entirely.
+  if (runStatus("docker", ["run", "--rm", "-v", `${vol}:${m.target}`, HELPER_IMAGE,
+                           "test", "-e", m.proof], true) !== 0)
+    fail("the overlay volume was created but could not be mounted");
+
+  console.log(`desolate: built ${project}'s copy-on-write view of ${m.lower}`);
+  return vol;
 }
 
 function specFilePath(project: string): string {
@@ -471,6 +612,10 @@ RUN set -eu; \\
     else echo 'desolate: this base image has neither update-ca-certificates nor update-ca-trust;' >&2; \\
          echo '          install the ca-certificates package in it to build behind the proxy.' >&2; \\
          exit 1; fi
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
+ENV GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/desolate-proxy.crt
 USER ${baseUser}
 `;
@@ -614,34 +759,25 @@ else
 fi`;
 }
 
-function devcontainerUp(dir: string, config: string, noCache = false): void {
-  const args = [
-    "up", "--workspace-folder", dir, ...configArgs(config),
-    "--mount", `type=bind,source=${SERVER_SRC},target=${SERVER_DST}`,
-  ];
-  if (noCache) args.push("--build-no-cache");
-  // The proxy CA is injected HERE, by the trusted orchestrator -- never
-  // declared in devcontainer.json. That keeps the broker's "no bind mounts"
-  // policy strict while still giving every project TLS trust for free.
+function devcontainerUp(project: string, dir: string, config: string, noCache = false): void {
+  // EVERY injected mount is type=volume, never a bind of the shared directory.
+  // These two are what a devcontainer receives from outside its own project,
+  // they are both executed, and neither passes through the broker's mount
+  // policy -- desolate adds them itself. As plain binds they were the stack's
+  // sharpest cross-project edge; as per-project overlays the shared originals
+  // cannot be written through at all. See overlayMounts/ensureOverlayVolume.
   //
-  // NO `readonly` here, deliberately, and it is not an oversight: the
-  // devcontainer CLI's --mount accepts only
-  //   type=<bind|volume>,source=<source>,target=<target>[,external=<true|false>]
-  // and rejects the whole invocation with "Unmatched argument format" if given
-  // anything else. This is only reachable once the egress proxy is installed
-  // (that is what creates ca.pem), which is why it survived until the first
-  // real end-to-end run.
-  //
-  // Read-only is still enforced, one level up and by the layer that can
-  // actually guarantee it: docker-compose.yml mounts
-  // /var/lib/desolate-proxy/public into dind as `:ro`, so this bind inherits
-  // MS_RDONLY from its source mount and the devcontainer cannot write it no
-  // matter what is requested here. tests/static/02-compose-invariants.sh
-  // asserts that `:ro` ("dind mounts the CA dir read-only") -- if that test is
-  // ever relaxed, this comment stops being true.
-  if (fs.existsSync(`${CA_DIR}/ca.pem`)) {
-    args.push("--mount", `type=bind,source=${CA_DIR},target=${CA_DIR}`);
+  // A read-only bind was NOT sufficient here, which is worth remembering before
+  // "simplifying" this back: MS_RDONLY is a per-mount flag, and a devcontainer
+  // with allowPrivileged holds CAP_SYS_ADMIN in dind's user namespace, so it
+  // can `mount -o remount,bind,rw` its own copy and write through to the shared
+  // file. Measured, not assumed.
+  const args = ["up", "--workspace-folder", dir, ...configArgs(config)];
+  for (const m of overlayMounts()) {
+    args.push("--mount",
+      `type=volume,source=${ensureOverlayVolume(project, m)},target=${m.target}`);
   }
+  if (noCache) args.push("--build-no-cache");
   const code = runStatus("devcontainer", args, /* quiet */ true);
   if (code !== 0) die(`devcontainer up failed (exit ${code})`);
 }
@@ -669,7 +805,7 @@ function installProxyCa(dir: string): void {
                    "          check that the image has update-ca-certificates");
 }
 
-function startEditor(dir: string, cfg: ProjectConfig, token: string, config: string): void {
+function startEditor(project: string, dir: string, cfg: ProjectConfig, token: string, config: string): void {
   const rootless = innerDaemonIsRootless();
   if (rootless) {
     console.log("desolate: inner daemon is rootless -- starting editor as container-root");
@@ -687,7 +823,7 @@ function startEditor(dir: string, cfg: ProjectConfig, token: string, config: str
     console.log("desolate: container has stale mounts (runc rc 126) -- recreating...");
     const stale = devcontainerId(dir, true);
     if (stale) run("docker", ["rm", "-f", stale], true);
-    devcontainerUp(dir, config);
+    devcontainerUp(project, dir, config);
     const retry = runStatus("devcontainer",
       ["exec", "--workspace-folder", dir, ...configArgs(config), "bash", "-lc", script]);
     if (retry !== 0) console.log(`desolate: warning -- exec still unclean (rc ${retry}); trusting the probe`);
@@ -856,10 +992,10 @@ async function runProject(
   const runConfig = withCaTrustedBase(dir, config, cfg, project);
 
   console.log(`desolate: starting devcontainer for ${project} ...`);
-  devcontainerUp(dir, runConfig, noCache);
+  devcontainerUp(project, dir, runConfig, noCache);
   if (willCreate) saveSpecFingerprint(project, fingerprint);
   installProxyCa(dir);
-  startEditor(dir, cfg, token, runConfig);
+  startEditor(project, dir, cfg, token, runConfig);
   recreateRelays(project, dir, map);
 
   if (!(await probeEditor(editorPort))) {

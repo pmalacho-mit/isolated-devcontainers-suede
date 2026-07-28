@@ -52,6 +52,11 @@ install -d -m 0750 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy
 # Public dir must exist before compose starts (dind bind-mounts it read-only).
 install -d -m 0755 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy/public
 install -m 0755 ../container/install-ca.sh /var/lib/desolate-proxy/public/install-ca.sh
+# Published for DEVELOPERS to run from inside their own devcontainer terminal,
+# where there is no desolate CLI and no access to the outer daemon. The
+# /desolate-ca mount is the only channel into a devcontainer, so anything a
+# developer needs to run in there has to arrive this way.
+install -m 0755 ../container/trust-proxy-in-builds.sh /var/lib/desolate-proxy/public/trust-proxy-in-builds.sh
 
 echo "==> detect bridge interface for network '$COMPOSE_NET'"
 BRIDGE=""
