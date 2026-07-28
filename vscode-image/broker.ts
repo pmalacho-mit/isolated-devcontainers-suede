@@ -64,21 +64,67 @@ let inFlight = 0;
 // ---------------------------------------------------------------------------
 // Request validation
 // ---------------------------------------------------------------------------
-const PROJECT_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+// One path segment. Must START with alphanumeric, which is what rules out "..",
+// ".", hidden dirs and anything beginning with a dash.
+const SEGMENT = "[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}";
+// A project is either a direct child of /workspaces, or ONE level deeper so a
+// repo can be scoped by its owner: `pmalacho-mit/typescript2mermaid-suede`.
+// Exactly one optional slash -- deeper nesting is not a project.
+const PROJECT_RE = new RegExp(`^${SEGMENT}(?:/${SEGMENT})?$`);
 
-/** Project must be a plain name AND resolve to a real dir directly under
- *  /workspaces (defeats "..", absolute paths, and symlink escapes). */
+/** Project must be a plain name (one or two segments) AND resolve to exactly
+ *  that path under /workspaces.
+ *
+ *  The realpath comparison is the load-bearing half: the regex already forbids
+ *  "..", but a SYMLINK named legally could still point anywhere. Comparing the
+ *  resolved path against the resolved workspaces root plus the name closes
+ *  that, and does so identically at either depth -- the old `dirname(real) ===
+ *  root` test would have needed a second case and is easy to get subtly wrong. */
 function validateProject(name: unknown): string {
-  if (typeof name !== "string" || !PROJECT_RE.test(name) || name === "." || name === "..") {
+  if (typeof name !== "string" || !PROJECT_RE.test(name)) {
     throw new Error("invalid project name");
   }
-  const dir = path.join(WORKSPACES, name);
-  const real = fs.realpathSync(dir);            // throws if missing
-  if (path.dirname(real) !== fs.realpathSync(WORKSPACES)) {
-    throw new Error("project must be a direct child of /workspaces");
+  const real = fs.realpathSync(path.join(WORKSPACES, name));   // throws if missing
+  if (real !== path.join(fs.realpathSync(WORKSPACES), name)) {
+    throw new Error("project must resolve to that exact path under /workspaces");
   }
   if (!fs.statSync(real).isDirectory()) throw new Error("project is not a directory");
   return name;
+}
+
+/** Every project directory under /workspaces.
+ *
+ *  Serves the `list` op AND the volume-namespace rule in policy.ts: a project
+ *  owns `<project>-*`, but that pattern also matches a LONGER project's name
+ *  ('web' matching 'web-api-secrets'), so the policy has to know who else
+ *  exists to award each volume to the longest claim. */
+function hasDevcontainer(dir: string): boolean {
+  return fs.existsSync(path.join(dir, ".devcontainer", "devcontainer.json"))
+      || fs.existsSync(path.join(dir, ".devcontainer.json"));
+}
+
+function listProjects(): string[] {
+  const out: string[] = [];
+  let top: fs.Dirent[];
+  try { top = fs.readdirSync(WORKSPACES, { withFileTypes: true }); }
+  catch { return []; }   // unreadable /workspaces: the prefix rule alone still applies
+
+  for (const e of top) {
+    if (!e.isDirectory() || e.name.startsWith(".")) continue;
+    const dir = path.join(WORKSPACES, e.name);
+    out.push(e.name);
+    // Descend only into directories that are NOT themselves projects. An owner
+    // directory (`pmalacho-mit/`) holds projects; a project directory holds
+    // `src/`, `tests/` and so on, which are not projects and must not be listed
+    // as siblings -- doing so would hand them a volume namespace.
+    if (hasDevcontainer(dir)) continue;
+    try {
+      for (const sub of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (sub.isDirectory() && !sub.name.startsWith(".")) out.push(`${e.name}/${sub.name}`);
+      }
+    } catch { /* unreadable owner dir */ }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,15 +208,43 @@ function crossCheckParse(configPath: string, spec: ResolvedSpec): void {
   catch (err: any) { throw new Error(`devcontainer.json is not parseable: ${err?.message ?? err}`); }
 
   const cli = spec.configuration ?? {};
+
+  // PRESENCE and SHAPE, not exact values.
+  //
+  // Comparing values was wrong, and wrong in a way that refused ordinary
+  // projects: the CLI performs VARIABLE SUBSTITUTION on .configuration, so
+  //   "mounts": ["source=${localWorkspaceFolderBasename}-node_modules,..."]
+  // -- the standard node_modules idiom, straight out of Microsoft's docs --
+  // arrives as "source=myrepo-node_modules,...". Our parse of the file keeps
+  // the variables, the strings differ, and the start was refused with a message
+  // blaming comments. Nothing about the file was wrong.
+  //
+  // What this tripwire is actually for is the E4 escape: a key VISIBLE to the
+  // CLI but INVISIBLE to our parser (or vice versa), because the two disagree
+  // about where a comment or string ends. Presence catches that, and array
+  // length catches an entry smuggled into one view and not the other --
+  // neither of which substitution can change.
+  const shape = (v: any): string =>
+    Array.isArray(v) ? `array[${v.length}]` : v === null ? "null" : typeof v;
+
   for (const key of ["mounts", "runArgs", "workspaceMount", "appPort",
                      "dockerComposeFile", "initializeCommand", "features", "privileged"]) {
-    const a = JSON.stringify(own[key] ?? null);
-    const b = JSON.stringify(cli[key] ?? null);
-    if (a !== b) {
+    const inOwn = own[key] !== undefined;
+    const inCli = cli[key] !== undefined;
+    if (inOwn !== inCli) {
       throw new Error(
-        `parser disagreement on "${key}" -- refusing to start. ` +
-        `This usually means the file contains comment or escape sequences that ` +
-        `two JSONC parsers read differently; simplify it and retry.`);
+        `"${key}" is visible to ${inCli ? "the devcontainer CLI" : "our parser"} ` +
+        `but not to ${inCli ? "our parser" : "the devcontainer CLI"} -- refusing to ` +
+        `start. Two JSONC parsers reading the same file differently is how a key ` +
+        `gets past the policy, so this is never tolerated. Simplify the comments ` +
+        `and escape sequences around "${key}" and retry.`);
+    }
+    if (!inOwn) continue;
+    if (shape(own[key]) !== shape(cli[key])) {
+      throw new Error(
+        `"${key}" has a different shape for each parser (${shape(own[key])} vs ` +
+        `${shape(cli[key])}) -- refusing to start. Values may legitimately differ ` +
+        `(the CLI substitutes \${...} variables), but the structure may not.`);
     }
   }
 }
@@ -198,10 +272,7 @@ function runDesolate(args: string[], send: (line: string) => void): Promise<numb
 async function handle(req: any, send: (line: string) => void): Promise<void> {
   const op = req?.op;
   if (op === "list") {
-    const projects = fs.readdirSync(WORKSPACES, { withFileTypes: true })
-      .filter(e => e.isDirectory() && !e.name.startsWith("."))
-      .map(e => e.name);
-    send(JSON.stringify({ ok: true, projects }));
+    send(JSON.stringify({ ok: true, projects: listProjects() }));
     return;
   }
 
@@ -218,7 +289,10 @@ async function handle(req: any, send: (line: string) => void): Promise<void> {
       const configPath = snapshotSpec(project);
       const spec = resolveSpec(project, configPath);
       crossCheckParse(configPath, spec);
-      enforcePolicy(project, spec, { workspaces: WORKSPACES });
+      // The sibling list settles volume-namespace collisions: '<project>-*'
+      // also matches a longer project's name, so the policy needs to know who
+      // else exists to award the volume to the longest claim.
+      enforcePolicy(project, spec, { workspaces: WORKSPACES, projects: listProjects() });
       args = ["--config", configPath, ...(op === "rebuild" ? ["--rebuild"] : []), project];
       break;
     }

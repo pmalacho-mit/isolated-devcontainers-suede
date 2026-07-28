@@ -69,6 +69,16 @@ dv=$(docker exec desolate-orchestrator devcontainer --version 2>/dev/null)
 [ -n "$dv" ] && ok "devcontainer CLI $dv" || bad "devcontainer CLI broken"
 docker exec desolate-vscode test -x /usr/local/bin/desolate \
   && ok "desolate (broker client) installed in editor" || bad "desolate client missing"
+# The editor is where git happens: deploy keys are minted here and clones/pushes
+# run here. ssh-keygen was missing from the image for a long time, so `repo add`
+# died with a raw Node ENOENT trace -- a missing binary is invisible until the
+# moment something shells out to it.
+for t in git ssh-keygen ssh git-lfs git-subrepo; do
+  docker exec desolate-vscode sh -c "command -v $t >/dev/null" \
+    && ok "editor has $t" \
+    || { bad "editor is missing $t"
+         note "the vscode image installs git, openssh-client, git-lfs and git-subrepo"; }
+done
 docker exec desolate-orchestrator test -x /usr/local/bin/desolate-run \
   && ok "desolate-run installed in orchestrator" || bad "desolate-run missing"
 
@@ -86,6 +96,20 @@ fi
 docker exec desolate-vscode test -w /workspaces \
   && ok "/workspaces writable by editor user" \
   || bad "/workspaces not writable by uid 1000 -- volume-init chown failed?"
+# Every devcontainer executes this binary from a SHARED mount, so anything that
+# can write it can run code in every other project. Assert the live mount, not
+# just the compose intent: `:ro` in config and a read-only mount at runtime are
+# different claims, and only this one matters.
+for c in desolate-dind desolate-orchestrator; do
+  if docker exec "$c" sh -c 'touch /server-dist/.desolate-writetest 2>/dev/null' 2>/dev/null; then
+    docker exec "$c" rm -f /server-dist/.desolate-writetest >/dev/null 2>&1
+    bad "$c can WRITE /server-dist -- the shared editor server is poisonable"
+    note "every devcontainer executes /vscode-server/bin/openvscode-server from here"
+    note "docker-compose.yml must mount server-dist :ro for this service"
+  else
+    ok "$c holds /server-dist read-only"
+  fi
+done
 
 echo
 echo "== 4. the inner daemon is not on the network at all =="

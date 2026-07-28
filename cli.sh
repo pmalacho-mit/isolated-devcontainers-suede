@@ -85,6 +85,15 @@ EOF
   return 1
 }
 
+# jq program for `secret list`. NO double quotes and NO spaces, on purpose: it
+# travels as a bare argument through `colima ssh -- ...`, which re-parses the
+# command line remotely. The version this replaces tried to survive that by
+# escaping its quotes, which made it invalid jq -- \" is not legal inside a
+# \(...) interpolation -- so `secret list` never worked at all. Emitting TSV and
+# formatting on the Mac leaves the remote side nothing to misparse.
+# tests/static/05-cli-queries.sh executes this against a fixture.
+SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
+
 COMPOSE_NET=desolate_devnet
 PINNED_BRIDGE=br-desolate
 
@@ -211,7 +220,7 @@ editor_url() {
   local tok
   tok=$(grep -o 'VSCODE_TOKEN=.*' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2)
   [ -n "$tok" ] || { echo "cli.sh: no VSCODE_TOKEN in .env -- run '$0 up' first" >&2; return 1; }
-  local url="http://127.0.0.1:3000/?tkn=$tok"
+  local url="http://127.0.0.1:3000/?tkn=$tok&folder=/workspaces"
   echo "$url"
   if command -v pbcopy >/dev/null 2>&1; then
     printf '%s' "$url" | pbcopy && echo "(copied to clipboard)"
@@ -222,7 +231,15 @@ TTY=(-i); [ -t 0 ] && [ -t 1 ] && TTY=(-it)
 
 CMD="${1:-help}"; shift || true
 case "$CMD" in
-  up)        require_sysbox
+  up)        # BEFORE compose, not after: if the docker context and
+             # COLIMA_PROFILE are different machines, the stack comes up on one
+             # while every VM-side check below inspects the other. The symptoms
+             # are baffling and none of them mention the VM -- `down` clears
+             # containers the installer cannot see, and volumes you believed you
+             # destroyed along with a VM are still there, because the VM you
+             # destroyed was not the one holding them.
+             require_matching_vm || exit 1
+             require_sysbox
              compose up -d --build "$@"
              ensure_vm_proxy || exit 1
              if [ -x "$SCRIPT_DIR/preflight.sh" ]; then "$SCRIPT_DIR/preflight.sh" || true; fi
@@ -266,6 +283,26 @@ case "$CMD" in
                  printf 'value for %s (input hidden): ' "$NAME" >&2
                  stty -echo 2>/dev/null; IFS= read -r VALUE; stty echo 2>/dev/null; echo >&2
                  [ -n "$VALUE" ] || { echo "cli.sh: empty value" >&2; exit 1; }
+                 # `read -r` strips the trailing newline but KEEPS a carriage
+                 # return, so a key pasted from anything CRLF-flavoured is stored
+                 # with a trailing \r. The proxy then substitutes it into an
+                 # Authorization header, the CR corrupts the request, and the
+                 # upstream answers with an opaque HTML 403 that mentions
+                 # neither desolate nor the header. Nothing downstream can
+                 # diagnose that, so strip it here.
+                 VALUE=${VALUE//$'\r'/}
+                 VALUE=${VALUE#"${VALUE%%[![:space:]]*}"}   # trim leading space
+                 VALUE=${VALUE%"${VALUE##*[![:space:]]}"}   # trim trailing space
+                 [ -n "$VALUE" ] || { echo "cli.sh: value was only whitespace" >&2; exit 1; }
+                 # Interior whitespace is almost certainly a broken paste; a
+                 # secret that silently does not work is worse than a refusal.
+                 case "$VALUE" in
+                   *[[:space:]]*)
+                     echo "cli.sh: the value contains whitespace, which is unusual for an API key." >&2
+                     echo "        If your terminal wrapped or truncated the paste, re-run this." >&2
+                     echo "        Refusing rather than storing a key that will fail opaquely." >&2
+                     exit 1 ;;
+                 esac
                  # value travels on stdin, never in argv (so it can't show in ps)
                  # umask 077 first: the temp file holds every secret in the store,
                  # and jq's redirect would otherwise create it 0644 for the window
@@ -285,8 +322,28 @@ case "$CMD" in
                  echo "  \"containerEnv\": { \"YOUR_ENV_VAR\": \"$NAME\" }"
                  ;;
                list)
-                 vm sudo jq -r '.secrets | to_entries[] | "  \(.key)  ->  \(.value.hosts | join(\", \"))"' \
-                   /etc/desolate-proxy/settings.json 2>/dev/null || echo "  (no secrets configured yet)"
+                 # Three distinguishable states, deliberately: no settings file
+                 # yet, a file with no secrets, and a store we could not read.
+                 # The old one printed "(no secrets configured yet)" for all
+                 # three, so a broken query looked like an empty store.
+                 if ! vm sudo test -f /etc/desolate-proxy/settings.json 2>/dev/null; then
+                   echo "  (no secrets configured yet -- run: $0 secret add NAME --hosts ...)"
+                   exit 0
+                 fi
+                 OUT=$(vm sudo jq -r "$SECRET_LIST_JQ" /etc/desolate-proxy/settings.json 2>&1) || {
+                   echo "cli.sh: could not read the secret store:" >&2
+                   printf '%s\n' "$OUT" >&2
+                   exit 1
+                 }
+                 if [ -z "${OUT//[[:space:]]/}" ]; then
+                   echo "  (no secrets stored yet)"
+                 else
+                   # Formatting happens HERE, on the Mac, where quoting is ours.
+                   printf '%s\n' "$OUT" | awk -F'\t' '{
+                     hosts=$2; for (i=3; i<=NF; i++) hosts = hosts ", " $i
+                     printf "  %s  ->  %s\n", $1, hosts
+                   }'
+                 fi
                  ;;
                rm)
                  NAME="${1:?usage: cli.sh secret rm NAME}"
@@ -370,7 +427,8 @@ case "$CMD" in
                  GN=$(git config --global user.name 2>/dev/null || true)
                  GE=$(git config --global user.email 2>/dev/null || true)
                  docker exec -e GIT_NAME="$GN" -e GIT_EMAIL="$GE" "$CONTAINER" newrepo clone "$OR" "$AL"
-                 echo "Next: ./cli.sh desolate $AL" ;;
+                 # Clones land under the owner, so the project is owner/alias.
+                 echo "Next: ./cli.sh desolate ${OR%%/*}/$AL" ;;
                status) docker exec "$CONTAINER" newrepo status ;;
                *) echo "usage: cli.sh repo {add owner/repo [alias] | status}" >&2; exit 1 ;;
              esac ;;
@@ -382,9 +440,17 @@ case "$CMD" in
              exec docker exec "${TTY[@]}" "$ORCHESTRATOR" desolate-run "$@" ;;
 
   shell|bash) ensure_running
-             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" bash "$@" ;;
+             # with-ca, because `docker exec` inherits NOTHING the entrypoint
+             # exported. A terminal opened in the browser editor is a child of
+             # the server process and does get proxy-CA trust; one opened this
+             # way would not, so `git lfs`, `curl` and `pip` typed here would
+             # fail certificate verification while the same command worked in
+             # the browser. Same asymmetry that broke `desolate` from the Mac.
+             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" with-ca bash "$@" ;;
 
   help|-h|--help) usage ;;
   *)         ensure_running
-             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" "$CMD" "$@" ;;
+             # Same reason as `shell` above: this runs arbitrary commands in the
+             # editor, and plenty of them speak TLS.
+             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" with-ca "$CMD" "$@" ;;
 esac

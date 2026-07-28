@@ -48,7 +48,11 @@ socket is not. `./cli.sh observe` replaces it.
 
 - Apple Silicon Mac, macOS 13+
 - Homebrew
-- `brew install docker docker-compose colima`
+- `brew install docker docker-compose colima jq`
+
+`jq` is needed by `cli.sh observe inspect|raw` and by the static test suite.
+`gh` is optional -- with it, `cli.sh repo add` registers deploy keys for you;
+without it you paste the public key into GitHub yourself.
 
 sysbox is what makes the whole thing safe, and it needs a real Linux kernel
 (cgroup v2, id-mapped mounts). Colima's VM is a real Ubuntu machine, so sysbox
@@ -188,6 +192,8 @@ recreates the network and fixes it permanently.
 ./cli.sh vm status              # sysbox, live vs armed bridge, VM unit state
 ./cli.sh vm install             # re-provision the VM (idempotent; also upgrades)
 ./cli.sh repo add owner/repo    # per-repo deploy key (in-container) + clone
+                                # -> /workspaces/owner/repo
+./cli.sh desolate owner/repo    # open it
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
 ./cli.sh down                   # stop (down -v also deletes volumes; confirms)
@@ -333,7 +339,149 @@ The supported path is `"image"` plus Features, which covers most of what a
 Dockerfile is usually doing anyway. If you genuinely need a custom Dockerfile,
 either pre-build that image yourself outside the stack and reference it with
 `"image"`, or keep its build steps to plain-http sources (`apt` already is).
-Closing this properly is a known open item.
+
+## Building your own containers inside a devcontainer
+
+If your project runs its own containers -- a `compose.yml` you bring up from
+inside the devcontainer, testing something production-shaped -- those builds hit
+the same wall, one level further down.
+
+### Why
+
+Every container's egress is redirected through the proxy, which presents
+certificates signed by a private CA. **A container trusts CAs from its own
+image's filesystem**, so a stock `python:3.12-slim` does not trust the proxy,
+and anything it fetches over HTTPS during `docker build` fails:
+
+```
+fatal: unable to access 'https://...': SSL certificate problem:
+       unable to get local issuer certificate
+```
+
+Nothing at the daemon or host level can fix this. `pip`, `npm` and `git` are
+each their own TLS client with their own trust store, verifying inside a
+throwaway build container. The only thing that reaches all of them at once is
+**the base image's trust store**.
+
+Note this is specifically HTTPS *inside a build step*. Plain-http `apt` works
+untouched, which is why the problem often does not show up until the first
+`pip install`.
+
+### The fix
+
+Derive a base image that trusts the proxy, and redirect the build's `FROM` at
+it. `desolate` publishes a script into every devcontainer for this -- run it
+from **your own terminal inside the devcontainer**:
+
+```bash
+/desolate-ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim
+```
+
+That does two things:
+
+1. Builds `desolate-ca/python:3.12-slim` on your devcontainer's own daemon --
+   your base, plus the CA, plus the environment variables below.
+2. Writes `compose.override.yml` next to your `compose.yml`, pointing that
+   service's build at the derived image, and adds the file to `.gitignore`.
+
+Then build as usual. **Your `Dockerfile` and `compose.yml` are never touched.**
+
+It fixes **runtime as well as build time**, which is worth knowing because it is
+not obvious. Installing the CA into the system trust store is not enough on its
+own: Python (`httpx`, `requests`, `pip`), Node and Cargo all ignore the system
+store and carry their own bundled CA list. An app doing outbound HTTPS would
+still fail with:
+
+```
+[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate
+```
+
+So the derived image also sets `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+`NODE_EXTRA_CA_CERTS`, `CARGO_HTTP_CAINFO` and `GIT_SSL_CAINFO` as image `ENV`,
+pointing at the system bundle -- which now holds the proxy CA *and* every public
+root. As `ENV` they reach every process; the same variables written to
+`/etc/profile.d` would only reach login shells, never a container that execs
+`uvicorn`. Because they name the standard bundle path, they are harmless in an
+image built outside desolate.
+
+```bash
+docker compose up --build
+```
+
+Run it once per (service, base image). Later invocations merge into the same
+file rather than replacing it, so a second service or a second base image just
+adds an entry. Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--compose <file>` | point at a compose file elsewhere; the override is named to match |
+| `--image` alone, no `--service` | just derive the image and print the YAML to add |
+| `--print-recipe` | show the Dockerfile it *would* build, then stop |
+| `--force` | rebuild even if the derived image is current |
+| `--no-gitignore` | leave `.gitignore` alone |
+
+**It shows you the recipe before it runs.** This script modifies the image your
+code is built from, on your behalf, so it prints the complete Dockerfile it uses
+-- there is no second file and no hidden step:
+
+```
+trust-proxy: deriving desolate-ca/python:3.12-slim
+             from python:3.12-slim, using exactly this and nothing else:
+
+    | FROM python:3.12-slim
+    | USER root
+    | COPY ca.pem /usr/local/share/ca-certificates/desolate-proxy.crt
+    | COPY ca.pem /etc/pki/ca-trust/source/anchors/desolate-proxy.crt
+    | RUN set -eu; \
+    |     if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates; \
+    |     elif command -v update-ca-trust >/dev/null 2>&1; then update-ca-trust extract; \
+    |     else echo '... has neither ...' >&2; exit 1; fi
+    | ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    | ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+    | ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
+    | ENV GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt
+    | ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/desolate-proxy.crt
+    | LABEL desolate.ca.fingerprint=<sha256 of the CA>
+    | USER vscode
+
+             build context: /desolate-ca  (contains only the public CA cert)
+```
+
+Use `--print-recipe` to read it *before* anything is built. The recipe is shown
+only when it actually derives; a cached rebuild stays quiet.
+
+### What this means for production
+
+`compose.override.yml` is a **development artifact and must not ship.** Compose
+auto-merges it only when it sits beside your compose file, so:
+
+| | In the devcontainer | In production |
+|---|---|---|
+| Command | `docker compose up --build` | `docker compose up --build` |
+| Files read | `compose.yml` + `compose.override.yml` | `compose.yml` |
+| `FROM python:3.12-slim` resolves to | `desolate-ca/python:3.12-slim` | `python:3.12-slim` |
+
+Identical command, unmodified `Dockerfile`, and nothing desolate-specific in
+what you deploy. It is gitignored by default because if it *does* reach
+production, builds fail -- the `desolate-ca/*` images exist only inside your
+devcontainer.
+
+One caveat worth knowing: your development image is not byte-identical to the
+production one. It carries one extra layer (the CA plus
+`update-ca-certificates`). Everything above it is the same.
+
+### Two things that will bite
+
+- **Do not pass `--pull`.** It makes BuildKit try to fetch `desolate-ca/*` from
+  a registry, where it does not exist, and the build fails with `pull access
+  denied`. Loud, at least.
+- **A new base image needs its own run.** Adding a service on `node:22-slim`
+  means running the script again for it; the build otherwise fails with the
+  certificate error above, naming the image.
+
+If you would rather keep all of this out of your project entirely, reference a
+**pre-built image** (`image: myapp:dev`) instead of building in place. Nothing
+needs deriving, and it is closer to what production actually does.
 
 ### Applying changes to devcontainer.json
 
@@ -394,6 +542,39 @@ frees a port immediately. The other cause is worth knowing: relay containers run
 with `restart: unless-stopped`, so if a project's devcontainer is deleted by
 hand rather than through `desolate --stop`, its relays survive and keep holding
 their ports. `./cli.sh observe ps` lists them as `desolate-relay-<project>-<port>`.
+
+## How projects are laid out
+
+A project is a directory under `/workspaces`, and may be nested **one** level so
+repositories are scoped by owner:
+
+```
+/workspaces/
+  example-project/            <- a flat project
+  pmalacho-mit/               <- an owner directory, not a project itself
+    typescript2mermaid-suede/ <- a project
+```
+
+`cli.sh repo add owner/repo` clones to `/workspaces/owner/repo`, and you open it
+with the same two-part name:
+
+```bash
+./cli.sh desolate pmalacho-mit/typescript2mermaid-suede
+```
+
+Two owners can then have a repo of the same name without colliding -- and so can
+their deploy keys, which are named `deploy_<owner>__<repo>` for the same reason.
+
+Exactly one level of nesting is allowed. `a/b/c` is refused, and so is anything
+resolving outside `/workspaces` -- the broker compares the *resolved* path
+against the workspaces root, so a symlink named legally still cannot escape.
+
+**Docker names cannot contain `/`.** So a nested project's volumes, relay
+containers and state files use an encoded form: `owner/repo` becomes
+`owner__repo`, and the project owns the `owner__repo-*` volume namespace. You
+only see this if you look at `docker volume ls` or write a `mounts` entry by
+hand -- `desolate` and the broker's policy use the same encoding, so a project
+can always mount its own.
 
 ## Secrets: placeholders in, real values never
 
@@ -521,8 +702,20 @@ outside `/workspaces`:
 ```
 
 The broker only permits volumes named `<project>` or `<project>-*`, so one
-project cannot mount another's. Prefer the proxy whenever the credential is
-used over HTTPS.
+project cannot mount another's.
+
+That rule needs one refinement to actually hold, because **project names can
+prefix each other**. With projects `web` and `web-api`, the volume
+`web-api-secrets` matches `web-*` too -- so a bare prefix test would let `web`
+mount the very volume this section tells `web-api` to keep a password in, and
+`web`/`web-api` is an ordinary way to name two services. The broker therefore
+awards each volume to the **longest matching project name** among the projects
+that exist: `web-api` beats `web` for `web-api-secrets`, and `web` is refused
+with a message naming the real owner.
+
+Prefer the proxy whenever the credential is used over HTTPS -- a substituted
+secret never enters the container at all, which is strictly better than one
+sitting in a volume the container can read.
 
 ### The rules that still apply
 
@@ -541,12 +734,57 @@ Boundaries, strongest first:
   touch the VM. This is the boundary that makes the design safe regardless of
   credential hygiene: even a fully-privileged leaked key in a project can't
   escalate past here to reach other projects or the VM.
-- **dind <-> containers** -- Linux namespaces. Ordinary devcontainers mount only
-  their own project folder, so they can't read each other's files.
+- **dind <-> containers** -- Linux namespaces, and the weakest of the three.
+  This is the layer to be precise about.
 
-The docker-in-docker feature (for level-3 projects like `sample-fastapi`) runs
-**unprivileged** under sysbox -- no privileged flag, no cgroup workaround. This
-is exactly the case sysbox was built for.
+  A project's *workspace* is properly confined: `workspaceMount` must bind
+  exactly `/workspaces/<project>` (source **and** target -- a substring check
+  would let `source=/,target=/workspaces/foo` through), volumes are restricted
+  to `<project>` / `<project>-*`, and bind mounts are refused outright. So
+  projects cannot reach each other's source through anything they declare.
+
+  But `desolate` injects two mounts of its own, which never pass through that
+  policy, and both are **executed**:
+
+  | Mount | Executed by | If poisoned |
+  |---|---|---|
+  | `/vscode-server` | every devcontainer, on start | code execution as each project's user |
+  | `/desolate-ca` | `install-ca.sh`, via `docker exec -u 0` in every devcontainer, and dind's entrypoint | **root** execution in every project and in dind |
+
+  Shared and writable, either is cross-project code execution needing no
+  privilege at all -- overwrite one file, and every other project runs it.
+
+  So neither is shared. Each project gets its own **overlayfs** volume whose
+  lower layer is the pristine directory. overlayfs never writes down: a
+  modification is copied up into that project's own upper layer, and the lower
+  is untouched. The protection is structural -- a property of how the filesystem
+  works -- rather than a permission flag someone can clear. It costs about 8K
+  per project instead of a copy.
+
+  A read-only *flag* would not have been enough, and that was measured rather
+  than assumed. `MS_RDONLY` is per-mount, so a devcontainer with
+  `allowPrivileged` -- holding `CAP_SYS_ADMIN` in dind's user namespace -- can
+  `mount -o remount,bind,rw` its own copy and write **through to the shared
+  file**. An overlay's lower layer is not writable through the overlay by any
+  means, so the same attempt changes only that project's own upper.
+
+  `desolate` **refuses to start a project** if an overlay cannot be built --
+  there is deliberately no fallback to a shared mount. Each volume is keyed on
+  the identity of its lower (the seeded server version; the CA fingerprint), so
+  changing either rebuilds every project's view rather than leaving a stale
+  upper shadowing newer content. Static tests assert both mounts are volumes and
+  never binds, `preflight` checks the live read-only mounts, and
+  `tests/integration/stack` performs both attacks against a running stack:
+  `E6` for the editor binary, `E7` for the CA scripts -- including the
+  privileged remount.
+
+Note that a `--privileged` devcontainer is privileged *relative to dind*, and
+dind's own root is already an unprivileged VM user. Capabilities in a
+non-initial user namespace apply only to resources that namespace owns, so such
+a container cannot load kernel modules, touch VM devices, or reach the VM
+however it misbehaves. sysbox is what bounds the damage to dind's contents --
+which is precisely why `allowPrivileged` warns about *siblings* and nothing
+beyond them.
 
 ## Verifying containment
 
@@ -585,6 +823,12 @@ VM's -- proof the escape reads nothing of the host.
   (sysbox-runc), `vscode` (OpenVSCode Server), `orchestrator` (the broker).
 - `cli.sh` -- the one command you run on the Mac (see Daily use).
 - `preflight.sh` -- post-start verification, including the containment proof.
+- `vscode-image/Dockerfile` also installs **git-lfs** and **git-subrepo**, both
+  pinned. git-lfs is configured with `git lfs install --system`, so its filters
+  live in `/etc/gitconfig` rather than a home directory -- this image's `$HOME`
+  and its passwd entry disagree, and a per-user install could land where git
+  never looks. git-subrepo lives in `/opt/git-subrepo` with `GIT_SUBREPO_ROOT`
+  set; it is how this repo itself vendors `release/` and `.suede/*`.
 - `observe.sh` -- views of the inner daemon from the Mac, via the orchestrator's
   unix socket. Nothing is published to reach it.
 - `vscode-image/` -- one image, two roles. `broker.ts` (orchestrator: narrow
@@ -637,7 +881,9 @@ which recreates the affected containers.
 - **Editor won't load** -- confirm `VSCODE_TOKEN` is set in `.env`; use
   `./cli.sh url` for the correct link. Check `./cli.sh logs`.
 - **VM config didn't apply** -- resource flags only take effect when the profile
-  is created; `colima delete desolate` and recreate with the flags above.
+  is created; `colima delete desolate` and recreate with the flags above. Your
+  projects survive this: `colima delete` preserves container data unless you
+  pass `--data`.
 - **TLS errors inside a devcontainer** -- the proxy CA didn't get installed.
   `desolate` does it automatically as root; if the image lacks
   `update-ca-certificates`, install the CA in your base image instead
@@ -646,13 +892,38 @@ which recreates the affected containers.
   bound to the wrong bridge. Re-run `sudo ./install.sh` in the VM with the
   stack up; it re-detects.
 - **git over SSH fails** -- the forward chain is default-deny and allows tcp/22
-  only to hostnames dnsmasq resolved from the allowlist (`github.com` by
-  default; add `nftset=` lines in `/etc/desolate-proxy/dnsmasq.conf` for
-  others, then `sudo systemctl restart desolate-dnsmasq`).
-  This needs dnsmasq >= 2.87. If yours is older, either use git over HTTPS with
-  a placeholder token, or add a blanket rule:
-  `nft add rule inet desolate forward iifname <bridge> tcp dport 22 accept`
-  (weaker: any host becomes reachable on 22).
+  only to addresses in `ssh_allow_v4`/`ssh_allow_v6`. Those hold **GitHub's
+  published git ranges**, fetched by `proxy/vm/ssh-allow.sh` at install time and
+  refilled after every ruleset reload. Check them:
+
+  ```bash
+  colima ssh -p desolate -- sudo nft list set inet desolate ssh_allow_v4
+  colima ssh -p desolate -- sudo /opt/desolate-proxy/ssh-allow.sh   # refill by hand
+  ```
+
+  An empty set means every clone and push times out with no other symptom, so
+  the script refuses to finish rather than leave one. The rules carry counters,
+  which say which side you are on:
+
+  ```bash
+  colima ssh -p desolate -- sudo nft list table inet desolate | grep -A1 'dport 22'
+  ```
+
+  For a host other than GitHub -- a self-hosted git server -- add its range:
+
+  ```bash
+  colima ssh -p desolate -- sudo nft add element inet desolate ssh_allow_v4 '{ 10.0.0.0/24 }'
+  ```
+
+  That is lost on the next reload; to make it stick, edit `ssh-allow.sh`. Git
+  over HTTPS needs none of this -- it goes through the proxy like any other
+  traffic, and a personal access token can be a substituted placeholder.
+
+  These sets were filled from DNS until 2026-07-28, keyed on hostname via
+  dnsmasq's `nftset=`. That never worked: containers resolve through Docker's
+  embedded DNS at `127.0.0.11`, which forwards upstream from a path the
+  nftables redirect never sees, so the resolver never observed the lookups.
+  `ssh-allow.sh`'s header records that and the three lesser reasons.
 - **Pulls fail with "no such host" / "connection refused ... :53"** -- the VM's
   own resolver is down. Two dnsmasq instances are meant to run and they are not
   alternatives: `desolate-dnsmasq` on `:5353` serves *containers* (via the
@@ -665,7 +936,29 @@ which recreates the affected containers.
   `docker` (your current context) and `colima ssh -p $COLIMA_PROFILE`. If those
   are different VMs, `down` removes containers the installer cannot see and
   `vm install` provisions a VM your stack is not on. `./cli.sh vm status` prints
-  both; `vm install` refuses outright when they disagree.
+  both; `up` and `vm install` refuse outright when they disagree.
+- **Deleting and recreating the VM did not clear `/workspaces`** -- this is
+  Colima behaving as documented, not a mistake on your part. **`colima delete`
+  removes the VM but PRESERVES container data** (images and volumes) by
+  default, and restores it when the profile is recreated with the same runtime.
+  See [Colima's data persistence
+  docs](https://colima.run/docs/commands/#colima-delete).
+
+  It is easy to assume otherwise, because `desolate_workspaces` is an ordinary
+  named volume with no host path anywhere -- so "the VM is gone" feels like it
+  must be gone too. It is not.
+
+  Pick the teardown that matches what you actually want:
+
+  ```bash
+  ./cli.sh down -v                   # projects, settings + inner images; VM untouched
+  colima delete --data desolate      # VM *and* all container data
+  colima delete desolate             # VM only -- your projects come back
+  ```
+
+  `./cli.sh down -v` is usually the one you want, and it prompts, because it
+  deletes every project. Note this cuts both ways: recreating the VM to change
+  its CPU/memory flags keeps your work, which is the helpful case.
 - **`error setting rlimit type 7: operation not permitted`** -- `DESOLATE_NOFILE`
   is above what sysbox lets the inner daemon set. Type 7 is `RLIMIT_NOFILE`; dind
   is user-namespaced, so it cannot raise a hard limit past what it inherited.

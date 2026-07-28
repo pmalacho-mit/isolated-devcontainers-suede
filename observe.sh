@@ -56,12 +56,24 @@ inner() {
   fi
 }
 
+# jq formats two of the subcommands below and runs HERE, on the Mac -- unlike
+# cli.sh's jq calls, which all execute in the VM via `vm sudo jq`. Check it
+# rather than letting the pipe fail with an empty result that reads like "no
+# containers".
+need_jq() {
+  command -v jq >/dev/null 2>&1 || {
+    echo "observe: '$1' formats output with jq, which is not installed." >&2
+    echo "         brew install jq   (or use: $0 docker inspect ...)" >&2
+    exit 1
+  }
+}
+
 case "${1:-ps}" in
   ps)      inner ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' ;;
   stats)   shift; inner stats "${@:---no-stream}" ;;
   logs)    shift; inner logs "$@" ;;
-  inspect) shift; inner inspect "$@" | jq . ;;
-  raw)     inner ps -a --format '{{json .}}' | jq -s . ;;
+  inspect) need_jq inspect; shift; inner inspect "$@" | jq . ;;
+  raw)     need_jq raw; inner ps -a --format '{{json .}}' | jq -s . ;;
   docker)  shift; inner "$@" ;;
   *)       sed -n '5,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 1 ;;
 esac

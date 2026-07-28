@@ -16,7 +16,13 @@ COMPOSE_NET="${DESOLATE_NET:-desolate_devnet}"
 
 echo "==> packages"
 apt-get update -qq
-apt-get install -y -qq python3-venv nftables dnsmasq
+# jq is NOT optional here: /etc/desolate-proxy/settings.json is this layer's
+# store, and every `cli.sh secret add|list|rm` edits it with jq over `colima
+# ssh`. It only ever worked by accident -- install-sysbox.sh installs jq as a
+# side effect, but ONLY on the branch that actually installs sysbox. Re-run
+# `vm install` on a VM already at the pinned version, or use --proxy-only, and
+# jq was never installed at all. The layer that needs a tool installs it.
+apt-get install -y -qq python3-venv nftables dnsmasq jq
 
 echo "==> service user"
 id desolate-proxy >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin desolate-proxy
@@ -52,6 +58,12 @@ install -d -m 0750 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy
 # Public dir must exist before compose starts (dind bind-mounts it read-only).
 install -d -m 0755 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy/public
 install -m 0755 ../container/install-ca.sh /var/lib/desolate-proxy/public/install-ca.sh
+# Published for DEVELOPERS to run from inside their own devcontainer terminal,
+# where there is no desolate CLI and no access to the outer daemon. The
+# /desolate-ca mount is the only channel into a devcontainer, so anything a
+# developer needs to run in there has to arrive this way.
+install -m 0755 ../container/trust-proxy-in-builds.sh /var/lib/desolate-proxy/public/trust-proxy-in-builds.sh
+install -m 0755 ssh-allow.sh /opt/desolate-proxy/ssh-allow.sh
 
 echo "==> detect bridge interface for network '$COMPOSE_NET'"
 BRIDGE=""
@@ -139,6 +151,11 @@ fi
 
 echo "==> nftables"
 nft -f /etc/desolate-proxy/nftables-desolate.conf
+
+echo "==> git-over-ssh allowlist"
+# Same reason as the ExecStartPost in the unit: the load above just emptied the
+# sets. Fails loudly rather than leaving an allowlist that refuses every clone.
+/opt/desolate-proxy/ssh-allow.sh
 cat > /etc/systemd/system/desolate-nft.service <<'EOF'
 [Unit]
 Description=desolate-proxy nftables interception rules
@@ -148,6 +165,10 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/desolate-proxy/nftables-desolate.conf
+# Loading the ruleset does `delete table inet desolate`, which EMPTIES
+# ssh_allow_v4/v6. Refill them, or git over SSH is refused until the next
+# install -- with nothing but a connection timeout to say why.
+ExecStartPost=/opt/desolate-proxy/ssh-allow.sh
 [Install]
 WantedBy=multi-user.target
 EOF
