@@ -48,7 +48,11 @@ socket is not. `./cli.sh observe` replaces it.
 
 - Apple Silicon Mac, macOS 13+
 - Homebrew
-- `brew install docker docker-compose colima`
+- `brew install docker docker-compose colima jq`
+
+`jq` is needed by `cli.sh observe inspect|raw` and by the static test suite.
+`gh` is optional -- with it, `cli.sh repo add` registers deploy keys for you;
+without it you paste the public key into GitHub yourself.
 
 sysbox is what makes the whole thing safe, and it needs a real Linux kernel
 (cgroup v2, id-mapped mounts). Colima's VM is a real Ubuntu machine, so sysbox
@@ -188,6 +192,8 @@ recreates the network and fixes it permanently.
 ./cli.sh vm status              # sysbox, live vs armed bridge, VM unit state
 ./cli.sh vm install             # re-provision the VM (idempotent; also upgrades)
 ./cli.sh repo add owner/repo    # per-repo deploy key (in-container) + clone
+                                # -> /workspaces/owner/repo
+./cli.sh desolate owner/repo    # open it
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
 ./cli.sh down                   # stop (down -v also deletes volumes; confirms)
@@ -537,6 +543,39 @@ with `restart: unless-stopped`, so if a project's devcontainer is deleted by
 hand rather than through `desolate --stop`, its relays survive and keep holding
 their ports. `./cli.sh observe ps` lists them as `desolate-relay-<project>-<port>`.
 
+## How projects are laid out
+
+A project is a directory under `/workspaces`, and may be nested **one** level so
+repositories are scoped by owner:
+
+```
+/workspaces/
+  example-project/            <- a flat project
+  pmalacho-mit/               <- an owner directory, not a project itself
+    typescript2mermaid-suede/ <- a project
+```
+
+`cli.sh repo add owner/repo` clones to `/workspaces/owner/repo`, and you open it
+with the same two-part name:
+
+```bash
+./cli.sh desolate pmalacho-mit/typescript2mermaid-suede
+```
+
+Two owners can then have a repo of the same name without colliding -- and so can
+their deploy keys, which are named `deploy_<owner>__<repo>` for the same reason.
+
+Exactly one level of nesting is allowed. `a/b/c` is refused, and so is anything
+resolving outside `/workspaces` -- the broker compares the *resolved* path
+against the workspaces root, so a symlink named legally still cannot escape.
+
+**Docker names cannot contain `/`.** So a nested project's volumes, relay
+containers and state files use an encoded form: `owner/repo` becomes
+`owner__repo`, and the project owns the `owner__repo-*` volume namespace. You
+only see this if you look at `docker volume ls` or write a `mounts` entry by
+hand -- `desolate` and the broker's policy use the same encoding, so a project
+can always mount its own.
+
 ## Secrets: placeholders in, real values never
 
 Containers never hold credentials. They hold a **placeholder**; the real value
@@ -663,8 +702,20 @@ outside `/workspaces`:
 ```
 
 The broker only permits volumes named `<project>` or `<project>-*`, so one
-project cannot mount another's. Prefer the proxy whenever the credential is
-used over HTTPS.
+project cannot mount another's.
+
+That rule needs one refinement to actually hold, because **project names can
+prefix each other**. With projects `web` and `web-api`, the volume
+`web-api-secrets` matches `web-*` too -- so a bare prefix test would let `web`
+mount the very volume this section tells `web-api` to keep a password in, and
+`web`/`web-api` is an ordinary way to name two services. The broker therefore
+awards each volume to the **longest matching project name** among the projects
+that exist: `web-api` beats `web` for `web-api-secrets`, and `web` is refused
+with a message naming the real owner.
+
+Prefer the proxy whenever the credential is used over HTTPS -- a substituted
+secret never enters the container at all, which is strictly better than one
+sitting in a volume the container can read.
 
 ### The rules that still apply
 
@@ -772,6 +823,12 @@ VM's -- proof the escape reads nothing of the host.
   (sysbox-runc), `vscode` (OpenVSCode Server), `orchestrator` (the broker).
 - `cli.sh` -- the one command you run on the Mac (see Daily use).
 - `preflight.sh` -- post-start verification, including the containment proof.
+- `vscode-image/Dockerfile` also installs **git-lfs** and **git-subrepo**, both
+  pinned. git-lfs is configured with `git lfs install --system`, so its filters
+  live in `/etc/gitconfig` rather than a home directory -- this image's `$HOME`
+  and its passwd entry disagree, and a per-user install could land where git
+  never looks. git-subrepo lives in `/opt/git-subrepo` with `GIT_SUBREPO_ROOT`
+  set; it is how this repo itself vendors `release/` and `.suede/*`.
 - `observe.sh` -- views of the inner daemon from the Mac, via the orchestrator's
   unix socket. Nothing is published to reach it.
 - `vscode-image/` -- one image, two roles. `broker.ts` (orchestrator: narrow
@@ -835,13 +892,38 @@ which recreates the affected containers.
   bound to the wrong bridge. Re-run `sudo ./install.sh` in the VM with the
   stack up; it re-detects.
 - **git over SSH fails** -- the forward chain is default-deny and allows tcp/22
-  only to hostnames dnsmasq resolved from the allowlist (`github.com` by
-  default; add `nftset=` lines in `/etc/desolate-proxy/dnsmasq.conf` for
-  others, then `sudo systemctl restart desolate-dnsmasq`).
-  This needs dnsmasq >= 2.87. If yours is older, either use git over HTTPS with
-  a placeholder token, or add a blanket rule:
-  `nft add rule inet desolate forward iifname <bridge> tcp dport 22 accept`
-  (weaker: any host becomes reachable on 22).
+  only to addresses in `ssh_allow_v4`/`ssh_allow_v6`. Those hold **GitHub's
+  published git ranges**, fetched by `proxy/vm/ssh-allow.sh` at install time and
+  refilled after every ruleset reload. Check them:
+
+  ```bash
+  colima ssh -p desolate -- sudo nft list set inet desolate ssh_allow_v4
+  colima ssh -p desolate -- sudo /opt/desolate-proxy/ssh-allow.sh   # refill by hand
+  ```
+
+  An empty set means every clone and push times out with no other symptom, so
+  the script refuses to finish rather than leave one. The rules carry counters,
+  which say which side you are on:
+
+  ```bash
+  colima ssh -p desolate -- sudo nft list table inet desolate | grep -A1 'dport 22'
+  ```
+
+  For a host other than GitHub -- a self-hosted git server -- add its range:
+
+  ```bash
+  colima ssh -p desolate -- sudo nft add element inet desolate ssh_allow_v4 '{ 10.0.0.0/24 }'
+  ```
+
+  That is lost on the next reload; to make it stick, edit `ssh-allow.sh`. Git
+  over HTTPS needs none of this -- it goes through the proxy like any other
+  traffic, and a personal access token can be a substituted placeholder.
+
+  These sets were filled from DNS until 2026-07-28, keyed on hostname via
+  dnsmasq's `nftset=`. That never worked: containers resolve through Docker's
+  embedded DNS at `127.0.0.11`, which forwards upstream from a path the
+  nftables redirect never sees, so the resolver never observed the lookups.
+  `ssh-allow.sh`'s header records that and the three lesser reasons.
 - **Pulls fail with "no such host" / "connection refused ... :53"** -- the VM's
   own resolver is down. Two dnsmasq instances are meant to run and they are not
   alternatives: `desolate-dnsmasq` on `:5353` serves *containers* (via the

@@ -25,9 +25,20 @@ ARG BUILDX_VERSION=0.35.0
 # Node 20 ("Iron") is EOL. 24 ("Krypton") is the current LTS line; preflight
 # asserts >=18 because that is the devcontainer CLI's floor.
 ARG NODE_VERSION=24.18.0
+# git-lfs: large-file support. git-subrepo: how this repo vendors `release/`
+# and .suede/* -- every .gitrepo file in the tree is managed with it, so the
+# editor needs it to push or pull those.
+ARG GIT_LFS_VERSION=3.7.1
+ARG GIT_SUBREPO_VERSION=0.4.9
 
+# openssh-client is REQUIRED, not optional: newrepo.ts shells out to ssh-keygen
+# to mint each repo's deploy key, and git's SSH transport (git@github.com:...)
+# needs the ssh binary. Without it `cli.sh repo add` dies with
+# "spawnSync ssh-keygen ENOENT" and there is no way to clone or push at all.
+# tests/static/01-syntax.sh asserts every command the TypeScript invokes has a
+# provider here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates jq xz-utils \
+        git openssh-client curl ca-certificates jq xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js LTS from nodejs.org -- NOT apt's nodejs, which is ancient (v12) and
@@ -60,6 +71,36 @@ RUN set -eux; \
       "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-${BUILDX_ARCH}"; \
     chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
              /usr/local/lib/docker/cli-plugins/docker-buildx
+
+# git-lfs -- pinned tarball rather than apt, matching how docker/compose/buildx
+# are handled above, and because distro packages lag well behind.
+#
+# `--system` writes the clean/smudge filters to /etc/gitconfig instead of
+# ~/.gitconfig. That is deliberate: this image's $HOME (/home/workspace) and its
+# passwd entry (/home/openvscode-server) disagree, so a per-user install could
+# land somewhere git never reads. A system-wide install has no such ambiguity.
+RUN set -eux; \
+    case "$(uname -m)" in \
+      aarch64|arm64) LFS_ARCH=arm64 ;; \
+      x86_64)        LFS_ARCH=amd64 ;; \
+      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/git-lfs/git-lfs/releases/download/v${GIT_LFS_VERSION}/git-lfs-linux-${LFS_ARCH}-v${GIT_LFS_VERSION}.tar.gz" \
+      | tar xz -C /tmp; \
+    install -m 0755 "/tmp/git-lfs-${GIT_LFS_VERSION}/git-lfs" /usr/local/bin/git-lfs; \
+    rm -rf "/tmp/git-lfs-${GIT_LFS_VERSION}"; \
+    git lfs install --system; \
+    git lfs version
+
+# git-subrepo -- a set of bash scripts, not a compiled binary. It is sourced
+# rather than installed by a package manager, so it lives in /opt and is put on
+# PATH; GIT_SUBREPO_ROOT is how it finds its own lib/ and man/.
+RUN set -eux; \
+    git clone --quiet --depth 1 --branch "${GIT_SUBREPO_VERSION}" \
+      https://github.com/ingydotnet/git-subrepo /opt/git-subrepo; \
+    rm -rf /opt/git-subrepo/.git
+ENV GIT_SUBREPO_ROOT=/opt/git-subrepo
+ENV PATH=/opt/git-subrepo/lib:$PATH
 
 # devcontainer CLI + tsx (TypeScript runner for desolate)
 RUN npm install -g @devcontainers/cli tsx && npm cache clean --force \

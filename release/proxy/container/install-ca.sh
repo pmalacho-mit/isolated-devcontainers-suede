@@ -12,6 +12,10 @@ SRC=""
 if [ -f /desolate-ca/ca.pem ]; then
     SRC=/desolate-ca/ca.pem
 elif [ -n "${DESOLATE_CA_URL:-}" ]; then
+    command -v curl >/dev/null 2>&1 || {
+        echo "desolate-ca: DESOLATE_CA_URL is set but this image has no curl" >&2
+        exit 1
+    }
     curl -fsS "$DESOLATE_CA_URL" -o /tmp/desolate-ca.pem
     SRC=/tmp/desolate-ca.pem
 else

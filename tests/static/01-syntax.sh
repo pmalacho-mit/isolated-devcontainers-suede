@@ -119,4 +119,57 @@ else
   done <<< "$WRAPPERS"
 fi
 
+# cli.sh is the other family of entry points: every `docker exec` into the
+# editor is a fresh process with none of the entrypoint's exports. Commands run
+# there speak TLS (git-lfs, git-subrepo, curl, pip), so they need with-ca too --
+# otherwise the same command works in the browser terminal, which IS a child of
+# the entrypoint, and fails from the Mac.
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  case "$line" in
+    *with-ca*)     pass "cli.sh exec into the editor uses with-ca" ;;
+    *newrepo*|*desolate-run*) pass "cli.sh exec runs a self-wrapping command" ;;
+    *)             fail "cli.sh exec into the editor uses with-ca" \
+                        "bare exec: ${line#*exec }" ;;
+  esac
+done <<< "$(grep -E 'docker exec .*(\$CONTAINER|\$ORCHESTRATOR)' "$RELEASE/cli.sh" | grep -v '^\s*#')"
+
+group "every command the TypeScript shells out to is in the image"
+# `newrepo` called ssh-keygen, which the image never installed -- so per-repo
+# deploy keys, cloning and pushing had never worked, and the failure was a raw
+# Node ENOENT stack trace. Nothing caught it: the call is a runtime spawn, and
+# the missing package is in a different file entirely.
+#
+# The table maps each command to the thing that must provide it. An unknown
+# command fails rather than being assumed fine -- that is the forcing function.
+declare -A PROVIDER=(
+  [devcontainer]="@devcontainers/cli"   # npm global
+  [docker]="docker-\${DOCKER_VERSION}"  # static tarball
+  [git]="git"                           # apt
+  [ssh-keygen]="openssh-client"         # apt -- also provides ssh, for git's transport
+  [sleep]="SKIP"                        # coreutils, in every base image
+  [tsx]="tsx"                           # npm global
+)
+# COMMENTS STRIPPED. Matching the whole file passed even with openssh-client
+# removed from the install line, because the comment explaining why it is needed
+# still mentioned it -- a guard that its own documentation satisfies.
+DOCKERFILE=$(grep -v '^[[:space:]]*#' "$RELEASE/vscode-image/Dockerfile")
+CMDS=$(grep -ohE '(execFileSync|runStatus|spawn)\("[a-z0-9-]+"' "$RELEASE"/vscode-image/*.ts \
+       | sed -E 's/.*"([a-z0-9-]+)"/\1/' | sort -u)
+while IFS= read -r cmd; do
+  [ -n "$cmd" ] || continue
+  want=${PROVIDER[$cmd]:-}
+  if [ -z "$want" ]; then
+    fail "'$cmd' has a known provider" \
+         "not in the table -- add it, and make sure the Dockerfile installs it"
+  elif [ "$want" = "SKIP" ]; then
+    pass "'$cmd' needs no package (base image)"
+  else
+    case "$DOCKERFILE" in
+      *"$want"*) pass "'$cmd' is provided by '$want'" ;;
+      *) fail "'$cmd' is provided by '$want'" "the Dockerfile does not mention '$want'" ;;
+    esac
+  fi
+done <<< "$CMDS"
+
 summary

@@ -187,6 +187,19 @@ const FEATURE_VOLUME_ALLOW = [/^dind-var-lib-docker-/];
  *  confusing hard failure. Nothing secret lives there (public cert only). */
 const CA_BIND_SOURCE = "/desolate-ca";
 
+/** A project name usable as a docker object name.
+ *
+ *  Projects may be nested one level -- `owner/repo` -- so that repositories from
+ *  different owners can share a repo name. Docker volume and container names
+ *  cannot contain `/`, so everything that becomes a docker object goes through
+ *  here, and both sides of the volume-namespace check below must use the SAME
+ *  encoding or a project would fail to mount its own volumes.
+ *
+ *  `__` rather than `_`, so `a/b` and `a_b` do not collide. A directory named
+ *  literally `a__b` still would; that is documented rather than defended
+ *  against, because project names come from directories a human made. */
+export const volumeNamespace = (project: string): string => project.replace(/\//g, "__");
+
 /** Split "source=x,target=y,type=volume" into a field map. */
 export function parseMountSpec(spec: string): Record<string, string> {
   return Object.fromEntries(
@@ -236,6 +249,11 @@ export interface ResolvedSpec {
 
 export interface PolicyOptions {
   workspaces?: string;
+  /** Every project directory currently under `workspaces`, used to settle
+   *  volume-namespace collisions. Optional so the policy stays pure and
+   *  testable; when absent the prefix rule alone applies, which is the old
+   *  (looser) behaviour. The broker always supplies it. */
+  projects?: string[];
 }
 
 export class PolicyError extends Error {}
@@ -342,14 +360,39 @@ export function enforcePolicy(
            `where every other project lives): ${m.raw}`);
     }
 
-    if (m.source === project || m.source.startsWith(`${project}-`)) continue;
+    // A project owns `<project>` and `<project>-*` -- but a bare prefix test is
+    // not enough, because project names can prefix each other. With projects
+    // `web` and `web-api`, `web-api-secrets` starts with `web-`, so `web` could
+    // mount it: exactly the volume the README tells you to keep a database
+    // password in. `web`/`web-api` is an ordinary way to name two services, so
+    // this is not an exotic collision.
+    //
+    // Resolve it by longest claim: among the projects that actually exist, the
+    // one with the longest matching prefix owns the volume. `web-api` beats
+    // `web` for `web-api-secrets`, so `web` is refused.
+    const ns = volumeNamespace(project);
+    if (m.source === ns || m.source.startsWith(`${ns}-`)) {
+      const owner = (opts.projects ?? [])
+        .map(p => ({ project: p, ns: volumeNamespace(p) }))
+        .filter(o => m.source === o.ns || m.source.startsWith(`${o.ns}-`))
+        .sort((a, b) => b.ns.length - a.ns.length)[0];
+      if (owner === undefined || owner.project === project) continue;
+      fail(`volume '${m.source}' (requested by ${origin}) belongs to project ` +
+           `'${owner.project}', not '${project}' -- '${ns}-*' also matches names ` +
+           `that start with '${ns}-', and the longer project owns them`);
+    }
 
     if (fromFeature && allowPrivileged && FEATURE_VOLUME_ALLOW.some(re => re.test(m.source))) {
       continue;   // e.g. dind-var-lib-docker-<id>, for an opted-in DinD project
     }
 
     fail(`volume '${m.source}' (requested by ${origin}) is outside this project's ` +
-         `namespace -- a project may only mount volumes named '${project}' or '${project}-*'`);
+         `namespace -- a project may only mount volumes named ` +
+         `'${volumeNamespace(project)}' or '${volumeNamespace(project)}-*'` +
+         (project.includes("/")
+           ? ` (a nested project '${project}' owns the '${volumeNamespace(project)}' namespace,` +
+             ` because docker names cannot contain '/')`
+           : ""));
   }
 
   // -- 3. runArgs -----------------------------------------------------------

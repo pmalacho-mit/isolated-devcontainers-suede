@@ -11,13 +11,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  enforcePolicy,
-  parseJsonc,
-  stripJsonc,
-  normalizeMount,
-  type ResolvedSpec,
-} from "../../../release/vscode-image/policy.ts";
+import { enforcePolicy, parseJsonc, stripJsonc, normalizeMount, type ResolvedSpec, volumeNamespace } from "../../../release/vscode-image/policy.ts";
 
 const PROJECT = "myapp";
 
@@ -550,4 +544,74 @@ describe("the repo's own example projects satisfy the policy", () => {
       enforcePolicy("sample-fastapi", spec(cfg, { privileged: true })),
     );
   });
+});
+
+test("a project cannot reach a sibling whose name it prefixes", () => {
+  // `<project>-*` also matches a LONGER project's name. With projects `web`
+  // and `web-api`, `web-api-secrets` starts with `web-`, so the bare prefix
+  // rule let `web` mount it -- and that is exactly where the README tells you
+  // to keep a local-only database password. `web`/`web-api` is an ordinary way
+  // to name two services, not a contrived collision.
+  const siblings = { workspaces: "/workspaces", projects: ["web", "web-api"] };
+  const vol = (source: string) => ({
+    mounts: [{ source, target: "/x", type: "volume" }],
+  });
+
+  // the longer project owns them
+  assert.throws(
+    () => enforcePolicy("web", spec({ image: "x" }, vol("web-api")), siblings),
+    /belongs to project 'web-api'/,
+  );
+  assert.throws(
+    () => enforcePolicy("web", spec({ image: "x" }, vol("web-api-secrets")), siblings),
+    /belongs to project 'web-api'/,
+  );
+
+  // ...and still owns its own
+  enforcePolicy("web-api", spec({ image: "x" }, vol("web-api-secrets")), siblings);
+  enforcePolicy("web-api", spec({ image: "x" }, vol("web-api")), siblings);
+
+  // the shorter project keeps everything genuinely its own
+  enforcePolicy("web", spec({ image: "x" }, vol("web")), siblings);
+  enforcePolicy("web", spec({ image: "x" }, vol("web-assets")), siblings);
+});
+
+test("volumes desolate injects for a project are still its own", () => {
+  // The overlay views are named <project>-vscode-server / -desolate-ca, and
+  // must not be mistaken for a sibling's just because siblings exist.
+  const siblings = { workspaces: "/workspaces", projects: ["web", "web-api"] };
+  for (const v of ["web-vscode-server", "web-vscode-server-data", "web-desolate-ca"]) {
+    enforcePolicy("web", spec({ image: "x" }, { mounts: [{ source: v, target: "/x", type: "volume" }] }), siblings);
+  }
+});
+
+test("nested projects own a volume namespace with '/' encoded", () => {
+  // Docker volume names cannot contain '/', so `acme/widgets` owns the
+  // `acme__widgets` namespace. policy.ts and desolate.ts must agree on that
+  // encoding or a project could not mount its own volumes.
+  const siblings = { workspaces: "/workspaces", projects: ["acme/widgets", "other/widgets"] };
+  const vol = (source: string) => ({ mounts: [{ source, target: "/x", type: "volume" }] });
+
+  enforcePolicy("acme/widgets", spec({ image: "x" }, vol("acme__widgets")), siblings);
+  enforcePolicy("acme/widgets", spec({ image: "x" }, vol("acme__widgets-secrets")), siblings);
+  // desolate's own injected volumes for a nested project
+  enforcePolicy("acme/widgets", spec({ image: "x" }, vol("acme__widgets-vscode-server")), siblings);
+
+  // the same repo name under a DIFFERENT owner is a different namespace
+  assert.throws(
+    () => enforcePolicy("acme/widgets", spec({ image: "x" }, vol("other__widgets-secrets")), siblings),
+    /outside this project's namespace|belongs to project/,
+  );
+  // and the un-encoded form is not this project's either
+  assert.throws(
+    () => enforcePolicy("acme/widgets", spec({ image: "x" }, vol("widgets-secrets")), siblings),
+    /outside this project's namespace/,
+  );
+});
+
+test("volumeNamespace is stable and collision-resistant", () => {
+  assert.equal(volumeNamespace("flat"), "flat");
+  assert.equal(volumeNamespace("acme/widgets"), "acme__widgets");
+  // '/' -> '__' rather than '_', so these stay distinct
+  assert.notEqual(volumeNamespace("a/b"), volumeNamespace("a_b"));
 });

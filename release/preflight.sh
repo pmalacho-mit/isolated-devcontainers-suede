@@ -69,6 +69,16 @@ dv=$(docker exec desolate-orchestrator devcontainer --version 2>/dev/null)
 [ -n "$dv" ] && ok "devcontainer CLI $dv" || bad "devcontainer CLI broken"
 docker exec desolate-vscode test -x /usr/local/bin/desolate \
   && ok "desolate (broker client) installed in editor" || bad "desolate client missing"
+# The editor is where git happens: deploy keys are minted here and clones/pushes
+# run here. ssh-keygen was missing from the image for a long time, so `repo add`
+# died with a raw Node ENOENT trace -- a missing binary is invisible until the
+# moment something shells out to it.
+for t in git ssh-keygen ssh git-lfs git-subrepo; do
+  docker exec desolate-vscode sh -c "command -v $t >/dev/null" \
+    && ok "editor has $t" \
+    || { bad "editor is missing $t"
+         note "the vscode image installs git, openssh-client, git-lfs and git-subrepo"; }
+done
 docker exec desolate-orchestrator test -x /usr/local/bin/desolate-run \
   && ok "desolate-run installed in orchestrator" || bad "desolate-run missing"
 

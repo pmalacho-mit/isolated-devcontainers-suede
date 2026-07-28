@@ -258,8 +258,30 @@ describe("hostile specs never reach the runner", () => {
     resetRunner();
     const msgs = await ask({ op: "start", project: "evil-jsonc" });
     assert.equal(result(msgs).ok, false, "the hidden mount was accepted");
-    assert.match(errorOf(msgs), /namespace|parser disagreement/);
+    assert.match(errorOf(msgs), /namespace|visible to|different shape/);
     assert.deepEqual(runnerInvocations(), []);
+  });
+
+  test("variable substitution in mounts is NOT a parser disagreement", async () => {
+    // The devcontainer CLI substitutes ${...} in .configuration, so the CLI's
+    // value and our parse of the file legitimately differ. Comparing values
+    // therefore refused the standard node_modules idiom -- straight out of
+    // Microsoft's own docs -- with a message blaming comments. The cross-check
+    // compares PRESENCE and SHAPE instead, which substitution cannot change.
+    project(
+      "subst-mounts",
+      `{
+  "image": "alpine:3",
+  "mounts": ["source=\${localWorkspaceFolderBasename}-node_modules,target=\${containerWorkspaceFolder}/node_modules,type=volume"]
+}`,
+    );
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "subst-mounts" });
+    // It may still be refused by the VOLUME NAMESPACE rule (the substituted
+    // name belongs to this project, so it should not be) -- but never by the
+    // cross-check, which is what this pins.
+    assert.doesNotMatch(errorOf(msgs) ?? "", /visible to|different shape/,
+      "substitution was mistaken for a parser disagreement");
   });
 
   test("E5: runArgs namespace escapes in every spelling", async () => {
@@ -314,10 +336,34 @@ describe("request-level validation", () => {
   });
 
   test("a symlink out of /workspaces is refused", async () => {
+    // The regex cannot catch this -- "escape" is a perfectly legal name. It is
+    // the realpath comparison that does, and that comparison is what allows
+    // nested `owner/repo` projects without needing a second case.
     fs.symlinkSync(os.tmpdir(), path.join(workspaces, "escape"));
+    resetRunner();
     const msgs = await ask({ op: "start", project: "escape" });
-    assert.equal(result(msgs).ok, false);
-    assert.match(errorOf(msgs), /direct child/);
+    assert.equal(result(msgs).ok, false, "a symlink out of /workspaces was accepted");
+    assert.match(errorOf(msgs), /exact path|direct child/);
+    assert.deepEqual(runnerInvocations(), [], "the runner was invoked anyway");
+  });
+
+  test("a nested owner/repo project is accepted", async () => {
+    // The other half of the same change: one level of nesting is legal, so
+    // `cli.sh repo add owner/repo` can clone to /workspaces/owner/repo.
+    fs.mkdirSync(path.join(workspaces, "acme", "widgets", ".devcontainer"), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaces, "acme", "widgets", ".devcontainer", "devcontainer.json"),
+      JSON.stringify({ image: "alpine:3" }),
+    );
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "acme/widgets" });
+    assert.equal(result(msgs).ok, true, errorOf(msgs) ?? "nested project was refused");
+  });
+
+  test("two levels of nesting are refused", async () => {
+    fs.mkdirSync(path.join(workspaces, "a", "b", "c"), { recursive: true });
+    const msgs = await ask({ op: "start", project: "a/b/c" });
+    assert.equal(result(msgs).ok, false, "a/b/c was accepted");
   });
 
   test("unknown ops are refused", async () => {

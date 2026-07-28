@@ -54,4 +54,44 @@ esac
 EMPTY=$(printf '%s' '{"secrets":{}}' | jq -r "$PROG" 2>&1)
 assert_eq "an empty store yields no rows" "$EMPTY" ""
 
+group "the jq expressions in ssh-allow.sh"
+# Third jq bug in this codebase, and none were caught by anything: a jq program
+# is a string in one language embedded in another, so `bash -n` sees a valid
+# script and the error only appears when that line runs. `secret list` shipped
+# invalid jq for months; ssh-allow.sh's final assertion used `?//`, which parses
+# as jq's destructuring-alternative operator, so the check could never run.
+# Extract every jq program from the script and EXECUTE it.
+SSH_ALLOW="$RELEASE/proxy/vm/ssh-allow.sh"
+GH_FIXTURE='{"git":["192.30.252.0/22","140.82.112.0/20","2a0a:a440::/29"]}'
+
+# Flags are OPTIONAL in this pattern. Requiring one (`jq -[a-z]+`) is how the
+# first version of this test missed the very bug it was written for: that call
+# was a bare `jq '<prog>'`, so the grep skipped it and the group passed on the
+# OTHER programs. A guard that matches some of its subjects is worse than one
+# that matches none, because the empty-guard below cannot see it.
+PROGS=$(grep -oE "jq( -[a-zA-Z]+)* '[^']+'" "$SSH_ALLOW" \
+        | sed -E "s/^jq( -[a-zA-Z]+)* '//; s/'$//" | sort -u)
+# ...plus the two passed via the add_all helper.
+PROGS="$PROGS
+$(grep -oE "add_all ssh_allow_v[46] '[^']+'" "$SSH_ALLOW" | sed -E "s/.*'([^']+)'.*/\1/")"
+
+if [ -z "$(printf '%s' "$PROGS" | tr -d '[:space:]')" ]; then
+  fail "found jq programs in ssh-allow.sh" "grep matched nothing -- did the calls change shape?"
+else
+  while IFS= read -r prog; do
+    [ -n "$prog" ] || continue
+    if OUT=$(printf '%s' "$GH_FIXTURE" | jq -r "$prog" 2>&1); then
+      pass "jq program runs: $prog"
+    else
+      fail "jq program runs: $prog" "$OUT"
+    fi
+  done <<< "$PROGS"
+fi
+
+# And the split must actually separate families, or one set gets both.
+V4=$(printf '%s' "$GH_FIXTURE" | jq -r '.git[] | select(contains(":") | not)' | tr '\n' ' ')
+V6=$(printf '%s' "$GH_FIXTURE" | jq -r '.git[] | select(contains(":"))' | tr '\n' ' ')
+assert_not_contains "the v4 filter excludes IPv6 ranges" "$V4" ":"
+assert_contains "the v6 filter keeps IPv6 ranges" "$V6" "2a0a"
+
 summary

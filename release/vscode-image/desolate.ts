@@ -2,9 +2,16 @@
 // port allocation for dev servers.
 //
 //   desolate myproject           -> starts devcontainer + editor, prints URL map
-//   desolate --rebuild myproject -> recreate the container from the current spec
-//   desolate --stop myproject    -> stop devcontainer and remove its relays
-//   desolate --ports myproject   -> show current port map
+//   desolate owner/myrepo        -> same, for a repo cloned under its owner
+//   desolate --rebuild <project> -> recreate the container from the current spec
+//   desolate --stop <project>    -> stop devcontainer and remove its relays
+//   desolate --ports <project>   -> show current port map
+//
+// A project is a directory under /workspaces, either a direct child or ONE
+// level deeper so repositories can be scoped by owner (`cli.sh repo add` clones
+// to /workspaces/<owner>/<repo>). Docker object names cannot contain "/", so
+// volumes, relay containers and state files use the encoded form from
+// policy.ts: `owner/repo` -> `owner__repo`.
 //
 // Plain start REUSES an existing container: `devcontainer up` finds it by label
 // and starts it without re-reading devcontainer.json. So editing the spec and
@@ -25,7 +32,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
-import { parseJsonc } from "./policy.ts";
+import { parseJsonc, volumeNamespace } from "./policy.ts";
 
 // ---------------------------------------------------------------------------
 // Configuration constants
@@ -163,12 +170,18 @@ function parseArgs(argv: string[]): Args {
 
   const raw = rest[0];
   if (!raw) die(USAGE);
-  const project = raw.replace(/\/+$/, "").split("/").pop()!;
+  // A project is `name` or `owner/name` -- so NOT `.pop()`, which used to
+  // collapse `owner/repo` to `repo` and open the wrong directory. Accept an
+  // absolute path too, since tab-completion produces one.
+  const project = raw
+    .replace(/\/+$/, "")
+    .replace(new RegExp(`^${WORKSPACES}/`), "");
   return { command, project, config, rebuild, noCache };
 }
 
 const USAGE =
-  "usage: desolate [--config <path>] [--rebuild [--no-cache]] [--stop|--ports] <project-dir>";
+  "usage: desolate [--config <path>] [--rebuild [--no-cache]] [--stop|--ports] <project>\n" +
+  "       <project> is 'name' or 'owner/name', relative to /workspaces";
 
 /** Extra CLI args pinning every devcontainer invocation to the frozen spec. */
 function configArgs(config: string): string[] {
@@ -183,7 +196,7 @@ function configArgs(config: string): string[] {
 type PortMap = Map<string, number>;
 
 function mapFilePath(project: string): string {
-  return `${WORKSPACES}/.desolate/${project}.ports`;
+  return `${WORKSPACES}/.desolate/${volumeNamespace(project)}.ports`;
 }
 
 function loadPortMap(project: string): PortMap {
@@ -328,8 +341,12 @@ function overlayMounts(): OverlayMount[] {
 /** Build (or reuse) one project's copy-on-write view of a shared directory.
  *  Returns the volume name; dies loudly rather than degrading to a shared mount. */
 function ensureOverlayVolume(project: string, m: OverlayMount): string {
-  const vol  = `${project}-${m.name}`;
-  const data = `${project}-${m.name}-data`;
+  // volumeNamespace, not the raw name: docker volume names cannot contain '/'
+  // and a nested project has one. policy.ts checks project-declared volumes
+  // against the SAME encoding, so a project can still mount its own.
+  const ns   = volumeNamespace(project);
+  const vol  = `${ns}-${m.name}`;
+  const data = `${ns}-${m.name}-data`;
   const want = m.key();
 
   const have = run("docker", ["volume", "inspect", vol, "-f",
@@ -380,7 +397,7 @@ function ensureOverlayVolume(project: string, m: OverlayMount): string {
 }
 
 function specFilePath(project: string): string {
-  return `${WORKSPACES}/.desolate/${project}.spec`;
+  return `${WORKSPACES}/.desolate/${volumeNamespace(project)}.spec`;
 }
 
 function loadSpecFingerprint(project: string): string {
@@ -674,7 +691,7 @@ function withCaTrustedBase(
   spec.image = tag;
 
   fs.mkdirSync(CA_CONFIG_DIR, { recursive: true });
-  const out = `${CA_CONFIG_DIR}/${project}.json`;
+  const out = `${CA_CONFIG_DIR}/${volumeNamespace(project)}.json`;
   fs.writeFileSync(out, JSON.stringify(spec, null, 2));
   return out;
 }
@@ -683,7 +700,7 @@ function withCaTrustedBase(
 // Connection token: one per project, persisted alongside the port map.
 // ---------------------------------------------------------------------------
 function connectionToken(project: string): string {
-  const file = `${WORKSPACES}/.desolate/${project}.token`;
+  const file = `${WORKSPACES}/.desolate/${volumeNamespace(project)}.token`;
   try {
     const existing = fs.readFileSync(file, "utf8").trim();
     if (existing) return existing;
@@ -858,7 +875,7 @@ function recreateRelays(project: string, dir: string, map: PortMap): void {
     // The relay joins the devcontainer's network so `ip` is directly routable.
     const code = runStatus("docker", [
       "run", "-d", "--restart", "unless-stopped",
-      "--name", `desolate-relay-${project}-${hostPort}`,
+      "--name", `desolate-relay-${volumeNamespace(project)}-${hostPort}`,
       "--label", `desolate.relay=${project}`,
       "--network", network,
       "-p", `${hostPort}:${hostPort}`,
@@ -871,7 +888,7 @@ function recreateRelays(project: string, dir: string, map: PortMap): void {
     // `docker run -d` exits 0 once the container is CREATED -- socat can still
     // die immediately (e.g. port taken by a stale appPort publish). Verify it
     // is actually up, and surface socat's own error if not.
-    const name = `desolate-relay-${project}-${hostPort}`;
+    const name = `desolate-relay-${volumeNamespace(project)}-${hostPort}`;
     let alive = false;
     for (let i = 0; i < 5; i++) {
       const state = run("docker", ["inspect", "-f", "{{.State.Status}}", name], true);

@@ -9,12 +9,18 @@ they live in the VM, and an intercepting proxy substitutes them in flight,
 only toward each secret's allowlisted hosts.
 
 Full documentation is in **[`release/README.md`](release/README.md)** --
-architecture, setup, the isolation model, and what it deliberately does *not*
+architecture, setup, the isolation model, and what it deliberately does _not_
 guarantee.
 
-This repo is a [suede dependency](https://github.com/pmalacho-mit/suede). 
+This repo is a [suede dependency](https://github.com/pmalacho-mit/suede).
 
 To see the installable source code, please checkout the [release branch](https://github.com/pmalacho-mit/isolated-devcontainers-suede/tree/release).
+
+## System Requirements
+
+- MacOS
+- Colima (`colima`)
+- Github CLI (`gh`)
 
 ## Installation
 
@@ -32,7 +38,6 @@ bash <(curl https://raw.githubusercontent.com/pmalacho-mit/suede/refs/heads/main
 ```
 
 </details>
-
 
 ## Working on this repo
 

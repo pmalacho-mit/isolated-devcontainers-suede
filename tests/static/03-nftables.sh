@@ -27,9 +27,17 @@ group "the forward chain is default-deny"
 FWD=$(printf '%s' "$RULES" | awk '/chain forward/,/^    }/')
 assert_contains "forward accepts established flows" "$FWD" "ct state established,related accept"
 assert_contains "forward drops QUIC so TLS falls back to interceptable TCP" "$FWD" "udp dport 443 drop"
-assert_contains "forward has a catch-all drop" "$FWD" 'iifname $DESOLATE_IF drop'
+# `counter` is optional on these rules and carries no semantics -- it only makes
+# `nft list table` show which rule fired, which is how you tell "the ssh
+# allowlist is empty" from "something else dropped it". Normalise it away so the
+# assertion is about the DROP being present and last, not about its spelling.
+nocount() { printf '%s' "$1" | sed 's/ counter / /g'; }
+assert_contains "forward has a catch-all drop" "$(nocount "$FWD")" 'iifname $DESOLATE_IF drop'
 LAST=$(printf '%s' "$FWD" | grep -vE '^\s*(#.*)?$' | grep -v '^    }' | tail -1 | sed 's/^ *//')
-assert_eq "the catch-all drop is the LAST forward rule" "$LAST" 'iifname $DESOLATE_IF drop'
+assert_eq "the catch-all drop is the LAST forward rule" "$(nocount "$LAST")" 'iifname $DESOLATE_IF drop'
+# The counters are what make an SSH refusal diagnosable at all, so pin them.
+assert_contains "the catch-all drop counts what it drops" "$FWD" 'counter drop'
+assert_contains "the ssh allowlist accept is counted too" "$FWD" 'tcp dport 22 counter accept'
 
 group "interception covers what it must"
 PRE=$(printf '%s' "$RULES" | awk '/chain prerouting/,/^    }/')
@@ -52,15 +60,27 @@ assert_eq "the catch-all drop is the LAST input rule" "$LAST_IN" 'iifname $DESOL
 assert_not_contains "input does not blanket-accept tcp/22 to the VM" "$IN" "dport 22 accept"
 
 group "git-over-ssh is allowlisted, not opened"
-assert_contains "ssh is restricted to a resolved-host set" "$RULES" "daddr @ssh_allow_v4 tcp dport 22 accept"
+assert_contains "ssh is restricted to a resolved-host set" \
+  "$(nocount "$RULES")" "daddr @ssh_allow_v4 tcp dport 22 accept"
 assert_contains "the v4 set exists" "$RULES" "set ssh_allow_v4"
 assert_contains "the v6 set exists" "$RULES" "set ssh_allow_v6"
-assert_contains "the sets expire so a stale IP does not stay reachable" "$RULES" "timeout 1h"
+# The sets hold CIDRs written by ssh-allow.sh, so `flags interval` is required.
+# The entries are a fetched fact rather than a DNS side effect, so there is no
+# timeout to expire them out from under a running clone.
+NOCOMMENT=$(printf '%s' "$RULES" | grep -v '^[[:space:]]*#')
+assert_contains "the ssh sets hold ranges (CIDRs from GitHub)" "$NOCOMMENT" "flags interval"
 
-group "dnsmasq feeds the ssh allowlist"
-DNS=$(cat "$RELEASE/proxy/vm/dnsmasq-desolate.conf")
-assert_contains "resolver listens on the redirected port" "$DNS" "port=5353"
-assert_contains "resolver ignores the VM's own resolv.conf" "$DNS" "no-resolv"
-assert_contains "github is in the nftset allowlist" "$DNS" "nftset=/github.com/inet#desolate#ssh_allow_v4"
-
-summary
+group "the ssh allowlist is a fetched fact, not a DNS side effect"
+# It was filled by dnsmasq's nftset= for a long time and never once worked. The
+# unfixable reason: containers resolve through Docker's embedded DNS at
+# 127.0.0.11, which forwards upstream from a path the `iifname br-desolate`
+# redirect never sees -- so that resolver never observes the lookups at all.
+# Verified directly: a query aimed at 1.1.1.1:53 IS intercepted and logged, the
+# same name via getent is not.
+assert_not_contains "dnsmasq does not claim to fill the ssh sets" \
+  "$(grep -v '^[[:space:]]*#' "$RELEASE/proxy/vm/dnsmasq-desolate.conf")" "nftset="
+assert_ok "ssh-allow.sh exists and is executable" test -x "$RELEASE/proxy/vm/ssh-allow.sh"
+assert_ok "the nft unit refills the sets after every reload" \
+  grep -q "ExecStartPost=/opt/desolate-proxy/ssh-allow.sh" "$RELEASE/proxy/vm/install.sh"
+assert_ok "install runs it too (the load above empties the sets)" \
+  grep -q "^/opt/desolate-proxy/ssh-allow.sh" "$RELEASE/proxy/vm/install.sh"
