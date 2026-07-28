@@ -54,7 +54,10 @@ group "CLI argument formats we hand to other tools"
 # after the egress proxy was installed, because that mount is conditional on
 # ca.pem existing. Nothing at build or unit level catches it: it is a string
 # assembled at runtime and validated by a different process.
-MOUNT_SPECS=$(grep -oE '"--mount", `[^`]+`' "$RELEASE/vscode-image/desolate.ts" | sed 's/.*`\(.*\)`/\1/')
+# Matched on the SPEC itself, not on proximity to the "--mount" token: the call
+# was once reformatted onto two lines and this grep then matched nothing, which
+# the empty-guard below caught. Anchor on the thing being asserted.
+MOUNT_SPECS=$(grep -oE '`type=[a-z]+,[^`]+`' "$RELEASE/vscode-image/desolate.ts" | tr -d '`')
 if [ -z "$MOUNT_SPECS" ]; then
   fail "found the --mount specs in desolate.ts" "grep matched nothing -- did the call shape change?"
 else
@@ -71,6 +74,28 @@ else
     esac
   done <<< "$MOUNT_SPECS"
 fi
+
+group "shared directories are never bind-mounted into a devcontainer"
+# It is EXECUTED by every project. A bind of the shared /server-dist -- even a
+# read-only one -- is poisonable: MS_RDONLY is per-mount, and a privileged
+# devcontainer holds CAP_SYS_ADMIN in dind's userns and can remount it rw. Each
+# project must get an overlay volume whose lower cannot be written through.
+if grep -qE '"--mount",[^)]*type=bind,source=\$\{(SERVER_SRC|CA_DIR)\}' "$RELEASE/vscode-image/desolate.ts"; then
+  fail "injected mounts are volumes, not binds" \
+       "found a type=bind of a SHARED dir -- that is the poisonable shape"
+else
+  pass "injected mounts are volumes, not binds"
+fi
+assert_ok "desolate.ts builds per-project overlay volumes" \
+  grep -q "ensureOverlayVolume" "$RELEASE/vscode-image/desolate.ts"
+assert_ok "each overlay is keyed for invalidation" \
+  grep -q "desolate.overlay.key" "$RELEASE/vscode-image/desolate.ts"
+# Both shared directories must go through it -- the CA one is the higher-impact
+# of the two, since install-ca.sh is executed as root in every devcontainer.
+assert_ok "the editor server is one of them" \
+  grep -q 'lower: SERVER_SRC' "$RELEASE/vscode-image/desolate.ts"
+assert_ok "the proxy CA dir is one of them" \
+  grep -q 'lower: CA_DIR' "$RELEASE/vscode-image/desolate.ts"
 
 group "every entry point carries proxy-CA trust"
 # with-ca grants trust by EXPORTING env vars and exec'ing, and `docker exec`

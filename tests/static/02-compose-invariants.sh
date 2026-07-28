@@ -111,6 +111,22 @@ for svc in orchestrator vscode; do
     "$(q ".services.\"$svc\".entrypoint // [] | join(\" \")")" "with-ca"
 done
 
+group "the shared editor server cannot be poisoned by a project"
+# /server-dist is bind-mounted into EVERY devcontainer as /vscode-server, and
+# every devcontainer EXECUTES /vscode-server/bin/openvscode-server. Writable,
+# that is cross-project code execution with no privilege required: the volume is
+# chowned 1000:1000 and the stock devcontainer user is uid 1000, so project A
+# overwrites the binary and project B runs it. Only volume-init, which seeds it,
+# may hold it read-write.
+for svc in dind orchestrator; do
+  assert_eq "$svc mounts server-dist read-only" \
+    "$(q "[.services.\"$svc\".volumes[]? | select(.source == \"server-dist\") | .read_only] | first")" "true"
+done
+assert_eq "volume-init keeps it writable (it does the seeding)" \
+  "$(q '[.services."volume-init".volumes[]? | select(.source == "server-dist") | .read_only // false] | first')" "false"
+assert_eq "the editor container does not mount it at all" \
+  "$(q '[.services.vscode.volumes[]? | select(.source == "server-dist")] | length')" "0"
+
 group "the CA mount carries only the public certificate"
 for svc in dind orchestrator vscode; do
   assert_eq "$svc mounts the CA dir read-only" \

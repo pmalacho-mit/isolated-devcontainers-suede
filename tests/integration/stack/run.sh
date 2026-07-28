@@ -201,6 +201,66 @@ else
   fail "desolate example-project succeeded" "$(printf '%s' "$OUT" | tail -5)"
 fi
 
+# =========================================================================
+group "E6: a project cannot poison the editor server every project executes"
+# =========================================================================
+# /vscode-server/bin/openvscode-server is EXECUTED by every devcontainer. When
+# it was a shared bind of /server-dist, any project could overwrite it and run
+# code in every other project on next start -- no privilege, no policy bypass:
+# the volume is chowned 1000:1000 and the stock devcontainer user is uid 1000.
+# Each project now gets an overlayfs volume whose lower is the pristine server,
+# and overlayfs never writes down. This proves the lower survives the attempt.
+DEVC=$(docker exec "$C_ORCH" docker ps -q \
+         --filter label=devcontainer.local_folder=/workspaces/example-project 2>/dev/null | head -1)
+if [ -z "$DEVC" ]; then
+  skip "E6 server poisoning" "no example-project devcontainer is running"
+else
+  BEFORE=$(docker exec "$C_DIND" sha256sum /server-dist/bin/openvscode-server 2>/dev/null | cut -d' ' -f1)
+  # The attack, exactly as a compromised project would run it.
+  docker exec "$C_ORCH" docker exec "$DEVC" \
+    sh -c 'echo MALICIOUS > /vscode-server/bin/openvscode-server' >/dev/null 2>&1
+  AFTER=$(docker exec "$C_DIND" sha256sum /server-dist/bin/openvscode-server 2>/dev/null | cut -d' ' -f1)
+
+  if [ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ]; then
+    pass "the pristine server survived a write through the project's view"
+  else
+    fail "the pristine server survived a write through the project's view" \
+         "/server-dist changed: $BEFORE -> $AFTER -- every other project now executes it"
+  fi
+  # And the project must see only its OWN modification, not a shared one.
+  SEEN=$(docker exec "$C_ORCH" docker exec "$DEVC" \
+           sh -c 'cat /vscode-server/bin/openvscode-server 2>/dev/null | head -c 9' 2>/dev/null)
+  assert_contains "the writer sees its own copy-up (overlay is working)" "$SEEN" "MALICIOUS"
+fi
+
+# =========================================================================
+group "E7: a project cannot poison the shared CA scripts"
+# =========================================================================
+# /desolate-ca/install-ca.sh is executed with `docker exec -u 0` in EVERY
+# devcontainer by installProxyCa(), and by dind's own entrypoint. Shared and
+# writable, poisoning it once buys ROOT execution in every project and in the
+# daemon holding them all -- strictly worse than the editor binary in E6. Same
+# defence: each project gets an overlay whose lower cannot be written through.
+if [ -z "${DEVC:-}" ]; then
+  skip "E7 CA poisoning" "no example-project devcontainer is running"
+else
+  CA_BEFORE=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
+  docker exec "$C_ORCH" docker exec "$DEVC" \
+    sh -c 'echo POISONED > /desolate-ca/install-ca.sh' >/dev/null 2>&1
+  # And the privileged escalation the read-only flag could not stop.
+  docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
+    'mount -o remount,bind,rw /desolate-ca 2>/dev/null; echo POISONED > /desolate-ca/install-ca.sh' \
+    >/dev/null 2>&1
+  CA_AFTER=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
+
+  if [ -n "$CA_BEFORE" ] && [ "$CA_BEFORE" = "$CA_AFTER" ]; then
+    pass "the shared install-ca.sh survived both write attempts"
+  else
+    fail "the shared install-ca.sh survived both write attempts" \
+         "changed: $CA_BEFORE -> $CA_AFTER -- this runs as root in every devcontainer"
+  fi
+fi
+
 group "host-side visibility into the inner daemon still works"
 # observe.sh is now the only view, so it has to keep working -- otherwise the
 # next person reaches for a published port again. It goes through the

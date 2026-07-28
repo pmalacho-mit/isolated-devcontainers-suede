@@ -341,3 +341,57 @@ def test_proven_host_is_sni_only(tmp_path):
     assert addon.proven_host(f) == "api.openai.com"
     g = make_flow(sni=None, host_header="lies.example.com")
     assert addon.proven_host(g) is None
+
+
+# ===========================================================================
+# substitution must not disturb the request's destination
+# ===========================================================================
+def test_E9_substitution_preserves_the_host_header(tmp_path):
+    """Substituting a secret must not rewrite where the request is going.
+
+    The addon once did `flow.request.url = flow.request.url.replace(...)`. In
+    transparent mode request.host is the destination IP, and assigning .url --
+    even a byte-identical string, which is what it was whenever the placeholder
+    lived in a header rather than the URL -- re-parses it and REWRITES the Host
+    header to that IP. The upstream CDN then cannot tell which site is being
+    addressed and answers with an opaque HTML 403.
+
+    It only appeared once a secret was registered, because the substitution loop
+    does not run otherwise: unregistered, the request went out intact and came
+    back with a truthful 401 from the API. That asymmetry is what made it look
+    like a credentials problem.
+    """
+    _, addon, _ = load_addon(tmp_path, {
+        "default_action": "allow",
+        "secrets": {"MYAPP-KEY-PLACEHOLDER": {"value": "sk-real", "hosts": ["api.openai.com"]}},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  dest="162.159.140.245",
+                  headers={"Authorization": "Bearer MYAPP-KEY-PLACEHOLDER"})
+    addon.request(f)
+
+    assert not blocked(f), "an allowlisted host must not be blocked"
+    # the point of the test
+    assert f.request.headers["Host"] == "api.openai.com", \
+        "substitution rewrote the Host header to the destination IP"
+    assert f.request.headers["Authorization"] == "Bearer sk-real"
+
+
+def test_E9b_substitution_still_reaches_the_query_string(tmp_path):
+    """...while still substituting placeholders that DO live in the URL."""
+    _, addon, _ = load_addon(tmp_path, {
+        "default_action": "allow",
+        "secrets": {"MYAPP-KEY-PLACEHOLDER": {"value": "sk-real", "hosts": ["api.openai.com"]}},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  dest="162.159.140.245", path="/v1/models?token=MYAPP-KEY-PLACEHOLDER")
+    addon.request(f)
+
+    assert not blocked(f)
+    assert "sk-real" in f.request.path
+    assert "MYAPP-KEY-PLACEHOLDER" not in f.request.path
+    assert f.request.headers["Host"] == "api.openai.com"

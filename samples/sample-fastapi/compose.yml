@@ -1,5 +1,14 @@
 # Run from INSIDE the devcontainer's terminal:
-#   cd /workspaces/sample-fastapi && docker compose up --build
+#   cd /workspaces/sample-fastapi
+#   /desolate-ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim   # once
+#   docker compose up --build
+#
+# That first line derives a base image trusting the egress proxy's CA and writes
+# a gitignored compose.override.yml pointing this build at it. Without it the
+# `pip install` in the Dockerfile fails certificate verification, because all
+# egress is intercepted and a stock python:3.12-slim does not trust the
+# interceptor. See "Building your own containers inside a devcontainer" in the
+# README. Nothing below, and nothing in the Dockerfile, is desolate-specific.
 #
 # Level-3: this runs on the devcontainer's OWN docker daemon. The API key is a
 # PLACEHOLDER inherited from the devcontainer environment -- the real value is
@@ -10,9 +19,5 @@ services:
     environment:
       # Placeholder passthrough. Contains no secret material.
       OPENAI_API_KEY: ${OPENAI_API_KEY:-SAMPLE-FASTAPI-OPENAI-KEY}
-    volumes:
-      # Proxy CA so this container trusts the intercepted TLS. The path exists
-      # inside the devcontainer because desolate mounted it there.
-      - /devenv-ca:/devenv-ca:ro
     ports:
       - "0.0.0.0:8000:8000"

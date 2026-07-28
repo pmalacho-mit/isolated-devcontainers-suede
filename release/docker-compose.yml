@@ -137,8 +137,20 @@ services:
       - dind-sysbox-data:/var/lib/docker  # inner images/containers
       - workspaces:/workspaces        # MUST match the vscode mount path so
                                       # devcontainer bind mounts resolve
-      - server-dist:/server-dist      # OpenVSCode tarball, bind-mounted into
-                                      # each devcontainer by `desolate`
+      # READ-ONLY, and this is a containment boundary, not tidiness.
+      #
+      # This is the pristine editor server, and it is the LOWER LAYER of the
+      # per-project overlayfs volume `desolate` builds for each devcontainer
+      # (see ensureServerVolume in vscode-image/desolate.ts). Every devcontainer
+      # EXECUTES /vscode-server/bin/openvscode-server out of its own overlay.
+      #
+      # Nothing but volume-init may write here. If a project could reach this
+      # directory, it would be writing the binary every OTHER project runs.
+      # overlayfs already prevents that from the project side -- writes are
+      # copied up, never down -- and `:ro` is the second lock, covering anything
+      # inside dind that touches the path directly rather than through a
+      # project's overlay.
+      - server-dist:/server-dist:ro
     healthcheck:
       # Healthy only once dockerd is up and the socket exists -- dependents
       # wait on this, which fixes the startup race on first boot.
@@ -195,7 +207,11 @@ services:
       - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
       - inner-run:/run/inner        # the daemon socket lives HERE only
       - workspaces:/workspaces
-      - server-dist:/server-dist
+      # Read-only for the same reason as dind's copy above: the orchestrator
+      # only ever names this path as a bind SOURCE for devcontainers, never
+      # writes it. Leaving it writable would give a compromised orchestrator a
+      # way to poison the binary every project executes.
+      - server-dist:/server-dist:ro
       - broker-run:/run/broker
     security_opt:
       - no-new-privileges:true

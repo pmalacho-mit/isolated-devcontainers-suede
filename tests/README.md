@@ -101,3 +101,14 @@ A new refusal in `release/vscode-image/policy.ts` wants two tests: one in
 rule in `release/proxy/vm/addon.py` wants a unit case and, if it depends on how packets
 actually flow, a case in `integration/proxy/run.sh` -- that distinction is
 exactly where the Host-header exfiltration lived.
+
+## probes/
+
+Not tests. A probe answers a *capability* question about the environment so a
+design decision can be made -- it asserts no invariant, gates nothing, and is
+not run by `run.sh`. Run one by hand when you need its answer, and delete it
+once the question is settled.
+
+| probe | question |
+|---|---|
+| `dind-overlay-volume.sh` | can each project get a private copy-on-write view of the shared editor server, instead of the read-only bind it gets today? |

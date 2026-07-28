@@ -38,5 +38,5 @@ the attempt is refused and logged (`./cli.sh proxy logs | grep LEAK`).
 
 Nothing in this project needs one. The placeholder lives in
 `devcontainer.json` (`containerEnv`) and is safe to commit; the real value
-lives only in the Colima VM at `/etc/devenv-proxy/settings.json` (0600), below
+lives only in the Colima VM at `/etc/desolate-proxy/settings.json` (0600), below
 the sysbox boundary, on a filesystem no container can reach.

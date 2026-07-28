@@ -4,8 +4,8 @@
 
   // Enables THIS devcontainer to run its own Docker daemon (level 3), so it
   // can start the FastAPI container the same way production compose would.
-  // Under sysbox this nested daemon runs UNPRIVILEGED -- no privileged flag,
-  // no cgroup workaround needed (sysbox virtualizes /sys/fs/cgroup for it).
+  // NOTE: sysbox contains *dind*, not this container -- this runs on dind's
+  // daemon, which uses plain runc. The feature's privilege below is real.
   "features": {
     "ghcr.io/devcontainers/features/docker-in-docker:2": {}
   },
@@ -23,11 +23,19 @@
       // feature, so it has to be acknowledged HERE, in the project's own file,
       // where code review and `git log` can see it.
       //
-      // What you are accepting: a privileged container on the inner daemon can
-      // reach that daemon's /var/lib/docker, i.e. sibling projects' on-disk
-      // data. sysbox still contains it to the VM, and the VM still contains it
-      // to your Mac -- but this project is no longer isolated from its
-      // siblings. Do not run untrusted code in a project with this flag.
+      // What you are accepting: all capabilities, all devices, and no seccomp
+      // or apparmor confinement INSIDE dind -- which is where every project's
+      // source (the shared /workspaces volume) and every project's images
+      // live. Whether that specifically yields sibling data has not been
+      // demonstrated here; treat it as a materially weaker boundary than an
+      // ordinary devcontainer gets, not as a proven escape.
+      //
+      // What you are NOT accepting: anything beyond dind. This container sits
+      // in dind's user namespace, where capabilities apply only to resources
+      // that namespace owns -- so it cannot load kernel modules, reach VM
+      // devices, or touch the VM, no matter what it does. sysbox is what
+      // bounds it. Still: do not run untrusted code in a project with this
+      // flag.
       "allowPrivileged": true
     },
     "vscode": { "extensions": [] }

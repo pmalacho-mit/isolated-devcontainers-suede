@@ -86,6 +86,20 @@ fi
 docker exec desolate-vscode test -w /workspaces \
   && ok "/workspaces writable by editor user" \
   || bad "/workspaces not writable by uid 1000 -- volume-init chown failed?"
+# Every devcontainer executes this binary from a SHARED mount, so anything that
+# can write it can run code in every other project. Assert the live mount, not
+# just the compose intent: `:ro` in config and a read-only mount at runtime are
+# different claims, and only this one matters.
+for c in desolate-dind desolate-orchestrator; do
+  if docker exec "$c" sh -c 'touch /server-dist/.desolate-writetest 2>/dev/null' 2>/dev/null; then
+    docker exec "$c" rm -f /server-dist/.desolate-writetest >/dev/null 2>&1
+    bad "$c can WRITE /server-dist -- the shared editor server is poisonable"
+    note "every devcontainer executes /vscode-server/bin/openvscode-server from here"
+    note "docker-compose.yml must mount server-dist :ro for this service"
+  else
+    ok "$c holds /server-dist read-only"
+  fi
+done
 
 echo
 echo "== 4. the inner daemon is not on the network at all =="

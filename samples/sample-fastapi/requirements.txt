@@ -1,0 +1,20 @@
+# Runtime dependencies for the level-3 FastAPI container.
+#
+# The Dockerfile installs from this file rather than listing packages inline,
+# so there is one place to change and nothing to keep in step.
+#
+# Upper bounds are on the majors: this is a sample, and a rotting pin is worse
+# than a loose one. Nothing here is security-sensitive -- it holds no secret
+# material, only the PLACEHOLDER it is handed at runtime.
+
+fastapi>=0.140,<1.0
+uvicorn[standard]>=0.51,<1.0
+
+# The app calls api.openai.com to prove the proxy substitutes the placeholder
+# in flight (see /live-call), and example.com to prove it refuses to (/exfil-test).
+httpx>=0.28,<1.0
+
+# Imported by app/main.py as `from dotenv import load_dotenv`. Easy to miss:
+# the import is at module scope, so leaving it out is not a degraded feature,
+# it is an ImportError before the server ever binds.
+python-dotenv>=1.2,<2.0

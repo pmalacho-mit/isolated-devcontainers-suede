@@ -236,7 +236,27 @@ class DesolateProxy:
         # 3) substitution
         for name in found:
             value = self.secrets[name]["value"]
-            flow.request.url = flow.request.url.replace(name, value)
+            # .path, NOT .url -- and this is load-bearing, not style.
+            #
+            # Assigning flow.request.url re-parses it into scheme/host/port/path
+            # and, as a side effect, REWRITES THE HOST HEADER to whatever host
+            # the URL names. In transparent mode request.host is the destination
+            # IP, so `request.url = request.url` -- a byte-identical assignment,
+            # which is what this was when the placeholder lived in a header
+            # rather than the URL -- silently replaced `Host: api.openai.com`
+            # with `Host: 162.159.140.245`. The upstream CDN then has no idea
+            # which site is being addressed and answers with an HTML 403 that
+            # mentions neither the header nor us.
+            #
+            # It only bit once a secret was actually registered, because this
+            # loop does not run otherwise: without the secret the request went
+            # out intact and returned a truthful 401.
+            #
+            # request.path covers path AND query string, which is the only part
+            # of a URL a placeholder can realistically appear in, and assigning
+            # it leaves host and headers alone.
+            if name in flow.request.path:
+                flow.request.path = flow.request.path.replace(name, value)
             for k, v in list(flow.request.headers.items(multi=True)):
                 if name in v:
                     flow.request.headers[k] = v.replace(name, value)
