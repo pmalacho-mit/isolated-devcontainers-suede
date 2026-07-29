@@ -19,14 +19,6 @@
 #     solely through the broker's fixed op vocabulary, never directly.
 #   - The only host-reachable surface is 3000 (the editor, token-gated), bound
 #     to 127.0.0.1. Nothing else is published except the dev-server range.
-#
-# There used to be a GET-only socket proxy on 127.0.0.1:2375 here, for host-side
-# observability. It was removed deliberately, and re-adding one is a decision,
-# not a convenience: its read-only guarantee constrained only the Mac, which is
-# already the trust root and can drive the inner daemon through the orchestrator
-# anyway -- while an unauthenticated HTTP port on loopback is reachable from any
-# browser you point at a hostile page (DNS rebinding), which a unix socket never
-# is. It bought nothing and cost that. observe.sh covers the use case.
 
 name: desolate
 
@@ -109,28 +101,31 @@ services:
       - --host=unix:///run/inner/docker.sock
       - --group=1000                  # gid of the openvscode user, grants socket access
       - --icc=true
-      # What the INNER daemon hands its containers. containerd 2.x defaults this
-      # to 1024, which is far below what a language server + bundler + watcher
-      # in one devcontainer needs; the failure is EMFILE deep inside a toolchain,
-      # nowhere near anything that says "docker".
+      # What the INNER daemon hands its containers. sysbox gives dind
+      # soft=1024/hard=524288, and containers inherit the daemon's limits when
+      # this flag is absent -- so without it every devcontainer runs at a 1024
+      # soft limit, which one language server + bundler + watcher blows through.
+      # The failure is EMFILE deep in a toolchain, nowhere near anything docker.
       #
-      # 65536, NOT the 1048576 that dockerd conventionally uses on a bare host.
-      # dind runs under sysbox in a user namespace, so it has no
-      # CAP_SYS_RESOURCE in the initial namespace and cannot raise a hard limit
-      # past what it inherited -- and setrlimit(RLIMIT_NOFILE) above
-      # /proc/sys/fs/nr_open returns EPERM regardless. Asking for 1048576 makes
-      # EVERY inner container fail at creation with:
-      #   error setting rlimit type 7: operation not permitted
-      # which names neither ulimits nor sysbox. Raise it only as far as the
-      # containment allows; the point is to clear 1024, not to match a host.
-      - --default-ulimit=nofile=${DESOLATE_NOFILE:-65536}:${DESOLATE_NOFILE:-65536}
-    # dockerd/containerd's OWN limits inside dind. Separate from the flag above:
-    # that one is the default for containers, this is the headroom for the
-    # daemon holding every one of their fds.
+      # soft < hard on purpose: 65536 without asking, 524288 for anything that
+      # raises its own limit. A soft limit AT the ceiling is the classic footgun
+      # for software that closes fds by iterating the whole table.
+      #
+      # 524288 is sysbox's ceiling for dind and cannot be exceeded -- dind is
+      # user-namespaced, so it has no CAP_SYS_RESOURCE to raise its own hard
+      # limit. Asking for more fails every inner container at creation with
+      # "error setting rlimit type 7: operation not permitted", which names
+      # neither ulimits nor sysbox; preflight.sh diagnoses that case.
+      - --default-ulimit=nofile=65536:524288
+    # The daemon's OWN limits, which are NOT the flag above: dockerd and
+    # containerd hold fds for every container at once, so they get the full
+    # ceiling rather than one container's allowance. Without this they would
+    # inherit sysbox's soft=1024 and bottleneck everything below them. The
+    # iterate-the-fd-table concern above does not apply to dockerd itself.
     ulimits:
       nofile:
-        soft: ${DESOLATE_NOFILE:-65536}
-        hard: ${DESOLATE_NOFILE:-65536}
+        soft: 524288
+        hard: 524288
     volumes:
       - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
       - inner-run:/run/inner          # the inner socket lives here

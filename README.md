@@ -1,22 +1,22 @@
-# isolated-devcontainers-suede
+# isolated-devcontainers-suede (`desolate`)
 
 > [!NOTE]
-> This is a [suede](https://github.com/pmalacho-mit/suede) dependency. 
+> This is a [suede](https://github.com/pmalacho-mit/suede) dependency.
 
-A browser-based, container-isolated VS Code dev environment for macOS (Apple
-Silicon). You edit in a browser tab; each project runs in its own devcontainer
+A browser-based, container-isolated VS Code dev environment for macOS.
+You edit in a browser tab; each project runs in its own devcontainer
 on an inner Docker daemon; that inner daemon runs **unprivileged** under the
 [sysbox](https://github.com/nestybox/sysbox) runtime, so a compromised project
 cannot reach the VM or your Mac. Hardened against the container-escape chain in
-The Red Guild's "Leveraging VSCode internals to escape containers."
+The Red Guild's ["Leveraging VSCode internals to escape containers."](https://blog.theredguild.org/leveraging-vscode-internals-to-escape-containers/).
 
-The name is "desolate" = **de**v + i**solate**.
+The name is `desolate` = **de**v + i**solate**.
 
 ## Architecture
 
 ```
 +- macOS ---------------------------------------------------------------+
-|  browser --> 127.0.0.1:3000 (token)     ./cli.sh observe (no port)   |
+|  browser --> 127.0.0.1:3000 (?token)     ./cli.sh observe (no port)   |
 |                                                                       |
 |  +- Colima VM (Ubuntu; sysbox + desolate-proxy) --------------------+   |
 |  |  SECRETS LIVE HERE ONLY: /etc/desolate-proxy/settings.json (0600)  |   |
@@ -36,17 +36,19 @@ The name is "desolate" = **de**v + i**solate**.
 **One** host-reachable surface, loopback-only: `3000`, the editor, token-gated.
 (Plus the dev-server range, 8080-8090 by default, once a project is running.)
 
-There is deliberately no network path to the inner Docker daemon. An earlier
-version published a GET-only socket proxy on `127.0.0.1:2375` for host-side
-observability; it was removed, because its read-only guarantee constrained only
-the Mac -- already the trust root, and able to drive the inner daemon through
-the orchestrator regardless -- while an unauthenticated HTTP port on loopback is
-reachable from any browser aimed at a hostile page (DNS rebinding), which a unix
-socket is not. `./cli.sh observe` replaces it.
+There is deliberately no network path to the inner Docker daemon.
+
+> [!NOTE]
+> An earlier version published a GET-only socket proxy on `127.0.0.1:2375` for host-side
+> observability; it was removed, because its read-only guarantee constrained only
+> the Mac -- already the trust root, and able to drive the inner daemon through
+> the orchestrator regardless -- while an unauthenticated HTTP port on loopback is
+> reachable from any browser aimed at a hostile page (DNS rebinding), which a unix
+> socket is not. `./cli.sh observe` replaces it.
 
 ## Requirements
 
-- Apple Silicon Mac, macOS 13+
+- macOS 13+
 - Homebrew
 - `brew install docker docker-compose colima jq`
 
@@ -83,7 +85,7 @@ One command, run from the Mac. It sshes into the VM and installs both VM-side
 layers, in order:
 
 **The repo must live under `$HOME`.** Colima mounts only your home directory
-into the VM, and this step runs scripts from the repo *inside* the VM. Anywhere
+into the VM, and this step runs scripts from the repo _inside_ the VM. Anywhere
 else and it cannot see them; `./cli.sh vm status` reports whether the VM can.
 
 1. **sysbox** ([`vm/install-sysbox.sh`](vm/install-sysbox.sh)) -- the
@@ -96,11 +98,11 @@ else and it cannot see them; `./cli.sh vm status` reports whether the VM can.
    deliberately left alone -- those belong to your projects.
 
 **The sysbox layer needs a container-free daemon.** Its installer restarts
-docker to rewrite network parameters and refuses to configure while *any*
+docker to rewrite network parameters and refuses to configure while _any_
 container exists on the VM -- stopped ones count. `vm install` handles this: it
 removes the desolate stack's own containers first (named volumes are untouched,
 so `cli.sh up` restores everything), and refuses only if containers it does not
-own are left. Either way it decides *before* apt runs, rather than letting the
+own are left. Either way it decides _before_ apt runs, rather than letting the
 package's postinst fail halfway and leave dpkg wedged.
 
 (`./cli.sh up` re-provisions only the proxy layer, via `--proxy-only`, so it is
@@ -146,7 +148,7 @@ secrets machinery work end to end:
 
 ### How the egress check stays honest
 
-The nftables rules match on an interface *name* (`iifname $DESOLATE_IF`). That
+The nftables rules match on an interface _name_ (`iifname $DESOLATE_IF`). That
 name is pinned in `docker-compose.yml` via
 `com.docker.network.bridge.name: br-desolate`, so it survives a `down`/`up`.
 
@@ -158,7 +160,7 @@ name no interface currently has -- and then match nothing. No error, no failed
 request, just no interception.
 
 So `cli.sh up` does not trust the pin. After compose returns it resolves the
-bridge the network is *actually* on (via the gateway address), compares that
+bridge the network is _actually_ on (via the gateway address), compares that
 against the `DESOLATE_IF` the installed ruleset is armed for, and also checks
 that the ruleset is loaded and the three units are active. If any of that is
 wrong it re-runs the proxy layer automatically:
@@ -207,7 +209,7 @@ out. There is no separate copy tool.
 
 The editor is a **universal file viewer/editor** over `/workspaces` -- you can
 read, edit, add and delete files in any project from the `:3000` tab. What it
-deliberately does *not* have is Docker access: no socket mount, no
+deliberately does _not_ have is Docker access: no socket mount, no
 `DOCKER_HOST`. Only the **orchestrator** container holds the inner daemon
 socket.
 
@@ -223,7 +225,7 @@ desolate --ports <project>    ->  {"op":"ports", ...}
 desolate --list               ->  {"op":"list"}
 ```
 
-`rebuild` runs the *same* snapshot-resolve-enforce sequence as `start`, never a
+`rebuild` runs the _same_ snapshot-resolve-enforce sequence as `start`, never a
 shortcut around it. It is the op most likely to be used immediately after
 editing `devcontainer.json` -- precisely when the spec is newly hostile -- so
 letting it reuse an older validation would make "edit the spec, then rebuild"
@@ -238,14 +240,14 @@ theater: a hostile extension could write
 `"mounts": ["source=otherproject-secrets,..."]` into its own project and then
 ask us to start it.
 
-Getting that check *right* is harder than it looks, because a devcontainer's
+Getting that check _right_ is harder than it looks, because a devcontainer's
 privilege can arrive from four places, and only one of them is the top-level
 keys of the file you are reading. Five bypasses were demonstrated against an
 earlier version of this policy; each now has a named regression test in
 `tests/` (`E1`..`E5`). The rules, and what each is actually defending:
 
 - **`initializeCommand` is refused.** It runs on the machine driving the
-  devcontainer CLI -- the *orchestrator*, which holds the inner daemon socket.
+  devcontainer CLI -- the _orchestrator_, which holds the inner daemon socket.
   It was arbitrary code execution against exactly the daemon the editor is not
   allowed to touch. The in-container hooks (`postCreateCommand`,
   `onCreateCommand`, `postStartCommand`, ...) run inside your container and
@@ -253,9 +255,9 @@ earlier version of this policy; each now has a named regression test in
 - **`dockerComposeFile` is refused.** A compose-mode devcontainer declares its
   privilege in the compose file, which this policy does not read; `privileged`,
   `pid: host`, `network_mode: host` and `- /:/host` are all expressible there.
-  Run compose *inside* a devcontainer with the docker-in-docker feature instead.
+  Run compose _inside_ a devcontainer with the docker-in-docker feature instead.
 - **Policy is enforced on the CLI's own `mergedConfiguration`**, not on our
-  parse of the file. That is where a *feature*'s `privileged` / `capAdd` /
+  parse of the file. That is where a _feature_'s `privileged` / `capAdd` /
   `securityOpt` / `mounts` land -- a local `./myfeature` could otherwise inject
   `--privileged --mount type=bind,src=/,dst=/host` without the project's
   devcontainer.json mentioning any of it. It also removes the class of bug
@@ -271,7 +273,7 @@ earlier version of this policy; each now has a named regression test in
 - **Privilege must be opted into explicitly**, in the project's own file:
   `"customizations": {"desolate": {"allowPrivileged": true}}`. The
   docker-in-docker feature needs it; the point is that it can no longer be
-  inherited *silently* from a third-party feature, and that `git log` shows
+  inherited _silently_ from a third-party feature, and that `git log` shows
   which projects are in the escalated tier.
 
 The validated spec is then **snapshotted** to a directory only the orchestrator
@@ -279,13 +281,13 @@ can write, and the container is started from that copy (`--override-config`).
 Without it the editor could swap the file between the check and the start, and
 the check would be decorative.
 
-`preflight.sh` asserts the separation holds: the editor must *fail* to reach a
+`preflight.sh` asserts the separation holds: the editor must _fail_ to reach a
 daemon, must not mount the socket volume, and the broker socket must be
 present. `tests/integration/stack` goes further and runs the attacks from
 inside the editor container.
 
 **Known limit:** a project that uses the docker-in-docker feature is privileged
-*within the sysbox userns* on the inner daemon, so within one stack it remains
+_within the sysbox userns_ on the inner daemon, so within one stack it remains
 possible for such a project, if compromised, to reach sibling containers'
 on-disk data. The broker cannot fix that -- it can only make you write the
 opt-in down. Run genuinely untrusted code in a separate stack (trust tier), not
@@ -363,7 +365,7 @@ each their own TLS client with their own trust store, verifying inside a
 throwaway build container. The only thing that reaches all of them at once is
 **the base image's trust store**.
 
-Note this is specifically HTTPS *inside a build step*. Plain-http `apt` works
+Note this is specifically HTTPS _inside a build step_. Plain-http `apt` works
 untouched, which is why the problem often does not show up until the first
 `pip install`.
 
@@ -398,7 +400,7 @@ still fail with:
 
 So the derived image also sets `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
 `NODE_EXTRA_CA_CERTS`, `CARGO_HTTP_CAINFO` and `GIT_SSL_CAINFO` as image `ENV`,
-pointing at the system bundle -- which now holds the proxy CA *and* every public
+pointing at the system bundle -- which now holds the proxy CA _and_ every public
 root. As `ENV` they reach every process; the same variables written to
 `/etc/profile.d` would only reach login shells, never a container that execs
 `uvicorn`. Because they name the standard bundle path, they are harmless in an
@@ -412,13 +414,13 @@ Run it once per (service, base image). Later invocations merge into the same
 file rather than replacing it, so a second service or a second base image just
 adds an entry. Useful flags:
 
-| Flag | Effect |
-|---|---|
-| `--compose <file>` | point at a compose file elsewhere; the override is named to match |
-| `--image` alone, no `--service` | just derive the image and print the YAML to add |
-| `--print-recipe` | show the Dockerfile it *would* build, then stop |
-| `--force` | rebuild even if the derived image is current |
-| `--no-gitignore` | leave `.gitignore` alone |
+| Flag                            | Effect                                                            |
+| ------------------------------- | ----------------------------------------------------------------- |
+| `--compose <file>`              | point at a compose file elsewhere; the override is named to match |
+| `--image` alone, no `--service` | just derive the image and print the YAML to add                   |
+| `--print-recipe`                | show the Dockerfile it _would_ build, then stop                   |
+| `--force`                       | rebuild even if the derived image is current                      |
+| `--no-gitignore`                | leave `.gitignore` alone                                          |
 
 **It shows you the recipe before it runs.** This script modifies the image your
 code is built from, on your behalf, so it prints the complete Dockerfile it uses
@@ -447,7 +449,7 @@ trust-proxy: deriving desolate-ca/python:3.12-slim
              build context: /desolate-ca  (contains only the public CA cert)
 ```
 
-Use `--print-recipe` to read it *before* anything is built. The recipe is shown
+Use `--print-recipe` to read it _before_ anything is built. The recipe is shown
 only when it actually derives; a cached rebuild stays quiet.
 
 ### What this means for production
@@ -455,14 +457,14 @@ only when it actually derives; a cached rebuild stays quiet.
 `compose.override.yml` is a **development artifact and must not ship.** Compose
 auto-merges it only when it sits beside your compose file, so:
 
-| | In the devcontainer | In production |
-|---|---|---|
-| Command | `docker compose up --build` | `docker compose up --build` |
-| Files read | `compose.yml` + `compose.override.yml` | `compose.yml` |
-| `FROM python:3.12-slim` resolves to | `desolate-ca/python:3.12-slim` | `python:3.12-slim` |
+|                                     | In the devcontainer                    | In production               |
+| ----------------------------------- | -------------------------------------- | --------------------------- |
+| Command                             | `docker compose up --build`            | `docker compose up --build` |
+| Files read                          | `compose.yml` + `compose.override.yml` | `compose.yml`               |
+| `FROM python:3.12-slim` resolves to | `desolate-ca/python:3.12-slim`         | `python:3.12-slim`          |
 
 Identical command, unmodified `Dockerfile`, and nothing desolate-specific in
-what you deploy. It is gitignored by default because if it *does* reach
+what you deploy. It is gitignored by default because if it _does_ reach
 production, builds fail -- the `desolate-ca/*` images exist only inside your
 devcontainer.
 
@@ -474,7 +476,7 @@ production one. It carries one extra layer (the CA plus
 
 - **Do not pass `--pull`.** It makes BuildKit try to fetch `desolate-ca/*` from
   a registry, where it does not exist, and the build fails with `pull access
-  denied`. Loud, at least.
+denied`. Loud, at least.
 - **A new base image needs its own run.** Adding a service on `node:22-slim`
   means running the script again for it; the build otherwise fails with the
   certificate error above, naming the image.
@@ -527,7 +529,7 @@ publishing more than you allocate merely wastes port bindings, while allocating
 more than you publish produces a relay that binds happily inside dind and is
 simply unreachable from the Mac, so the URL never answers and nothing logs an
 error. Driving both from one pair of variables is what prevents that;
-`cli.sh preflight` re-checks it against the *running* containers, which is the
+`cli.sh preflight` re-checks it against the _running_ containers, which is the
 case config alone cannot catch (an `.env` edit without a restart).
 
 ### When the range runs out
@@ -566,7 +568,7 @@ Two owners can then have a repo of the same name without colliding -- and so can
 their deploy keys, which are named `deploy_<owner>__<repo>` for the same reason.
 
 Exactly one level of nesting is allowed. `a/b/c` is refused, and so is anything
-resolving outside `/workspaces` -- the broker compares the *resolved* path
+resolving outside `/workspaces` -- the broker compares the _resolved_ path
 against the workspaces root, so a symlink named legally still cannot escape.
 
 **Docker names cannot contain `/`.** So a nested project's volumes, relay
@@ -652,19 +654,19 @@ Be precise about the boundary, because the parts that look like guarantees and
 are not will bite:
 
 - **Hosts are not restricted by default.** `default_action` ships as `allow`,
-  so the path is default-deny but the *destination set* is not. Set
+  so the path is default-deny but the _destination set_ is not. Set
   `default_action: "deny"` and an explicit `network` allowlist in
   `/etc/desolate-proxy/settings.json` if you want that too.
 - **Secrets are not scoped per project.** The proxy sees requests from the
   whole stack and cannot tell which devcontainer sent one. Any project can
-  *use* any other project's placeholder toward that secret's allowlisted hosts
+  _use_ any other project's placeholder toward that secret's allowlisted hosts
   -- it still cannot read the value, and it cannot send it anywhere else, but
   "project A cannot spend project B's API quota" is not a property this has.
 - **DNS is an open channel.** dnsmasq forwards to 1.1.1.1/8.8.8.8 without
   restriction, so a compromised container can exfiltrate data inside query
   names: `<base32-of-your-source>.attacker.com` resolves recursively to the
   attacker's own nameserver, which logs it. Nothing needs to answer -- the
-  query *is* the payload. Two things bound it. Secrets cannot go this way,
+  query _is_ the payload. Two things bound it. Secrets cannot go this way,
   because containers only ever hold placeholders and substitution happens in
   the HTTP proxy, which a DNS query never touches -- the attacker receives the
   literal placeholder. And `log-queries` is on, so it lands in the VM's
@@ -676,6 +678,7 @@ are not will bite:
   ships as `allow`, so DNS-over-HTTPS to any provider is permitted, and that
   is a far better exfil path than encoding data into query names. Tightening
   the resolver while leaving `default_action: allow` buys close to nothing.
+
 - **The inner Docker daemon is not exposed to the host at all** -- this is
   where a `127.0.0.1:2375` socket proxy used to be, and it is worth knowing why
   it is gone. `CONTAINERS=1` is a prefix match on `/containers`, and GET-only
@@ -687,13 +690,13 @@ are not will bite:
   is already the trust root, while the port itself was unauthenticated HTTP on
   loopback -- reachable from a browser via DNS rebinding in a way a unix socket
   never is. `./cli.sh observe` gives the same view over the orchestrator's
-  socket. It is a full-access channel behind fixed subcommands, so it is *not*
+  socket. It is a full-access channel behind fixed subcommands, so it is _not_
   mechanically read-only; that guarantee was traded away knowingly, for the
   smaller surface.
 
 ### Local-only secrets
 
-For credentials that are *not* outbound HTTP -- a local DB password, a signing
+For credentials that are _not_ outbound HTTP -- a local DB password, a signing
 key used in-process -- there is nothing to substitute. Use a per-project volume
 outside `/workspaces`:
 
@@ -737,7 +740,7 @@ Boundaries, strongest first:
 - **dind <-> containers** -- Linux namespaces, and the weakest of the three.
   This is the layer to be precise about.
 
-  A project's *workspace* is properly confined: `workspaceMount` must bind
+  A project's _workspace_ is properly confined: `workspaceMount` must bind
   exactly `/workspaces/<project>` (source **and** target -- a substring check
   would let `source=/,target=/workspaces/foo` through), volumes are restricted
   to `<project>` / `<project>-*`, and bind mounts are refused outright. So
@@ -746,10 +749,10 @@ Boundaries, strongest first:
   But `desolate` injects two mounts of its own, which never pass through that
   policy, and both are **executed**:
 
-  | Mount | Executed by | If poisoned |
-  |---|---|---|
-  | `/vscode-server` | every devcontainer, on start | code execution as each project's user |
-  | `/desolate-ca` | `install-ca.sh`, via `docker exec -u 0` in every devcontainer, and dind's entrypoint | **root** execution in every project and in dind |
+  | Mount            | Executed by                                                                          | If poisoned                                     |
+  | ---------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------- |
+  | `/vscode-server` | every devcontainer, on start                                                         | code execution as each project's user           |
+  | `/desolate-ca`   | `install-ca.sh`, via `docker exec -u 0` in every devcontainer, and dind's entrypoint | **root** execution in every project and in dind |
 
   Shared and writable, either is cross-project code execution needing no
   privilege at all -- overwrite one file, and every other project runs it.
@@ -761,7 +764,7 @@ Boundaries, strongest first:
   works -- rather than a permission flag someone can clear. It costs about 8K
   per project instead of a copy.
 
-  A read-only *flag* would not have been enough, and that was measured rather
+  A read-only _flag_ would not have been enough, and that was measured rather
   than assumed. `MS_RDONLY` is per-mount, so a devcontainer with
   `allowPrivileged` -- holding `CAP_SYS_ADMIN` in dind's user namespace -- can
   `mount -o remount,bind,rw` its own copy and write **through to the shared
@@ -778,12 +781,12 @@ Boundaries, strongest first:
   `E6` for the editor binary, `E7` for the CA scripts -- including the
   privileged remount.
 
-Note that a `--privileged` devcontainer is privileged *relative to dind*, and
+Note that a `--privileged` devcontainer is privileged _relative to dind_, and
 dind's own root is already an unprivileged VM user. Capabilities in a
 non-initial user namespace apply only to resources that namespace owns, so such
 a container cannot load kernel modules, touch VM devices, or reach the VM
 however it misbehaves. sysbox is what bounds the damage to dind's contents --
-which is precisely why `allowPrivileged` warns about *siblings* and nothing
+which is precisely why `allowPrivileged` warns about _siblings_ and nothing
 beyond them.
 
 ## Verifying containment
@@ -801,7 +804,7 @@ secret exfiltration via a spoofed `Host` header. See `tests/README.md`.
 
 `./cli.sh preflight` asserts the stack is up AND that dind runs unprivileged
 under sysbox with an active user-namespace (`uid_map` shows container-root
-mapping to a non-zero VM uid). It also now proves the *proxy policy* is live,
+mapping to a non-zero VM uid). It also now proves the _proxy policy_ is live,
 not merely that the proxy is running: an addon that fails to load leaves a
 working transparent proxy that substitutes nothing, so preflight trips the
 leak detector on purpose and expects a 403.
@@ -814,7 +817,7 @@ docker run --rm --privileged -v /:/host alpine cat /host/etc/shadow
 ```
 
 The second command is the Red Guild escape. Under sysbox it reads only the
-*container's* placeholder shadow file (all `*`/`!`, no real hashes), not the
+_container's_ placeholder shadow file (all `*`/`!`, no real hashes), not the
 VM's -- proof the escape reads nothing of the host.
 
 ## Components
@@ -846,11 +849,11 @@ VM's -- proof the escape reads nothing of the host.
   dnsmasq resolver, systemd units, and an idempotent `install.sh`.
 - `proxy/container/install-ca.sh` -- trusts the proxy CA inside a container.
   You never call it: `desolate` runs it for you.
-Two example projects live in `samples/` in the source repo -- `example-project`
-(a minimal hardened devcontainer) and `sample-fastapi` (the full three-level
-chain plus secrets). They are fixtures and documentation, deliberately outside
-this shipped tree, so they are not part of an install. Copy one into
-`/workspaces/<name>` to try it.
+  Two example projects live in `samples/` in the source repo -- `example-project`
+  (a minimal hardened devcontainer) and `sample-fastapi` (the full three-level
+  chain plus secrets). They are fixtures and documentation, deliberately outside
+  this shipped tree, so they are not part of an install. Copy one into
+  `/workspaces/<name>` to try it.
 
 ## Configuration
 
@@ -859,13 +862,12 @@ Everything tunable lives in the `.env` next to `docker-compose.yml`, except
 are chosen to work unmodified; you should not need any of this on a normal
 machine.
 
-| Variable | Default | What it does |
-|---|---|---|
-| `VSCODE_TOKEN` | *(required)* | Gates the editor on `127.0.0.1:3000`. `cli.sh up` refuses to start without it. |
-| `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8090` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else. |
-| `DESOLATE_NOFILE` | `65536` | File-descriptor limit the inner daemon gives each container. Raises containerd's 1024 default, which is low enough to break file watchers. |
-| `COLIMA_PROFILE` | `desolate` | Which Colima VM `cli.sh` talks to. Set it if you run more than one. |
-| `DESOLATE_SKIP_VM_CHECK` | unset | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
+| Variable                     | Default         | What it does                                                                                                                                                            |
+| ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:3000`. `cli.sh up` refuses to start without it.                                                                                          |
+| `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8090` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else.                   |
+| `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |
+| `DESOLATE_SKIP_VM_CHECK`     | unset           | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
 
 Changing any of the `DESOLATE_*` values takes effect on the next `./cli.sh up`,
 which recreates the affected containers.
@@ -924,10 +926,11 @@ which recreates the affected containers.
   embedded DNS at `127.0.0.11`, which forwards upstream from a path the
   nftables redirect never sees, so the resolver never observed the lookups.
   `ssh-allow.sh`'s header records that and the three lesser reasons.
+
 - **Pulls fail with "no such host" / "connection refused ... :53"** -- the VM's
   own resolver is down. Two dnsmasq instances are meant to run and they are not
-  alternatives: `desolate-dnsmasq` on `:5353` serves *containers* (via the
-  nftables redirect), while Colima's `dnsmasq` on `:53` serves *the VM itself*
+  alternatives: `desolate-dnsmasq` on `:5353` serves _containers_ (via the
+  nftables redirect), while Colima's `dnsmasq` on `:53` serves _the VM itself_
   and is what `/etc/resolv.conf` points at. If something set a global `port=`
   on the system one -- a stray drop-in in `/etc/dnsmasq.d/` -- `:53` is left
   unserved and every image pull fails with an error that sounds like Docker.
@@ -959,14 +962,16 @@ which recreates the affected containers.
   `./cli.sh down -v` is usually the one you want, and it prompts, because it
   deletes every project. Note this cuts both ways: recreating the VM to change
   its CPU/memory flags keeps your work, which is the helpful case.
-- **`error setting rlimit type 7: operation not permitted`** -- `DESOLATE_NOFILE`
-  is above what sysbox lets the inner daemon set. Type 7 is `RLIMIT_NOFILE`; dind
-  is user-namespaced, so it cannot raise a hard limit past what it inherited.
-  Check the ceiling and set below it:
-  `docker exec desolate-dind sh -c 'ulimit -Hn; cat /proc/sys/fs/nr_open'`.
+
+- **`error setting rlimit type 7: operation not permitted`** -- this host's sysbox
+  gives the inner daemon a lower fd ceiling than the 524288 in
+  `docker-compose.yml` (the `--default-ulimit=nofile` flag and dind's `ulimits`).
+  Check it with
+  `docker run --rm --runtime=sysbox-runc alpine sh -c 'ulimit -Hn'` and lower
+  both to fit under what it prints.
 - **A Feature fails to install with a certificate error** -- that should not
   happen for `"image"`-based projects; `desolate` derives a CA-trusting base for
-  them (see "Features and build-time downloads"). It *is* expected for projects
+  them (see "Features and build-time downloads"). It _is_ expected for projects
   that build from their own `Dockerfile`, which are not covered.
 - **Everything broke, need internet now** -- in the VM:
   `sudo nft delete table inet desolate` removes interception;
