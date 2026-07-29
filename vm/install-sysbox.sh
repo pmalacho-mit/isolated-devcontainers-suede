@@ -128,6 +128,14 @@ if docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc; 
     echo "    sysbox-runc already registered"
 else
     echo "    not registered -- adding it to /etc/docker/daemon.json"
+    # jq is installed above only on the branch that INSTALLS sysbox. This
+    # branch runs independently -- sysbox present at the pinned version but not
+    # registered reaches here with no jq -- so ensure it at the point of use
+    # rather than relying on an ordering that does not hold.
+    command -v jq >/dev/null 2>&1 || {
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq && apt-get install -y -qq jq
+    }
     install -d /etc/docker
     TMPJ=$(mktemp)
     if [ -s /etc/docker/daemon.json ]; then

@@ -100,7 +100,15 @@ ca_fingerprint() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$CA_PEM" | cut -d' ' -f1
     elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$CA_PEM" | cut -d' ' -f1
     elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$CA_PEM" | awk '{print $NF}'
-    else echo "no-sha-tool"; fi
+    else
+        # NOT a fallback value. A constant here would make every derived image
+        # compare equal forever, so regenerating the CA would silently reuse an
+        # image trusting the old one -- the exact staleness the fingerprint
+        # exists to prevent, now invisible. Refuse instead.
+        die "no sha256 tool in this image (need sha256sum, shasum or openssl).
+       The derived image is keyed on the CA's fingerprint so it rebuilds when
+       the CA changes; without a hash there is no safe way to detect that."
+    fi
 }
 FINGERPRINT=$(ca_fingerprint)
 TAG="$TAG_PREFIX/$IMAGE"

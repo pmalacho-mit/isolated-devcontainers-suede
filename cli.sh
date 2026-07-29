@@ -119,8 +119,9 @@ armed_bridge() {
     /etc/desolate-proxy/nftables-desolate.conf 2>/dev/null
 }
 
-# Repo path as seen from inside the VM. Colima mounts the home dir, so a repo
-# under $HOME is visible at the same path; anywhere else it is not.
+# Repo path as seen from inside the VM. The VM is started with `--mount <repo>`,
+# and Colima mounts at the same path it has on the Mac, so SCRIPT_DIR resolves
+# identically on both sides. Without that mount the VM sees nothing of the repo.
 vm_repo_visible() { vm test -d "$SCRIPT_DIR/vm" >/dev/null 2>&1; }
 
 vm_install() {
@@ -129,8 +130,10 @@ vm_install() {
     cat >&2 <<EOF
 cli.sh: the repo is not visible inside the VM at
   $SCRIPT_DIR
-Colima only mounts your home directory, so VM-side installs need the repo under
-\$HOME. Either move it there, or run this by hand after copying it in:
+The VM was not started with a mount covering this directory. Recreate it with:
+  colima delete $COLIMA_PROFILE
+  cd $SCRIPT_DIR && colima start $COLIMA_PROFILE --mount "\$PWD" <other flags>
+Or run this by hand after copying it in:
   colima ssh -p $COLIMA_PROFILE
   cd <repo>/vm && sudo ./install.sh
 EOF
@@ -218,9 +221,21 @@ EOF
 
 editor_url() {
   local tok
-  tok=$(grep -o 'VSCODE_TOKEN=.*' "$SCRIPT_DIR/.env" 2>/dev/null | cut -d= -f2)
+  # Match compose's env_file rules, because that is what the editor is
+  # actually running with. README says to append the token (`>> .env`), so a
+  # re-roll leaves several VSCODE_TOKEN lines and the LAST one wins -- hence
+  # tail, not head. Anchoring rules out '#VSCODE_TOKEN=' and 'OLD_VSCODE_TOKEN=',
+  # and '#*=' keeps everything after the first '=' so a value containing '='
+  # survives. Surrounding quotes come off the same way compose strips them.
+  tok=$(grep '^VSCODE_TOKEN=' "$SCRIPT_DIR/.env" 2>/dev/null | tail -n 1)
+  tok=${tok#*=}
+  tok=${tok%$'\r'}
+  case $tok in
+    \"*\") tok=${tok#\"}; tok=${tok%\"} ;;
+    \'*\') tok=${tok#\'}; tok=${tok%\'} ;;
+  esac
   [ -n "$tok" ] || { echo "cli.sh: no VSCODE_TOKEN in .env -- run '$0 up' first" >&2; return 1; }
-  local url="http://127.0.0.1:3000/?tkn=$tok"
+  local url="http://127.0.0.1:3000/?tkn=$tok&folder=/workspaces"
   echo "$url"
   if command -v pbcopy >/dev/null 2>&1; then
     printf '%s' "$url" | pbcopy && echo "(copied to clipboard)"
@@ -427,7 +442,8 @@ case "$CMD" in
                  GN=$(git config --global user.name 2>/dev/null || true)
                  GE=$(git config --global user.email 2>/dev/null || true)
                  docker exec -e GIT_NAME="$GN" -e GIT_EMAIL="$GE" "$CONTAINER" newrepo clone "$OR" "$AL"
-                 echo "Next: ./cli.sh desolate $AL" ;;
+                 # Clones land under the owner, so the project is owner/alias.
+                 echo "Next: ./cli.sh desolate ${OR%%/*}/$AL" ;;
                status) docker exec "$CONTAINER" newrepo status ;;
                *) echo "usage: cli.sh repo {add owner/repo [alias] | status}" >&2; exit 1 ;;
              esac ;;
@@ -439,9 +455,17 @@ case "$CMD" in
              exec docker exec "${TTY[@]}" "$ORCHESTRATOR" desolate-run "$@" ;;
 
   shell|bash) ensure_running
-             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" bash "$@" ;;
+             # with-ca, because `docker exec` inherits NOTHING the entrypoint
+             # exported. A terminal opened in the browser editor is a child of
+             # the server process and does get proxy-CA trust; one opened this
+             # way would not, so `git lfs`, `curl` and `pip` typed here would
+             # fail certificate verification while the same command worked in
+             # the browser. Same asymmetry that broke `desolate` from the Mac.
+             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" with-ca bash "$@" ;;
 
   help|-h|--help) usage ;;
   *)         ensure_running
-             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" "$CMD" "$@" ;;
+             # Same reason as `shell` above: this runs arbitrary commands in the
+             # editor, and plenty of them speak TLS.
+             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" with-ca "$CMD" "$@" ;;
 esac

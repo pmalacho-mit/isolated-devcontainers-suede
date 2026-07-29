@@ -69,6 +69,16 @@ dv=$(docker exec desolate-orchestrator devcontainer --version 2>/dev/null)
 [ -n "$dv" ] && ok "devcontainer CLI $dv" || bad "devcontainer CLI broken"
 docker exec desolate-vscode test -x /usr/local/bin/desolate \
   && ok "desolate (broker client) installed in editor" || bad "desolate client missing"
+# The editor is where git happens: deploy keys are minted here and clones/pushes
+# run here. ssh-keygen was missing from the image for a long time, so `repo add`
+# died with a raw Node ENOENT trace -- a missing binary is invisible until the
+# moment something shells out to it.
+for t in git ssh-keygen ssh git-lfs git-subrepo; do
+  docker exec desolate-vscode sh -c "command -v $t >/dev/null" \
+    && ok "editor has $t" \
+    || { bad "editor is missing $t"
+         note "the vscode image installs git, openssh-client, git-lfs and git-subrepo"; }
+done
 docker exec desolate-orchestrator test -x /usr/local/bin/desolate-run \
   && ok "desolate-run installed in orchestrator" || bad "desolate-run missing"
 
@@ -199,10 +209,10 @@ else
       # RLIMIT_NOFILE is type 7. dind is user-namespaced by sysbox, so it cannot
       # raise a hard limit above what it inherited or above fs.nr_open -- asking
       # for more makes every container fail at creation, naming neither ulimits
-      # nor sysbox.
+      # nor sysbox. This host's ceiling is below the value compose asks for.
       bad "inner run failed: the requested ulimit exceeds what sysbox allows dind to set"
       note "dind's ceiling: hard=$(docker exec desolate-dind sh -c 'ulimit -Hn' 2>/dev/null || echo '?') nr_open=$(docker exec desolate-dind cat /proc/sys/fs/nr_open 2>/dev/null || echo '?')"
-      note "set DESOLATE_NOFILE in .env below that (default 65536), then ./cli.sh up" ;;
+      note "lower --default-ulimit=nofile and the dind ulimits in docker-compose.yml (65536:524288) below that, then ./cli.sh up" ;;
     *"no space left"*)
       bad "inner run failed: the VM is out of disk"
       note "colima ssh -p \${COLIMA_PROFILE:-desolate} -- df -h /var/lib/docker" ;;
