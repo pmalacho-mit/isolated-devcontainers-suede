@@ -1,0 +1,34 @@
+{
+  "name": "typescript2mermaid-vscode",
+  "displayName": "typescript2mermaid",
+  "description": "Hover previews and rendered diagrams for typescript2mermaid <Family>.Diagram<...> type aliases",
+  "version": "0.1.0",
+  "publisher": "typescript2mermaid",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/pmalacho-mit/typescript2mermaid-suede" },
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Visualization", "Programming Languages"],
+  "activationEvents": ["onLanguage:typescript", "onLanguage:typescriptreact"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "tsMermaid.preview", "title": "typescript2mermaid: Preview Diagram" },
+      { "command": "tsMermaid.showLog", "title": "typescript2mermaid: Show Log" }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc",
+    "package": "vsce package --no-dependencies -o typescript2mermaid.vsix",
+    "install-extension": "node install.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "mermaid": "^11.0.0",
+    "ts-morph": "^27.0.0",
+    "typescript": "^5.5.0"
+  }
+}

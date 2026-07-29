@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "types": ["node", "vscode"],
+    "baseUrl": ".",
+    // Must mirror the esbuild aliases in build.mjs, or `tsc` and the bundle
+    // disagree about what these imports mean.
+    "paths": {
+      "@typescript-dsl-suede/vscode": ["../typescript-dsl-suede/vscode-extension/extension.ts"],
+      "@typescript-dsl-suede/webview": ["../typescript-dsl-suede/vscode-extension/webview.ts"],
+      "@typescript-dsl-suede": ["../typescript-dsl-suede/index.ts"],
+      "ts-morph": ["./node_modules/ts-morph"]
+    }
+  },
+  "include": ["src"]
+}

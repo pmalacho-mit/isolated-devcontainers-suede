@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/ingydotnet/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/pmalacho-mit/typescript-cli-suede
+	branch = release
+	commit = b843d530cdf971187e95f69f47a4ae4d17e4eb4f
+	parent = 81ccc082a40e2c0b9ec48cf094bbafc59849c4ea
+	method = merge
+	cmdver = 0.4.9
