@@ -9,7 +9,17 @@ cd "$ROOT"
 
 group "nothing sensitive is tracked"
 TRACKED=$(git ls-files 2>/dev/null)
-assert_not_contains ".env is not committed (it holds VSCODE_TOKEN)" "$TRACKED" ".env"
+# Match real dotenv files by path segment, not substring: `.env` and `.env.local`
+# are secrets, `.env.example` is documentation and is meant to be tracked. A
+# plain substring check on ".env" fails on the example file.
+DOTENVS=$(printf '%s\n' "$TRACKED" | grep -E '(^|/)\.env($|\.)' \
+          | grep -vE '(^|/)\.env\.example$' || true)
+assert_eq ".env is not committed (it holds VSCODE_TOKEN)" "${DOTENVS:-none}" "none"
+# The exemption above is only safe while the example stays a template. A real
+# 24-byte hex token pasted in here would be committed and pass every other check.
+LEAKED=$(git grep -nE '^[[:space:]]*VSCODE_TOKEN=["'"'"']?[0-9a-fA-F]{16,}' \
+         -- '*.env.example' 2>/dev/null || true)
+assert_eq ".env.example holds no real VSCODE_TOKEN" "${LEAKED:-none}" "none"
 assert_not_contains "no .DS_Store" "$TRACKED" ".DS_Store"
 assert_not_contains "no ssh private keys" "$TRACKED" "id_rsa"
 assert_not_contains "no deploy keys" "$TRACKED" "deploy_"
