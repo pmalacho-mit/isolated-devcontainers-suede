@@ -1,20 +1,34 @@
-# Isolated Devcontainers Suede
+# Isolated Devcontainers Suede (`desolate`)
 
 **desolate** (dev + isolate) is a browser-based, container-isolated VS Code
-environment for macOS. Projects run as devcontainers inside an unprivileged
-Docker-in-Docker daemon in a Colima VM, reached through a browser tab rather
-than a desktop editor. A compromised project cannot reach your Mac, your
-credentials, or another project -- and secrets never enter a container at all:
-they live in the VM, and an intercepting proxy substitutes them in flight,
-only toward each secret's allowlisted hosts.
+environment for macOS[^1].
 
-Full documentation is in **[`release/README.md`](release/README.md)** --
-architecture, setup, the isolation model, and what it deliberately does _not_
-guarantee.
+It's goal is to enable human developers to work alongside coding agents
+without sacrificing developer experience nor sandbox isolation.
+
+Whether or not you trust LLMs, supply chain attacks are on the rise.
+Paired with the inherit [vulnerabilities](https://blog.theredguild.org/leveraging-vscode-internals-to-escape-containers/) of running VS Code natively[^2],
+executing code has never been more dangerous.
+
+In essence, `desolate` allows the developer to sandbox themselves along with their agent(s),
+all without giving up the ergonomics key to their workflow.
+
+[^1] The `desolate` architecture should be applicable to both Windows (with WSL2) + Linux, and could be even simpler without the need for a Linux VM. [@pmalacho-mit]() is on a mac, so contributions are welcome. [See more]().
+
+[^2] As the Red Guild's ["Leveraging VSCode internals to escape containers."](https://blog.theredguild.org/leveraging-vscode-internals-to-escape-containers/) explains, VS Code is a ripe <ins>local</ins> attack surface even when connecting to remote development environments.
 
 This repo is a [suede dependency](https://github.com/pmalacho-mit/suede).
 
-To see the installable source code, please checkout the [release branch](https://github.com/pmalacho-mit/isolated-devcontainers-suede/tree/release).
+To see the installable source code along with the full documentation, please checkout the [release branch](https://github.com/pmalacho-mit/isolated-devcontainers-suede/tree/release).
+
+## At a glance
+
+Projects run as devcontainers inside an unprivileged
+Docker-in-Docker daemon in a Colima VM, reached through a browser tab rather
+than a desktop editor. A compromised project cannot reach your Mac, your
+credentials, or another project -- and secrets never enter a devcontainer at all:
+they live in the VM, and an intercepting proxy substitutes them in flight,
+only toward each secret's allowlisted hosts.
 
 ## System Requirements
 
@@ -43,7 +57,7 @@ bash <(curl https://raw.githubusercontent.com/pmalacho-mit/suede/refs/heads/main
 
 `release/` is the **shipped tree** -- everything in it installs onto a user's
 Mac. Everything else is dev and test harness and does not ship. That split is
-prescribed by the suede dependency workflow, and it is worth respecting when
+prescribed by the suede dependency workflow, and must be respected when
 adding files.
 
 ```
