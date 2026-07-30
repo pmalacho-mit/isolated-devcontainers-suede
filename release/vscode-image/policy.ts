@@ -171,16 +171,26 @@ const SECURITY_OPT_DENY = [
 // Mounts
 // ---------------------------------------------------------------------------
 /**
- * The docker-in-docker feature mounts a volume for the nested daemon's
- * /var/lib/docker, named dind-var-lib-docker-<devcontainerId>. That name is
- * outside the project's namespace and the feature -- not the project -- picks
- * it, so the namespace rule cannot see it as legitimate.
+ * The docker-in-docker feature mounts volumes for the nested daemon's state:
+ * dind-var-lib-docker-<devcontainerId> for /var/lib/docker, and
+ * dind-var-lib-containerd-<devcontainerId> for /var/lib/containerd. Those names
+ * are outside the project's namespace and the feature -- not the project --
+ * picks them, so the namespace rule cannot see them as legitimate.
  *
- * It is allowed only for projects that opted into privileged mode (see
+ * They are allowed only for projects that opted into privileged mode (see
  * allowPrivileged below), because docker-in-docker implies that opt-in anyway.
  * This is a CODE-level allowance, not a project-controlled one.
+ *
+ * The `-<devcontainerId>` suffix is what keeps this safe: the CLI substitutes a
+ * value it derives from the workspace folder, so one project cannot name
+ * another's. The trailing `-` is therefore load-bearing -- a bare
+ * `dind-var-lib-docker` (no suffix) is NOT this feature's volume and stays
+ * refused.
  */
-const FEATURE_VOLUME_ALLOW = [/^dind-var-lib-docker-/];
+const FEATURE_VOLUME_ALLOW = [
+  /^dind-var-lib-docker-/,
+  /^dind-var-lib-containerd-/,
+];
 
 /** The read-only public proxy CA. Injected by desolate, never by a project --
  *  but tolerated in project config so a copied devcontainer.json is not a
@@ -243,8 +253,17 @@ export interface ResolvedSpec {
    *  the project's config with every feature's metadata merged in. This is
    *  where feature-injected privileged/capAdd/securityOpt/mounts show up, and
    *  enforcing on it is what makes feature escapes impossible rather than
-   *  merely inconvenient. */
-  mergedConfiguration?: any;
+   *  merely inconvenient.
+   *
+   *  REQUIRED, not optional -- it used to be `mergedConfiguration?: any` with a
+   *  `?? {}` default at the top of enforcePolicy, and that combination was a
+   *  quiet fail-OPEN in a design that is fail-closed everywhere else. With merged
+   *  absent the policy still ran, still returned successfully, and no longer
+   *  saw ANY feature-injected privilege, capability or mount -- i.e. it reverted
+   *  to the strength it had before the E3 escape was fixed, with nothing said.
+   *  It is also the only thing that normalises types (see TRUTHINESS below), so
+   *  losing it re-opens the string-typed `privileged` bypass too. */
+  mergedConfiguration: any;
 }
 
 export interface PolicyOptions {
@@ -260,6 +279,41 @@ export class PolicyError extends Error {}
 
 const fail = (msg: string): never => { throw new PolicyError(msg); };
 
+// ---------------------------------------------------------------------------
+// TRUTHINESS, not equality
+// ---------------------------------------------------------------------------
+// The devcontainer CLI decides these by plain JS truthiness -- from its bundle:
+//     privileged&&d.push("--privileged")
+// so `"privileged": "true"` (a STRING) yields a privileged container. The policy
+// tested `=== true`, which is false for a string, so the two disagreed about the
+// same spec -- and a disagreement between "what the policy saw" and "what gets
+// started" is the definition of a bypass here.
+//
+// It was not exploitable, purely because mergedConfiguration normalises the type
+// before we see it (measured: configuration reports 'true' the string, merged
+// reports the boolean). But that made a load-bearing protection depend on an
+// undocumented normalisation in someone else's tool. Matching the CLI's own rule
+// removes the dependency: anything the CLI would act on, we act on.
+//
+// Note `"false"` is TRUTHY in JS, so it requires the opt-in too. That is correct
+// -- the CLI would make such a container privileged.
+const truthy = (v: unknown): boolean => Boolean(v);
+
+/** Normalise a field the spec allows as either a scalar or a list.
+ *
+ *  Spreading these blind was its own bug: `[...(cfg.capAdd ?? [])]` on the string
+ *  "SYS_ADMIN" spreads into ELEVEN single characters, and `(cfg.mounts ?? [])
+ *  .map(...)` on a string throws "cfg.mounts.map is not a function" -- both
+ *  fail-closed, but reported as gibberish. The CLI itself coerces a lone string
+ *  to a one-element array (measured: capAdd 'SYS_ADMIN' -> ['SYS_ADMIN']), so
+ *  match that, and refuse only types the CLI would not accept either. */
+function asList(value: unknown, key: string): unknown[] {
+  if (value === undefined || value === null) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") return [value];      // as the CLI coerces it
+  return fail(`"${key}" must be a string or an array (got ${typeof value})`);
+}
+
 /**
  * Throws PolicyError with a specific reason if the project asks for anything
  * outside its own trust domain. Returns silently when the spec is acceptable.
@@ -271,7 +325,22 @@ export function enforcePolicy(
 ): void {
   const WORKSPACES = opts.workspaces ?? "/workspaces";
   const cfg = spec.configuration ?? {};
-  const merged = spec.mergedConfiguration ?? {};
+
+  // FAIL CLOSED on a missing merged config rather than defaulting it to {}.
+  // Enforcing on mergedConfiguration is what makes a feature unable to smuggle
+  // in privilege, capabilities or mounts; running without it is not a degraded
+  // check, it is a different and much weaker policy. If we cannot see what the
+  // features contribute, we do not get to approve the spec. (broker.ts refuses to
+  // accept a read-configuration result that lacks the key, so reaching this is a
+  // programming error rather than a spec someone wrote -- which is exactly why it
+  // should be loud.)
+  if (spec.mergedConfiguration === undefined || spec.mergedConfiguration === null) {
+    fail("internal: the resolved spec carries no mergedConfiguration, so " +
+         "feature-injected privilege, capabilities and mounts are invisible -- " +
+         "refusing to approve it. Resolve with " +
+         "`read-configuration --include-merged-configuration`.");
+  }
+  const merged = spec.mergedConfiguration;
 
   // -- 0. Modes we cannot police -------------------------------------------
   // A compose-mode devcontainer's privilege lives in the compose file, which
@@ -319,7 +388,9 @@ export function enforcePolicy(
   // `git log` shows which projects are in the escalated tier.
   const allowPrivileged = cfg.customizations?.desolate?.allowPrivileged === true;
 
-  if (merged.privileged === true || cfg.privileged === true) {
+  // truthy, not `=== true`: the CLI acts on truthiness, so `"privileged": "true"`
+  // starts a privileged container. See the note on `truthy` above.
+  if (truthy(merged.privileged) || truthy(cfg.privileged)) {
     if (!allowPrivileged) {
       fail("this spec requests a PRIVILEGED container (often pulled in by a " +
            "feature such as docker-in-docker). Privileged containers can reach " +
@@ -329,13 +400,15 @@ export function enforcePolicy(
     }
   }
 
-  const capAdd: string[] = [...(merged.capAdd ?? []), ...(cfg.capAdd ?? [])].map(String);
+  const capAdd: string[] = [...asList(merged.capAdd, "capAdd"),
+                            ...asList(cfg.capAdd, "capAdd")].map(String);
   if (capAdd.length && !allowPrivileged) {
     fail(`capability additions are not allowed (requested: ${capAdd.join(", ")}). ` +
          "Add them via an explicit allowPrivileged opt-in if genuinely required.");
   }
 
-  for (const so of [...(merged.securityOpt ?? []), ...(cfg.securityOpt ?? [])].map(String)) {
+  for (const so of [...asList(merged.securityOpt, "securityOpt"),
+                    ...asList(cfg.securityOpt, "securityOpt")].map(String)) {
     if (SECURITY_OPT_DENY.some(re => re.test(so))) {
       fail(`securityOpt '${so}' is not allowed (it weakens the sandbox)`);
     }
@@ -343,8 +416,8 @@ export function enforcePolicy(
 
   // -- 2. Mounts ------------------------------------------------------------
   // Enforced over the MERGED mount list, so a feature cannot smuggle one in.
-  const projectMounts = (cfg.mounts ?? []).map(normalizeMount);
-  const mergedMounts = (merged.mounts ?? []).map(normalizeMount);
+  const projectMounts = asList(cfg.mounts, "mounts").map(normalizeMount);
+  const mergedMounts = asList(merged.mounts, "mounts").map(normalizeMount);
   const projectRaw = new Set(projectMounts.map(m => `${m.type}|${m.source}|${m.target}`));
 
   for (const m of [...projectMounts, ...mergedMounts]) {
@@ -386,17 +459,38 @@ export function enforcePolicy(
       continue;   // e.g. dind-var-lib-docker-<id>, for an opted-in DinD project
     }
 
+    // The single most likely way a NESTED project trips this rule, and the
+    // hardest to guess from the message alone: `${localWorkspaceFolderBasename}`
+    // expands to the LAST path segment only, so the standard
+    //   "source=${localWorkspaceFolderBasename}-node_modules,..."
+    // idiom from Microsoft's own docs yields 'suede-node_modules' for
+    // 'pmalacho-mit/suede' -- a name outside the project's namespace, and one
+    // that two different owners' same-named repos would both claim. Refusing is
+    // correct (that shared volume is exactly the cross-project leak this rule
+    // exists to stop), but saying only "outside your namespace" sends people
+    // hunting through a devcontainer.json that looks textbook.
+    const base = project.split("/").pop()!;
+    const looksLikeBasenameIdiom =
+      project.includes("/") && (m.source === base || m.source.startsWith(`${base}-`));
+
     fail(`volume '${m.source}' (requested by ${origin}) is outside this project's ` +
          `namespace -- a project may only mount volumes named ` +
          `'${volumeNamespace(project)}' or '${volumeNamespace(project)}-*'` +
          (project.includes("/")
            ? ` (a nested project '${project}' owns the '${volumeNamespace(project)}' namespace,` +
              ` because docker names cannot contain '/')`
+           : "") +
+         (looksLikeBasenameIdiom
+           ? `.\n      This looks like '\${localWorkspaceFolderBasename}', which expands to ` +
+             `'${base}'\n      -- the last path segment only, so the owner is dropped and two owners' ` +
+             `\n      '${base}' repos would both claim '${m.source}'. Name it explicitly instead:` +
+             `\n        "source=${volumeNamespace(project)}-${m.source.startsWith(`${base}-`) ? m.source.slice(base.length + 1) : "data"},..."`
            : ""));
   }
 
   // -- 3. runArgs -----------------------------------------------------------
-  const runArgs: string[] = [...(cfg.runArgs ?? []), ...(merged.runArgs ?? [])].map(String);
+  const runArgs: string[] = [...asList(cfg.runArgs, "runArgs"),
+                             ...asList(merged.runArgs, "runArgs")].map(String);
   for (let i = 0; i < runArgs.length; i++) {
     const arg = runArgs[i];
     if (!arg.startsWith("-")) {
@@ -445,14 +539,38 @@ export function enforcePolicy(
   // -- 4. workspaceMount ----------------------------------------------------
   // A substring check would be unsound: "source=/,target=/workspaces/foo"
   // mentions the project while mounting the inner daemon's root.
+  //
+  // SOURCE and TARGET are not the same kind of check, and conflating them was a
+  // bug for nested projects. The source is the security-relevant half -- it is
+  // what decides which of the inner daemon's directories enters the container --
+  // so it must be exactly this project's own directory, no alternatives.
+  //
+  // The target is where that directory appears inside the container, and there
+  // are two legitimate answers, because the devcontainer CLI derives its own
+  // default from ${localWorkspaceFolderBasename} -- the LAST path segment only.
+  // For 'pmalacho-mit/suede' that is /workspaces/suede, not
+  // /workspaces/pmalacho-mit/suede. Demanding the mirrored path refused a nested
+  // project for writing out the CLI's own default verbatim, while the identical
+  // mount created implicitly (the CLI derives it; the spec never names it) was
+  // never checked at all. Accept both spellings; desolate mirrors the outer path
+  // for nested projects, and a project that prefers the basename default is not
+  // reaching outside itself by saying so.
   const wsMount = cfg.workspaceMount ?? merged.workspaceMount;
   if (typeof wsMount === "string") {
     const f = parseMountSpec(wsMount);
     const own = `${WORKSPACES}/${project}`;
+    const basename = `${WORKSPACES}/${project.split("/").pop()}`;
     const src = f["source"] ?? f["src"] ?? "";
     const dst = f["target"] ?? f["dst"] ?? f["destination"] ?? "";
-    if (src !== own || dst !== own) {
-      fail(`workspaceMount must bind exactly ${own} (got source='${src}' target='${dst}')`);
+    if (src !== own) {
+      fail(`workspaceMount must have source=${own} exactly (got source='${src}') -- ` +
+           `the source decides which of the inner daemon's directories enters ` +
+           `your container`);
+    }
+    if (dst !== own && dst !== basename) {
+      fail(`workspaceMount target must be ${own}` +
+           (basename === own ? "" : ` or ${basename}`) +
+           ` (got target='${dst}')`);
     }
   }
 }

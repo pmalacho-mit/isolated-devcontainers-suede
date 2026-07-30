@@ -213,6 +213,61 @@ describe("demonstrated escapes (regression)", () => {
       /weakens the sandbox/,
     );
   });
+
+  test("E6: the policy and the CLI must not disagree about TYPES", () => {
+    // Measured against the real CLI, both halves:
+    //
+    //   * its bundle decides privilege by truthiness -- `privileged&&d.push(
+    //     "--privileged")` -- so "privileged": "true", the STRING, starts a
+    //     privileged container.
+    //   * the policy tested `=== true`, which a string fails.
+    //
+    // It was saved only by mergedConfiguration normalising the type on the way in
+    // (configuration reports 'true', merged reports the boolean), i.e. by an
+    // undocumented detail of someone else's tool. Test the policy directly, with
+    // the un-normalised value in BOTH places, so the guarantee is the policy's own.
+    for (const value of ["true", "false", 1, "yes", {}]) {
+      refuses(spec({ image: "x", privileged: value }), /PRIVILEGED/);
+      refuses(spec({ image: "x" }, { privileged: value }), /PRIVILEGED/);
+    }
+    // Falsy stays allowed -- the CLI would not add the flag either.
+    for (const value of [false, 0, "", null, undefined]) {
+      allows(spec({ image: "x", privileged: value }));
+    }
+    // A scalar where a list is expected must not be spread into CHARACTERS.
+    // `[...(cfg.capAdd ?? [])]` on "SYS_ADMIN" used to yield 11 single letters,
+    // so the refusal named 'S, Y, S, _, A, D, M, I, N' -- fail-closed, reported
+    // as gibberish. The CLI coerces this to ['SYS_ADMIN'], so we do too.
+    refuses(spec({ image: "x", capAdd: "SYS_ADMIN" }), /requested: SYS_ADMIN\)/);
+    refuses(
+      spec({ image: "x", securityOpt: "seccomp=unconfined" }),
+      /weakens the sandbox/,
+    );
+    // And a type the CLI would not accept either says so plainly, rather than
+    // throwing "cfg.mounts.map is not a function".
+    refuses(spec({ image: "x", mounts: 42 }), /"mounts" must be a string or an array/);
+  });
+
+  test("E7: a spec without mergedConfiguration is refused, not silently trusted", () => {
+    // mergedConfiguration used to be optional on ResolvedSpec with a `?? {}`
+    // default, so a spec missing it was approved by a policy that could not see a
+    // single feature-injected privilege, capability or mount -- E3, silently
+    // un-checked, with a successful return. Fail closed instead.
+    for (const missing of [undefined, null]) {
+      assert.throws(
+        () =>
+          enforcePolicy(
+            PROJECT,
+            { configuration: { image: "x" }, mergedConfiguration: missing } as ResolvedSpec,
+            { workspaces: "/workspaces" },
+          ),
+        /no mergedConfiguration/,
+      );
+    }
+    // An EMPTY merged config is a real answer (a project with no features) and
+    // stays allowed -- absent and empty are not the same thing.
+    allows(spec({ image: "x" }, {}));
+  });
 });
 
 // ===========================================================================
@@ -279,12 +334,20 @@ describe("mounts", () => {
     assert.equal(m.type, "bind");
   });
 
-  test("the docker-in-docker volume is allowed only for an opted-in project", () => {
+  test("the docker-in-docker volumes are allowed only for an opted-in project", () => {
+    // BOTH of them. The feature mounts /var/lib/docker AND /var/lib/containerd;
+    // allowing only the first refused every real docker-in-docker project with a
+    // namespace error naming a volume the project never asked for.
     const dind = {
       mounts: [
         {
           source: "dind-var-lib-docker-abc123",
           target: "/var/lib/docker",
+          type: "volume",
+        },
+        {
+          source: "dind-var-lib-containerd-abc123",
+          target: "/var/lib/containerd",
           type: "volume",
         },
       ],
@@ -335,7 +398,7 @@ describe("workspaceMount", () => {
         image: "x",
         workspaceMount: "source=/,target=/workspaces/myapp,type=bind",
       }),
-      /workspaceMount must bind exactly/,
+      /source=\/workspaces\/myapp exactly/,
     );
     refuses(
       spec({
@@ -343,7 +406,49 @@ describe("workspaceMount", () => {
         workspaceMount:
           "source=/workspaces/other,target=/workspaces/other,type=bind",
       }),
-      /workspaceMount must bind exactly/,
+      /source=\/workspaces\/myapp exactly/,
+    );
+  });
+
+  test("a nested project may use EITHER the mirrored path or the CLI's default", () => {
+    // The devcontainer CLI derives its default target from
+    // ${localWorkspaceFolderBasename} -- the last segment only -- so for
+    // 'pmalacho-mit/suede' it mounts at /workspaces/suede. Demanding the
+    // mirrored path refused a project for writing out the CLI's own default,
+    // while the very same mount created implicitly was never checked.
+    const nested = "pmalacho-mit/suede";
+    const src = "/workspaces/pmalacho-mit/suede";
+    for (const target of [src, "/workspaces/suede"]) {
+      enforcePolicy(
+        nested,
+        spec({ image: "x", workspaceMount: `source=${src},target=${target},type=bind` }),
+        { workspaces: "/workspaces" },
+      );
+    }
+    // The source half stays exact -- that is the half that decides what enters
+    // the container. A sibling owner's repo is not reachable by either spelling.
+    assert.throws(
+      () =>
+        enforcePolicy(
+          nested,
+          spec({
+            image: "x",
+            workspaceMount:
+              "source=/workspaces/other-owner/suede,target=/workspaces/suede,type=bind",
+          }),
+          { workspaces: "/workspaces" },
+        ),
+      /source=\/workspaces\/pmalacho-mit\/suede exactly/,
+    );
+    // And an unrelated target is still refused.
+    assert.throws(
+      () =>
+        enforcePolicy(
+          nested,
+          spec({ image: "x", workspaceMount: `source=${src},target=/host,type=bind` }),
+          { workspaces: "/workspaces" },
+        ),
+      /workspaceMount target must be/,
     );
   });
 });
@@ -527,6 +632,11 @@ describe("the repo's own example projects satisfy the policy", () => {
         {
           source: "dind-var-lib-docker-0123456789",
           target: "/var/lib/docker",
+          type: "volume",
+        },
+        {
+          source: "dind-var-lib-containerd-0123456789",
+          target: "/var/lib/containerd",
           type: "volume",
         },
       ],

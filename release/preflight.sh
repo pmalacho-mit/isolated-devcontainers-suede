@@ -147,9 +147,29 @@ if docker inspect desolate-vscode desolate-orchestrator 2>/dev/null \
 else
   ok "host docker socket not mounted into the stack"
 fi
-if docker ps --format '{{.Ports}}' | grep -q "0.0.0.0:3000"; then
-  bad "port 3000 published on 0.0.0.0 -- should be 127.0.0.1 only"
-else ok "port 3000 not exposed beyond loopback"; fi
+# Ask the RUNNING container where the editor is published, rather than assuming
+# 3000: VSCODE_PORT moves it, and a container that predates an .env edit is still
+# on the old port -- which is exactly the case a check reading .env would miss.
+VSPORT=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}}{{end}}{{end}}' \
+         desolate-vscode 2>/dev/null)
+VSIPS=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}} {{end}}{{end}}' \
+        desolate-vscode 2>/dev/null)
+if [ -z "$VSPORT" ]; then
+  note "editor container not running -- skipping its port checks"
+else
+  # Check the bind ADDRESS, not the number. The old test grepped every container's
+  # ports for the literal "0.0.0.0:3000", so it silently stopped covering anything
+  # the moment the port moved -- and missed other non-loopback binds entirely.
+  BADIP=""
+  for ip in $VSIPS; do
+    [ "$ip" = "127.0.0.1" ] || BADIP="$BADIP $ip"
+  done
+  if [ -n "$BADIP" ]; then
+    bad "editor published on non-loopback address(es):$BADIP -- should be 127.0.0.1 only"
+  else
+    ok "editor (port $VSPORT) not exposed beyond loopback"
+  fi
+fi
 # The dind publish is what makes a relay reachable from the Mac; DESOLATE_PORT_*
 # is what desolate.ts allocates relays from. compose feeds both from the same
 # variables, so these agree unless a running container predates an .env edit --
@@ -169,7 +189,9 @@ else
   note "relays on those ports bind inside dind and are unreachable from the Mac"
   note "recreate dind so it picks up the range: ./cli.sh up"
 fi
-if curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/ 2>/dev/null | grep -qE '401|403'; then
+if [ -z "$VSPORT" ]; then
+  note "editor container not running -- skipping the token-gate check"
+elif curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$VSPORT/" 2>/dev/null | grep -qE '401|403'; then
   ok "editor rejects tokenless requests"
 else
   note "editor returned a page without a token -- confirm VSCODE_TOKEN is set in .env"

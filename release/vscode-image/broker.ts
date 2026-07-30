@@ -188,15 +188,29 @@ function resolveSpec(project: string, configPath: string): ResolvedSpec {
 
   // The CLI interleaves progress lines with its JSON result; take the last
   // line that parses and carries a configuration.
+  //
+  // BOTH keys are required. Accepting a result with only `configuration` was a
+  // fail-open: enforcePolicy would run, succeed, and never see a single
+  // feature-injected privileged/capAdd/securityOpt/mount -- the E3 escape class,
+  // silently un-checked. mergedConfiguration is also the only thing that
+  // normalises types (a string `"privileged": "true"` arrives as a real boolean),
+  // so losing it re-opens that bypass too. It is not optional to this policy, so
+  // it is not optional here: a result without it means the CLI's contract changed
+  // under us, and the right response to that is to stop, not to approve a spec
+  // we can only partly see.
   for (const line of stdout.split("\n").reverse()) {
     const t = line.trim();
     if (!t.startsWith("{")) continue;
     try {
       const parsed = JSON.parse(t);
-      if (parsed?.configuration) return parsed as ResolvedSpec;
+      if (parsed?.configuration && parsed?.mergedConfiguration) return parsed as ResolvedSpec;
     } catch { /* not the result line */ }
   }
-  throw new Error("devcontainer read-configuration produced no configuration (refusing to start)");
+  throw new Error(
+    "devcontainer read-configuration produced no result carrying BOTH " +
+    "configuration and mergedConfiguration (refusing to start). The merged view " +
+    "is where a feature's privileged/capAdd/mounts appear, so without it the " +
+    "policy cannot see what this spec actually asks for.");
 }
 
 /** Defence in depth: our own parse of the snapshot must also succeed and must

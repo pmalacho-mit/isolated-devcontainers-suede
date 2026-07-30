@@ -33,8 +33,9 @@ The name is `desolate` = **de**v + i**solate**.
 +-----------------------------------------------------------------------+
 ```
 
-**One** host-reachable surface, loopback-only: `3000`, the editor, token-gated.
-(Plus the dev-server range, 8080-8090 by default, once a project is running.)
+**One** host-reachable surface, loopback-only: `3000` by default (`VSCODE_PORT`),
+the editor, token-gated. (Plus the dev-server range, 8080-8090 by default, once a
+project is running.)
 
 There is deliberately no network path to the inner Docker daemon.
 
@@ -703,6 +704,41 @@ only see this if you look at `docker volume ls` or write a `mounts` entry by
 hand -- `desolate` and the broker's policy use the same encoding, so a project
 can always mount its own.
 
+**Inside the container, the path mirrors the path outside.** A nested project
+opens at `/workspaces/owner/repo`, the same path it has in `/workspaces`, so two
+owners' same-named repos are told apart at a glance rather than both showing up
+as `/workspaces/repo`.
+
+That is not the devcontainer CLI's default. The CLI derives the in-container path
+from `${localWorkspaceFolderBasename}`, which is the **last path segment only**,
+so it would mount `/workspaces/pmalacho-mit/suede` at `/workspaces/suede`.
+`desolate` sets `workspaceFolder` and `workspaceMount` together to mirror the
+outer path instead -- together, because setting `workspaceFolder` alone leaves the
+CLI deriving the mount target from the basename, which mounts the workspace in one
+place and tells the editor to open another. A project that declares either field
+itself keeps full control and is left alone.
+
+Containers created before this behaviour existed keep the layout they were built
+with (`devcontainer up` reuses a container without remounting it). `desolate`
+prints the actual in-container path and points you at `--rebuild`.
+
+⚠️ **`${localWorkspaceFolderBasename}` drops the owner in `mounts` too**, and there
+the policy refuses the result. The idiom from Microsoft's docs --
+
+```jsonc
+"mounts": ["source=${localWorkspaceFolderBasename}-node_modules,target=...,type=volume"]
+```
+
+-- expands to `suede-node_modules` for `pmalacho-mit/suede`, which is outside that
+project's namespace. Refusing is the point: two owners' `suede` repos would
+otherwise share one volume. Name it explicitly instead:
+
+```jsonc
+"mounts": ["source=pmalacho-mit__suede-node_modules,target=...,type=volume"]
+```
+
+The error message says this, including the exact name to use.
+
 ## Secrets: placeholders in, real values never
 
 Containers never hold credentials. They hold a **placeholder**; the real value
@@ -989,7 +1025,8 @@ machine.
 
 | Variable                     | Default         | What it does                                                                                                                                                            |
 | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:3000`. `cli.sh up` refuses to start without it.                                                                                          |
+| `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
+| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. Must sit **outside** `DESOLATE_PORT_MIN..MAX` -- dind publishes that whole range, and `cli.sh up` refuses a collision.  |
 | `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8090` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else.                   |
 | `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |
 | `DESOLATE_SKIP_VM_CHECK`     | unset           | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |

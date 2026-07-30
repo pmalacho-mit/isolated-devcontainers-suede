@@ -338,6 +338,43 @@ function overlayMounts(): OverlayMount[] {
   return mounts;
 }
 
+/** The mount options an overlay view of `lower` backed by `data` must have.
+ *  Single source of truth: ensureOverlayVolume creates with exactly this, and
+ *  overlayIntact re-derives it to decide whether a cached volume still holds. */
+function overlayOptString(lower: string, dataMountpoint: string): string {
+  return `lowerdir=${lower},upperdir=${dataMountpoint}/upper,workdir=${dataMountpoint}/work`;
+}
+
+/**
+ * Is a CACHE HIT still trustworthy?
+ *
+ * The label alone is not sufficient evidence, for two reasons that both end with
+ * `devcontainer up` failing on a mount and saying nothing about overlays:
+ *
+ *   1. `upperdir` is a PATH STRING into the `-data` volume's mountpoint, and
+ *      docker does not treat that as a reference. So `docker volume prune -a`
+ *      (or `docker system prune --volumes`) happily deletes `-data` while the
+ *      overlay volume survives -- it is attached to a container, so it looks
+ *      used. The result is a labelled, "valid", permanently unmountable volume.
+ *      No label can prevent that: docker has no protect-from-prune marker, only
+ *      an operator-supplied `--filter label!=...`.
+ *
+ *   2. A dind restart on a fresh /var/lib/docker changes every mountpoint, so a
+ *      surviving overlay volume can point at a path that is now someone else's.
+ *
+ * Checking is pure metadata -- two `volume inspect` calls, no container -- so it
+ * runs on every start rather than only when something already looks wrong.
+ */
+function overlayIntact(vol: string, data: string, lower: string): boolean {
+  const mp = run("docker", ["volume", "inspect", data, "-f", "{{.Mountpoint}}"], true);
+  if (!mp) return false;                                  // -data pruned or removed
+  const opts = run("docker", ["volume", "inspect", vol, "-f", '{{index .Options "o"}}'], true);
+  // Exact, not substring: comparing whole strings needs no reasoning about one
+  // mountpoint path being a prefix of another. A false negative here is cheap --
+  // it rebuilds a view that cost ~8K -- so erring toward "rebuild" is correct.
+  return opts === overlayOptString(lower, mp);
+}
+
 /** Build (or reuse) one project's copy-on-write view of a shared directory.
  *  Returns the volume name; dies loudly rather than degrading to a shared mount. */
 function ensureOverlayVolume(project: string, m: OverlayMount): string {
@@ -351,21 +388,40 @@ function ensureOverlayVolume(project: string, m: OverlayMount): string {
 
   const have = run("docker", ["volume", "inspect", vol, "-f",
                               '{{index .Labels "desolate.overlay.key"}}'], true);
-  if (have === want) return vol;
-  if (have) console.log(`desolate: ${m.lower} changed -- rebuilding ${project}'s view of it`);
+  if (have === want) {
+    if (overlayIntact(vol, data, m.lower)) return vol;
+    console.log(`desolate: ${project}'s view of ${m.lower} is stamped current but its\n` +
+                `          backing volume '${data}' is missing or has moved ` +
+                `(pruned?) -- rebuilding`);
+  } else if (have) {
+    console.log(`desolate: ${m.lower} changed -- rebuilding ${project}'s view of it`);
+  }
 
   // Both, together: the stale upper lives in the data volume, and keeping it is
   // exactly what invalidation exists to prevent.
   run("docker", ["volume", "rm", "-f", vol, data], true);
 
-  const fail = (reason: string): never =>
+  // Nothing half-built survives a failure. The label IS the cache key, and
+  // docker cannot label a volume after creation -- so the overlay volume is
+  // necessarily stamped "valid" before the mount proof below can run. Leaving it
+  // behind would make every later start trust an unmountable volume, skip the
+  // proof, and fail inside `devcontainer up` with this explanation lost. Undoing
+  // the create is what keeps the label honest.
+  const fail = (reason: string): never => {
+    run("docker", ["volume", "rm", "-f", vol, data], true);
     die(`could not build ${project}'s copy-on-write view of ${m.lower}: ${reason}.\n\n` +
         `      ${m.why}\n\n` +
         `      This is not optional and there is no fallback -- desolate refuses to start\n` +
         `      rather than quietly hand out a shared mount instead.\n\n` +
         `      Diagnose with:  ./tests/probes/dind-overlay-volume.sh`);
+  };
 
-  if (runStatus("docker", ["volume", "create", data], true) !== 0)
+  // desolate.overlay.of records the pairing docker itself cannot see, so
+  // `docker volume ls --filter label=desolate.overlay.of=<vol>` finds the backing
+  // volume. It does NOT protect it from prune -- overlayIntact above is what
+  // makes prune survivable.
+  if (runStatus("docker", ["volume", "create",
+                           "--label", `desolate.overlay.of=${vol}`, data], true) !== 0)
     fail(`could not create the volume '${data}'`);
 
   // upper/ and work/ must EXIST before the overlay can mount, and only a
@@ -377,7 +433,7 @@ function ensureOverlayVolume(project: string, m: OverlayMount): string {
   const mp = run("docker", ["volume", "inspect", data, "-f", "{{.Mountpoint}}"], true);
   if (!mp) fail(`could not resolve the mountpoint of '${data}'`);
 
-  const opts = `lowerdir=${m.lower},upperdir=${mp}/upper,workdir=${mp}/work`;
+  const opts = overlayOptString(m.lower, mp);
   if (runStatus("docker", ["volume", "create", "--driver", "local",
                            "--opt", "type=overlay", "--opt", "device=overlay",
                            "--opt", `o=${opts}`,
@@ -430,17 +486,6 @@ function usedHostPorts(): Map<number, string> {
     for (const match of ports.matchAll(/:(\d+)->/g)) used.set(Number(match[1]), name);
   }
   return used;
-}
-
-/** True when the INNER daemon runs rootless (docker:dind-rootless).
- *  Rootless dockerd runs in a user namespace where the daemon user becomes
- *  namespace-root, so a container's uid 0 maps to the real uid 1000 that owns
- *  /workspaces, while a container's uid 1000 maps into the subuid range and
- *  CANNOT write it. Hence: run the editor as container-root under rootless.
- *  That "root" is not real root -- it is the unprivileged daemon user. */
-function innerDaemonIsRootless(): boolean {
-  const out = run("docker", ["info", "--format", "{{json .SecurityOptions}}"], true);
-  return out.includes("rootless");
 }
 
 /** The devcontainer's container id for a workspace folder ("" if none). */
@@ -528,13 +573,80 @@ interface ProjectConfig {
   usesDockerfile: boolean;
 }
 
+/**
+ * FAILS CLOSED, matching the broker.
+ *
+ * This used to be `catch { /* fall through with empty config *\/ }`, and an empty
+ * config is not a harmless default -- it silently changes five behaviours at
+ * once, every one of them a thing the user asked for and did not get:
+ *
+ *   appPorts: []          -> declared dev-server ports get NO relays
+ *   extensions: []        -> declared extensions are not installed
+ *   hadLegacyAppPort:false-> the appPort guard does not fire, so the "address in
+ *                            use" failure it exists to replace comes back
+ *   image: ""             -> build-time proxy-CA trust is skipped, i.e. exactly
+ *                            the x509-inside-a-Feature failure caTrustingImage
+ *                            was written to fix
+ *   usesDockerfile: false -> the Dockerfile NOTE is not printed
+ *
+ * None of that produced a message. `read-configuration` does exit 1 for real
+ * (measured: a missing --override-config, a missing workspace folder, and a
+ * project with no devcontainer.json all exit 1), so this was reachable.
+ */
 function readProjectConfig(dir: string, config: string): ProjectConfig {
-  let parsed: any = {};
+  /** What the CLI actually told us, minus its own version banner.
+   *
+   *  Worth the filter: on a failed read-configuration this CLI (0.88.0, measured)
+   *  writes NOTHING to stdout and only the banner to stderr -- so passing the raw
+   *  tail through reported "@devcontainers/cli 0.88.0. Node.js v24..." as the
+   *  reason the project would not start. Say "it gave no reason" instead of
+   *  dressing up a version string as a diagnosis. */
+  const reason = (err: any): string => {
+    const text = [err?.stderr, err?.stdout, err?.message]
+      .map(s => (s == null ? "" : String(s)))
+      .join("\n");
+    const kept = text.split("\n")
+      .map(l => l.trim())
+      .filter(l => l && !/@devcontainers\/cli \d/.test(l));
+    return kept.length ? kept.join("\n      ").slice(-600) : "(the CLI gave no reason)";
+  };
+
+  const repro =
+    `      Reproduce it with:\n` +
+    `        devcontainer read-configuration --workspace-folder ${dir}` +
+    (config ? ` \\\n          --override-config ${config}` : "");
+
+  let stdout: string;
   try {
-    parsed = JSON.parse(run("devcontainer",
-      ["read-configuration", "--workspace-folder", dir, ...configArgs(config)]));
-  } catch { /* fall through with empty config */ }
-  const cfg = parsed.configuration ?? parsed ?? {};
+    stdout = run("devcontainer",
+      ["read-configuration", "--workspace-folder", dir, ...configArgs(config)]);
+  } catch (err: any) {
+    die(`could not read this project's devcontainer.json (refusing to start).\n` +
+        `      ${reason(err)}\n${repro}`);
+  }
+
+  // Scan for the result line rather than parsing the whole stream, for the same
+  // reason broker.ts does: the CLI is documented to interleave progress output
+  // with its JSON, and a naive JSON.parse of everything turns that into the
+  // silent-empty-config case above the moment it happens.
+  //
+  // The old code also had `parsed.configuration ?? parsed ?? {}`, which fell back
+  // to using ANY parsed JSON as the configuration -- so an error object, or a
+  // progress line that happened to be JSON, was read as a valid empty spec.
+  // Require the real key instead.
+  let cfg: any;
+  for (const line of stdout.split("\n").reverse()) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(t);
+      if (parsed?.configuration) { cfg = parsed.configuration; break; }
+    } catch { /* not the result line */ }
+  }
+  if (cfg === undefined) {
+    die("devcontainer read-configuration produced no configuration for this " +
+        `project (refusing to start).\n${repro}`);
+  }
 
   const ports: unknown = cfg.customizations?.desolate?.ports;
   const appPorts = Array.isArray(ports)
@@ -586,7 +698,9 @@ function readProjectConfig(dir: string, config: string): ProjectConfig {
 // it like everything else does.
 // ---------------------------------------------------------------------------
 const CA_IMAGE_REPO = "desolate-ca/base";
-const CA_CONFIG_DIR = "/tmp/desolate-ca-config";
+/** Where deriveRunConfig writes its rewritten specs. The orchestrator's own
+ *  /tmp, so no other container can touch what we are about to start from. */
+const RUN_CONFIG_DIR = "/tmp/desolate-run-config";
 
 /** Build (once) an image identical to `baseImage` but trusting the proxy CA.
  *  Returns its tag, or "" if it could not be produced. */
@@ -656,54 +770,151 @@ function projectConfigPath(dir: string): string {
   return "";
 }
 
-/** Point the spec at a CA-trusting derivative of its base image.
- *  Returns the --config path to use from here on (unchanged if not applicable).
- *
- *  NOTE ON TRUST: on the broker path this rewrites a spec that enforcePolicy
- *  has already validated. That is deliberate and deliberately narrow -- the
- *  ONLY field changed is `image`, and only to a tag this process just built
- *  `FROM` the image the policy approved. No project-supplied value is
- *  introduced, and the rewritten file lands in the orchestrator's own /tmp,
- *  which no other container can write. */
-function withCaTrustedBase(
-  dir: string, config: string, cfg: ProjectConfig, project: string,
-): string {
-  if (!fs.existsSync(`${CA_DIR}/ca.pem`)) return config;   // proxy not installed
+/** The CA-trusting derivative of this spec's base image, or "" when the rewrite
+ *  does not apply (no proxy, Dockerfile-based, no `image`, or the build failed).
+ *  Split out from the spec rewrite so its diagnostics still print in the cases
+ *  where nothing gets rewritten. */
+function caTrustedBaseImage(cfg: ProjectConfig): string {
+  if (!fs.existsSync(`${CA_DIR}/ca.pem`)) return "";       // proxy not installed
   if (cfg.usesDockerfile) {
     console.log(`desolate: NOTE -- this project builds from its own Dockerfile, so its build`);
     console.log(`          steps do NOT trust the proxy CA. Anything fetched over HTTPS during`);
     console.log(`          the build will fail; add the CA in the Dockerfile, or use "image".`);
-    return config;
+    return "";
   }
-  if (!cfg.image) return config;
+  if (!cfg.image) return "";
 
   const tag = caTrustingImage(cfg.image);
-  if (!tag) {
-    console.error(`desolate: warning -- proceeding with ${cfg.image}; build-time HTTPS may fail`);
-    return config;
-  }
+  if (!tag) console.error(`desolate: warning -- proceeding with ${cfg.image}; build-time HTTPS may fail`);
+  return tag;
+}
+
+// ---------------------------------------------------------------------------
+// Mirroring an owner-scoped path INTO the container
+//
+// The devcontainer CLI derives the in-container workspace path from
+// ${localWorkspaceFolderBasename}, which is the LAST path segment only. So
+// /workspaces/pmalacho-mit/suede is mounted at /workspaces/suede: the owner is
+// silently dropped, and two owners' same-named repos are indistinguishable from
+// inside. Measured, not assumed -- `read-configuration` reports
+//   workspaceFolder: "/workspaces/suede"
+//
+// Setting workspaceFolder ALONE does not fix it and actively breaks the
+// container: the CLI keeps deriving workspaceMount's target from the basename,
+// so the workspace is mounted at /workspaces/suede while the editor is told to
+// open /workspaces/pmalacho-mit/suede, which does not exist. Both fields have to
+// move together, which is why they are set as a pair below or not at all.
+// ---------------------------------------------------------------------------
+
+/** Narrow, derived rewrites of a validated spec. Returns the --config path to
+ *  use from here on (unchanged when nothing applies).
+ *
+ *  NOTE ON TRUST: on the broker path this rewrites a spec enforcePolicy has
+ *  already validated, which is deliberate and deliberately narrow. Every value
+ *  written here is derived by THIS process -- an image tag it just built `FROM`
+ *  the approved image, and a path built from `project`, which the broker
+ *  validated against PROJECT_RE and realpath before we ever ran. No
+ *  project-supplied value is introduced, the injected bind's source is the
+ *  project's own directory (exactly what the policy permits), and the rewritten
+ *  file lands in the orchestrator's own /tmp, which no other container can
+ *  write. */
+function deriveRunConfig(
+  dir: string, config: string, cfg: ProjectConfig, project: string,
+): string {
+  const tag = caTrustedBaseImage(cfg);
 
   const src = config || projectConfigPath(dir);
   if (!src) return config;
   let spec: any;
   try { spec = parseJsonc(fs.readFileSync(src, "utf8")); } catch { return config; }
   if (typeof spec !== "object" || spec === null) return config;
-  spec.image = tag;
 
-  fs.mkdirSync(CA_CONFIG_DIR, { recursive: true });
-  const out = `${CA_CONFIG_DIR}/${volumeNamespace(project)}.json`;
+  const applied: string[] = [];
+
+  // Only for nested projects -- a top-level `foo` already lands at
+  // /workspaces/foo, so there is nothing to mirror.
+  //
+  // And only when the project declares NEITHER field: a project that set either
+  // one has an opinion about its own layout, and half-overriding it is precisely
+  // the broken state described above. Respect it and leave the path alone.
+  if (project.includes("/") &&
+      spec.workspaceFolder === undefined && spec.workspaceMount === undefined) {
+    const own = `${WORKSPACES}/${project}`;
+    spec.workspaceFolder = own;
+    spec.workspaceMount = `source=${own},target=${own},type=bind`;
+    applied.push(`workspace mounted at ${own}, mirroring its path outside`);
+  }
+
+  if (tag) {
+    spec.image = tag;
+    applied.push(`base image ${tag} (trusts the proxy CA)`);
+  }
+
+  if (applied.length === 0) return config;
+  for (const note of applied) console.log(`desolate: ${note}`);
+
+  fs.mkdirSync(RUN_CONFIG_DIR, { recursive: true });
+  const out = `${RUN_CONFIG_DIR}/${volumeNamespace(project)}.json`;
   fs.writeFileSync(out, JSON.stringify(spec, null, 2));
   return out;
 }
 
+/** Where the project's directory is ACTUALLY mounted inside the running
+ *  container -- read from the daemon, not derived.
+ *
+ *  This is what the editor URL's `folder=` needs, and deriving it instead would
+ *  be wrong in three separate ways: the CLI's basename default, a project's own
+ *  `workspaceFolder`, and a REUSED container created before any of this (whose
+ *  layout is whatever it was built with, since `devcontainer up` does not
+ *  remount an existing container). Asking the container removes all three.
+ *
+ *  Returns "" when no bind of `dir` is found, which is the caller's cue that it
+ *  has nothing better than the outer path to offer. */
+function containerWorkspaceFolder(dir: string, cid: string): string {
+  // dir is NOT interpolated into the template: the broker validates project
+  // names, but `cli.sh desolate` is a direct path where a quote in an argument
+  // would otherwise break the template open. Compare in TypeScript instead.
+  const out = run("docker", ["inspect", "-f",
+    '{{range .Mounts}}{{.Source}}\t{{.Destination}}{{"\\n"}}{{end}}', cid], true);
+  for (const line of lines(out)) {
+    const [src, dst] = line.split("\t");
+    if (src === dir && dst) return dst;
+  }
+  return "";
+}
+
 // ---------------------------------------------------------------------------
 // Connection token: one per project, persisted alongside the port map.
+//
+// The token is interpolated into a bash script -- `--connection-token '<tok>'` --
+// that runs inside the project's devcontainer via `devcontainer exec`. And it is
+// READ BACK from /workspaces/.desolate/<ns>.token, which lives in the volume the
+// EDITOR container writes.
+//
+// So an unvalidated token was a shell injection: a single quote in that file
+// closes the quoting and the rest runs as root in the target project's container.
+// It is not a new boundary -- a compromised editor can already write a
+// postCreateCommand into a devcontainer.json and ask the broker to rebuild -- but
+// the fix costs one regex, and the extension-id handling two hundred lines up
+// already applies exactly this rule ("anything that is not a plain marketplace id
+// is dropped rather than quoted-and-hoped-for"). Same rule, same reason.
+//
+// 24 random bytes as lowercase hex, so a valid token is exactly 48 hex chars.
 // ---------------------------------------------------------------------------
+const TOKEN_RE = /^[0-9a-f]{48}$/;
+
 function connectionToken(project: string): string {
   const file = `${WORKSPACES}/.desolate/${volumeNamespace(project)}.token`;
   try {
     const existing = fs.readFileSync(file, "utf8").trim();
-    if (existing) return existing;
+    if (TOKEN_RE.test(existing)) return existing;
+    if (existing) {
+      // Do not reuse it and do not try to repair it -- mint a fresh one. The URL
+      // printed at the end carries the new token, so the only visible effect is
+      // that an older bookmarked link stops working.
+      console.error(`desolate: warning -- ${file} does not hold a valid token; ` +
+                    `replacing it (a previously bookmarked URL will stop working)`);
+    }
   } catch { /* create below */ }
   fs.mkdirSync(`${WORKSPACES}/.desolate`, { recursive: true });
   const token = [...crypto.getRandomValues(new Uint8Array(24))]
@@ -719,38 +930,20 @@ function connectionToken(project: string): string {
 // Open VSX, (2) starts openvscode-server on EDITOR_INTERNAL unless something
 // is already listening there (checked with a real TCP connect, not pgrep).
 // ---------------------------------------------------------------------------
-function editorStartScript(extensions: string[], token: string, rootless: boolean): string {
-  // Under a rootless inner daemon the editor must run as container-root so its
-  // writes land as the real uid 1000 that owns /workspaces (see
-  // innerDaemonIsRootless). SUDO is resolved at runtime so images without sudo
-  // simply run unelevated rather than failing outright.
-  // Under rootless we need the editor to run as container-root. Two ways in:
-  //   (a) the container ALREADY runs as root -> nothing to do (preferred; works
-  //       even with no-new-privileges, since no escalation occurs);
-  //   (b) escalate with sudo -> only possible when no-new-privileges is NOT set.
-  // We TEST sudo rather than merely checking it exists, because
-  // `--security-opt no-new-privileges:true` makes an installed sudo fail at
-  // runtime with "the no new privileges flag is set".
-  const elevate = rootless
-    ? `SUDO=""
-if [ "$(id -u)" != "0" ]; then
-  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    SUDO="sudo -E"
-  else
-    echo "desolate: ROOTLESS daemon, but this devcontainer runs as uid $(id -u) and" >&2
-    echo "      cannot become root (sudo missing, or no-new-privileges is set)." >&2
-    echo "      Editor writes will fail with EACCES on /workspaces." >&2
-    echo "      Fix -- add to this project's devcontainer.json:" >&2
-    echo '        "remoteUser": "root", "containerUser": "root"' >&2
-    echo "      (Safe here: under a rootless daemon, container-root maps to the" >&2
-    echo "       unprivileged host uid -- it is not real root.)" >&2
-    echo "      Then recreate the container and rerun desolate." >&2
-  fi
-fi`
-    : `SUDO=""`;
+function editorStartScript(extensions: string[], token: string): string {
+  // The editor runs as whatever user the devcontainer runs as -- no elevation.
+  //
+  // There used to be a `sudo -E` path here, for a ROOTLESS inner daemon: under
+  // docker:dind-rootless the editor had to become container-root so its writes
+  // landed as the uid that owns /workspaces. That mode is not reachable. Rootless
+  // dind requires --privileged ("just like the regular dind images, --privileged
+  // is required for Docker-in-Docker to function properly" -- docker-library/
+  // docker), and this stack's whole guarantee is an UNPRIVILEGED inner daemon
+  // under sysbox: cli.sh refuses to start without sysbox-runc and preflight.sh
+  // asserts privileged=false. So the branch was dead, and it was the confusing
+  // kind of dead -- it implied uid handling here is conditional when it is not.
   return `
 set -e
-${elevate}
 SRV=${SERVER_DST}/bin/openvscode-server
 DATA="$HOME/.openvscode-desolate"
 mkdir -p "$DATA/extensions"
@@ -759,7 +952,7 @@ if [ ! -x "$SRV" ]; then
   exit 1
 fi
 for e in ${extensions.map(e => `'${e}'`).join(" ")}; do
-  $SUDO "$SRV" --install-extension "$e" \\
+  "$SRV" --install-extension "$e" \\
       --extensions-dir "$DATA/extensions" --server-data-dir "$DATA" \\
       >/dev/null 2>&1 || echo "desolate: extension unavailable on Open VSX: $e" >&2
 done
@@ -767,7 +960,7 @@ if (exec 3<>/dev/tcp/127.0.0.1/${EDITOR_INTERNAL}) 2>/dev/null; then
   exec 3>&- 3<&-
   echo 'desolate: editor already listening'
 else
-  setsid nohup $SUDO "$SRV" \\
+  setsid nohup "$SRV" \\
     --host 0.0.0.0 --port ${EDITOR_INTERNAL} \\
     --connection-token '${token}' \\
     --extensions-dir "$DATA/extensions" --server-data-dir "$DATA" \\
@@ -823,12 +1016,7 @@ function installProxyCa(dir: string): void {
 }
 
 function startEditor(project: string, dir: string, cfg: ProjectConfig, token: string, config: string): void {
-  const rootless = innerDaemonIsRootless();
-  if (rootless) {
-    console.log("desolate: inner daemon is rootless -- starting editor as container-root");
-    console.log("      (maps to the unprivileged host uid that owns /workspaces)");
-  }
-  const script = editorStartScript(cfg.extensions, token, rootless);
+  const script = editorStartScript(cfg.extensions, token);
   const code = runStatus("devcontainer",
     ["exec", "--workspace-folder", dir, ...configArgs(config), "bash", "-lc", script]);
   if (code === 0) return;
@@ -855,15 +1043,53 @@ function startEditor(project: string, dir: string, cfg: ProjectConfig, token: st
 // Relays: one socat container per mapped port, named desolate-relay-<proj>-<port>
 // so the host port is recoverable from the name alone.
 // ---------------------------------------------------------------------------
+/** The devcontainer's (network, ip) pairs on the inner daemon.
+ *
+ *  Read as PAIRS, from one template, deliberately. Two separate templates that
+ *  each `range` over .NetworkSettings.Networks and emit no separator produce
+ *  concatenated garbage the moment a container is on more than one network --
+ *  measured on a two-network container:
+ *
+ *    network -> "audit-n1audit-n2"
+ *    ip      -> "172.18.0.2172.19.0.2"
+ *
+ *  Taking `[0]` did not help, because that is a single line. The relay then got
+ *  `--network audit-n1audit-n2`, failed, and the error blamed socat and suggested
+ *  removing appPort. Pairing them also keeps the name and the address CONSISTENT:
+ *  the relay joins one network and dials one address, and they have to be the
+ *  same network or the address is not routable from the relay. */
+function containerNetworks(cid: string): Array<{ network: string; ip: string }> {
+  const out = run("docker", ["inspect", "-f",
+    '{{range $n, $c := .NetworkSettings.Networks}}{{$n}}\t{{$c.IPAddress}}{{"\\n"}}{{end}}',
+    cid], true);
+  const pairs: Array<{ network: string; ip: string }> = [];
+  for (const line of lines(out)) {
+    const [network, ip = ""] = line.split("\t");
+    if (network) pairs.push({ network, ip });
+  }
+  return pairs;
+}
+
 function recreateRelays(project: string, dir: string, map: PortMap): void {
   const cid = devcontainerId(dir);
   if (!cid) die("devcontainer is not running after up");
 
-  const network = lines(run("docker", ["inspect", "-f",
-    "{{range $n,$_ := .NetworkSettings.Networks}}{{$n}}{{end}}", cid]))[0];
-  const ip = lines(run("docker", ["inspect", "-f",
-    "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", cid]))[0];
-  if (!ip) die("could not resolve devcontainer IP");
+  const nets = containerNetworks(cid);
+  // First network with an actual address. A container can legitimately sit on
+  // several; any ONE of them is routable from a relay joined to that same
+  // network, so this needs no cleverness -- only consistency.
+  const attach = nets.find(n => n.ip);
+  if (!attach) {
+    die(`could not resolve a network address for the devcontainer.\n` +
+        `      Networks reported: ${nets.length ? nets.map(n => `${n.network}(ip='${n.ip}')`).join(", ") : "none"}\n` +
+        `      A relay has to join one of the container's networks and dial its\n` +
+        `      address on that network; with no address there is nothing to dial.`);
+  }
+  const { network, ip } = attach;
+  if (nets.length > 1) {
+    console.log(`desolate: devcontainer is on ${nets.length} networks ` +
+                `(${nets.map(n => n.network).join(", ")}); relays will use ${network}`);
+  }
 
   const old = ownRelayNames(project);
   if (old.length) run("docker", ["rm", "-f", ...old], true);
@@ -1003,10 +1229,11 @@ async function runProject(
   const token = connectionToken(project);
 
   // From here on, every devcontainer CLI call uses runConfig, not config: the
-  // image the build runs FROM has to be the CA-trusting one, and `exec` later
-  // must resolve the same container. The FINGERPRINT above deliberately used
-  // the original -- it tracks what the user wrote, not what we derived.
-  const runConfig = withCaTrustedBase(dir, config, cfg, project);
+  // image the build runs FROM has to be the CA-trusting one, the workspace has
+  // to land where we say, and `exec` later must resolve the same container. The
+  // FINGERPRINT above deliberately used the original -- it tracks what the user
+  // wrote, not what we derived.
+  const runConfig = deriveRunConfig(dir, config, cfg, project);
 
   console.log(`desolate: starting devcontainer for ${project} ...`);
   devcontainerUp(project, dir, runConfig, noCache);
@@ -1020,8 +1247,26 @@ async function runProject(
         `      devcontainer exec --workspace-folder ${dir} cat /tmp/openvscode-desolate.log`);
   }
 
+  // `folder=` must be the path INSIDE the container, which is not `dir`: the CLI
+  // mounts /workspaces/<owner>/<repo> at /workspaces/<repo> by default. Printing
+  // the outer path opened the editor on a folder that does not exist in there.
+  const cid = devcontainerId(dir);
+  const folder = (cid && containerWorkspaceFolder(dir, cid)) || dir;
+
   console.log(`\n  ${project} is ready:\n`);
-  console.log(`    http://127.0.0.1:${editorPort}/?tkn=${token}&folder=${dir}\n`);
+  console.log(`    http://127.0.0.1:${editorPort}/?tkn=${token}&folder=${folder}\n`);
+
+  // A container created before desolate started mirroring nested paths keeps the
+  // layout it was built with -- `devcontainer up` reuses it without remounting,
+  // and our own rewrite is invisible to the spec fingerprint (it is derived, not
+  // written by the user), so nothing else would ever mention it.
+  const mirrored = `${WORKSPACES}/${project}`;
+  if (project.includes("/") && folder !== mirrored) {
+    console.log(`  NOTE: inside the container this project is at ${folder}, not\n` +
+                `        ${mirrored}. Recreate it to mirror the outer path (and to\n` +
+                `        tell two owners' same-named repos apart):\n` +
+                `          desolate --rebuild ${project}\n`);
+  }
   for (const [label, port] of map) {
     if (label === "editor") continue;
     console.log(`    dev server on container port ${label} -> http://127.0.0.1:${port}`);
