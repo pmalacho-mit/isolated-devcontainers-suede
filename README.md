@@ -33,8 +33,9 @@ The name is `desolate` = **de**v + i**solate**.
 +-----------------------------------------------------------------------+
 ```
 
-**One** host-reachable surface, loopback-only: `3000`, the editor, token-gated.
-(Plus the dev-server range, 8080-8090 by default, once a project is running.)
+**One** host-reachable surface, loopback-only: `3000` by default (`VSCODE_PORT`),
+the editor, token-gated. (Plus the dev-server range, 8080-8090 by default, once a
+project is running.)
 
 There is deliberately no network path to the inner Docker daemon.
 
@@ -49,7 +50,7 @@ There is deliberately no network path to the inner Docker daemon.
 ## Requirements
 
 - macOS 13+
-- Homebrew
+- [Homebrew](https://brew.sh/)
 - `brew install docker docker-compose colima jq`
 
 `jq` is needed by `cli.sh observe inspect|raw` and by the static test suite.
@@ -63,63 +64,126 @@ is why the setup is Colima-only.)
 
 ## Setup
 
+### 0. Determine specs for the Colima VM
+
+The VM you'll setup in the next step is meant to host your whole development workflow, so size it like your primary machine rather than a sandbox.
+
+You'll need three numbers: `cpus` (how many CPU cores the VM gets), `memory` (how much RAM it gets, in GB), and `disk` (how much storage it gets, in GB, for images and project files).
+
+Read your Mac's numbers first:
+
+```bash
+sysctl -n hw.logicalcpu                       # total cores
+```
+
+```bash
+sysctl -n hw.perflevel0.logicalcpu            # performance cores (only Apple Silicon)
+```
+
+```bash
+echo $(( $(sysctl -n hw.memsize) / 1073741824 ))   # RAM, GiB
+```
+
+```bash
+df -h /System/Volumes/Data                    # free disk (where ~/.colima lives)
+```
+
+> [!WARNING]
+> `hw.perflevel0.logicalcpu` errors on Intel Macs, which have no P/E split -- instead just use the total.
+
+Based on those values, here's some guidance on what settings to use in the next step:
+
+**`--cpus`: total cores minus 2.** Two cores left over keeps macOS responsive while the VM builds. On Apple Silicon, your performance-core count is a good conservative alternative -- it leaves the efficiency cores to the host, and on many systems it comes out to the same number anyway.
+
+**`--memory`: half to two-thirds of your RAM.** This is the value that actually constrains you, since every open project is a devcontainer running a full VS Code server plus its toolchain. Keep <ins>**at least 8 GB**</ins> on the Mac side -- the editor UI is a _browser tab on the host_, so the browser's RAM usage comes out of the host's share, not the VM's.
+
+**`--disk`: be generous, 100 GB+ if you can spare it.** Inner images, named volumes, and every devcontainer layer are stored here. The image grows on demand rather than pre-allocating, and Colima releases unused space back on startup, so a large number costs little until you use it. Keep roughly 20% of your Mac's disk free.
+
+| Mac (cores / RAM) | `--cpus` | `--memory` | `--disk` |
+| ----------------- | -------- | ---------- | -------- |
+| 8 / 16 GB         | `6`      | `8`        | `100`    |
+| 10 / 16 GB        | `8`      | `8`        | `100`    |
+| 12 / 32 GB        | `10`     | `20`       | `150`    |
+| 14 / 36 GB        | `12`     | `24`       | `200`    |
+| 16 / 64 GB        | `14`     | `40`       | `250`    |
+
+Don't overthink it -- all three can be changed later. Stop the VM and start it
+again with new numbers; flags you leave out keep their current values:
+
+```bash
+colima stop desolate
+colima start desolate --cpus 10 --memory 24 --disk 200
+```
+
+> [!WARNING]
+> One limit: **disk can only grow.** Ask for less and Colima warns `disk size cannot be reduced, ignoring...` and keeps the size you had.
+
 ### 1. Create the Colima VM
 
-Use flags (not a config file -- Colima's config has required fields that a
-hand-written file omits):
+Start the Colima VM (with the `desolate` name) using the below flags and tell `docker` to use it:
+
+```bash
+cd <path>/isolated-devcontainers-suede/
+```
 
 ```bash
 colima start desolate \
-  --cpu 4 --memory 8 --disk 60 \
-  --vm-type vz --vz-rosetta --mount-type virtiofs
+  --vm-type vz --vz-rosetta --mount-type virtiofs --mount "$PWD" \
+  --cpus ___ --memory ___  --disk ___
+```
+
+```bash
 docker context use colima-desolate
 ```
 
+> [!IMPORTANT]
+> Make sure to fill in the `___`s above with the numbers you determined in [step 0](#0-determine-specs-for-the-colima-vm).
+
+| flag           | value                                               | what it does                                                               | Apple Silicon only |
+| -------------- | --------------------------------------------------- | -------------------------------------------------------------------------- | ------------------ |
+| `--cpus`       | from [step 0](#0-determine-specs-for-the-colima-vm) | CPU cores the VM gets                                                      | No                 |
+| `--memory`     | from [step 0](#0-determine-specs-for-the-colima-vm) | RAM the VM gets, in GiB                                                    | No                 |
+| `--disk`       | from [step 0](#0-determine-specs-for-the-colima-vm) | Storage the VM gets, in GiB                                                | No                 |
+| `--vm-type`    | `vz`                                                | Use Apple's Virtualization framework instead of QEMU -- faster. macOS 13+. | No                 |
+| `--vz-rosetta` | _(none)_                                            | Run amd64 images via Rosetta, so x86-only images still work                | **Yes**            |
+| `--mount-type` | `virtiofs`                                          | Fastest way to share files with the VM. Requires `--vm-type vz`.           | No                 |
+| `--mount`      | `"$PWD"`                                            | Share this repo with the VM -- and nothing else from your Mac              | No                 |
+
+> [!NOTE]
+> `--vm-type` and `--mount-type` are the two you can't change later, and would require a `colima delete desolate` followed by a fresh `colima start desolate ...`. Though you shouldn't need to change these, if you had to it wouldn't be a big deal, since [`colima delete`](https://colima.run/docs/commands/#colima-delete) preserves data by default, so you'd just need to re-[provision](#2-provision-the-vm) the VM after recreating it.
+
 ### 2. Provision the VM
+
+Run the below command from your Mac. It `ssh`es into the VM and installs both VM-side layers ([sysbox](#1-sysbox) and the [egress proxy](#2-the-egress-proxy)):
 
 ```bash
 ./cli.sh vm install
 ```
 
-One command, run from the Mac. It sshes into the VM and installs both VM-side
-layers, in order:
+> This assumes you're still `cd`ed into _isolated-devcontainers-suede/_ from the previous step. From anywhere else, use the full path: `<path>/isolated-devcontainers-suede/cli.sh vm install`.
 
-**The repo must live under `$HOME`.** Colima mounts only your home directory
-into the VM, and this step runs scripts from the repo _inside_ the VM. Anywhere
-else and it cannot see them; `./cli.sh vm status` reports whether the VM can.
+**This runs scripts from the repo folder _inside_ the VM**, which works because [step 1](#1-create-the-colima-vm) started the VM with `--mount "$PWD"`. If that mount is missing or points somewhere else, the VM cannot see the scripts and will error (use `./cli.sh vm status` to check your setup).
 
-1. **sysbox** ([`vm/install-sysbox.sh`](vm/install-sysbox.sh)) -- the
-   containment boundary. `cli.sh up` refuses to start until `docker info`
-   lists `sysbox-runc`.
-2. **the egress proxy** ([`proxy/vm/install.sh`](proxy/vm/install.sh)) --
-   mitmproxy in transparent mode on `:18080`, a VM-local resolver on `:5353`,
-   nftables rules that force all container egress through them, and a CA
-   publisher on `:18081`. The dev-server range (8080-8090 by default) is
-   deliberately left alone -- those belong to your projects.
+Each script installs one of the two isolation layers the VM is built on:
 
-**The sysbox layer needs a container-free daemon.** Its installer restarts
-docker to rewrite network parameters and refuses to configure while _any_
-container exists on the VM -- stopped ones count. `vm install` handles this: it
-removes the desolate stack's own containers first (named volumes are untouched,
-so `cli.sh up` restores everything), and refuses only if containers it does not
-own are left. Either way it decides _before_ apt runs, rather than letting the
-package's postinst fail halfway and leave dpkg wedged.
+#### 1. sysbox
 
-(`./cli.sh up` re-provisions only the proxy layer, via `--proxy-only`, so it is
-never subject to this -- which is the point of that flag.)
+Installed by [`vm/install-sysbox.sh`](./vm/install-sysbox.sh). This is the
+containment boundary -- the reason a compromised project can't reach your Mac.
 
-Both layers are idempotent, so re-running is also how you upgrade them. There
-is **nothing to run again after your first `up`**: `cli.sh up` checks that the
-nftables rules are armed for the bridge the stack actually landed on, and
-re-provisions automatically if they are not (see "How the egress check stays
-honest" below).
+Normally, running Docker inside a container requires `--privileged`, which is
+close to handing that container the machine. sysbox is a container runtime that
+makes it unnecessary: it runs each container in its own **user namespace**, so
+what the container calls "root" is really an unprivileged user on the VM. The
+inner Docker daemon gets everything it needs to build and run your
+devcontainers, while a break-out lands as a nobody user on the VM instead of as
+root.
 
-This needs the repo under your home directory, since that is what Colima mounts
-into the VM. `./cli.sh vm status` tells you what it can see:
+`cli.sh up` refuses to start until `docker info` lists `sysbox-runc`, so you
+can't accidentally run the stack without this.
 
-```bash
-./cli.sh vm status
-```
+> [!NOTE]
+> **The sysbox layer needs a container-free daemon.** Its installer restarts docker to rewrite network parameters and refuses to configure while _any_ container exists on the VM. `vm install` handles this by removing `desolate`'s own containers first, and refuses only if containers it does not own are left.
 
 To pin a different sysbox release, check the
 [releases page](https://github.com/nestybox/sysbox/releases) and pass it
@@ -129,24 +193,98 @@ through:
 SYSBOX_VERSION=0.7.0 ./cli.sh vm install
 ```
 
+#### 2. The egress proxy
+
+Installed by [`proxy/vm/install.sh`](./proxy/vm/install.sh). "Egress" just means
+traffic leaving your containers. This layer puts a checkpoint in front of all of
+it.
+
+The payoff is that **your real secrets never have to exist inside a container**.
+Your project uses placeholders like `${GITHUB_TOKEN}`; the checkpoint swaps in
+the real value as the request leaves the VM, and scrubs it back out of anything
+that comes back. Code running in a devcontainer can _use_ your tokens without
+ever being able to _read_ them (see [Secrets](#secrets-placeholders-in-real-values-never)).
+
+The checkpoint is [mitmproxy](https://mitmproxy.org/) -- a tool that sits in the
+middle of a network connection and can inspect or rewrite what passes through.
+That is normally an attack ("man in the middle"); here you are doing it to your
+own traffic, on purpose. It runs in **transparent mode**, meaning containers
+need no proxy settings at all: they make ordinary requests, and the VM's
+firewall quietly reroutes them.
+
+Four pieces get installed:
+
+| piece          | where    | what it's for                                                                       |
+| -------------- | -------- | ----------------------------------------------------------------------------------- |
+| mitmproxy      | `:18080` | The checkpoint itself -- swaps secrets in, scrubs them out, blocks disallowed hosts |
+| DNS resolver   | `:5353`  | Answers containers' domain lookups, so name resolution can't be used to slip past   |
+| CA publisher   | `:18081` | Hands out the proxy's certificate, so containers can trust it for HTTPS             |
+| nftables rules | kernel   | Force all container traffic through the above, rather than trusting them to opt in  |
+
+The certificate matters more than it sounds: HTTPS traffic is encrypted, so the
+proxy can only do its job if containers trust its certificate. That's what the
+publisher is for, and it's why a devcontainer that skips installing the CA gets
+TLS errors.
+
+Your own dev servers (ports 8080-8090 by default) are deliberately left out of
+all this -- that range belongs to your projects.
+
+> [!NOTE]
+> `./cli.sh up` may re-run the proxy installation by invoking `cli.sh vm install` with the `--proxy-only` flag. The firewall rules are tied to the name of the network the stack runs on, and that name can change out from under them -- which would turn interception off silently. So `up` checks on every start and repairs it if needed (see [Why `up` re-checks the proxy](#why-up-re-checks-the-proxy)). `--proxy-only` skips the sysbox half, which restarts docker and would kill the stack that just started.
+
 ### 3. Start the stack
 
+First give the editor a password. `VSCODE_TOKEN` is a random string that gets
+added to the editor's URL, and it is the only thing standing between your
+projects and anything else that can reach `127.0.0.1:3000` on your Mac -- the
+editor can read and write every project in `/workspaces`, so this is not
+optional. `cli.sh up` refuses to start without it.
+
 ```bash
-echo "VSCODE_TOKEN=$(openssl rand -hex 24)" > .env && chmod 600 .env
+echo "VSCODE_TOKEN=$(openssl rand -hex 24)" >> .env && chmod 600 .env
 ./cli.sh up            # verifies sysbox, builds, starts, runs preflight,
                        # then prints (and copies) the editor URL
 ```
 
+> [!WARNING]
+> `>>` **appends** to `.env` if it already exists. The last value will be used, so it's not a big deal, but your `.env` will grow indefinitely.
+
 Open the printed `http://127.0.0.1:3000/?tkn=...` URL. That's your editor.
 
-`preflight` will tell you whether egress is actually intercepted. To see the
+[`preflight`](./preflight.sh) will tell you whether egress is actually intercepted. To see the
 secrets machinery work end to end:
 
 ```bash
 ./cli.sh proxy test     # substitution + scrubbing, then a blocked exfil (403)
 ```
 
-### How the egress check stays honest
+### Why `up` re-checks the proxy
+
+The firewall rules that force container traffic through the proxy refer to the
+stack's network **by name**. If that name ever changes, the rules keep loading
+without complaint and simply stop matching anything -- no error, no failed
+request, just containers quietly talking to the internet unfiltered.
+
+Because that failure is invisible, `cli.sh up` never assumes it worked. On every
+start it checks that the rules are armed for the network the stack actually
+landed on, and repairs them if not:
+
+```
+cli.sh: egress interception needs attention -- rules are armed for
+        'br-desolate' but the stack is on 'br-a1b2c3d4e5f6'.
+cli.sh: re-provisioning the VM proxy layer...
+```
+
+If it can't turn interception on, `up` **fails** rather than leave your
+containers running with unfiltered network access. You can override that with
+`DESOLATE_SKIP_VM_CHECK=1`, but it doesn't repair anything -- it only stops `up`
+refusing.
+
+You may also see a warning about an "unpinned" network. Run
+`./cli.sh down && ./cli.sh up` to recreate it, which fixes it for good.
+
+<details>
+<summary>How the name drifts, for the curious</summary>
 
 The nftables rules match on an interface _name_ (`iifname $DESOLATE_IF`). That
 name is pinned in `docker-compose.yml` via
@@ -156,31 +294,19 @@ The pin has one gap, and it is a silent one. `driver_opts` are applied when the
 network is **created**, so a network that already existed before the pin was
 added keeps docker's generated `br-<hash>` name. Rules armed for `br-desolate`
 still load cleanly -- `iifname` is a string match, so nftables happily accepts a
-name no interface currently has -- and then match nothing. No error, no failed
-request, just no interception.
+name no interface currently has -- and then match nothing.
 
 So `cli.sh up` does not trust the pin. After compose returns it resolves the
 bridge the network is _actually_ on (via the gateway address), compares that
 against the `DESOLATE_IF` the installed ruleset is armed for, and also checks
 that the ruleset is loaded and the three units are active. If any of that is
-wrong it re-runs the proxy layer automatically:
+wrong it re-runs the proxy layer with `--proxy-only` -- the sysbox layer
+restarts docker and would kill the stack that just started.
 
-```
-cli.sh: egress interception needs attention -- rules are armed for
-        'br-desolate' but the stack is on 'br-a1b2c3d4e5f6'.
-cli.sh: re-provisioning the VM proxy layer...
-```
+An unpinned network keeps warning because its name changes on every recreate, so
+the rules would go stale again each time.
 
-It re-provisions with `--proxy-only`, because the sysbox layer restarts docker
-and would kill the stack that just started.
-
-If it cannot arm interception, `up` **fails** rather than leaving containers
-running with unfiltered egress. Override with `DESOLATE_SKIP_VM_CHECK=1` if you
-have a reason to.
-
-An unpinned network still gets a warning, because its name changes on every
-recreate and the rules would go stale again each time. `./cli.sh down && ./cli.sh up`
-recreates the network and fixes it permanently.
+</details>
 
 ## Daily use
 
@@ -578,6 +704,41 @@ only see this if you look at `docker volume ls` or write a `mounts` entry by
 hand -- `desolate` and the broker's policy use the same encoding, so a project
 can always mount its own.
 
+**Inside the container, the path mirrors the path outside.** A nested project
+opens at `/workspaces/owner/repo`, the same path it has in `/workspaces`, so two
+owners' same-named repos are told apart at a glance rather than both showing up
+as `/workspaces/repo`.
+
+That is not the devcontainer CLI's default. The CLI derives the in-container path
+from `${localWorkspaceFolderBasename}`, which is the **last path segment only**,
+so it would mount `/workspaces/pmalacho-mit/suede` at `/workspaces/suede`.
+`desolate` sets `workspaceFolder` and `workspaceMount` together to mirror the
+outer path instead -- together, because setting `workspaceFolder` alone leaves the
+CLI deriving the mount target from the basename, which mounts the workspace in one
+place and tells the editor to open another. A project that declares either field
+itself keeps full control and is left alone.
+
+Containers created before this behaviour existed keep the layout they were built
+with (`devcontainer up` reuses a container without remounting it). `desolate`
+prints the actual in-container path and points you at `--rebuild`.
+
+⚠️ **`${localWorkspaceFolderBasename}` drops the owner in `mounts` too**, and there
+the policy refuses the result. The idiom from Microsoft's docs --
+
+```jsonc
+"mounts": ["source=${localWorkspaceFolderBasename}-node_modules,target=...,type=volume"]
+```
+
+-- expands to `suede-node_modules` for `pmalacho-mit/suede`, which is outside that
+project's namespace. Refusing is the point: two owners' `suede` repos would
+otherwise share one volume. Name it explicitly instead:
+
+```jsonc
+"mounts": ["source=pmalacho-mit__suede-node_modules,target=...,type=volume"]
+```
+
+The error message says this, including the exact name to use.
+
 ## Secrets: placeholders in, real values never
 
 Containers never hold credentials. They hold a **placeholder**; the real value
@@ -864,7 +1025,8 @@ machine.
 
 | Variable                     | Default         | What it does                                                                                                                                                            |
 | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:3000`. `cli.sh up` refuses to start without it.                                                                                          |
+| `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
+| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. Must sit **outside** `DESOLATE_PORT_MIN..MAX` -- dind publishes that whole range, and `cli.sh up` refuses a collision.  |
 | `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8090` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else.                   |
 | `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |
 | `DESOLATE_SKIP_VM_CHECK`     | unset           | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
