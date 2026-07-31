@@ -101,11 +101,15 @@ RUN chmod +x /usr/local/bin/with-ca
 #   orchestrator -- runs broker.ts; the ONLY container with the daemon socket
 #   vscode       -- runs openvscode-server; no socket, talks to the broker
 COPY --chown=1000:1000 \
-  desolate.ts \
-  newrepo.ts \ 
   broker.ts \ 
   desolate-client.ts \ 
+  desolate.ts \
+  devcontainer.ts \
+  jsonc.ts \
+  newrepo.ts \ 
   policy.ts \
+  projects.ts \
+  utils.ts \
   /usr/local/lib/desolate/
 
 # Create wrappers for supporting scripts so they can be invoked plainly.
