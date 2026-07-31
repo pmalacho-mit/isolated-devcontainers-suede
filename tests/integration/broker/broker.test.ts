@@ -139,7 +139,7 @@ before(async () => {
       PATH: `${bin}:${process.env.PATH}`,
       DESOLATE_WORKSPACES: workspaces,
       DESOLATE_BROKER: socket,
-      DESOLATE_SPEC_DIR: specDir,
+      DESOLATE_SPECS: specDir,
       DESOLATE_RUNNER: stub,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -280,8 +280,11 @@ describe("hostile specs never reach the runner", () => {
     // It may still be refused by the VOLUME NAMESPACE rule (the substituted
     // name belongs to this project, so it should not be) -- but never by the
     // cross-check, which is what this pins.
-    assert.doesNotMatch(errorOf(msgs) ?? "", /visible to|different shape/,
-      "substitution was mistaken for a parser disagreement");
+    assert.doesNotMatch(
+      errorOf(msgs) ?? "",
+      /visible to|different shape/,
+      "substitution was mistaken for a parser disagreement",
+    );
   });
 
   test("E5: runArgs namespace escapes in every spelling", async () => {
@@ -342,7 +345,11 @@ describe("request-level validation", () => {
     fs.symlinkSync(os.tmpdir(), path.join(workspaces, "escape"));
     resetRunner();
     const msgs = await ask({ op: "start", project: "escape" });
-    assert.equal(result(msgs).ok, false, "a symlink out of /workspaces was accepted");
+    assert.equal(
+      result(msgs).ok,
+      false,
+      "a symlink out of /workspaces was accepted",
+    );
     assert.match(errorOf(msgs), /exact path|direct child/);
     assert.deepEqual(runnerInvocations(), [], "the runner was invoked anyway");
   });
@@ -350,14 +357,26 @@ describe("request-level validation", () => {
   test("a nested owner/repo project is accepted", async () => {
     // The other half of the same change: one level of nesting is legal, so
     // `cli.sh repo add owner/repo` can clone to /workspaces/owner/repo.
-    fs.mkdirSync(path.join(workspaces, "acme", "widgets", ".devcontainer"), { recursive: true });
+    fs.mkdirSync(path.join(workspaces, "acme", "widgets", ".devcontainer"), {
+      recursive: true,
+    });
     fs.writeFileSync(
-      path.join(workspaces, "acme", "widgets", ".devcontainer", "devcontainer.json"),
+      path.join(
+        workspaces,
+        "acme",
+        "widgets",
+        ".devcontainer",
+        "devcontainer.json",
+      ),
       JSON.stringify({ image: "alpine:3" }),
     );
     resetRunner();
     const msgs = await ask({ op: "start", project: "acme/widgets" });
-    assert.equal(result(msgs).ok, true, errorOf(msgs) ?? "nested project was refused");
+    assert.equal(
+      result(msgs).ok,
+      true,
+      errorOf(msgs) ?? "nested project was refused",
+    );
   });
 
   test("two levels of nesting are refused", async () => {

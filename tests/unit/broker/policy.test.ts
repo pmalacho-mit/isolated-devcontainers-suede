@@ -11,13 +11,63 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { enforcePolicy, parseJsonc, stripJsonc, normalizeMount, type ResolvedSpec, volumeNamespace } from "../../../release/vscode-image/policy.ts";
+import { enforcePolicy, normalizeMount, type ResolvedSpec } from "../../../release/vscode-image/policy.ts";
+import { volumeNamespace } from "../../../release/vscode-image/projects.ts";
+import { parse as parseJsonc, strip as stripJsonc } from "../../../release/vscode-image/jsonc.ts";
 
 const PROJECT = "myapp";
 
 /** Build a ResolvedSpec the way `devcontainer read-configuration
- *  --include-merged-configuration` reports one. */
-function spec(configuration: any, mergedConfiguration: any = {}): ResolvedSpec {
+ *  --include-merged-configuration` reports one.
+ *
+ *  The second argument is the FEATURE (or image) metadata, not a literal merged
+ *  object. Measured against @devcontainers/cli 0.88.0, mergedConfiguration is
+ *  `{...configuration, ...folded metadata}`: the project's own keys are spread
+ *  in first, then every metadata entry is folded over the metadata keys
+ *  (privileged/init by OR, capAdd/securityOpt/mounts by union). Handing the
+ *  policy a merged object written by hand is how a fixture drifts into a spec
+ *  the CLI would never emit -- raw declaring a key, merged empty -- which is
+ *  exactly the spec that would make a merged-only policy look safe when it is
+ *  not.
+ *
+ *  What this deliberately does NOT copy is the CLI's type normalisation
+ *  ("true" -> true, "SYS_ADMIN" -> ["SYS_ADMIN"]). E6 exists to prove the policy
+ *  holds without leaning on it, so values reach merged verbatim. */
+function spec(configuration: any, feature: any = {}): ResolvedSpec {
+  const declaredByBoth = (key: string) =>
+    configuration?.[key] !== undefined && feature?.[key] !== undefined;
+  const asList = (v: any) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
+
+  const mergedConfiguration: any = { ...configuration, ...feature };
+  for (const key of ["capAdd", "securityOpt", "mounts"])
+    if (declaredByBoth(key))
+      mergedConfiguration[key] = [
+        ...asList(configuration[key]),
+        ...asList(feature[key]),
+      ];
+  for (const key of ["privileged", "init"])
+    if (declaredByBoth(key))
+      mergedConfiguration[key] =
+        Boolean(configuration[key]) || Boolean(feature[key]);
+
+  // customizations are not merged but RESHAPED: one array of contributions per
+  // namespace, the project's and a feature's indistinguishable once inside it.
+  // Modelled here because it is the reason the allowPrivileged opt-in is read
+  // from the raw config -- see "a feature cannot grant itself privilege" below.
+  if (configuration?.customizations || feature?.customizations) {
+    const namespaces = new Set([
+      ...Object.keys(configuration?.customizations ?? {}),
+      ...Object.keys(feature?.customizations ?? {}),
+    ]);
+    mergedConfiguration.customizations = Object.fromEntries(
+      [...namespaces].map((ns) => [
+        ns,
+        [configuration?.customizations?.[ns], feature?.customizations?.[ns]]
+          .filter((c) => c !== undefined),
+      ]),
+    );
+  }
+
   return { configuration, mergedConfiguration };
 }
 
@@ -267,6 +317,57 @@ describe("demonstrated escapes (regression)", () => {
     // An EMPTY merged config is a real answer (a project with no features) and
     // stays allowed -- absent and empty are not the same thing.
     allows(spec({ image: "x" }, {}));
+  });
+
+  test("E8: a feature cannot grant itself the privilege opt-in", () => {
+    // The policy enforces on mergedConfiguration, but reads the allowPrivileged
+    // opt-in from the RAW config, and this is why. Merged reshapes
+    // customizations into one array of contributions per namespace, so a feature
+    // that ships "customizations": {"desolate": {"allowPrivileged": true}} in its
+    // own metadata lands in the very same place the project's opt-in would. Read
+    // there, the feature demanding the privilege would also be authorising it.
+    refuses(
+      spec(
+        { image: "x" },
+        {
+          privileged: true,
+          customizations: { desolate: { allowPrivileged: true } },
+        },
+      ),
+      /PRIVILEGED/,
+    );
+    // ... while the project's own opt-in still works, same feature present.
+    allows(
+      spec(
+        { image: "x", customizations: { desolate: { allowPrivileged: true } } },
+        { privileged: true },
+      ),
+    );
+  });
+
+  test("E9: a merged config that LOST a key the project declared is refused", () => {
+    // Every rule reads mergedConfiguration, which makes one failure mode fatal:
+    // if the CLI renames or reshapes a key (postCreateCommand ->
+    // postCreateCommands, entrypoint -> entrypoints, customizations -> arrays),
+    // the rule that reads the old name silently checks nothing at all and the
+    // spec sails through. Raw is the witness that the key was declared.
+    const declaredThenLost: [string, any][] = [
+      ["runArgs", ["--privileged"]],
+      ["mounts", ["source=other,target=/steal,type=volume"]],
+      ["initializeCommand", "id > /tmp/pwned"],
+    ];
+    for (const [key, value] of declaredThenLost) {
+      assert.throws(
+        () =>
+          enforcePolicy(
+            PROJECT,
+            { configuration: { image: "x", [key]: value }, mergedConfiguration: { image: "x" } },
+            { workspaces: "/workspaces" },
+          ),
+        new RegExp(`declares "${key}"`),
+        `merged silently dropped "${key}" and the policy approved the spec`,
+      );
+    }
   });
 });
 
@@ -724,4 +825,8 @@ test("volumeNamespace is stable and collision-resistant", () => {
   assert.equal(volumeNamespace("acme/widgets"), "acme__widgets");
   // '/' -> '__' rather than '_', so these stay distinct
   assert.notEqual(volumeNamespace("a/b"), volumeNamespace("a_b"));
+  // '__' is reserved for that encoding, so a name that could forge a nesting is
+  // refused outright rather than silently mapped onto 'a/b'.
+  assert.throws(() => volumeNamespace("a__b"), /double underscore/);
+  assert.throws(() => volumeNamespace("owner/re__po"), /double underscore/);
 });
