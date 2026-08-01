@@ -11,7 +11,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { enforcePolicy, normalizeMount, type ResolvedSpec } from "../../../release/vscode-image/policy.ts";
+import { enforcePolicy, mount } from "../../../release/vscode-image/policy.ts";
+import type { ResolvedSpec } from "../../../release/vscode-image/devcontainer.ts";
 import { volumeNamespace } from "../../../release/vscode-image/projects.ts";
 import { parse as parseJsonc, strip as stripJsonc } from "../../../release/vscode-image/jsonc.ts";
 
@@ -431,7 +432,7 @@ describe("mounts", () => {
       }),
     );
     // A source containing a comma must not be able to forge a later field.
-    const m = normalizeMount({ source: "x,type=volume", type: "bind" });
+    const m = mount.normalize({ source: "x,type=volume", type: "bind" });
     assert.equal(m.type, "bind");
   });
 

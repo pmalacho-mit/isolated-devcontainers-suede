@@ -291,7 +291,8 @@ async function handle(req: unknown, send: Send) {
       case "start":
       case "rebuild": {
         const configPath = spec.snapshot(validated);
-        enforcePolicy(validated, resolveSpec(validated, configPath), config);
+        const workspace = join(config.workspaces, validated);
+        enforcePolicy(validated, resolveSpec(workspace, configPath), config);
         flags = [
           ["--config", configPath],
           ...(req.op === "rebuild" ? (["--rebuild"] as const) : []),

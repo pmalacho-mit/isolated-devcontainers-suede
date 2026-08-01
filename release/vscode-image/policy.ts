@@ -1,11 +1,11 @@
 // policy.ts -- the spec policy the broker enforces before starting a project.
 //
 // Pure and side-effect free (so it's easy to test)
-import { ResolvedSpec } from "./devcontainer.ts";
+import type { ResolvedSpec } from "./devcontainer.ts";
 import { list as listProjects, volumeNamespace } from "./projects.ts";
 import {
   type ItemFromSet,
-  JSONValue,
+  type JSONValue,
   nonNullObject,
   readonlySet,
 } from "./utils.ts";
@@ -90,7 +90,7 @@ interface NormalMount {
   raw: string;
 }
 
-const mount = {
+export const mount = {
   /** Split "source=x,target=y,type=volume" into a field map. */
   parse: (spec: string) =>
     Object.fromEntries(
@@ -135,6 +135,21 @@ const fail = (...msgs: string[]): never => {
 };
 
 const reader = ({ configuration, mergedConfiguration }: ResolvedSpec) => {
+  if (!nonNullObject(mergedConfiguration))
+    fail(
+      `internal: the resolved spec carries no mergedConfiguration, so`,
+      `feature-injected privilege, capabilities and mounts are invisible --`,
+      `refusing to approve it. Resolve with`,
+      "`read-configuration --include-merged-configuration`.",
+    );
+
+  if (!nonNullObject(configuration))
+    fail(
+      `internal: the resolved spec carries no configuration, so the keys a`,
+      `project declared cannot be told apart from the ones a feature injected`,
+      `-- refusing to approve it.`,
+    );
+
   const read = <T extends JSONValue = JSONValue>(
     key: string,
   ): T | undefined => {
