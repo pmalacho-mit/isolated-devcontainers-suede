@@ -1,4 +1,4 @@
-import { run, type JSONValue } from "./utils";
+import { nonNullObject, run, type JSONValue } from "./utils.ts";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -70,8 +70,8 @@ export const resolveSpec = (
     try {
       const parsed = JSON.parse(trimmed);
       if (
-        typeof parsed?.configuration === "object" &&
-        typeof parsed?.mergedConfiguration === "object"
+        nonNullObject(parsed?.configuration) &&
+        nonNullObject(parsed?.mergedConfiguration)
       )
         return parsed;
     } /* not the result line */ catch {}

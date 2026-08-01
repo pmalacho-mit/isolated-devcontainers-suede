@@ -124,9 +124,9 @@ const readOrDie = (path: string, hint: string) => {
 const resolveOrDie = (project: string, config: string) => {
   try {
     return resolveSpec(project, config);
-  } catch {
+  } catch (err) {
     return die(
-      `Unable to resolve devcontainer spec for ${project} @ ${config}`,
+      `Unable to resolve devcontainer spec for ${project} @ ${config}:\n\n${err}`,
     );
   }
 };
@@ -1319,7 +1319,7 @@ async function runProject(
   config ??= tryLocateConfig(dir);
   if (!config) return die(`no devcontainer.json under ${dir}`);
 
-  const project = readProjectConfig(resolveSpec(dir, config));
+  const project = readProjectConfig(resolveOrDie(dir, config));
   if (project.hadLegacyAppPort)
     return die(`devcontainer.json still contains "appPort".
       desolate allocates host ports itself, and an appPort publish occupies the
@@ -1333,7 +1333,7 @@ async function runProject(
   config = deriveRunConfig(dir, config, project, name);
 
   try {
-    enforcePolicy(name, resolveSpec(dir, config), {
+    enforcePolicy(name, resolveOrDie(dir, config), {
       workspaces: WORKSPACES,
     });
   } catch (err: any) {
