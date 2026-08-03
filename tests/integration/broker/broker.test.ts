@@ -308,6 +308,72 @@ describe("hostile specs never reach the runner", () => {
     }
   });
 
+  test("E11: build.context reaching out of the project", async () => {
+    // DEMONSTRATED against @devcontainers/cli 0.88.0 and a real daemon: this
+    // exact config, with `COPY victim/secrets.env /stolen` in its Dockerfile,
+    // built an image holding the sibling project's file.
+    //
+    // The snapshot does not stop it and that is the part worth remembering:
+    // --override-config changes which JSON the CLI reads, not where relative
+    // paths resolve from. `configFilePath` still names the file in the live
+    // /workspaces, and the build context is read from THERE. This test asks
+    // the real CLI for that field, so it fails if that ever changes.
+    fs.mkdirSync(path.join(workspaces, "victim"), { recursive: true });
+    fs.writeFileSync(path.join(workspaces, "victim", "secrets.env"), "TOKEN=1");
+    project(
+      "ctx-escape",
+      JSON.stringify({ build: { dockerfile: "Dockerfile", context: "../.." } }),
+      { ".devcontainer/Dockerfile": "FROM alpine:3\nCOPY victim/secrets.env /\n" },
+    );
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "ctx-escape" });
+    assert.equal(result(msgs).ok, false, "a context outside the project passed");
+    assert.match(errorOf(msgs), /outside/);
+    assert.deepEqual(runnerInvocations(), [], "the runner was invoked anyway");
+  });
+
+  test("the same context, one level shallower, is legitimate", async () => {
+    // "context": ".." from .devcontainer/ is the repo-root build, and it has
+    // to keep working or the rule above just moves the problem.
+    // `dockerfile` is relative to the config file, `context` to the same place
+    // -- so this pair is "the Dockerfile in .devcontainer/, built against the
+    // repo root", which is what most projects mean.
+    project(
+      "ctx-root",
+      JSON.stringify({ build: { dockerfile: "Dockerfile", context: ".." } }),
+      { ".devcontainer/Dockerfile": "FROM alpine:3\n" },
+    );
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "ctx-root" });
+    assert.equal(result(msgs).ok, true, errorOf(msgs));
+  });
+
+  test("a local feature outside the project is refused by the CLI itself", async () => {
+    // Not this policy's doing: the CLI resolves `./feat` against the config
+    // directory and refuses anything that is not a child of it. Asserted
+    // because the policy RELIES on that -- a feature is a directory that gets
+    // copied into the build, so a `../../` feature path would be the same
+    // escape as E11 by another route. If the CLI ever relaxes this, the
+    // failure should land here rather than in the field.
+    fs.mkdirSync(path.join(workspaces, "loosefeat"), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspaces, "loosefeat", "devcontainer-feature.json"),
+      JSON.stringify({ id: "loosefeat", version: "1.0.0", name: "outside" }),
+    );
+    fs.writeFileSync(
+      path.join(workspaces, "loosefeat", "install.sh"),
+      "#!/bin/sh\nexit 0\n",
+    );
+    project(
+      "feat-escape",
+      JSON.stringify({ image: "alpine:3", features: { "../../loosefeat": {} } }),
+    );
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "feat-escape" });
+    assert.equal(result(msgs).ok, false, "a feature outside the project passed");
+    assert.deepEqual(runnerInvocations(), [], "the runner was invoked anyway");
+  });
+
   test("another project's volume, declared directly", async () => {
     project(
       "evil-mount",

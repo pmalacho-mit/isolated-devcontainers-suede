@@ -26,11 +26,12 @@ Four things make that validation sound:
     --override-config. Without this the editor could swap the file between
     the check and the start (i.e., a TOCTOU attack).
 
-  - CONTAINMENT. Making that copy means following the project's symlinks, in
-    the container that holds the inner Docker socket. Every one of them must
-    resolve inside the project (see snapshot.ts), or a committed
-    `.devcontainer/key -> ../../../root/.ssh/id_ed25519` would be copied into
-    the build context and `COPY key /` would do the rest.
+  - CONTAINMENT. A project may only reach its own directory. Two halves,
+    because the CLI reads two different trees: making the snapshot means
+    following the project's symlinks HERE, in the container holding the inner
+    Docker socket (snapshot.ts), while `build.context` and `build.dockerfile`
+    are resolved by the CLI against the LIVE project directory, where
+    `"context": "../.."` is every sibling project's source code (policy.ts).
 
   - FAIL CLOSED. Anything we cannot resolve, parse or classify is refused.
 */

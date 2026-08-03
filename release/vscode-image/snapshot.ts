@@ -7,23 +7,35 @@ frozen copy of the spec the policy validated, not from the live file. Making
 that copy means DEREFERENCING symlinks -- a link into editor-writable state
 would otherwise still be a live file at build time.
 
-Dereferencing is where a second escape lives, and it is the reason this module
-is not a `cpSync(..., { dereference: true })` call:
+Dereferencing is a file READ, performed with the orchestrator's privileges on
+the project's behalf, and it is the reason this module is not a
+`cpSync(..., { dereference: true })` call:
 
     ln -s ../../../root/.ssh/id_ed25519 myproject/.devcontainer/key
 
-Committed to a repo, that link is followed HERE, in the orchestrator -- the one
-container holding the inner Docker socket. cp would happily copy the file it
-points at into the snapshot, and the snapshot is the build context the CLI
-hands to `docker build`, so a one-line `COPY key /` in the project's own
-Dockerfile lifts it into an image the project owns. Nothing in the spec policy
-sees this: every key in devcontainer.json is legal, and the theft is in the
-filesystem underneath it.
+Committed to a repo, that link is followed HERE, in the one container holding
+the inner Docker socket, and cp would copy what it points at into the snapshot.
+Nothing in the spec policy sees it: every key in that devcontainer.json is
+legal, and the read is in the filesystem underneath it.
 
-So every link is resolved and required to land inside the project directory,
-which is exactly the boundary the project already owns. A link to a sibling
-project is refused for the same reason as a link to /root: it is somebody
-else's trust domain.
+Measured against @devcontainers/cli 0.88.0, that copy does not TODAY reach an
+image: `--override-config` changes which JSON is read, not where relative paths
+resolve from, so `build.context` and `build.dockerfile` are taken from the live
+project directory and this snapshot is never handed to `docker build`. The
+stolen bytes land in a directory only the orchestrator can read. Say what is
+verified rather than what sounds worse.
+
+It is still refused, for three reasons that do not depend on that measurement:
+the orchestrator should not be a file-read oracle for a project at all; the
+copy is meant to be a FROZEN COPY OF THE PROJECT, and one containing /root's
+private key is not that; and the day this directory does become the build
+context -- which is the obvious way to make the freeze cover the Dockerfile
+too -- the escape would be live and nothing here would have changed to say so.
+
+A link to a sibling project is refused for the same reason as a link to /root:
+it is somebody else's trust domain. What the LIVE build context may reach is a
+separate rule, enforced by policy.ts (`build.context` must stay in the project)
+and, for symlinks, by BuildKit, which refuses to follow one out of the context.
 
 Refusal, not silent skipping: a snapshot that quietly dropped a file would
 produce a build failure somewhere far away from the cause.
@@ -41,20 +53,14 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { join, relative } from "node:path";
+import { isWithin } from "./utils.ts";
 
 export class ContainmentError extends Error {}
 
 const fail = (message: string): never => {
   throw new ContainmentError(message);
 };
-
-/** Is `candidate` at or under `root`? Both must already be real paths.
- *
- *  The separator is load-bearing: a bare `startsWith` would accept
- *  `/workspaces/web-api` as being inside `/workspaces/web`. */
-const within = (root: string, candidate: string) =>
-  candidate === root || candidate.startsWith(root.endsWith(sep) ? root : root + sep);
 
 /** Describe a path the way the person who wrote the symlink would recognise it. */
 const describe = (root: string, path: string) => relative(root, path) || ".";
@@ -75,7 +81,7 @@ export const resolveWithin = (root: string, target: string): string => {
         `one whose target was removed while the spec was being snapshotted`,
     );
   }
-  if (!within(root, real))
+  if (!isWithin(root, real))
     return fail(
       `'${describe(root, target)}' resolves to '${real}', which is outside ` +
         `'${root}'. A devcontainer config may only reference files within its ` +

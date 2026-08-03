@@ -1,9 +1,11 @@
 // policy.ts -- the spec policy the broker enforces before starting a project.
 //
 // Pure and side-effect free (so it's easy to test)
+import { posix } from "node:path";
 import type { ResolvedSpec } from "./devcontainer.ts";
 import { volumeNamespace } from "./projects.ts";
 import {
+  isWithin,
   type ItemFromSet,
   type JSONValue,
   nonNullObject,
@@ -336,6 +338,40 @@ const helpers = {
 
     return helpers.refuseForeignVolume(payload, mounted, origin);
   },
+  /**
+   * The directory the CLI resolves this spec's relative paths against.
+   *
+   * Ground truth, from `read-configuration`, for the same reason the rest of
+   * this file enforces on `mergedConfiguration`: deriving it here would be a
+   * guess about which layout the CLI picked, and the CLI is the one that
+   * resolves `build.context`. It cannot be spoofed by writing `configFilePath`
+   * into devcontainer.json -- the CLI overwrites the key with the path it
+   * actually read (measured on @devcontainers/cli 0.88.0) -- and it is checked
+   * against the project anyway, so a future CLI that stopped overwriting it
+   * would fail closed here rather than open somewhere else.
+   */
+  configDirectory: ({ read, project, workspaces }: Payload) => {
+    const declared = read<{ fsPath?: string }>("configFilePath") ?? null;
+    const file =
+      nonNullObject(declared) && typeof declared.fsPath === "string"
+        ? declared.fsPath
+        : undefined;
+
+    if (!file)
+      return fail`
+        internal: the resolved spec does not say which file the CLI read
+        ("configFilePath"), so there is no way to tell what a relative
+        "build.context" would resolve to -- refusing to approve it`;
+
+    const directory = posix.dirname(file);
+    const root = posix.join(workspaces, project);
+    if (!isWithin(root, directory))
+      return fail`
+        internal: the CLI read this project's configuration from '${file}',
+        which is outside '${root}' -- refusing to approve it`;
+
+    return { directory, root };
+  },
   runArgs: {
     /**
      * Parse the name of an arg, and extract it's inline value (e.g. flag=value)
@@ -472,6 +508,44 @@ const checks = {
         return fail`--tmpfs '${value}' must be an absolute in-container path`;
     }
   },
+  buildPathsStayInOwnProject: (payload) => {
+    const { read } = payload;
+
+    const build = read<{ context?: string; dockerfile?: string }>("build") ?? null;
+    const declared: [key: string, value: JSONValue | undefined][] = [
+      ["build.context", nonNullObject(build) ? build.context : undefined],
+      ["build.dockerfile", nonNullObject(build) ? build.dockerfile : undefined],
+      // The pre-"build" spelling. The CLI still accepts it, and a rule that
+      // only knew the modern one would be a rule with a synonym for a bypass.
+      ["context", read("context")],
+      ["dockerFile", read("dockerFile")],
+    ];
+
+    if (declared.every(([, value]) => value === undefined)) return;
+
+    const { directory, root } = helpers.configDirectory(payload);
+
+    for (const [key, value] of declared) {
+      if (value === undefined) continue;
+      if (typeof value !== "string")
+        return fail`"${key}" must be a string (got ${typeof value})`;
+
+      // The CLI resolves these against the directory the config was READ from
+      // -- the live project, not the snapshot -- so ".." is the project root
+      // for a .devcontainer/ layout and /workspaces for a flat one. Both are
+      // spelled the same way in the file, which is why the base comes from the
+      // CLI rather than from a guess about the layout.
+      const resolved = posix.resolve(directory, value);
+      if (!isWithin(root, resolved))
+        return fail`
+          "${key}" is '${value}', which resolves to '${resolved}' -- outside
+          this project's folder ('${root}'). The build context is read from
+          disk and shipped to the daemon, so a path that leaves the project
+          copies somebody else's files into an image this project owns:
+          '"context": "../.."' is every sibling project's source code. Keep
+          build inputs inside the project.`;
+    }
+  },
   workspaceMountIsOwnFolder: ({ read, project, workspaces }) => {
     const declared = read("workspaceMount");
     if (!declared) return;
@@ -538,5 +612,6 @@ export function enforcePolicy(
   checks.securityOptKeepsTheSandbox();
   checks.mountsStayInOwnNamespace();
   checks.runArgsOnAllowlist();
+  checks.buildPathsStayInOwnProject();
   checks.workspaceMountIsOwnFolder();
 }

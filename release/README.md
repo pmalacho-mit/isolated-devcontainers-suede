@@ -395,6 +395,10 @@ earlier version of this policy; each now has a named regression test in
   while `--network host`, `--net=host`, `--pid=container:<id>`, `--uts=host`
   and `--cgroupns=host` all sailed through. Unknown flags are now refused.
 - **`workspaceMount`**, if present, must bind exactly this project's own folder.
+- **`build.context` and `build.dockerfile` must stay inside the project** (and
+  the legacy top-level `context` / `dockerFile` with them). `"context": "../.."`
+  built an image containing a sibling project's file -- see "A project may only
+  reach its own folder" below.
 - **`appPort` is refused** (it collides with the relay bind).
 - **Privilege must be opted into explicitly**, in the project's own file:
   `"customizations": {"desolate": {"allowPrivileged": true}}`. The
@@ -407,23 +411,49 @@ can write, and the container is started from that copy (`--override-config`).
 Without it the editor could swap the file between the check and the start, and
 the check would be decorative.
 
-Snapshotting the whole `.devcontainer/` directory means **following its
-symlinks**, and that happens in the orchestrator -- the one container holding
-the inner Docker socket. So every link must resolve to somewhere inside the
-project:
+### A project may only reach its own folder
+
+Two separate rules, because the CLI reads two different trees, and neither is
+visible as a *key* in devcontainer.json -- both are paths underneath one.
+
+**Build inputs.** `build.context` and `build.dockerfile` must resolve inside
+the project. They are resolved by the CLI against the directory it read the
+config from, which is the **live** project folder -- `--override-config`
+changes which JSON is read, not where relative paths point. So:
+
+```jsonc
+// .devcontainer/devcontainer.json
+{ "build": { "dockerfile": "Dockerfile", "context": ".." } }     // fine: the repo root
+{ "build": { "dockerfile": "Dockerfile", "context": "../.." } }  // refused
+```
+
+The second one is `/workspaces` -- every sibling project's source code, shipped
+to the daemon as a build context, where one `COPY victim/secrets.env /` in the
+project's own Dockerfile collects it. That was demonstrated against a real
+daemon before the rule existed; `tests/integration/broker` runs it. The same
+applies to `dockerfile` (`../../Dockerfile.evil` also built), to the legacy
+top-level `context` / `dockerFile` spellings, and -- enforced by the CLI itself
+rather than by us -- to local `features` paths, which must be children of
+`.devcontainer/`.
+
+**Snapshot symlinks.** Freezing the spec means *following* the project's
+symlinks, in the orchestrator, so every link in `.devcontainer/` must resolve
+inside the project:
 
 ```
 myproject/.devcontainer/key -> ../../../root/.ssh/id_ed25519   # refused
 myproject/.devcontainer/Dockerfile -> ../Dockerfile            # fine
 ```
 
-The first is not a policy question -- every key in that project's
-devcontainer.json is legal. It is a file read performed by the orchestrator on
-the project's behalf, landing in the build context, where a `COPY key /` in the
-project's own Dockerfile collects it. Links that stay inside the project are
-still dereferenced, so the snapshot holds real files rather than paths back
-into editor-writable state. A link to a *sibling project* is refused too: that
-is someone else's trust domain.
+Measured on `@devcontainers/cli` 0.88.0, the first one does not reach an image
+today -- the snapshot is not the build context, and BuildKit refuses to follow
+a symlink out of a context. It is refused anyway: the orchestrator should not
+be a file-read oracle for a project, a "frozen copy of the project" holding
+`/root`'s private key is not one, and the day the snapshot *does* become the
+build context that read turns into an escape. Links that stay inside are still
+dereferenced, so the copy holds real files rather than paths back into
+editor-writable state. A link to a *sibling project* is refused too: that is
+someone else's trust domain.
 
 `preflight.sh` asserts the separation holds: the editor must _fail_ to reach a
 daemon, must not mount the socket volume, and the broker socket must be
