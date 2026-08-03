@@ -155,14 +155,39 @@ class DesolateProxy:
             raw = raw.rsplit(":", 1)[0]
         return raw.lower()
 
-    def _network_allowed(self, host, method):
+    def _network_allowed(self, flow, proven, claimed, method):
+        """First matching rule wins, with ALLOW and DENY matched differently.
+
+        The secret path already refuses to decide on the Host header, because in
+        transparent mode the client picks the name and the IP independently:
+        connect to an attacker and claim any hostname you like. That reasoning
+        does not stop at secrets. A network allowlist that matched the claimed
+        name had the same hole -- `curl http://attacker/ -H 'Host: allowed.com'`
+        satisfied an allow rule while the packets went to the attacker -- which
+        matters precisely for the `default_action: "deny"` posture the README
+        recommends as hardening.
+
+        So the two actions match against different things:
+
+          ALLOW  only against a destination we can PROVE. The TLS SNI where
+                 there is one; otherwise the destination address itself, which
+                 the client cannot forge because it is where the packets went.
+          DENY   also against the name the client CLAIMED. Honouring a lying
+                 client here costs nothing -- the worst it achieves is denying
+                 itself -- and a deny rule that stopped matching plaintext
+                 would be a real loss.
+        """
+        provable = proven or flow.request.host
         for rule in self.network:
-            if not self._host_matches(host, [str(rule.get("host", "*")).lower()]):
-                continue
             m = rule.get("method")
             if m and m.upper() != method.upper():
                 continue
-            return rule.get("action", "deny") == "allow"
+            action = rule.get("action", "deny")
+            candidates = [provable] if action == "allow" else [provable, claimed]
+            pattern = [str(rule.get("host", "*")).lower()]
+            if not any(self._host_matches(c, pattern) for c in candidates if c):
+                continue
+            return action == "allow"
         return self.default_action == "allow"
 
     @staticmethod
@@ -231,10 +256,11 @@ class DesolateProxy:
         proven = self.proven_host(flow)
         claimed = self.host_header(flow)
 
-        # 1) network policy -- on the proven name where we have one.
-        policy_host = proven or claimed or flow.request.host
-        if not self._network_allowed(policy_host, method):
-            log.warning(f"DENY  {method} {policy_host}{flow.request.path} (network policy)")
+        # 1) network policy -- allow only on a destination we can prove.
+        if not self._network_allowed(flow, proven, claimed, method):
+            policy_host = proven or flow.request.host
+            log.warning(f"DENY  {method} {policy_host}{flow.request.path} "
+                        f"(claimed {claimed!r}) (network policy)")
             self._block(flow, 403, f"network policy denied {method} {policy_host}")
             return
 

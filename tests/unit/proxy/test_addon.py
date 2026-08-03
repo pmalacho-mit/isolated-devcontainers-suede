@@ -487,3 +487,88 @@ def test_E10e_undecodable_body_fails_closed(tmp_path):
     addon.response(f)
 
     assert blocked(f), "an undecodable response must not pass unscrubbed"
+
+
+# ===========================================================================
+# E11 -- network allowlist over plaintext
+# ===========================================================================
+
+def _deny_by_default(host_rules):
+    return {
+        "default_action": "deny",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]}},
+        "network": host_rules,
+        "scrub_responses": True,
+    }
+
+
+def test_E11_plaintext_host_spoof_does_not_satisfy_an_allow_rule(tmp_path):
+    """VERIFIED BYPASS: with `default_action: deny` and an allowlist -- the
+    hardening the README recommends -- a container reached any host at all by
+    connecting to it on :80 and claiming an allowlisted name. The allow rule
+    matched the Host header, which the client chooses independently of the IP
+    it dialled. Same bug the secret path fixed; it survived here."""
+    _, addon, _ = load_addon(tmp_path, settings=_deny_by_default(
+        [{"action": "allow", "host": "deb.debian.org"}]))
+    addon._maybe_reload()
+    f = make_flow(host_header="deb.debian.org", dest="203.0.113.7")  # no SNI => plaintext
+
+    addon.request(f)
+
+    assert blocked(f), "an unprovable destination must not satisfy an allow rule"
+
+
+def test_E11b_allow_rule_still_matches_a_proven_tls_destination(tmp_path):
+    _, addon, _ = load_addon(tmp_path, settings=_deny_by_default(
+        [{"action": "allow", "host": "api.openai.com"}]))
+    addon._maybe_reload()
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com")
+
+    addon.request(f)
+
+    assert not blocked(f)
+
+
+def test_E11c_plaintext_may_be_allowed_by_its_real_destination_address(tmp_path):
+    """The escape hatch for plaintext that genuinely must work under
+    default-deny: name the destination by address, which the client cannot
+    forge, rather than by a header it supplies."""
+    _, addon, _ = load_addon(tmp_path, settings=_deny_by_default(
+        [{"action": "allow", "host": "203.0.113.*"}]))
+    addon._maybe_reload()
+    f = make_flow(host_header="anything-at-all.example", dest="203.0.113.7")
+
+    addon.request(f)
+
+    assert not blocked(f)
+
+
+def test_E11d_deny_rules_still_match_the_claimed_name(tmp_path):
+    """A deny must keep matching what the client claimed. Honouring a lying
+    client costs nothing here -- the most it achieves is denying itself -- and a
+    deny rule that silently stopped covering plaintext would be a regression."""
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {},
+        "network": [{"action": "deny", "host": "telemetry.example.com"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    f = make_flow(host_header="telemetry.example.com", dest="203.0.113.9")
+
+    addon.request(f)
+
+    assert blocked(f)
+
+
+def test_E11e_shipped_default_still_allows_everything(tmp_path):
+    """The default settings ship `allow */default_action: allow`. This change
+    must not quietly tighten a stack nobody hardened -- `*` matches the
+    destination address as readily as a name."""
+    _, addon, _ = load_addon(tmp_path)  # the shipped-shape default settings
+    addon._maybe_reload()
+    f = make_flow(host_header="example.com", dest="203.0.113.9")
+
+    addon.request(f)
+
+    assert not blocked(f)
