@@ -407,6 +407,24 @@ can write, and the container is started from that copy (`--override-config`).
 Without it the editor could swap the file between the check and the start, and
 the check would be decorative.
 
+Snapshotting the whole `.devcontainer/` directory means **following its
+symlinks**, and that happens in the orchestrator -- the one container holding
+the inner Docker socket. So every link must resolve to somewhere inside the
+project:
+
+```
+myproject/.devcontainer/key -> ../../../root/.ssh/id_ed25519   # refused
+myproject/.devcontainer/Dockerfile -> ../Dockerfile            # fine
+```
+
+The first is not a policy question -- every key in that project's
+devcontainer.json is legal. It is a file read performed by the orchestrator on
+the project's behalf, landing in the build context, where a `COPY key /` in the
+project's own Dockerfile collects it. Links that stay inside the project are
+still dereferenced, so the snapshot holds real files rather than paths back
+into editor-writable state. A link to a *sibling project* is refused too: that
+is someone else's trust domain.
+
 `preflight.sh` asserts the separation holds: the editor must _fail_ to reach a
 daemon, must not mount the socket volume, and the broker socket must be
 present. `tests/integration/stack` goes further and runs the attacks from
@@ -1054,7 +1072,8 @@ VM's -- proof the escape reads nothing of the host.
   unix socket. Nothing is published to reach it.
 - `vscode-image/` -- one image, two roles. `broker.ts` (orchestrator: narrow
   request API, snapshotting and ground-truth resolution), `policy.ts` (the spec
-  policy itself -- pure and unit-tested), `desolate-client.ts` (editor:
+  policy itself -- pure and unit-tested), `snapshot.ts` (the copy that freezes a
+  spec, refusing any symlink that leaves the project), `desolate-client.ts` (editor:
   `desolate`), `desolate.ts` (the real runner, `desolate-run`, orchestrator
   only), and `newrepo.ts` (per-repo deploy keys; git only, no daemon needed).
 - `tests/` -- static invariants, unit tests and integration tests, including a

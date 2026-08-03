@@ -26,14 +26,18 @@ Four things make that validation sound:
     --override-config. Without this the editor could swap the file between
     the check and the start (i.e., a TOCTOU attack).
 
+  - CONTAINMENT. Making that copy means following the project's symlinks, in
+    the container that holds the inner Docker socket. Every one of them must
+    resolve inside the project (see snapshot.ts), or a committed
+    `.devcontainer/key -> ../../../root/.ssh/id_ed25519` would be copied into
+    the build context and `COPY key /` would do the rest.
+
   - FAIL CLOSED. Anything we cannot resolve, parse or classify is refused.
 */
 /// <reference types="node" />
 import { spawn } from "node:child_process";
 import {
   chmodSync,
-  cpSync,
-  copyFileSync,
   realpathSync,
   statSync,
   existsSync,
@@ -46,6 +50,7 @@ import { join, dirname } from "node:path";
 import { resolveSpec } from "./devcontainer.ts";
 import { list as listProjects, volumeNamespace } from "./projects.ts";
 import { enforcePolicy, PolicyError } from "./policy.ts";
+import { snapshotDirectory, snapshotFile } from "./snapshot.ts";
 import type { Flags } from "./args.ts";
 import { identity, noop } from "./utils.ts";
 
@@ -208,15 +213,18 @@ const spec = {
 
     if (existsSync(join(dotDir, "devcontainer.json"))) {
       // The whole directory: the CLI resolves `build.dockerfile` and
-      // `build.context` relative to the config file. `dereference` because a
-      // symlink out of the project would still point at editor-writable state.
-      cpSync(dotDir, dest, { recursive: true, dereference: true });
+      // `build.context` relative to the config file. Symlinks are dereferenced,
+      // because one into editor-writable state would still be a live file at
+      // build time -- and refused when they leave the project, because this
+      // copy runs in the orchestrator and becomes the build context, so a link
+      // to /root/.ssh would otherwise be copied into the project's own image.
+      snapshotDirectory(base, dotDir, dest);
       const file = join(dest, "devcontainer.json");
       if (!existsSync(file)) throw new Error("no devcontainer.json in project");
       return file;
     }
     if (existsSync(flat)) {
-      copyFileSync(flat, join(dest, "devcontainer.json"));
+      snapshotFile(base, flat, join(dest, "devcontainer.json"));
       return join(dest, "devcontainer.json");
     }
     throw new Error("no devcontainer.json in project");

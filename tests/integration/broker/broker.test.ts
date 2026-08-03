@@ -481,6 +481,57 @@ describe("a legitimate project starts, from a frozen copy", () => {
     );
   });
 
+  test("a symlink out of the project never reaches the snapshot", async () => {
+    // The spec policy cannot see this one: every key in the devcontainer.json
+    // below is legal. The theft is in the filesystem underneath it -- the
+    // snapshot dereferences the link, in the container holding the inner
+    // Docker socket, and the snapshot IS the build context, so `COPY key /`
+    // in the project's own Dockerfile finishes the job.
+    const secret = path.join(tmp, "orchestrator-private-key");
+    fs.writeFileSync(secret, "PRIVATE KEY MATERIAL");
+    project(
+      "link-out",
+      JSON.stringify({
+        build: { dockerfile: "Dockerfile" },
+      }),
+      { ".devcontainer/Dockerfile": "FROM alpine:3\nCOPY key /\n" },
+    );
+    fs.symlinkSync(
+      secret,
+      path.join(workspaces, "link-out", ".devcontainer", "key"),
+    );
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "link-out" });
+    assert.equal(result(msgs).ok, false, "a link out of the project was copied");
+    assert.match(errorOf(msgs), /outside/);
+    assert.deepEqual(runnerInvocations(), [], "the runner was invoked anyway");
+    const leaked = path.join(specDir, "link-out", "key");
+    assert.ok(!fs.existsSync(leaked), `${leaked} holds the orchestrator's file`);
+  });
+
+  test("a symlink INSIDE the project is still dereferenced, not refused", async () => {
+    // The rule has to leave the legitimate idiom alone, or projects work around
+    // it by inlining and nobody notices when the check is dropped.
+    project(
+      "link-in",
+      JSON.stringify({ build: { dockerfile: "Dockerfile" } }),
+      { "Dockerfile": "FROM alpine:3\n" },
+    );
+    fs.symlinkSync(
+      "../Dockerfile",
+      path.join(workspaces, "link-in", ".devcontainer", "Dockerfile"),
+    );
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "link-in" });
+    assert.equal(result(msgs).ok, true, errorOf(msgs));
+    const copy = path.join(specDir, "link-in", "Dockerfile");
+    assert.equal(fs.readFileSync(copy, "utf8"), "FROM alpine:3\n");
+    assert.ok(
+      !fs.lstatSync(copy).isSymbolicLink(),
+      "the snapshot kept a link, so it still points at editor-writable state",
+    );
+  });
+
   test("local features are snapshotted too, not just the json", async () => {
     // A config can point at ./myfeature, whose metadata carries privilege of
     // its own. Freezing only devcontainer.json would leave that swappable.

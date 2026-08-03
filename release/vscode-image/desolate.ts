@@ -56,6 +56,7 @@ import {
   mintToken,
 } from "./editor.ts";
 import * as relay from "./relays.ts";
+import { snapshotDirectory } from "./snapshot.ts";
 import {
   allocatePorts,
   ownRelayPorts,
@@ -476,7 +477,11 @@ function deriveRunConfig(
 
   const srcDir = path.dirname(src);
   if (config || path.basename(srcDir) === ".devcontainer")
-    fs.cpSync(srcDir, out, { recursive: true, dereference: true });
+    // Same containment rule as the broker's snapshot, and for the same reason:
+    // this copy becomes the build context, and this process holds the inner
+    // daemon. Via the broker `srcDir` IS the (already checked) snapshot, so the
+    // boundary is that directory; run directly, it is the project's own folder.
+    snapshotDirectory(config ? srcDir : dir, srcDir, out);
 
   const file = `${out}/devcontainer.json`;
   fs.writeFileSync(file, JSON.stringify(spec, null, 2));

@@ -20,7 +20,7 @@ fi
 
 group "typescript parses"
 if node -e 'process.exit(process.versions.node.split(".").map(Number)[0] >= 22 ? 0 : 1)' 2>/dev/null; then
-  for f in policy.ts broker.ts desolate.ts desolate-client.ts newrepo.ts; do
+  for f in policy.ts broker.ts snapshot.ts desolate.ts desolate-client.ts newrepo.ts; do
     # --check parses and strips types without executing.
     assert_ok "node --check vscode-image/$f" node --check "$RELEASE/vscode-image/$f"
   done
