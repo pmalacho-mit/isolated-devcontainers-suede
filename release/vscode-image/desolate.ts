@@ -701,18 +701,9 @@ function recreateRelays(project: string, dir: string, map: PortMap): void {
  * Is the project's editor answering? Asked THROUGH the project's own relay,
  * from inside it.
  *
- * This was `fetch("http://dind:<port>/")`, which needed an IP path from the
- * editor world to the container world. That path is precisely what containment
- * is supposed to remove -- and on a VM without br_netfilter it was never
- * filtered, so the probe worked only because the wall was down. Making the wall
- * real (either by loading br_netfilter or by splitting the bridges) breaks the
- * probe, which is why the probe has to stop needing it.
- *
  * `docker exec` reaches the relay over the inner daemon's unix socket, crossing
- * no bridge at all, and lands on the far side of the wall by design. It also
- * tests strictly more of the chain than the old probe did: socat's listener,
- * socat's dial, and the editor answering -- everything except the two pure
- * docker publishes that carry the Mac's traffic in.
+ * no bridge at all, and lands on the far side of the wall by design. It tests
+ * everything except the two pure docker publishes that carry the Mac's traffic in.
  */
 function probeEditor(project: string, port: number): boolean {
   const config = { retries: 5, gapMs: 1000 } as const;
