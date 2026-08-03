@@ -1,458 +1,596 @@
 // policy.ts -- the spec policy the broker enforces before starting a project.
 //
-// Pure and side-effect free ON PURPOSE: everything here is a function of its
-// arguments, so tests/unit/broker exercises it without docker, without the
-// devcontainer CLI, and without a running stack.
-//
-// ---------------------------------------------------------------------------
-// WHY THIS FILE EXISTS
-// ---------------------------------------------------------------------------
-// The editor container can write any /workspaces/<proj>/.devcontainer/
-// devcontainer.json and then ask the broker to start that project. So every
-// containment property of the stack that is NOT enforced by the kernel is
-// enforced here. Five classes of escape were demonstrated against the previous
-// version of this policy (see tests/unit/broker/policy.test.ts, which keeps a
-// regression case for each):
-//
-//   1. initializeCommand    -- runs on the machine driving the CLI, i.e. INSIDE
-//                              the orchestrator, with DOCKER_HOST set. Arbitrary
-//                              code execution against the inner daemon.
-//   2. dockerComposeFile    -- compose-mode projects declare privileged / pid:
-//                              host / network_mode: host / "/:/host" in the
-//                              compose file, which the old policy never read.
-//   3. features             -- a devcontainer feature's own metadata injects
-//                              privileged, capAdd, securityOpt and mounts. The
-//                              old policy only looked at top-level keys.
-//   4. JSONC divergence     -- a regex comment-stripper disagreed with the real
-//                              parser, so `mounts` could be visible to the CLI
-//                              and invisible to the policy.
-//   5. runArgs denylist     -- "--network=host" was refused but "--network host",
-//                              "--net=host" and "--pid=container:x" were not.
-//
-// The corresponding structural answers, in the same order: refuse the key;
-// refuse the mode; enforce on the CLI's own mergedConfiguration; use a real
-// JSONC scanner; allowlist instead of denylist.
+// Pure and side-effect free (so it's easy to test)
+import type { ResolvedSpec } from "./devcontainer.ts";
+import { volumeNamespace } from "./projects.ts";
+import {
+  type ItemFromSet,
+  type JSONValue,
+  nonNullObject,
+  readonlySet,
+} from "./utils.ts";
 
-// ---------------------------------------------------------------------------
-// JSONC
-// ---------------------------------------------------------------------------
-/**
- * Strip JSONC comments and trailing commas with a real scanner.
- *
- * The previous implementation was two regexes. It disagreed with the parser the
- * devcontainer CLI actually uses, and the disagreement was exploitable: a `/*`
- * inside a *string* opened a comment for the stripper but not for the CLI, so
- * everything up to the next `*\/` -- including a whole `"mounts"` line --
- * vanished from the policy's view while the CLI still honoured it.
- *
- * A scanner cannot have that class of bug, because it tracks string state.
- */
-export function stripJsonc(text: string): string {
-  let out = "";
-  let i = 0;
-  const n = text.length;
+const allowlist = (() => {
+  /** Flags that take a value (either "--flag v" or "--flag=v"). */
+  const values = new Set([
+    "--cap-drop",
+    "--security-opt",
+    "--pids-limit",
+    "--memory",
+    "-m",
+    "--memory-swap",
+    "--memory-reservation",
+    "--cpus",
+    "--cpu-shares",
+    "--cpuset-cpus",
+    "--shm-size",
+    "--ulimit",
+    "--hostname",
+    "-h",
+    "--env",
+    "-e",
+    "--workdir",
+    "-w",
+    "--user",
+    "-u",
+    "--stop-signal",
+    "--stop-timeout",
+    "--tmpfs",
+  ] as const);
 
-  while (i < n) {
-    const c = text[i];
-
-    // Inside a string: copy verbatim through the closing quote, honouring
-    // backslash escapes. Comment starts are just characters in here.
-    if (c === '"') {
-      out += c;
-      i++;
-      while (i < n) {
-        if (text[i] === "\\" && i + 1 < n) { out += text[i] + text[i + 1]; i += 2; continue; }
-        out += text[i];
-        if (text[i] === '"') { i++; break; }
-        i++;
-      }
-      continue;
-    }
-
-    if (c === "/" && text[i + 1] === "/") {
-      while (i < n && text[i] !== "\n") i++;          // drop to end of line
-      continue;
-    }
-
-    if (c === "/" && text[i + 1] === "*") {
-      i += 2;
-      while (i < n && !(text[i] === "*" && text[i + 1] === "/")) i++;
-      i += 2;                                          // skip the closing */
-      continue;
-    }
-
-    out += c;
-    i++;
-  }
-
-  // Trailing commas: JSONC allows them, JSON.parse does not. Only reached
-  // outside strings because the loop above already consumed string bodies --
-  // but we re-scan defensively rather than regexing over raw text.
-  return removeTrailingCommas(out);
-}
-
-function removeTrailingCommas(text: string): string {
-  let out = "";
-  let i = 0;
-  const n = text.length;
-  while (i < n) {
-    const c = text[i];
-    if (c === '"') {
-      out += c; i++;
-      while (i < n) {
-        if (text[i] === "\\" && i + 1 < n) { out += text[i] + text[i + 1]; i += 2; continue; }
-        out += text[i];
-        if (text[i] === '"') { i++; break; }
-        i++;
-      }
-      continue;
-    }
-    if (c === ",") {
-      let j = i + 1;
-      while (j < n && /\s/.test(text[j])) j++;
-      if (text[j] === "}" || text[j] === "]") { i++; continue; }   // drop the comma
-    }
-    out += c;
-    i++;
-  }
-  return out;
-}
-
-/** Parse a devcontainer.json (JSONC). Throws on anything unparseable. */
-export function parseJsonc(text: string): any {
-  return JSON.parse(stripJsonc(text));
-}
-
-// ---------------------------------------------------------------------------
-// runArgs: ALLOWLIST
-// ---------------------------------------------------------------------------
-// A denylist has to enumerate every spelling of every dangerous flag, and
-// docker accepts many: --network=host, --network host, --net=host, --net host,
-// --pid=container:<id>, --uts=host, --cgroupns=host ... all of which the old
-// denylist let through. An allowlist fails the other way: an unknown flag is
-// refused, and adding one is a reviewed change to this file.
-
-/** Flags that take a value (either "--flag v" or "--flag=v"). */
-export const RUNARG_VALUE_FLAGS = new Set([
-  "--cap-drop",
-  "--security-opt",
-  "--pids-limit",
-  "--memory", "-m", "--memory-swap", "--memory-reservation",
-  "--cpus", "--cpu-shares", "--cpuset-cpus",
-  "--shm-size",
-  "--ulimit",
-  "--label", "-l",
-  "--hostname", "-h",
-  "--env", "-e",
-  "--workdir", "-w",
-  "--user", "-u",
-  "--stop-signal",
-  "--stop-timeout",
-  "--tmpfs",
-]);
-
-/** Flags that take no value. */
-export const RUNARG_BOOL_FLAGS = new Set([
-  "--read-only",
-  "--init",
-  "--interactive", "-i",
-  "--tty", "-t",
-]);
-
-// --security-opt exists to HARDEN (no-new-privileges:true). These values undo
-// the sandbox instead, so they are refused even though the flag is allowed.
-const SECURITY_OPT_DENY = [
-  /unconfined/i,          // seccomp=unconfined, apparmor=unconfined
-  /label\s*=\s*disable/i, // SELinux off
-  /^seccomp\s*=\s*[./]/i, // a profile loaded from a project-writable path
-];
-
-// ---------------------------------------------------------------------------
-// Mounts
-// ---------------------------------------------------------------------------
-/**
- * The docker-in-docker feature mounts a volume for the nested daemon's
- * /var/lib/docker, named dind-var-lib-docker-<devcontainerId>. That name is
- * outside the project's namespace and the feature -- not the project -- picks
- * it, so the namespace rule cannot see it as legitimate.
- *
- * It is allowed only for projects that opted into privileged mode (see
- * allowPrivileged below), because docker-in-docker implies that opt-in anyway.
- * This is a CODE-level allowance, not a project-controlled one.
- */
-const FEATURE_VOLUME_ALLOW = [/^dind-var-lib-docker-/];
+  return {
+    runargs: {
+      values: readonlySet(values),
+      bools: readonlySet(
+        new Set([
+          "--read-only",
+          "--init",
+          "--interactive",
+          "-i",
+          "--tty",
+          "-t",
+        ] as const),
+      ),
+      deny: {
+        "--security-opt": [
+          /unconfined/i, // seccomp=unconfined, apparmor=unconfined
+          /label\s*=\s*disable/i, // SELinux off
+          /^seccomp\s*=\s*[./]/i, // a profile loaded from a project-writable path
+        ],
+      } satisfies Partial<Record<ItemFromSet<typeof values>, RegExp[]>>,
+    },
+    featureVolumes: [
+      /**
+       * The docker-in-docker feature mounts volumes for the nested daemon's state:
+       * dind-var-lib-docker-<devcontainerId> for /var/lib/docker, and
+       * dind-var-lib-containerd-<devcontainerId> for /var/lib/containerd.
+       *
+       * The `-<devcontainerId>` suffix is what keeps this safe: the CLI substitutes a
+       * value it derives from the workspace folder, so one project cannot name
+       * another's. The trailing `-` is therefore load-bearing -- a bare
+       * `dind-var-lib-docker` (no suffix) is NOT this feature's volume and stays
+       * refused.
+       */
+      ...[/^dind-var-lib-docker-/, /^dind-var-lib-containerd-/],
+    ],
+    /** Avoid dangerous mounts like:
+     * - `volume-driver=local`
+     * - `volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/` */
+    mountFields: {
+      type: ["type"],
+      source: ["source", "src"],
+      target: ["target", "dst", "destination"],
+      readonly: ["readonly", "ro"],
+      consistency: ["consistency"],
+    } as const,
+  } as const;
+})();
 
 /** The read-only public proxy CA. Injected by desolate, never by a project --
  *  but tolerated in project config so a copied devcontainer.json is not a
  *  confusing hard failure. Nothing secret lives there (public cert only). */
 const CA_BIND_SOURCE = "/desolate-ca";
 
-/** A project name usable as a docker object name.
- *
- *  Projects may be nested one level -- `owner/repo` -- so that repositories from
- *  different owners can share a repo name. Docker volume and container names
- *  cannot contain `/`, so everything that becomes a docker object goes through
- *  here, and both sides of the volume-namespace check below must use the SAME
- *  encoding or a project would fail to mount its own volumes.
- *
- *  `__` rather than `_`, so `a/b` and `a_b` do not collide. A directory named
- *  literally `a__b` still would; that is documented rather than defended
- *  against, because project names come from directories a human made. */
-export const volumeNamespace = (project: string): string => project.replace(/\//g, "__");
-
-/** Split "source=x,target=y,type=volume" into a field map. */
-export function parseMountSpec(spec: string): Record<string, string> {
-  return Object.fromEntries(
-    spec.split(",").map(kv => {
-      const i = kv.indexOf("=");
-      return i < 0 ? [kv.trim(), ""] : [kv.slice(0, i).trim(), kv.slice(i + 1).trim()];
-    }),
-  );
+interface NormalMount {
+  type: string;
+  source: string;
+  target: string;
+  raw: string;
 }
 
-interface NormalMount { type: string; source: string; target: string; raw: string }
+type MountField = keyof (typeof allowlist)["mountFields"];
 
-/** devcontainer.json accepts mounts as strings OR objects; normalise both. */
-export function normalizeMount(m: unknown): NormalMount {
-  if (typeof m === "string") {
-    const f = parseMountSpec(m);
+export const mount = {
+  aliases: new Map(
+    Object.entries(allowlist.mountFields).flatMap(([canonical, spellings]) =>
+      spellings.map((spelling) => [spelling, canonical as MountField] as const),
+    ),
+  ) as ReadonlyMap<string, MountField>,
+  /**
+   * Split "source=x,target=y,type=volume" into a field map keyed by CANONICAL
+   * name, refusing any field docker understands and this policy does not.
+   *
+   * @throws PolicyError on an unknown, unparseable or quoted field.
+   */
+  parse: (spec: string): Partial<Record<MountField, string>> => {
+    if (spec.includes('"'))
+      fail`
+        mount '${spec}' contains a double quote. Docker parses a --mount as CSV,
+        where a quoted field may contain the comma this policy reads as a field
+        separator -- so the two would not necessarily see the same mount.
+        Refusing rather than parsing it a second way.`;
+
+    const fields: Partial<Record<MountField, string>> = {};
+
+    for (const field of spec.split(",")) {
+      const index = field.indexOf("=");
+      const spelling = (index < 0 ? field : field.slice(0, index))
+        .trim()
+        .toLowerCase();
+
+      if (!spelling)
+        return fail`
+          mount '${spec}' has an empty field (a stray or trailing comma).
+          Refusing rather than guessing which field was meant.`;
+
+      const canonical = mount.aliases.get(spelling);
+      if (!canonical)
+        return fail`
+          mount field '${spelling}' (in '${spec}') is not on the allowlist.
+          Allowed: ${[...mount.aliases.keys()].sort().join(" ")}.
+          (Driver and driver-option fields are deliberately absent: they can
+          turn a volume named inside this project's namespace into a bind mount
+          of the inner daemon's filesystem, where every other project lives.)`;
+
+      // Last wins, as docker does.
+      fields[canonical] = index < 0 ? "" : field.slice(index + 1).trim();
+    }
+
+    return fields;
+  },
+  /** devcontainer.json accepts mounts as strings OR objects; normalize both.
+   *
+   *  The object branch reads `type`/`source`/`target` and nothing else, because
+   *  that is exactly what the CLI rebuilds an object mount from. A `src` key on
+   *  an object is dropped by the CLI, so reading it here would have this policy
+   *  approving a mount docker never receives.
+   *
+   *  @throws PolicyError if a string mount cannot be parsed (see `parse`). */
+  normalize: (query: unknown): NormalMount => {
+    if (typeof query === "string") {
+      const fields = mount.parse(query);
+      return {
+        type: fields.type ?? "",
+        source: fields.source ?? "",
+        target: fields.target ?? "",
+        raw: query,
+      };
+    }
+    const obj = (query ?? {}) as Record<string, unknown>;
     return {
-      type: f["type"] ?? "",
-      source: f["source"] ?? f["src"] ?? "",
-      target: f["target"] ?? f["dst"] ?? f["destination"] ?? "",
-      raw: m,
+      type: String(obj.type ?? ""),
+      source: String(obj.source ?? ""),
+      target: String(obj.target ?? ""),
+      raw: JSON.stringify(query),
     };
-  }
-  const o = (m ?? {}) as Record<string, unknown>;
-  return {
-    type: String(o.type ?? ""),
-    source: String(o.source ?? o.src ?? ""),
-    target: String(o.target ?? o.dst ?? o.destination ?? ""),
-    raw: JSON.stringify(m),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Policy input
-// ---------------------------------------------------------------------------
-export interface ResolvedSpec {
-  /** The raw devcontainer.json, parsed by the SAME parser the CLI uses --
-   *  in production this is `devcontainer read-configuration`'s .configuration. */
-  configuration: any;
-  /** `.mergedConfiguration` from `read-configuration --include-merged-configuration`:
-   *  the project's config with every feature's metadata merged in. This is
-   *  where feature-injected privileged/capAdd/securityOpt/mounts show up, and
-   *  enforcing on it is what makes feature escapes impossible rather than
-   *  merely inconvenient. */
-  mergedConfiguration?: any;
-}
-
-export interface PolicyOptions {
-  workspaces?: string;
-  /** Every project directory currently under `workspaces`, used to settle
-   *  volume-namespace collisions. Optional so the policy stays pure and
-   *  testable; when absent the prefix rule alone applies, which is the old
-   *  (looser) behaviour. The broker always supplies it. */
-  projects?: string[];
-}
+  },
+  identity: ({ type, source, target }: NormalMount) =>
+    `${type}|${source}|${target}`,
+  requiresOwnership: (project: string, { source }: NormalMount) => {
+    const namespace = volumeNamespace(project);
+    return source === namespace || source.startsWith(`${namespace}-`);
+  },
+  /** Which project owns this volume name.
+   *
+   *  A bare prefix test is not enough, because project names can prefix each
+   *  other: `web-api-secrets` starts with `web-`, so `web` would otherwise
+   *  reach the volume the README tells you to keep `web-api`'s password in.
+   *  The LONGEST matching claim wins, so `web-api` beats `web`. */
+  owner: (projects: string[], mounted: NormalMount) =>
+    projects
+      .filter((project) => mount.requiresOwnership(project, mounted))
+      .sort((a, b) => volumeNamespace(b).length - volumeNamespace(a).length)
+      .at(0),
+  /** The public proxy CA, which desolate injects into every project. */
+  isPublicCa: ({ type, source }: NormalMount) =>
+    type === "bind" && source === CA_BIND_SOURCE,
+  /** e.g. dind-var-lib-docker-<id>, for an opted-in docker-in-docker project. */
+  isFeatureVolume: ({ source }: NormalMount) =>
+    allowlist.featureVolumes.some((regex) => regex.test(source)),
+};
 
 export class PolicyError extends Error {}
 
-const fail = (msg: string): never => { throw new PolicyError(msg); };
+const format = {
+  /**
+   * Reflow a message written across source lines onto one line.
+   *
+   * Only the line breaks and the indentation that follows them are touched, so
+   * spacing the author wrote WITHIN a line -- around an interpolation, inside
+   * quotes -- survives verbatim.
+   * @param strings
+   * @param values
+   * @returns
+   */
+  single: Object.assign(
+    (strings: TemplateStringsArray, ...values: unknown[]) =>
+      strings
+        .reduce(
+          (result, current, index) =>
+            result + String(values[index - 1]) + current,
+        )
+        .replace(/\s*\n\s*/g, " ")
+        .trim(),
+    {
+      withLeadingSpace: (strings: TemplateStringsArray, ...values: unknown[]) =>
+        " " + format.single(strings, ...values),
+    },
+  ),
+};
+
+/**
+ * @throws A PolicyError witht the template strings formatted as a single line.
+ * @param strings
+ * @param values
+ */
+const fail = (strings: TemplateStringsArray, ...values: unknown[]): never => {
+  throw new PolicyError(format.single(strings, ...values));
+};
+
+const reader = ({ configuration, mergedConfiguration }: ResolvedSpec) => {
+  if (!nonNullObject(mergedConfiguration))
+    fail`
+      internal: the resolved spec carries no mergedConfiguration, so
+      feature-injected privilege, capabilities, and mounts are invisible --
+      refusing to approve it. There must've been an issue with
+      \`read-configuration --include-merged-configuration\`.`;
+
+  if (!nonNullObject(configuration))
+    fail`
+      internal: the resolved spec carries no configuration, so the keys a
+      project declared cannot be told apart from the ones a feature injected
+      -- refusing to approve it.`;
+
+  const read = <T extends JSONValue = JSONValue>(
+    key: string,
+  ): T | undefined => {
+    if (
+      mergedConfiguration[key] === undefined &&
+      configuration[key] !== undefined
+    )
+      return fail`
+        internal: this project declares "${key}", but the CLI's
+        \`mergedConfiguration\` does not carry it -- the merged shape has changed
+        (renamed or reshaped), so this policy would be enforcing on a key that
+        no longer exists. Refusing to approve it.`;
+
+    return mergedConfiguration[key] as T;
+  };
+
+  const desolate = (key: string) =>
+    nonNullObject(configuration.customizations) &&
+    "desolate" in configuration.customizations &&
+    nonNullObject(configuration.customizations.desolate)
+      ? configuration.customizations.desolate[key]
+      : undefined;
+
+  const asList = (value: JSONValue | undefined, key: string) => {
+    if (value === undefined || value === null) return [];
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string") return [value]; // as the CLI coerces it
+    return fail`"${key}" must be a string or an array (got ${typeof value})`;
+  };
+
+  return Object.assign(read, {
+    asList: <T extends JSONValue = JSONValue>(key: string) =>
+      asList(read(key), key) as T[],
+    /** Read value off configuration (instead of using merged, the source of truth) */
+    unsafe: Object.assign((key: string) => configuration[key], {
+      asList: <T extends JSONValue = JSONValue>(key: string) =>
+        asList(configuration[key], key) as T[],
+    }),
+    truthy: (key: string) => Boolean(read(key)),
+    /**
+     * desolate customizations are read from the raw configuration (unmerged)
+     */
+    desolate,
+  });
+};
+
+type Payload = Readonly<{
+  project: string;
+  workspaces: string;
+  projects: string[];
+  read: ReturnType<typeof reader>;
+  namespace: string;
+}>;
+
+const helpers = {
+  allowPrivileged: ({ read }: Pick<Payload, "read">) =>
+    read.desolate("allowPrivileged") === true,
+  disallowedSecurityOption: (option: string) =>
+    allowlist.runargs.deny["--security-opt"].some((regex) =>
+      regex.test(option),
+    ),
+  basename: (payloadOrProject: Pick<Payload, "project"> | string) =>
+    (typeof payloadOrProject === "string"
+      ? payloadOrProject
+      : payloadOrProject.project
+    )
+      .split("/")
+      .pop()!,
+  /**
+   * Refuse a volume outside the project's namespace, with the two hints that make
+   * the refusal actionable.
+   */
+  refuseForeignVolume: (
+    { project, namespace }: Pick<Payload, "project" | "namespace">,
+    mounted: NormalMount,
+    origin: string,
+  ): never => {
+    const basename = helpers.basename(project);
+
+    const nested = project.includes("/")
+      ? format.single.withLeadingSpace`
+          (a nested project '${project}' owns the '${namespace}' namespace, 
+          because docker names cannot contain '/')`
+      : "";
+
+    const suffix = mounted.source.startsWith(`${basename}-`)
+      ? mounted.source.slice(basename.length + 1)
+      : "data";
+
+    const idiom =
+      project.includes("/") &&
+      (mounted.source === basename || mounted.source.startsWith(`${basename}-`))
+        ? format.single.withLeadingSpace`
+            This looks like '\${localWorkspaceFolderBasename}', which expands to 
+            '${basename}' -- the last path segment only, so the owner is dropped 
+            and two owners' '${basename}' repos would both claim '${mounted.source}'. 
+            Name it explicitly instead: "source=${namespace}-${suffix},..."`
+        : "";
+
+    return fail`
+      volume '${mounted.source}' (requested by ${origin}) is outside this project's
+      namespace -- a project may only mount volumes named '${namespace}' or
+      '${namespace}-*'${nested}.${idiom}`;
+  },
+  ensureMountIsWithinNamespace: (
+    payload: Payload,
+    mounted: NormalMount,
+    fromFeature: boolean,
+  ) => {
+    const { project, projects, namespace } = payload;
+    const origin = fromFeature ? "a feature" : "this project";
+
+    if (mount.isPublicCa(mounted)) return;
+
+    if (mounted.type !== "volume")
+      return fail`
+        mount type '${mounted.type}' requested by ${origin} is not allowed
+        (volumes only -- a bind mount reaches the inner daemon's filesystem,
+        where every other project lives): ${mounted.raw}`;
+
+    if (mount.requiresOwnership(project, mounted)) {
+      const owner = mount.owner(projects, mounted);
+      if (owner === undefined || owner === project) return;
+
+      return fail`
+        volume '${mounted.source}' (requested by ${origin}) belongs to project
+        '${owner}', not '${project}' -- '${namespace}-*' also matches names that
+        start with '${namespace}-', and the longer project owns them`;
+    }
+
+    if (
+      fromFeature &&
+      helpers.allowPrivileged(payload) &&
+      mount.isFeatureVolume(mounted)
+    )
+      return;
+
+    return helpers.refuseForeignVolume(payload, mounted, origin);
+  },
+  runArgs: {
+    /**
+     * Parse the name of an arg, and extract it's inline value (e.g. flag=value)
+     * if it exists
+     * @param arg
+     * @returns
+     */
+    parse: (arg: string) => {
+      const equals = arg.indexOf("=");
+      return {
+        flag: equals >= 0 ? arg.slice(0, equals) : arg,
+        inline: equals >= 0 ? arg.slice(equals + 1) : undefined,
+      };
+    },
+    /**
+     * Read `runArgs` as the (flag, value) pairs it denotes, refusing any flag that
+     * is not on the allowlist and any allowed flag whose value is missing.
+     * @param args
+     * @throws if flag is not on allowlist or was provided incorrectly
+     * (e.g. a value flag with no value, or a boolean flag with a value)
+     */
+    *allowedPairs(args: string[]) {
+      const { values, bools } = allowlist.runargs;
+
+      for (let index = 0; index < args.length; index++) {
+        const arg = args[index];
+        if (!arg.startsWith("-"))
+          fail`
+            runArgs entry '${arg}' is not a flag; bare values are only allowed
+            immediately after an allowed value-taking flag`;
+
+        const { flag, inline } = helpers.runArgs.parse(arg);
+
+        if (bools.has(flag as ItemFromSet<typeof bools>)) {
+          if (inline !== undefined && !/^(true|false)$/i.test(inline))
+            fail`runArgs '${arg}' is not allowed (${flag} takes no value)`;
+          continue;
+        }
+
+        if (!values.has(flag as ItemFromSet<typeof values>))
+          fail`
+            runArgs flag '${flag}' is not on the allowlist. Allowed:
+            ${[...values, ...bools].sort().join(" ")}.
+            (Namespace, device, privilege and mount flags are deliberately absent
+            -- they would let a project out of its own container.)`;
+
+        if (inline !== undefined) {
+          yield { flag, value: inline };
+          continue;
+        }
+
+        const next = args[index + 1] ?? "";
+        if (next === "" || next.startsWith("-"))
+          fail`runArgs '${flag}' expects a value`;
+        index++; // the value is consumed here, so it is never read as a flag
+        yield { flag, value: next };
+      }
+    },
+  },
+};
+
+type Check = (payload: Payload) => void;
+
+const checks = {
+  noCompose: ({ read }) => {
+    if (read("dockerComposeFile") !== undefined)
+      return fail`
+        compose-based devcontainers ("dockerComposeFile") are not supported:
+        their privilege is declared in the compose file, which this policy
+        cannot validate. Use an image/Dockerfile devcontainer, and run compose
+        INSIDE it with the docker-in-docker feature.
+      `;
+  },
+  noInitializeCommand: ({ read }) => {
+    if (read("initializeCommand") !== undefined)
+      return fail`
+        "initializeCommand" is not allowed: it executes on the orchestrator (which holds
+        the inner Docker socket), not inside your container. Use
+        "postCreateCommand" / "onCreateCommand" instead -- those run in the container.`;
+  },
+  noBuildOptions: ({ read }) => {
+    if (read<{ options: any }>("build")?.options !== undefined)
+      return fail`"build.options" is not allowed (arbitrary docker build flags)`;
+  },
+  noAppPorts: ({ read }) => {
+    if (read("appPort") !== undefined)
+      return fail`Remove "appPort"; declare \`customizations.desolate.ports\` instead`;
+  },
+  privilegeMustBeExplicit: (payload) => {
+    if (payload.read.truthy("privileged"))
+      if (!helpers.allowPrivileged(payload))
+        return fail`
+          this spec requests a PRIVILEGED container (often pulled in by a
+          feature such as docker-in-docker). Privileged containers can reach
+          sibling projects' data on the inner daemon. 
+          If that is intended, declare it explicitly: 
+          "customizations": { "desolate": { "allowPrivileged": true } }`;
+  },
+  capAddsOnlyWhenPrivileged: (payload) => {
+    const capAdd = payload.read.asList("capAdd").map(String);
+    if (capAdd.length && !helpers.allowPrivileged(payload))
+      return fail`
+        capability additions are not allowed (requested: ${capAdd.join(", ")}).
+        Add them via an explicit allowPrivileged opt-in if genuinely required.`;
+  },
+  securityOptKeepsTheSandbox: ({ read }) => {
+    for (const option of read.asList("securityOpt").map(String))
+      if (helpers.disallowedSecurityOption(option))
+        return fail`securityOpt '${option}' is not allowed (it weakens the sandbox)`;
+  },
+  mountsStayInOwnNamespace: (payload) => {
+    const { read } = payload;
+
+    // Raw, not merged: whatever the merged view carries that the project did not
+    // write itself is a feature's, and only a feature gets the dind allowance.
+    const writtenByProject = new Set(
+      read.unsafe.asList("mounts").map(mount.normalize).map(mount.identity),
+    );
+
+    for (const mounted of read.asList("mounts").map(mount.normalize))
+      helpers.ensureMountIsWithinNamespace(
+        payload,
+        mounted,
+        !writtenByProject.has(mount.identity(mounted)),
+      );
+  },
+  runArgsOnAllowlist: ({ read }) => {
+    const args = read.asList("runArgs").map(String);
+    for (const { flag, value } of helpers.runArgs.allowedPairs(args)) {
+      if (flag === "--security-opt" && helpers.disallowedSecurityOption(value))
+        return fail`--security-opt '${value}' is not allowed (it weakens the sandbox)`;
+
+      if (flag === "--tmpfs" && !value.startsWith("/"))
+        return fail`--tmpfs '${value}' must be an absolute in-container path`;
+    }
+  },
+  workspaceMountIsOwnFolder: ({ read, project, workspaces }) => {
+    const declared = read("workspaceMount");
+    if (!declared) return;
+
+    const mounted = mount.normalize(declared);
+    const full = `${workspaces}/${project}`;
+    const fromWorkspaces = `${workspaces}/${helpers.basename(project)}`;
+
+    if (mounted.source !== full)
+      return fail`
+        workspaceMount must have source=${full} exactly (got
+        source='${mounted.source}') -- the source decides which of the inner
+        daemon's directories enters your container`;
+
+    if (mounted.target !== full && mounted.target !== fromWorkspaces) {
+      const options =
+        fromWorkspaces === full ? full : `${full} or ${fromWorkspaces}`;
+      return fail`
+        workspaceMount target must be ${options} (got target='${mounted.target}')`;
+    }
+  },
+} satisfies Record<string, Check>;
+
+const checker = (
+  ...[project, spec, workspaces, projects]: Parameters<typeof enforcePolicy>
+) => {
+  const namespace = volumeNamespace(project);
+  const read = reader(spec);
+  const payload: Payload = { project, workspaces, projects, namespace, read };
+  return Object.entries(checks).reduce(
+    (acc, [key, check]) => {
+      acc[key as keyof typeof checks] = check.bind(null, payload);
+      return acc;
+    },
+    {} as Record<keyof typeof checks, () => void>,
+  );
+};
 
 /**
  * Throws PolicyError with a specific reason if the project asks for anything
  * outside its own trust domain. Returns silently when the spec is acceptable.
+ * @param project // todo
+ * @param spec // todo
+ * @param workspaces //todo
+ * @param projects //todo
+ * @throws PolicyError with a specific reason if the project asks for anything
+ * outside its own trust domain.
+ * @returns nothing (when the spec is acceptable)
  */
 export function enforcePolicy(
   project: string,
   spec: ResolvedSpec,
-  opts: PolicyOptions = {},
+  workspaces: string,
+  projects: string[],
 ): void {
-  const WORKSPACES = opts.workspaces ?? "/workspaces";
-  const cfg = spec.configuration ?? {};
-  const merged = spec.mergedConfiguration ?? {};
+  const checks = checker(project, spec, workspaces, projects);
 
-  // -- 0. Modes we cannot police -------------------------------------------
-  // A compose-mode devcontainer's privilege lives in the compose file, which
-  // this policy does not read. Rather than pretend to validate it, refuse the
-  // mode: everything dangerous (privileged, pid: host, network_mode: host,
-  // "/:/host") is expressible there and none of it is visible here.
-  if (cfg.dockerComposeFile !== undefined) {
-    fail('compose-based devcontainers ("dockerComposeFile") are not supported: ' +
-         "their privilege is declared in the compose file, which this policy " +
-         "cannot validate. Use an image/Dockerfile devcontainer, and run compose " +
-         "INSIDE it with the docker-in-docker feature.");
-  }
-
-  // initializeCommand runs on the machine driving the devcontainer CLI. That
-  // machine is the orchestrator container, and it holds the inner daemon
-  // socket -- so this key is arbitrary code execution against the daemon the
-  // editor is not allowed to touch. The in-container lifecycle hooks
-  // (onCreate/updateContent/postCreate/postStart/postAttach) are fine and stay
-  // allowed: they run inside the project's own container.
-  for (const key of ["initializeCommand"]) {
-    if (cfg[key] !== undefined || merged[key] !== undefined) {
-      fail(`"${key}" is not allowed: it executes on the orchestrator (which holds ` +
-           `the inner Docker socket), not inside your container. Use ` +
-           `"postCreateCommand" / "onCreateCommand" instead -- those run in the container.`);
-    }
-  }
-
-  // Arbitrary flags to `docker build` (e.g. --network=host) are as good as
-  // arbitrary runArgs.
-  if (cfg.build?.options !== undefined) {
-    fail('"build.options" is not allowed (arbitrary docker build flags)');
-  }
-
-  // appPort makes the inner daemon publish inside dind's namespace, which is
-  // exactly where desolate's relays bind.
-  if (cfg.appPort !== undefined) {
-    fail('remove "appPort"; declare customizations.desolate.ports instead');
-  }
-
-  // -- 1. Privilege ---------------------------------------------------------
-  // Explicit opt-in, in the project's own config, because the docker-in-docker
-  // feature legitimately needs it. This is NOT a boundary against a compromised
-  // editor (which can write the opt-in itself) -- it exists so that privilege
-  // is never inherited SILENTLY from a third-party feature, and so that
-  // `git log` shows which projects are in the escalated tier.
-  const allowPrivileged = cfg.customizations?.desolate?.allowPrivileged === true;
-
-  if (merged.privileged === true || cfg.privileged === true) {
-    if (!allowPrivileged) {
-      fail("this spec requests a PRIVILEGED container (often pulled in by a " +
-           "feature such as docker-in-docker). Privileged containers can reach " +
-           "sibling projects' data on the inner daemon. If that is intended, " +
-           'declare it explicitly: "customizations": { "desolate": ' +
-           '{ "allowPrivileged": true } }');
-    }
-  }
-
-  const capAdd: string[] = [...(merged.capAdd ?? []), ...(cfg.capAdd ?? [])].map(String);
-  if (capAdd.length && !allowPrivileged) {
-    fail(`capability additions are not allowed (requested: ${capAdd.join(", ")}). ` +
-         "Add them via an explicit allowPrivileged opt-in if genuinely required.");
-  }
-
-  for (const so of [...(merged.securityOpt ?? []), ...(cfg.securityOpt ?? [])].map(String)) {
-    if (SECURITY_OPT_DENY.some(re => re.test(so))) {
-      fail(`securityOpt '${so}' is not allowed (it weakens the sandbox)`);
-    }
-  }
-
-  // -- 2. Mounts ------------------------------------------------------------
-  // Enforced over the MERGED mount list, so a feature cannot smuggle one in.
-  const projectMounts = (cfg.mounts ?? []).map(normalizeMount);
-  const mergedMounts = (merged.mounts ?? []).map(normalizeMount);
-  const projectRaw = new Set(projectMounts.map(m => `${m.type}|${m.source}|${m.target}`));
-
-  for (const m of [...projectMounts, ...mergedMounts]) {
-    const key = `${m.type}|${m.source}|${m.target}`;
-    const fromFeature = !projectRaw.has(key);
-    const origin = fromFeature ? "a feature" : "this project";
-
-    if (m.type === "bind" && m.source === CA_BIND_SOURCE) continue;  // public CA, read-only
-
-    if (m.type !== "volume") {
-      fail(`mount type '${m.type}' requested by ${origin} is not allowed ` +
-           `(volumes only -- a bind mount reaches the inner daemon's filesystem, ` +
-           `where every other project lives): ${m.raw}`);
-    }
-
-    // A project owns `<project>` and `<project>-*` -- but a bare prefix test is
-    // not enough, because project names can prefix each other. With projects
-    // `web` and `web-api`, `web-api-secrets` starts with `web-`, so `web` could
-    // mount it: exactly the volume the README tells you to keep a database
-    // password in. `web`/`web-api` is an ordinary way to name two services, so
-    // this is not an exotic collision.
-    //
-    // Resolve it by longest claim: among the projects that actually exist, the
-    // one with the longest matching prefix owns the volume. `web-api` beats
-    // `web` for `web-api-secrets`, so `web` is refused.
-    const ns = volumeNamespace(project);
-    if (m.source === ns || m.source.startsWith(`${ns}-`)) {
-      const owner = (opts.projects ?? [])
-        .map(p => ({ project: p, ns: volumeNamespace(p) }))
-        .filter(o => m.source === o.ns || m.source.startsWith(`${o.ns}-`))
-        .sort((a, b) => b.ns.length - a.ns.length)[0];
-      if (owner === undefined || owner.project === project) continue;
-      fail(`volume '${m.source}' (requested by ${origin}) belongs to project ` +
-           `'${owner.project}', not '${project}' -- '${ns}-*' also matches names ` +
-           `that start with '${ns}-', and the longer project owns them`);
-    }
-
-    if (fromFeature && allowPrivileged && FEATURE_VOLUME_ALLOW.some(re => re.test(m.source))) {
-      continue;   // e.g. dind-var-lib-docker-<id>, for an opted-in DinD project
-    }
-
-    fail(`volume '${m.source}' (requested by ${origin}) is outside this project's ` +
-         `namespace -- a project may only mount volumes named ` +
-         `'${volumeNamespace(project)}' or '${volumeNamespace(project)}-*'` +
-         (project.includes("/")
-           ? ` (a nested project '${project}' owns the '${volumeNamespace(project)}' namespace,` +
-             ` because docker names cannot contain '/')`
-           : ""));
-  }
-
-  // -- 3. runArgs -----------------------------------------------------------
-  const runArgs: string[] = [...(cfg.runArgs ?? []), ...(merged.runArgs ?? [])].map(String);
-  for (let i = 0; i < runArgs.length; i++) {
-    const arg = runArgs[i];
-    if (!arg.startsWith("-")) {
-      fail(`runArgs entry '${arg}' is not a flag; bare values are only allowed ` +
-           `immediately after an allowed value-taking flag`);
-    }
-    const eq = arg.indexOf("=");
-    const flag = eq >= 0 ? arg.slice(0, eq) : arg;
-    const inlineValue = eq >= 0 ? arg.slice(eq + 1) : undefined;
-
-    if (RUNARG_BOOL_FLAGS.has(flag)) {
-      if (inlineValue !== undefined && !/^(true|false)$/i.test(inlineValue)) {
-        fail(`runArgs '${arg}' is not allowed (${flag} takes no value)`);
-      }
-      continue;
-    }
-
-    if (!RUNARG_VALUE_FLAGS.has(flag)) {
-      fail(`runArgs flag '${flag}' is not on the allowlist. Allowed: ` +
-           `${[...RUNARG_VALUE_FLAGS, ...RUNARG_BOOL_FLAGS].sort().join(" ")}. ` +
-           `(Namespace, device, privilege and mount flags are deliberately absent -- ` +
-           `they would let a project out of its own container.)`);
-    }
-
-    // Consume the value, whether inline or as the next entry, so it is never
-    // mistaken for a flag on the next iteration.
-    let value: string;
-    if (inlineValue !== undefined) {
-      value = inlineValue;
-    } else {
-      value = runArgs[i + 1] ?? "";
-      if (value === "" || value.startsWith("-")) {
-        fail(`runArgs '${flag}' expects a value`);
-      }
-      i++;
-    }
-
-    if (flag === "--security-opt" && SECURITY_OPT_DENY.some(re => re.test(value))) {
-      fail(`--security-opt '${value}' is not allowed (it weakens the sandbox)`);
-    }
-    if (flag === "--tmpfs" && !value.startsWith("/")) {
-      fail(`--tmpfs '${value}' must be an absolute in-container path`);
-    }
-  }
-
-  // -- 4. workspaceMount ----------------------------------------------------
-  // A substring check would be unsound: "source=/,target=/workspaces/foo"
-  // mentions the project while mounting the inner daemon's root.
-  const wsMount = cfg.workspaceMount ?? merged.workspaceMount;
-  if (typeof wsMount === "string") {
-    const f = parseMountSpec(wsMount);
-    const own = `${WORKSPACES}/${project}`;
-    const src = f["source"] ?? f["src"] ?? "";
-    const dst = f["target"] ?? f["dst"] ?? f["destination"] ?? "";
-    if (src !== own || dst !== own) {
-      fail(`workspaceMount must bind exactly ${own} (got source='${src}' target='${dst}')`);
-    }
-  }
+  checks.noCompose();
+  checks.noInitializeCommand();
+  checks.noBuildOptions();
+  checks.noAppPorts();
+  checks.privilegeMustBeExplicit();
+  checks.capAddsOnlyWhenPrivileged();
+  checks.securityOptKeepsTheSandbox();
+  checks.mountsStayInOwnNamespace();
+  checks.runArgsOnAllowlist();
+  checks.workspaceMountIsOwnFolder();
 }

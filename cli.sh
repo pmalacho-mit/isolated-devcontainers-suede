@@ -219,26 +219,79 @@ EOF
   fi
 }
 
-editor_url() {
-  local tok
-  # Match compose's env_file rules, because that is what the editor is
-  # actually running with. README says to append the token (`>> .env`), so a
-  # re-roll leaves several VSCODE_TOKEN lines and the LAST one wins -- hence
-  # tail, not head. Anchoring rules out '#VSCODE_TOKEN=' and 'OLD_VSCODE_TOKEN=',
-  # and '#*=' keeps everything after the first '=' so a value containing '='
-  # survives. Surrounding quotes come off the same way compose strips them.
-  tok=$(grep '^VSCODE_TOKEN=' "$SCRIPT_DIR/.env" 2>/dev/null | tail -n 1)
-  tok=${tok#*=}
-  tok=${tok%$'\r'}
-  case $tok in
-    \"*\") tok=${tok#\"}; tok=${tok%\"} ;;
-    \'*\') tok=${tok#\'}; tok=${tok%\'} ;;
+# Read one key out of .env the way compose's env_file does -- so what we print
+# matches what the stack is actually running with.
+#
+# README says to append a re-rolled token (`>> .env`), so several VSCODE_TOKEN
+# lines is a normal state and the LAST one wins -- hence tail, not head. Anchoring
+# rules out '#VSCODE_TOKEN=' and 'OLD_VSCODE_TOKEN='. '#*=' keeps everything after
+# the FIRST '=' so a value containing '=' survives. Surrounding quotes come off
+# the same way compose strips them, and a trailing CR is dropped for .env files
+# edited on Windows.
+#
+# Factored out rather than duplicated per key: every one of those rules is a bug
+# someone already hit once, and a second hand-rolled copy would not have all five.
+env_value() {
+  local v
+  v=$(grep "^$1=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -n 1)
+  v=${v#*=}
+  v=${v%$'\r'}
+  case $v in
+    \"*\") v=${v#\"}; v=${v%\"} ;;
+    \'*\') v=${v#\'}; v=${v%\'} ;;
   esac
+  printf '%s' "$v"
+}
+
+# The editor's host port, defaulting exactly as docker-compose.yml does.
+vscode_port() {
+  local p
+  p=$(env_value VSCODE_PORT)
+  printf '%s' "${p:-3000}"
+}
+
+editor_url() {
+  local tok port url
+  tok=$(env_value VSCODE_TOKEN)
   [ -n "$tok" ] || { echo "cli.sh: no VSCODE_TOKEN in .env -- run '$0 up' first" >&2; return 1; }
-  local url="http://127.0.0.1:3000/?tkn=$tok&folder=/workspaces"
+  port=$(vscode_port)
+  url="http://127.0.0.1:$port/?tkn=$tok&folder=/workspaces"
   echo "$url"
   if command -v pbcopy >/dev/null 2>&1; then
     printf '%s' "$url" | pbcopy && echo "(copied to clipboard)"
+  fi
+}
+
+# VSCODE_PORT must not land inside the range dind publishes: both are published on
+# 127.0.0.1 on the same daemon, so they would fight over the same address. dind
+# starts first (vscode depends_on it), so the loser is the EDITOR -- and the
+# symptom is "the editor container is not running" long after the port numbers
+# have gone out of mind. Refuse before starting instead.
+require_free_vscode_port() {
+  local port min max
+  port=$(vscode_port)
+  min=$(env_value DESOLATE_PORT_MIN); min=${min:-8080}
+  max=$(env_value DESOLATE_PORT_MAX); max=${max:-8090}
+  case "$port" in
+    ''|*[!0-9]*)
+      echo "cli.sh: VSCODE_PORT='$port' is not a port number (1-65535)" >&2; exit 1 ;;
+  esac
+  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    echo "cli.sh: VSCODE_PORT=$port is out of range (1-65535)" >&2; exit 1
+  fi
+  if [ "$port" -ge "$min" ] && [ "$port" -le "$max" ]; then
+    cat >&2 <<EOF
+cli.sh: VSCODE_PORT=$port is inside DESOLATE_PORT_MIN..MAX ($min-$max).
+
+dind publishes that whole range on 127.0.0.1 for dev-server relays, and the
+editor would be publishing the same address -- they cannot both have it, and the
+editor is the one that loses (it starts after dind).
+
+Fix either side in $SCRIPT_DIR/.env, then './cli.sh up':
+  VSCODE_PORT=3000                       # outside $min-$max
+  DESOLATE_PORT_MIN / DESOLATE_PORT_MAX  # move the range instead
+EOF
+    exit 1
   fi
 }
 
@@ -255,6 +308,7 @@ case "$CMD" in
              # destroyed was not the one holding them.
              require_matching_vm || exit 1
              require_sysbox
+             require_free_vscode_port
              compose up -d --build "$@"
              ensure_vm_proxy || exit 1
              if [ -x "$SCRIPT_DIR/preflight.sh" ]; then "$SCRIPT_DIR/preflight.sh" || true; fi
