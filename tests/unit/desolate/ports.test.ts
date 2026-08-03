@@ -19,7 +19,7 @@ import {
   PortsExhaustedError,
   type PortWorld,
 } from "../../../release/vscode-image/ports.ts";
-import { relay } from "../../../release/vscode-image/relays.ts";
+import * as relay from "../../../release/vscode-image/relays.ts";
 
 /** Run `fn`, returning the error it threw. Fails the test if it did not throw. */
 const thrown = (fn: () => unknown): Error => {

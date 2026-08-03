@@ -2,14 +2,8 @@
  * docker.ts -- every docker invocation desolate makes, as one named operation
  * each.
  *
- * The commands are built here rather than at the call sites for two reasons.
- * The first is readability: `docker.relay.start(...)` says what is happening
- * where a fourteen-element string array does not. The second is that these
- * argv arrays are a contract with a program this repo does not control, and
- * getting one subtly wrong fails at runtime inside a container -- a `readonly`
- * key in a --mount spec once broke every start, and a template that emitted no
- * separator once produced `--network audit-n1audit-n2`. Building them behind
- * an injectable runner is what lets those shapes be asserted without a daemon.
+ * The commands are built here rather than at the call sites for
+ * readability and testability.
  */
 
 /** How a command reaches the world. The two shapes differ in what they return,
@@ -35,15 +29,7 @@ const nonEmptyLines = (text: string) =>
     .map((line) => line.trim())
     .filter(Boolean);
 
-/** Read (network, ip) PAIRS from one template, deliberately.
- *
- *  Two templates that each range over .NetworkSettings.Networks and emit no
- *  separator produce concatenated garbage the moment a container is on more
- *  than one network -- measured on a two-network container, network came back
- *  as "audit-n1audit-n2" and ip as "172.18.0.2172.19.0.2". Taking [0] did not
- *  help, because that is a single line. Pairing them also keeps the name and
- *  the address CONSISTENT: a relay joins one network and dials one address,
- *  and they have to be the same network or the address is not routable. */
+/** Read (network, ip) PAIRS from one template, deliberately. */
 const NETWORKS_TEMPLATE =
   '{{range $n, $c := .NetworkSettings.Networks}}{{$n}}\t{{$c.IPAddress}}{{"\\n"}}{{end}}';
 
@@ -54,6 +40,62 @@ export const parseNetworkAttachments = (text: string): NetworkAttachment[] => {
     if (network) attachments.push({ network, ip });
   }
   return attachments;
+};
+
+/** The two labels the devcontainer CLI stamps a project's container with. It
+ *  finds that container again by matching BOTH, and so does this file. */
+export const IDENTITY_LABELS = {
+  workspace: "devcontainer.local_folder",
+  config: "devcontainer.config_file",
+} as const;
+
+export interface WorkspaceCandidate {
+  id: string;
+  /** "" when the container carries no config_file label at all. */
+  configFile: string;
+}
+
+/** Only a constant label NAME is interpolated here -- never a caller's value.
+ *  A path with a quote in it would break the template open, which is why the
+ *  config file is compared in TypeScript below rather than passed to --filter. */
+const WORKSPACE_CANDIDATES_TEMPLATE = `{{.ID}}\t{{.Label "${IDENTITY_LABELS.config}"}}`;
+
+export const parseWorkspaceCandidates = (
+  text: string,
+): WorkspaceCandidate[] => {
+  const candidates: WorkspaceCandidate[] = [];
+  for (const line of nonEmptyLines(text)) {
+    const [id, configFile = ""] = line.split("\t");
+    if (id) candidates.push({ id, configFile: configFile.trim() });
+  }
+  return candidates;
+};
+
+/**
+ * Which of the containers claiming a workspace folder is actually this
+ * project's.
+ *
+ * The workspace label ALONE is not an identity. It is written by the CLI before
+ * it appends the project's own runArgs, so a project used to be able to stamp a
+ * sibling's folder onto its container and be mistaken for it -- policy.ts now
+ * refuses `--label`, and this is the second lock. A container naming a
+ * DIFFERENT config file is somebody else's; one naming none is ours from before
+ * the label existed.
+ *
+ * `configFile` is optional for when a caller genuinely does not know
+ * which config a running container was created from; there the first match is
+ * still the best available answer.
+ */
+export const selectWorkspaceContainer = (
+  candidates: WorkspaceCandidate[],
+  configFile?: string,
+): string => {
+  if (!configFile) return candidates[0]?.id ?? "";
+  return (
+    candidates.find((c) => c.configFile === configFile)?.id ??
+    candidates.find((c) => !c.configFile)?.id ??
+    ""
+  );
 };
 
 export interface Mount {
@@ -78,16 +120,30 @@ export const createDocker = (run: Runner) => {
   const effect = (...argv: string[]) => run.status(argv);
 
   const container = {
-    /** The devcontainer's container id for a workspace folder ("" if none). */
-    forWorkspace: (dir: string, { includeStopped = false } = {}) =>
-      nonEmptyLines(
-        query(
-          "ps",
-          includeStopped ? "-aq" : "-q",
-          "--filter",
-          `label=devcontainer.local_folder=${dir}`,
+    /** The devcontainer's container id for a workspace folder ("" if none).
+     *
+     *  Pass `configFile` -- the path handed to `--override-config` -- wherever
+     *  it is known: it is the half of the CLI's identity that a project could
+     *  not forge even when it could still set labels. */
+    forWorkspace: (
+      dir: string,
+      { includeStopped = false, configFile = "" } = {},
+    ) =>
+      selectWorkspaceContainer(
+        parseWorkspaceCandidates(
+          // No `-q`: it is shorthand for `--format {{.ID}}` and would drop the
+          // config-file column this lookup is built on.
+          query(
+            "ps",
+            ...(includeStopped ? ["-a"] : []),
+            "--filter",
+            `label=${IDENTITY_LABELS.workspace}=${dir}`,
+            "--format",
+            WORKSPACE_CANDIDATES_TEMPLATE,
+          ),
         ),
-      )[0] ?? "",
+        configFile,
+      ),
     namesWithLabel: (label: string) =>
       nonEmptyLines(
         query(

@@ -12,6 +12,8 @@ import {
   createDocker,
   parseMounts,
   parseNetworkAttachments,
+  parseWorkspaceCandidates,
+  selectWorkspaceContainer,
   type Runner,
 } from "../../../release/vscode-image/docker.ts";
 
@@ -39,23 +41,33 @@ const recorder = (outputs: string[] = []) => {
 };
 
 describe("container queries", () => {
-  test("a workspace folder is matched by the CLI's own label", () => {
-    const { docker, calls } = recorder(["abc123\n"]);
+  test("a workspace folder is matched by the CLI's own labels", () => {
+    const { docker, calls } = recorder(["abc123\t/tmp/spec.json\n"]);
     assert.equal(docker.container.forWorkspace("/workspaces/myapp"), "abc123");
     assert.deepEqual(calls[0], [
       "ps",
-      "-q",
       "--filter",
       "label=devcontainer.local_folder=/workspaces/myapp",
+      "--format",
+      '{{.ID}}\t{{.Label "devcontainer.config_file"}}',
     ]);
   });
 
-  test("includeStopped switches -q to -aq", () => {
-    // --rebuild has to find a STOPPED container to remove it; -q alone lists
-    // only running ones, so the stale container survives the rebuild.
+  test("-q is never passed: it would drop the config-file column", () => {
+    // `docker ps -q` is shorthand for `--format {{.ID}}` and overrides an
+    // explicit --format, which would leave every container looking like one
+    // that carries no config_file label -- i.e. like a match.
+    const { docker, calls } = recorder();
+    docker.container.forWorkspace("/w/a");
+    assert.ok(!calls[0].includes("-q"));
+  });
+
+  test("includeStopped adds -a", () => {
+    // --rebuild has to find a STOPPED container to remove it; without -a the
+    // stale container survives the rebuild.
     const { docker, calls } = recorder();
     docker.container.forWorkspace("/w/a", { includeStopped: true });
-    assert.equal(calls[0][1], "-aq");
+    assert.equal(calls[0][1], "-a");
   });
 
   test("no match yields an empty string, not undefined", () => {
@@ -63,9 +75,65 @@ describe("container queries", () => {
     assert.equal(docker.container.forWorkspace("/w/a"), "");
   });
 
-  test("the first id wins when several match", () => {
-    const { docker } = recorder(["one\ntwo\n"]);
+  test("the first id wins when several match and no config is known", () => {
+    const { docker } = recorder(["one\t/a.json\ntwo\t/b.json\n"]);
     assert.equal(docker.container.forWorkspace("/w/a"), "one");
+  });
+});
+
+describe("which container actually belongs to a workspace", () => {
+  // E10's second lock. The workspace label alone is a CLAIM: the CLI writes it
+  // before it appends the project's own runArgs, so a project that could set
+  // `--label` could stamp a sibling's folder onto its container and be handed
+  // that sibling's editor session. policy.ts refuses the flag; this makes the
+  // lookup itself insist on the half of the identity a project never chose.
+  const candidates = [
+    { id: "impostor", configFile: "/tmp/desolate-specs/attacker/dc.json" },
+    { id: "genuine", configFile: "/tmp/desolate-specs/victim/dc.json" },
+  ];
+
+  test("the container naming OUR config file wins, whatever its position", () => {
+    assert.equal(
+      selectWorkspaceContainer(
+        candidates,
+        "/tmp/desolate-specs/victim/dc.json",
+      ),
+      "genuine",
+    );
+  });
+
+  test("a container naming a DIFFERENT config file is not ours", () => {
+    assert.equal(
+      selectWorkspaceContainer(
+        [candidates[0]],
+        "/tmp/desolate-specs/victim/dc.json",
+      ),
+      "",
+    );
+  });
+
+  test("a container with no config label at all is ours (pre-label vintage)", () => {
+    assert.equal(
+      selectWorkspaceContainer(
+        [{ id: "old", configFile: "" }],
+        "/tmp/desolate-specs/victim/dc.json",
+      ),
+      "old",
+    );
+  });
+
+  test("with no config file known, the first match is the best answer", () => {
+    // `desolate --stop` genuinely does not know which config a running
+    // container was created from.
+    assert.equal(selectWorkspaceContainer(candidates), "impostor");
+    assert.equal(selectWorkspaceContainer([]), "");
+  });
+
+  test("a missing label column parses as empty, not as the id", () => {
+    assert.deepEqual(parseWorkspaceCandidates("abc\t\ndef\t/c.json\n"), [
+      { id: "abc", configFile: "" },
+      { id: "def", configFile: "/c.json" },
+    ]);
   });
 });
 

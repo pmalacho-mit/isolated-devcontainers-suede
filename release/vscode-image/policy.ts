@@ -25,8 +25,6 @@ const allowlist = (() => {
     "--cpuset-cpus",
     "--shm-size",
     "--ulimit",
-    "--label",
-    "-l",
     "--hostname",
     "-h",
     "--env",
@@ -75,6 +73,16 @@ const allowlist = (() => {
        */
       ...[/^dind-var-lib-docker-/, /^dind-var-lib-containerd-/],
     ],
+    /** Avoid dangerous mounts like:
+     * - `volume-driver=local`
+     * - `volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/` */
+    mountFields: {
+      type: ["type"],
+      source: ["source", "src"],
+      target: ["target", "dst", "destination"],
+      readonly: ["readonly", "ro"],
+      consistency: ["consistency"],
+    } as const,
   } as const;
 })();
 
@@ -90,33 +98,79 @@ interface NormalMount {
   raw: string;
 }
 
+type MountField = keyof (typeof allowlist)["mountFields"];
+
 export const mount = {
-  /** Split "source=x,target=y,type=volume" into a field map. */
-  parse: (spec: string) =>
-    Object.fromEntries(
-      spec.split(",").map((kv) => {
-        const index = kv.indexOf("=");
-        return index < 0
-          ? [kv.trim(), ""]
-          : [kv.slice(0, index).trim(), kv.slice(index + 1).trim()];
-      }),
+  aliases: new Map(
+    Object.entries(allowlist.mountFields).flatMap(([canonical, spellings]) =>
+      spellings.map((spelling) => [spelling, canonical as MountField] as const),
     ),
-  /** devcontainer.json accepts mounts as strings OR objects; normalize both. */
+  ) as ReadonlyMap<string, MountField>,
+  /**
+   * Split "source=x,target=y,type=volume" into a field map keyed by CANONICAL
+   * name, refusing any field docker understands and this policy does not.
+   *
+   * @throws PolicyError on an unknown, unparseable or quoted field.
+   */
+  parse: (spec: string): Partial<Record<MountField, string>> => {
+    if (spec.includes('"'))
+      fail`
+        mount '${spec}' contains a double quote. Docker parses a --mount as CSV,
+        where a quoted field may contain the comma this policy reads as a field
+        separator -- so the two would not necessarily see the same mount.
+        Refusing rather than parsing it a second way.`;
+
+    const fields: Partial<Record<MountField, string>> = {};
+
+    for (const field of spec.split(",")) {
+      const index = field.indexOf("=");
+      const spelling = (index < 0 ? field : field.slice(0, index))
+        .trim()
+        .toLowerCase();
+
+      if (!spelling)
+        return fail`
+          mount '${spec}' has an empty field (a stray or trailing comma).
+          Refusing rather than guessing which field was meant.`;
+
+      const canonical = mount.aliases.get(spelling);
+      if (!canonical)
+        return fail`
+          mount field '${spelling}' (in '${spec}') is not on the allowlist.
+          Allowed: ${[...mount.aliases.keys()].sort().join(" ")}.
+          (Driver and driver-option fields are deliberately absent: they can
+          turn a volume named inside this project's namespace into a bind mount
+          of the inner daemon's filesystem, where every other project lives.)`;
+
+      // Last wins, as docker does.
+      fields[canonical] = index < 0 ? "" : field.slice(index + 1).trim();
+    }
+
+    return fields;
+  },
+  /** devcontainer.json accepts mounts as strings OR objects; normalize both.
+   *
+   *  The object branch reads `type`/`source`/`target` and nothing else, because
+   *  that is exactly what the CLI rebuilds an object mount from. A `src` key on
+   *  an object is dropped by the CLI, so reading it here would have this policy
+   *  approving a mount docker never receives.
+   *
+   *  @throws PolicyError if a string mount cannot be parsed (see `parse`). */
   normalize: (query: unknown): NormalMount => {
     if (typeof query === "string") {
-      const spec = mount.parse(query);
+      const fields = mount.parse(query);
       return {
-        type: spec["type"] ?? "",
-        source: spec["source"] ?? spec["src"] ?? "",
-        target: spec["target"] ?? spec["dst"] ?? spec["destination"] ?? "",
+        type: fields.type ?? "",
+        source: fields.source ?? "",
+        target: fields.target ?? "",
         raw: query,
       };
     }
     const obj = (query ?? {}) as Record<string, unknown>;
     return {
       type: String(obj.type ?? ""),
-      source: String(obj.source ?? obj.src ?? ""),
-      target: String(obj.target ?? obj.dst ?? obj.destination ?? ""),
+      source: String(obj.source ?? ""),
+      target: String(obj.target ?? ""),
       raw: JSON.stringify(query),
     };
   },

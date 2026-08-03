@@ -18,10 +18,17 @@ Every case named `E<n>` corresponds to an escape that was demonstrated against
 this repo, with the real `@devcontainers/cli` or a real transparent mitmproxy.
 They are regression tests. If one starts passing again, that escape is live.
 
+Several of them turn on a disagreement between this repo's reading of a string
+and someone else's -- the CLI's JSONC parser (`E4`), docker's `--mount` field
+parser (`E10`, `E11`), docker's last-label-wins rule (`E12`), node's `cpSync`
+(`E13`). When you add one of those, verify the OTHER side's behaviour by running
+it, not by reading its documentation: `E13` exists because `{dereference: true}`
+does not dereference, which the docs do not say.
+
 | layer | needs | what it proves |
 |---|---|---|
 | `static/` | bash, jq, docker compose (config only) | the invariants decided by config alone: no daemon in the editor, loopback-only ports, sysbox runtime, nftables default-deny, and that the compose bridge name and `DESOLATE_IF` cannot drift apart |
-| `unit/broker/` | node >= 22.18 | the spec policy, in isolation: every refused key, the runArgs allowlist, the JSONC scanner, and that the repo's own example projects still pass |
+| `unit/broker/` | node >= 22.18 | the spec policy, in isolation: every refused key, the runArgs allowlist, the mount-field allowlist and its alias rule, the JSONC scanner, the spec snapshot's copying, and that the repo's own example projects still pass |
 | `unit/proxy/` | python + mitmproxy + pytest | the addon's decisions: proven-destination vs claimed Host, allowlists, fail-closed on internal error, response scrubbing |
 | `integration/broker/` | node >= 22.18, `devcontainer` on PATH | the real broker over its unix socket, enforcing on the real CLI's `mergedConfiguration`, with a stub runner. Also the TOCTOU snapshot |
 | `integration/proxy/` | root, nft, docker, mitmproxy | the addon under a real transparent proxy with real nftables REDIRECT, checking what an attacker-controlled server actually received |
@@ -109,6 +116,13 @@ design decision can be made -- it asserts no invariant, gates nothing, and is
 not run by `run.sh`. Run one by hand when you need its answer, and delete it
 once the question is settled.
 
-| probe | question |
-|---|---|
-| `dind-overlay-volume.sh` | can each project get a private copy-on-write view of the shared editor server, instead of the read-only bind it gets today? |
+| probe | question | run it |
+|---|---|---|
+| `dind-overlay-volume.sh` | can each project get a private copy-on-write view of the shared editor server, instead of the read-only bind it gets today? | answered; kept for reference |
+| `loopback-cookie-scope.sh` | the editor and every project's dev server share `127.0.0.1`, and cookies are scoped by host and not by port -- can a page served by one devcontainer read the main editor's credential out of the shared jar? | **Mac, live stack** |
+| `devnet-reachability.sh` | the nftables forward chain ends in a drop, but container-to-container traffic on the same bridge is switched rather than routed -- does the drop actually cover it? | **Mac, live stack** |
+
+The last two are open questions, not settled ones. Each has a companion
+`README-*-fixes.md` next to it: run the probe, read the row of its table that
+matches what you got, and only then pick a fix. Both probes are read-only and
+neither sends anything to a devcontainer.

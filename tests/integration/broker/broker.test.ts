@@ -321,6 +321,69 @@ describe("hostile specs never reach the runner", () => {
     assert.equal(result(msgs).ok, false);
     assert.match(errorOf(msgs), /namespace/);
   });
+
+  test("E10: volume-opt -- a bind of dind's filesystem named as a volume", async () => {
+    // The CLI hands a STRING mount to `docker run --mount` unchanged, and the
+    // `local` driver turns type=none,o=bind,device=/ into a bind of the inner
+    // daemon's root. Source and type both look correct to a policy that reads
+    // only source and type, which is why this has to be proven against the real
+    // merged configuration and not just the unit fixture.
+    for (const mount of [
+      "type=volume,source=evil-esc,target=/esc,volume-driver=local,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/",
+      "type=volume,source=evil-esc,target=/esc,volume-opt=device=/var/lib/docker",
+    ]) {
+      project("evil-esc", JSON.stringify({ image: "alpine:3", mounts: [mount] }));
+      resetRunner();
+      const msgs = await ask({ op: "start", project: "evil-esc" });
+      assert.equal(result(msgs).ok, false, `${mount} reached the runner`);
+      assert.match(errorOf(msgs), /not on the allowlist/);
+      assert.deepEqual(runnerInvocations(), []);
+    }
+  });
+
+  test("E11: src= after source= -- the mount docker makes is not the one checked", async () => {
+    for (const [name, config] of [
+      [
+        "evil-alias",
+        {
+          image: "alpine:3",
+          mounts: ["type=volume,source=evil-alias-ok,target=/c,src=victim-secrets"],
+        },
+      ],
+      [
+        "evil-wsmount",
+        {
+          image: "alpine:3",
+          workspaceFolder: "/workspaces/evil-wsmount",
+          workspaceMount:
+            "source=/workspaces/evil-wsmount,target=/workspaces/evil-wsmount,type=bind,src=/workspaces",
+        },
+      ],
+    ] as const) {
+      project(name, JSON.stringify(config));
+      resetRunner();
+      const msgs = await ask({ op: "start", project: name });
+      assert.equal(result(msgs).ok, false, `${name} reached the runner`);
+      assert.deepEqual(runnerInvocations(), []);
+    }
+  });
+
+  test("E12: --label -- claiming another project's container identity", async () => {
+    for (const runArgs of [
+      ["--label", "devcontainer.local_folder=/workspaces/victim"],
+      ["-l", "devcontainer.config_file="],
+    ]) {
+      project("evil-label", JSON.stringify({ image: "alpine:3", runArgs }));
+      resetRunner();
+      const msgs = await ask({ op: "start", project: "evil-label" });
+      assert.equal(
+        result(msgs).ok,
+        false,
+        `runArgs ${JSON.stringify(runArgs)} reached the runner`,
+      );
+      assert.deepEqual(runnerInvocations(), []);
+    }
+  });
 });
 
 // ===========================================================================
@@ -478,6 +541,42 @@ describe("a legitimate project starts, from a frozen copy", () => {
       frozen.runArgs,
       undefined,
       "the snapshot followed the live file -- TOCTOU window is open",
+    );
+  });
+
+  test("E13: TOCTOU through a symlinked devcontainer.json", async () => {
+    // The same attack as above, wearing one layer of indirection -- and it used
+    // to work, because `fs.cpSync(..., {dereference: true})` does not
+    // dereference: it wrote a symlink into the snapshot still pointing at the
+    // project. Every read after the "freeze" -- the policy's own
+    // read-configuration, and later `devcontainer up` -- followed the link back
+    // to a file the project can rewrite at any moment.
+    const dir = project("toctou-link", JSON.stringify({ image: "alpine:3" }));
+    const live = path.join(dir, "live-spec.json");
+    fs.writeFileSync(live, JSON.stringify({ image: "alpine:3" }));
+    const config = path.join(dir, ".devcontainer", "devcontainer.json");
+    fs.rmSync(config);
+    fs.symlinkSync(live, config);
+
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "toctou-link" });
+    assert.equal(result(msgs).ok, true, errorOf(msgs));
+
+    const calls = runnerInvocations();
+    const snapshot = calls[0][calls[0].indexOf("--config") + 1];
+    assert.ok(
+      !fs.lstatSync(snapshot).isSymbolicLink(),
+      "the snapshot is a symlink back into the project -- it froze nothing",
+    );
+
+    fs.writeFileSync(
+      live,
+      JSON.stringify({ image: "alpine:3", runArgs: ["--privileged"] }),
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(snapshot, "utf8")).runArgs,
+      undefined,
+      "the snapshot followed the link -- TOCTOU window is open",
     );
   });
 

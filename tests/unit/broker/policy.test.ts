@@ -382,6 +382,113 @@ describe("demonstrated escapes (regression)", () => {
       );
     }
   });
+
+  test("E10: volume-opt -- a bind of dind's filesystem wearing a volume's name", () => {
+    // Verified against docker 29: the `local` driver takes
+    // type=none,o=bind,device=<path> and produces a BIND MOUNT of <path>, and
+    // the devcontainer CLI passes a STRING mount to `docker run --mount`
+    // byte-for-byte (its merge step parses one only to de-duplicate by target,
+    // then returns the original). A policy that reads type/source/target sees
+    // a well-behaved volume inside the project's own namespace and approves it,
+    // while the container comes up holding /run/inner/docker.sock, /workspaces
+    // and every other project's volume directory.
+    //
+    // This is the one that made the overlayfs work in overlay.ts moot: the
+    // LOWER is unwritable, but every project's upper is an ordinary directory
+    // under /var/lib/docker/volumes, and a file written into a sibling's upper
+    // shadows the lower it was protecting.
+    const escapes = [
+      "type=volume,source=myapp-esc,target=/esc,volume-driver=local,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/",
+      "type=volume,source=myapp-esc,target=/esc,volume-opt=device=/var/lib/docker",
+      "type=volume,source=myapp-esc,target=/esc,volume-driver=local",
+      // A field this policy has no opinion on is still a field it cannot see.
+      "type=volume,source=myapp-ok,target=/ok,volume-nocopy=true",
+      "type=volume,source=myapp-ok,target=/ok,bind-propagation=rshared",
+    ];
+    for (const mounts of [escapes.map((m) => [m]), [escapes]].flat())
+      refuses(spec({ image: "x", mounts }), /not on the allowlist/);
+
+    // The fields a project legitimately needs still work.
+    allows(spec({ image: "x", mounts: ["type=volume,source=myapp-db,target=/db,readonly"] }));
+    allows(
+      spec({
+        image: "x",
+        mounts: ["type=volume,src=myapp-db,dst=/db,consistency=cached,ro"],
+      }),
+    );
+  });
+
+  test("E11: source/src and target/dst -- the same mount read two ways", () => {
+    // Verified against docker 29:
+    //
+    //   docker run --mount 'type=volume,source=probe-a,src=probe-b,target=/m' ...
+    //
+    // mounts probe-B. Docker assigns Source once per field as it walks the
+    // spec, so the LAST spelling wins; this policy read `source ?? src`, so the
+    // canonical name won wherever it appeared. Every check below then ran
+    // against a mount docker was never going to make.
+    //
+    // Two exploits, and the second is the sharper one: workspaceMount is
+    // likewise handed to `docker run --mount` verbatim, so the check that
+    // insists a project binds its OWN folder was reading a different string
+    // from the one that decided what got mounted.
+    refuses(
+      spec({
+        image: "x",
+        mounts: ["type=volume,source=myapp-cache,target=/c,src=victim-secrets"],
+      }),
+      /belongs to project 'victim'|outside this project's namespace/,
+    );
+    refuses(
+      spec({
+        image: "x",
+        workspaceFolder: "/workspaces/myapp",
+        workspaceMount:
+          "source=/workspaces/myapp,target=/workspaces/myapp,type=bind,src=/workspaces",
+      }),
+      /workspaceMount must have source=/,
+    );
+    refuses(
+      spec({
+        image: "x",
+        workspaceFolder: "/workspaces/myapp",
+        workspaceMount:
+          "source=/workspaces/myapp,target=/workspaces/myapp,type=bind,dst=/",
+      }),
+      /workspaceMount target must be/,
+    );
+    // A quoted field is where the two parsers differ again: docker splits a
+    // --mount as CSV, so `"a,b"` is ONE field. Refused rather than re-implemented.
+    refuses(
+      spec({
+        image: "x",
+        mounts: ['type=volume,source="myapp-ok,src=victim-secrets",target=/c'],
+      }),
+      /double quote/,
+    );
+  });
+
+  test("E12: --label -- stamping another project's identity onto this container", () => {
+    // Verified against docker 29 and @devcontainers/cli 0.88.0: the CLI emits
+    // its identity labels (devcontainer.local_folder, devcontainer.config_file)
+    // BEFORE it appends the project's runArgs, and docker takes the last of a
+    // duplicated label key. So a project could claim a sibling's folder, and
+    // `desolate <sibling>` would find the impostor by label, start it, exec the
+    // editor into it with the sibling's connection token, and point the
+    // sibling's relays at it. The user gets an IDE that looks like the victim
+    // project and is entirely the attacker's.
+    //
+    // An EMPTY config_file is part of it: the CLI falls back to a
+    // local-folder-only match and accepts a container carrying no config label.
+    const claims = [
+      ["--label", "devcontainer.local_folder=/workspaces/victim"],
+      ["-l", "devcontainer.local_folder=/workspaces/victim"],
+      ["--label=devcontainer.config_file="],
+      ["--label", "anything=at-all"],
+    ];
+    for (const runArgs of claims)
+      refuses(spec({ image: "x", runArgs }), /not on the allowlist/);
+  });
 });
 
 // ===========================================================================

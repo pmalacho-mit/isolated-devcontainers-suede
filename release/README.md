@@ -368,9 +368,9 @@ ask us to start it.
 
 Getting that check _right_ is harder than it looks, because a devcontainer's
 privilege can arrive from four places, and only one of them is the top-level
-keys of the file you are reading. Five bypasses were demonstrated against an
-earlier version of this policy; each now has a named regression test in
-`tests/` (`E1`..`E5`). The rules, and what each is actually defending:
+keys of the file you are reading. Every bypass demonstrated against an earlier
+version of this policy has a named regression test in `tests/` (`E1`..`E13`).
+The rules, and what each is actually defending:
 
 - **`initializeCommand` is refused.** It runs on the machine driving the
   devcontainer CLI -- the _orchestrator_, which holds the inner daemon socket.
@@ -390,10 +390,28 @@ earlier version of this policy; each now has a named regression test in
   where our parser and the CLI's disagree about what the file says.
 - **Mounts must be volumes** named `<project>` or `<project>-*`, checked over
   the merged list. The one exception is the read-only public-CA bind.
+- **A mount's _fields_ are an allowlist too**, and this one is easy to miss.
+  A mount written as a string is handed to `docker run --mount` byte-for-byte,
+  and the fields a `type`/`source`/`target` reader ignores are the dangerous
+  ones: `volume-driver=local` with
+  `volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/` is a bind mount
+  of the inner daemon's root filesystem wearing a volume's name -- and the name
+  can sit inside the project's own namespace, so every other rule here passes
+  it. Only `type`, `source`/`src`, `target`/`dst`/`destination`,
+  `readonly`/`ro` and `consistency` are accepted. Docker refuses an unknown
+  field itself, so refusing more than docker does costs nothing.
+- **Aliases resolve the way docker resolves them.** Docker assigns each field
+  as it walks the spec, so the _last_ spelling wins and
+  `source=mine,src=/workspaces` mounts `/workspaces`. Reading `source ?? src`
+  instead let a project show the policy one mount and docker another.
 - **`runArgs` is an allowlist**, not a denylist. A denylist has to enumerate
   every spelling docker accepts, and it did not: `--network=host` was refused
   while `--network host`, `--net=host`, `--pid=container:<id>`, `--uts=host`
-  and `--cgroupns=host` all sailed through. Unknown flags are now refused.
+  and `--cgroupns=host` all sailed through. Unknown flags are now refused --
+  including `--label`, which looks like inert metadata and is not: the CLI
+  identifies a project's container by label and writes those labels _before_ it
+  appends `runArgs`, so a project could stamp a sibling's identity onto its own
+  container and be handed that sibling's editor session, token and relays.
 - **`workspaceMount`**, if present, must bind exactly this project's own folder.
 - **`appPort` is refused** (it collides with the relay bind).
 - **Privilege must be opted into explicitly**, in the project's own file:
@@ -406,6 +424,17 @@ The validated spec is then **snapshotted** to a directory only the orchestrator
 can write, and the container is started from that copy (`--override-config`).
 Without it the editor could swap the file between the check and the start, and
 the check would be decorative.
+
+Two things about the snapshot are worth knowing, because both were once wrong
+in ways nothing reported:
+
+- **Both entry points snapshot.** `cli.sh desolate` reaches the runner directly
+  rather than through the broker, and used to validate the live file and start
+  from it. The Mac is the trust root; the file it validates is not.
+- **The copy is dereferenced by hand.** `fs.cpSync(..., {dereference: true})`
+  does not dereference -- on node 24 it reproduces a symlink in the destination,
+  still pointing at the original -- so a project whose `devcontainer.json` was a
+  link had its spec read live at every step, and the freeze froze nothing.
 
 `preflight.sh` asserts the separation holds: the editor must _fail_ to reach a
 daemon, must not mount the socket volume, and the broker socket must be
@@ -960,8 +989,10 @@ beyond them.
 
 `tests/` carries a named regression case for every escape that has been
 demonstrated against this design -- policy bypasses via `initializeCommand`,
-compose mode, features, JSONC parser divergence and `runArgs` spellings, plus
-secret exfiltration via a spoofed `Host` header. See `tests/README.md`.
+compose mode, features, JSONC parser divergence, `runArgs` spellings, mount
+driver options, mount-field aliases and container-identity labels, a TOCTOU
+through a symlinked spec, plus secret exfiltration via a spoofed `Host` header.
+See `tests/README.md`.
 
 `./cli.sh preflight` asserts the stack is up AND that dind runs unprivileged
 under sysbox with an active user-namespace (`uid_map` shows container-root

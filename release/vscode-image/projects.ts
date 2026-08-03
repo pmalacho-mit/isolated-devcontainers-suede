@@ -14,11 +14,10 @@ import { join } from "node:path";
 import { hasConfig as hasDevcontainerConfig } from "./devcontainer.ts";
 import type { ReplaceAll } from "./utils.ts";
 
-const SLASH_REPLACEMENT = "__";
+export const SLASH_REPLACEMENT = "__";
 
 /** Whether `volumeNamespace` can encode this name without risking a collision. */
-const namespaceable = (project: string) =>
-  !project.includes(SLASH_REPLACEMENT);
+const namespaceable = (project: string) => !project.includes(SLASH_REPLACEMENT);
 
 export const list = Object.assign(
   /**
@@ -98,6 +97,25 @@ export const list = Object.assign(
   },
 );
 
+/**
+ * Is this a syntactically valid project name -- one or two plain path segments
+ * that can be turned into a volume namespace?
+ */
+export const validName = (() => {
+  /** Longest single path segment of a project name, in characters. Two of them
+   *  plus a slash is the ceiling for a whole name. */
+  const maxSegment = 64;
+  /** Must START with alphanumeric, which rules out "..", ".", hidden dirs, and
+   *  anything beginning with a dash. */
+  const segment = `[a-zA-Z0-9][a-zA-Z0-9._-]{0,${maxSegment - 1}}`;
+  /** A direct child of /workspaces, or one level deeper so a repo can be scoped
+   *  by its owner. */
+  const pattern = new RegExp(`^${segment}(?:/${segment})?$`);
+
+  return (query: unknown): query is string =>
+    typeof query === "string" && pattern.test(query) && namespaceable(query);
+})();
+
 /** A project name usable as a docker object name.
  *
  *  Projects may be nested one level -- `owner/repo` -- so that repositories from
@@ -118,10 +136,11 @@ export const volumeNamespace = Object.assign(
         ].join(" "),
       );
 
-    return project.replace(
-      /\//g,
-      SLASH_REPLACEMENT,
-    ) as ReplaceAll<T, "/", "__">;
+    return project.replace(/\//g, SLASH_REPLACEMENT) as ReplaceAll<
+      T,
+      "/",
+      "__"
+    >;
   },
   { supports: namespaceable },
 );
