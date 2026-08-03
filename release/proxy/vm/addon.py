@@ -76,6 +76,17 @@ Set "allow_private_destinations": true in settings.json only if you are
 deliberately proxying to something on the LAN, and understand that it removes
 the wall for :80/:443.
 
+That flag is no longer sufficient on its own, and this is deliberate. The
+check below is the INNER layer; the outer one is the `output` chain in
+nftables-desolate.conf, which drops private destinations from this process's
+uid in the kernel. It exists because there are three ways for the check below
+to be absent -- connection_strategy=eager dials before `request()` runs,
+`tls_passthrough` never reaches `request()` at all, and an addon that fails to
+load enforces nothing -- and none of them are visible to the kernel. So
+proxying to the LAN on purpose means changing BOTH: this flag, and that chain.
+A flag that silently does nothing is worse than one that is missing, which is
+why it is written down here rather than discovered from a timeout.
+
 ---------------------------------------------------------------------------
 WHAT MAKES A SECRET'S CONFIGURATION USABLE AT ALL
 ---------------------------------------------------------------------------

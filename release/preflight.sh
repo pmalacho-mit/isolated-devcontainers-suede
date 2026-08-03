@@ -417,6 +417,30 @@ if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet de
            note "loopback and link-local destination ADDRESSES before consulting"
            note "the network policy, which matches on names only." ;;
   esac
+  # The OUTER layer, and the one the probe above cannot distinguish from a
+  # closed port. addon.py's refusal is inner and has three ways of being absent
+  # (eager dials first, tls_passthrough skips the hook, a broken addon enforces
+  # nothing); the kernel has none of them. So assert the chain is actually
+  # loaded rather than inferring it from a timeout.
+  NFT_OUT=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- \
+            sudo nft list chain inet desolate output 2>/dev/null || true)
+  case "$NFT_OUT" in
+    *DESOLATE_INTERNAL4*|*"daddr { 0.0.0.0/8"*|*"10.0.0.0/8"*)
+      ok "the proxy's own egress is bounded in the kernel (output chain loaded)"
+      # Which layer stopped the probe above. Zero is not a fault -- it means
+      # addon.py or a refused connection got there first -- but a nonzero
+      # count is the only place an attempt to reach the Mac or LAN is visible.
+      if printf '%s' "$NFT_OUT" | grep -qE 'packets [1-9]'; then
+        note "the kernel drop is what stopped it (counters moved)"
+      else
+        note "kernel drop counters read zero: addon.py or a closed port answered first"
+      fi ;;
+    "") note "could not read the output chain (colima ssh unavailable?) -- skipped" ;;
+    *)  bad "the proxy's egress chain is loaded but carries no internal-address drop"
+        note "nftables-desolate.conf must drop DESOLATE_INTERNAL4/6 for skuid"
+        note "desolate-proxy, or the proxy is a route to the Mac and the LAN"
+        note "for anything that can reach :80/:443 -- which is every container." ;;
+  esac
 else
   note "desolate-proxy not installed -- secrets substitution and egress control are OFF"
   note "install it: ./cli.sh vm install"

@@ -28,6 +28,24 @@ else
   skip "typescript parses" "node >= 22 required for native type stripping"
 fi
 
+group "every static suite can actually fail"
+# 03-nftables.sh shipped without a `summary` call, and `summary` is what returns
+# the failure: harness `fail` only counts, so a script that ends on an assertion
+# exits with that assertion's status and the runner's `bash "$t" || rc=1` sees
+# success. Every rule in that file -- the forward default-deny, the lateral
+# drops, the ssh scoping -- was unable to turn the suite red for as long as that
+# was true. A suite that cannot fail is worse than a missing one, because it
+# reports as covered.
+for t in "$ROOT"/tests/static/*.sh; do
+  name="$(basename "$t") ends by calling summary"
+  if [ "$(grep -c '^summary$' "$t")" -ge 1 ]; then
+    LAST_CODE=$(grep -vE '^\s*(#.*)?$' "$t" | tail -1)
+    assert_eq "$name" "$LAST_CODE" "summary"
+  else
+    fail "$name" "no top-level 'summary' -- failures in this file cannot fail the suite"
+  fi
+done
+
 group "no unreachable code after a top-level exit"
 # preflight.sh once had its entire egress-proxy section sitting after `exit`,
 # so the single check that tells you whether interception is on never ran and

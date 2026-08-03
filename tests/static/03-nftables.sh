@@ -122,3 +122,62 @@ assert_ok "the nft unit refills the sets after every reload" \
   grep -q "ExecStartPost=/opt/desolate-proxy/ssh-allow.sh" "$RELEASE/proxy/vm/install.sh"
 assert_ok "install runs it too (the load above empties the sets)" \
   grep -q "^/opt/desolate-proxy/ssh-allow.sh" "$RELEASE/proxy/vm/install.sh"
+
+group "the proxy's own egress is bounded (the deputy chain)"
+# The chains above filter packets FROM the container bridges. None of them see
+# the packet the PROXY sends on a container's behalf: prerouting redirects
+# :80/:443 here whatever the destination was, and mitmproxy then dials that
+# destination as a VM process. addon.py refuses internal addresses itself, but
+# it cannot be the only wall -- connection_strategy=eager dials before the
+# request hook runs, tls_passthrough never reaches that hook, and an addon that
+# fails to load enforces nothing. All three are invisible to the kernel.
+OUT=$(printf '%s' "$RULES" | awk '/chain output/,/^    }/')
+assert_eq "there is an output chain" \
+  "$([ -n "$OUT" ] && echo yes || echo no)" "yes"
+assert_contains "it drops internal v4 destinations for the proxy uid" "$(nocount "$OUT")" \
+  'meta skuid desolate-proxy ip  daddr $DESOLATE_INTERNAL4 drop'
+assert_contains "it drops internal v6 destinations for the proxy uid" "$(nocount "$OUT")" \
+  'meta skuid desolate-proxy ip6 daddr $DESOLATE_INTERNAL6 drop'
+assert_contains "the drops are counted, so an attempt is visible" "$OUT" 'counter drop'
+
+# ORDER. Both of these accepts MUST precede the drops, and each for a reason
+# that is invisible once it is working:
+#
+#   - replies: mitmproxy answers every intercepted client on the container
+#     bridges (172.16/12) and the CA server shares that uid on :18081. Those
+#     are output packets to a private address from the restricted uid, so
+#     without the ct-state accept first this chain drops every reply the stack
+#     is built on -- interception included.
+#   - DNS: the proxy resolves the hosts it dials through the VM's resolver,
+#     which on Colima is itself an RFC1918 address over vmnet. Dropped, every
+#     request times out and nothing points back here.
+DROP_LINE=$(printf '%s' "$OUT" | grep -n 'daddr \$DESOLATE_INTERNAL4' | head -1 | cut -d: -f1)
+CT_ACCEPT=$(printf '%s' "$OUT" | grep -n 'ct state established,related accept' | head -1 | cut -d: -f1)
+DNS_ACCEPT=$(printf '%s' "$OUT" | grep -n 'udp dport 53 accept' | head -1 | cut -d: -f1)
+assert_eq "replies are accepted BEFORE the drops" \
+  "$([ -n "$CT_ACCEPT" ] && [ -n "$DROP_LINE" ] && [ "$CT_ACCEPT" -lt "$DROP_LINE" ] && echo yes || echo no)" "yes"
+assert_eq "the proxy's DNS is accepted BEFORE the drops" \
+  "$([ -n "$DNS_ACCEPT" ] && [ -n "$DROP_LINE" ] && [ "$DNS_ACCEPT" -lt "$DROP_LINE" ] && echo yes || echo no)" "yes"
+assert_contains "loopback is accepted too (the local resolver and CA server)" "$OUT" \
+  'meta skuid desolate-proxy oifname "lo" accept'
+
+# The ranges themselves. addon.py's is_internal() is the authority; these are
+# the kernel's copy of it, and the two drifting apart is how one of them ends up
+# enforcing less than the other.
+V4=$(sed -n 's/^define DESOLATE_INTERNAL4 = //p' "$CONF")
+for range in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16 100.64.0.0/10; do
+  assert_contains "internal v4 list covers $range" "$V4" "$range"
+done
+V6=$(sed -n 's/^define DESOLATE_INTERNAL6 = //p' "$CONF")
+for range in ::1/128 fc00::/7 fe80::/10; do
+  assert_contains "internal v6 list covers $range" "$V6" "$range"
+done
+
+# nft resolves `skuid desolate-proxy` to a uid at PARSE time, so a missing
+# account is not a rule that fails -- it is a file that does not parse, and
+# `nft -f` applies nothing at all. Interception and the forward default-deny
+# would be absent together, on a VM that looks installed.
+assert_ok "install.sh checks the account exists before loading the ruleset" \
+  grep -q 'id desolate-proxy >/dev/null 2>&1 ||' "$RELEASE/proxy/vm/install.sh"
+
+summary
