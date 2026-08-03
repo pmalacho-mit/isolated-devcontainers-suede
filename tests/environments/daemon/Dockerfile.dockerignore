@@ -1,0 +1,9 @@
+# BuildKit reads <dockerfile>.dockerignore in preference to the context root's,
+# so this scopes the ignore to these environments without adding a repo-root
+# file that would silently apply to every other build from here.
+*
+!release/vscode-image
+!tests
+!samples
+**/node_modules
+**/.git

@@ -2,6 +2,15 @@ import {
   execFileSync,
   type ExecFileSyncOptionsWithStringEncoding,
 } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+/** Was this module run as the program, rather than imported by another one?
+ *
+ *  A script that starts itself on import cannot be loaded by a test at all, so
+ *  every executable module in this tree guards its entry point with this. */
+export const isEntryPoint = (moduleUrl: string) =>
+  process.argv[1] !== undefined &&
+  moduleUrl === pathToFileURL(process.argv[1]).href;
 
 export const identity = <T>(value: T) => value;
 export const noop = () => {};

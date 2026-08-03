@@ -82,7 +82,7 @@ ENV PATH=/opt/git-subrepo/lib:$PATH
 # Install devcontainer CLI + tsx.
 RUN npm install -g \ 
   "@devcontainers/cli@${DEVCONTAINERS_CLI_NPM_VERSION}" \
-  "tsx@${TSX_NPM_VERSION}
+  "tsx@${TSX_NPM_VERSION}"
 
 # /workspaces must be writable by uid 1000; 
 # the volume-init service enforces this on the volume too.
@@ -100,17 +100,10 @@ RUN chmod +x /usr/local/bin/with-ca
 # with distinct roles:
 #   orchestrator -- runs broker.ts; the ONLY container with the daemon socket
 #   vscode       -- runs openvscode-server; no socket, talks to the broker
-COPY --chown=1000:1000 \
-  broker.ts \ 
-  desolate-client.ts \ 
-  desolate.ts \
-  devcontainer.ts \
-  jsonc.ts \
-  newrepo.ts \ 
-  policy.ts \
-  projects.ts \
-  utils.ts \
-  /usr/local/lib/desolate/
+# Every .ts in the directory, rather than a hand-kept list: a module extracted
+# during a refactor and forgotten here does not fail the build, it fails at
+# runtime inside the image with "cannot find module".
+COPY --chown=1000:1000 *.ts /usr/local/lib/desolate/
 
 # Create wrappers for supporting scripts so they can be invoked plainly.
 # Every wrapper goes through `with-ca` so `docker exec` from the mac works.

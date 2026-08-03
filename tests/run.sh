@@ -3,7 +3,9 @@
 #
 #   ./tests/run.sh                 static + unit          (fast, no stack, no docker daemon needed)
 #   ./tests/run.sh static          config invariants only
-#   ./tests/run.sh unit            policy + proxy addon logic only
+#   ./tests/run.sh unit            policy + desolate + proxy addon logic only
+#   ./tests/run.sh environments    the unit suite inside containers that mirror
+#                                  the shipped runtime (needs docker, no VM)
 #   ./tests/run.sh integration     brings a stack UP and attacks it (slow, needs docker)
 #   ./tests/run.sh all             everything
 #
@@ -58,6 +60,9 @@ run_unit() {
   printf '\n\033[1m-- broker spec policy --\033[0m\n'
   node_test "$ROOT"/tests/unit/broker/*.test.ts || rc=1
 
+  printf '\n\033[1m-- desolate --\033[0m\n'
+  node_test "$ROOT"/tests/unit/desolate/*.test.ts || rc=1
+
   printf '\n\033[1m-- proxy addon --\033[0m\n'
   local py
   if py=$(find_python); then
@@ -77,11 +82,14 @@ run_integration() {
 case "$SUITE" in
   static)      run "static" run_static ;;
   unit)        run "unit" run_unit ;;
+  environments) run "environments" bash "$ROOT/tests/environments/run.sh" ;;
   integration) run "integration" run_integration ;;
-  all)         run "static" run_static; run "unit" run_unit; run "integration" run_integration ;;
+  all)         run "static" run_static; run "unit" run_unit
+               run "environments" bash "$ROOT/tests/environments/run.sh"
+               run "integration" run_integration ;;
   default)     run "static" run_static; run "unit" run_unit
                printf '\n(integration not run -- it starts containers. ./tests/run.sh integration)\n' ;;
-  *)           echo "usage: tests/run.sh [static|unit|integration|all]" >&2; exit 2 ;;
+  *)           echo "usage: tests/run.sh [static|unit|environments|integration|all]" >&2; exit 2 ;;
 esac
 
 printf '\n'

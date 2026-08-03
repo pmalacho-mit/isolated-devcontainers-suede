@@ -86,16 +86,17 @@ if grep -qE '"--mount",[^)]*type=bind,source=\$\{(SERVER_SRC|CA_DIR)\}' "$RELEAS
 else
   pass "injected mounts are volumes, not binds"
 fi
-assert_ok "desolate.ts builds per-project overlay volumes" \
-  grep -q "ensureOverlayVolume" "$RELEASE/vscode-image/desolate.ts"
-assert_ok "each overlay is keyed for invalidation" \
-  grep -q "desolate.overlay.key" "$RELEASE/vscode-image/desolate.ts"
-# Both shared directories must go through it -- the CA one is the higher-impact
-# of the two, since install-ca.sh is executed as root in every devcontainer.
-assert_ok "the editor server is one of them" \
-  grep -q 'lower: SERVER_SRC' "$RELEASE/vscode-image/desolate.ts"
-assert_ok "the proxy CA dir is one of them" \
-  grep -q 'lower: CA_DIR' "$RELEASE/vscode-image/desolate.ts"
+# WHICH directories get an overlay, what the volumes are named, and whether the
+# policy accepts them are assertions about values, so they live in
+# tests/unit/desolate/overlay.test.ts and run against the real module.
+#
+# They were greps for identifier names here until one of them ("ensureOverlayVolume")
+# went on passing for a whole refactor against nothing but a stale comment. A grep
+# cannot tell a definition from a mention, so it reports "still covered" long after
+# the thing it named is gone. Only the bind-vs-volume shape stays here, because that
+# one is about a string this file assembles and hands to another process.
+assert_ok "the overlay invariants are asserted against the module, not this grep" \
+  test -f "$ROOT/tests/unit/desolate/overlay.test.ts"
 
 group "every entry point carries proxy-CA trust"
 # with-ca grants trust by EXPORTING env vars and exec'ing, and `docker exec`
