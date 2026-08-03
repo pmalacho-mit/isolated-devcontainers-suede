@@ -698,21 +698,28 @@ function recreateRelays(project: string, dir: string, map: PortMap): void {
 }
 
 /**
- * dind's eth0 (unless overidden in environment) --
- * the same interface path the Mac's traffic uses */
-const PROBE_HOST = process.env.DEVC_PROBE_HOST ?? "dind";
-
-async function probeEditor(port: number): Promise<boolean> {
-  const config = { timeoutMs: 2000, retries: 5, gapMs: 1000 } as const;
+ * Is the project's editor answering? Asked THROUGH the project's own relay,
+ * from inside it.
+ *
+ * This was `fetch("http://dind:<port>/")`, which needed an IP path from the
+ * editor world to the container world. That path is precisely what containment
+ * is supposed to remove -- and on a VM without br_netfilter it was never
+ * filtered, so the probe worked only because the wall was down. Making the wall
+ * real (either by loading br_netfilter or by splitting the bridges) breaks the
+ * probe, which is why the probe has to stop needing it.
+ *
+ * `docker exec` reaches the relay over the inner daemon's unix socket, crossing
+ * no bridge at all, and lands on the far side of the wall by design. It also
+ * tests strictly more of the chain than the old probe did: socat's listener,
+ * socat's dial, and the editor answering -- everything except the two pure
+ * docker publishes that carry the Mac's traffic in.
+ */
+function probeEditor(project: string, port: number): boolean {
+  const config = { retries: 5, gapMs: 1000 } as const;
+  const name = relay.name(project, port);
   for (let attempt = 0; attempt < config.retries; attempt++) {
-    try {
-      await fetch(`http://${PROBE_HOST}:${port}/`, {
-        signal: AbortSignal.timeout(config.timeoutMs),
-      });
-      return true; // any response at all means reachable
-    } catch {
-      await new Promise((r) => setTimeout(r, config.gapMs));
-    }
+    if (docker.relay.answers(name, port)) return true;
+    if (attempt < config.retries - 1) sleep(config.gapMs);
   }
   return false;
 }
@@ -812,9 +819,10 @@ async function runProject(
   startEditor(name, dir, project, token, config);
   recreateRelays(name, dir, map);
 
-  if (!(await probeEditor(editorPort)))
-    return die(`editor not reachable through ${PROBE_HOST}:${editorPort} -- check the log:
-      devcontainer exec --workspace-folder ${dir} cat /tmp/openvscode-desolate.log`);
+  if (!probeEditor(name, editorPort))
+    return die(`editor did not answer through the relay on :${editorPort} -- check the log:
+      devcontainer exec --workspace-folder ${dir} cat /tmp/openvscode-desolate.log
+      and the relay itself:  docker logs ${relay.name(name, editorPort)}`);
 
   const id = devcontainerId(dir);
   const folder = (id && containerWorkspaceFolder(dir, id)) || dir;
