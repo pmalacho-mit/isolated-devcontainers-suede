@@ -29,6 +29,54 @@ process.stdout.on("error", (err: NodeJS.ErrnoException) => {
 const SSH_DIR = `${os.homedir()}/.ssh`;
 const SSH_CONFIG = `${SSH_DIR}/config`;
 
+/** The keyring holds the private halves; this container never sees one.
+ *
+ *  ~/.ssh here holds the CONFIG only. Key generation, storage and signing all
+ *  happen in the keyring container over these two sockets, because a repo's own
+ *  .git/config and .gitattributes are executable configuration and the editor
+ *  runs git against project content -- so any project can eventually execute
+ *  code here. What it finds when it does is public keys and a socket. */
+const KEYRING_RUN = process.env.DESOLATE_KEYRING_RUN ?? "/run/keyring";
+const KEYRING_CONTROL = `${KEYRING_RUN}/control.sock`;
+const identityFile = (alias: string) => `${KEYRING_RUN}/pub/${alias}.pub`;
+
+/** One request, one response, over the keyring's control socket.
+ *
+ *  Synchronous on purpose: every caller here is a step in a sequential CLI, and
+ *  execFileSync sits either side of it. */
+function keyring(request: Record<string, unknown>): Record<string, any> {
+  const script = `
+    const net = require("node:net");
+    const c = net.createConnection(${JSON.stringify(KEYRING_CONTROL)});
+    let buf = "";
+    c.on("connect", () => c.write(${JSON.stringify(JSON.stringify(request))} + "\n"));
+    c.on("data", (d) => {
+      buf += d.toString();
+      if (buf.includes("\n")) { process.stdout.write(buf.split("\n")[0]); c.end(); }
+    });
+    c.on("error", (e) => { console.error(String(e.message)); process.exit(1); });
+  `;
+  let raw: string;
+  try {
+    raw = execFileSync(process.execPath, ["-e", script], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch {
+    return die(`cannot reach the keyring at ${KEYRING_CONTROL}.
+        Is the 'keyring' service running?   ./cli.sh up
+        Check it with:                      docker logs desolate-keyring`);
+  }
+  let parsed: Record<string, any>;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return die(`unreadable reply from the keyring: ${raw.slice(0, 200)}`);
+  }
+  if (!parsed.ok) return die(`keyring refused: ${parsed.error}`);
+  return parsed;
+}
+
 /** How git must invoke ssh for the per-repo host aliases to resolve.
  *
  *  `-F` is not belt-and-braces, it is required. Node's os.homedir() prefers
@@ -63,7 +111,14 @@ interface Repo {
   owner: string;       // "acme"
   alias: string;       // "widgets" (or user-chosen)
   project: string;     // "acme/widgets" -- the path under /workspaces
-  keyPath: string;     // ~/.ssh/deploy_acme__widgets
+  // Deliberately NO keyPath. There is no private key in this container to
+  // point at; the identity is the PUBLIC half the keyring exports, and
+  // `identityFile(tag)` is the only thing that names it.
+  //
+  // `tag`, NOT `alias`, is what the keyring is keyed on. They differ exactly
+  // when two owners have a repo of the same name, which is the case the whole
+  // per-repo scheme exists for -- see parseRepo.
+  tag: string;         // acme__widgets
   hostAlias: string;   // github.com-acme__widgets
 }
 
@@ -79,15 +134,21 @@ function parseRepo(ownerRepo: string | undefined, aliasArg?: string): Repo {
   // people already think about repositories.
   const project = `${owner}/${alias}`;
   // The key and ssh host alias are keyed on owner AND repo for the same reason
-  // -- `deploy_widgets` would have been shared by acme/widgets and other/widgets
-  // and silently handed the wrong identity to one of them.
+  // -- a key named `widgets` would have been shared by acme/widgets and
+  // other/widgets, and `create` is idempotent, so the second repo would have
+  // been handed the FIRST repo's public key to register. One keypair for two
+  // repos is the exact blast radius this scheme exists to avoid.
+  //
+  // Both `tag` fields below must stay in step: the ssh config resolves a host
+  // alias built from `tag` to an IdentityFile that must be the key the keyring
+  // stored under the same `tag`.
   const tag = `${owner}__${alias}`;
   return {
     ownerRepo,
     owner,
     alias,
     project,
-    keyPath: `${SSH_DIR}/deploy_${tag}`,
+    tag,
     hostAlias: `github.com-${tag}`,
   };
 }
@@ -125,14 +186,10 @@ function ensureKey(repo: Repo): void {
   warnIfHomeIsAmbiguous();
   fs.mkdirSync(SSH_DIR, { recursive: true, mode: 0o700 });
 
-  if (fs.existsSync(repo.keyPath)) {
-    console.log(`newrepo: reusing existing key for '${repo.alias}'`);
-  } else {
-    execFileSync("ssh-keygen",
-      ["-t", "ed25519", "-f", repo.keyPath, "-N", "", "-C", `desolate-${repo.alias}`],
-      { stdio: ["ignore", "ignore", "inherit"] });
-    console.log(`newrepo: generated new key for '${repo.alias}'`);
-  }
+  // The keyring generates and keeps it. `create` is idempotent, so this both
+  // makes a new key and re-exports an existing one's public half.
+  const { pubkey } = keyring({ op: "create", alias: repo.tag });
+  console.log(`newrepo: keyring holds the key for '${repo.project}'`);
 
   const configPath = `${SSH_DIR}/config`;
   const config = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
@@ -141,7 +198,13 @@ function ensureKey(repo: Repo): void {
       `Host ${repo.hostAlias}`,
       `  HostName github.com`,
       `  User git`,
-      `  IdentityFile ${repo.keyPath}`,
+      // A PUBLIC key as IdentityFile. ssh pairs it with the agent's private
+      // half, which is what keeps `IdentitiesOnly yes` usable: with several
+      // deploy keys loaded, an agent offers them in an arbitrary order and
+      // GitHub authenticates as whichever repo matches first, so pushing to A
+      // can authenticate as B. Pinning the identity per host alias avoids that
+      // without the editor ever holding a private key.
+      `  IdentityFile ${identityFile(repo.tag)}`,
       `  IdentitiesOnly yes`,
       ``,
     ].join("\n");
@@ -150,7 +213,7 @@ function ensureKey(repo: Repo): void {
   }
 
   // Machine-readable line, parsed by cli.sh for GitHub registration.
-  console.log(`PUBKEY ${fs.readFileSync(`${repo.keyPath}.pub`, "utf8").trim()}`);
+  console.log(`PUBKEY ${pubkey}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -193,15 +256,13 @@ function doClone(repo: Repo): void {
 // Status: derived from key files + workspace state, no bookkeeping to drift.
 // ---------------------------------------------------------------------------
 function showStatus(): void {
+  // Ask the keyring, not the filesystem: ~/.ssh here holds config only now.
+  const aliases: string[] = keyring({ op: "list" }).aliases ?? [];
   let found = false;
-  let entries: string[] = [];
-  try { entries = fs.readdirSync(SSH_DIR); } catch { /* no .ssh yet */ }
-  for (const entry of entries) {
-    const match = entry.match(/^deploy_(.+)\.pub$/);
-    if (!match) continue;
+  for (const alias of aliases) {
     found = true;
-    // deploy_<owner>__<repo> -> the project path it clones to.
-    const project = match[1].replace(/__/g, "/");
+    // <owner>__<repo> -> the project path it clones to.
+    const project = alias.replace(/__/g, "/");
     const dest = `${WORKSPACES}/${project}`;
     const state = fs.existsSync(`${dest}/.git`) ? `cloned at ${dest}` : "key only";
     console.log(`  ${project}: ${state}`);

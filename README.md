@@ -866,7 +866,9 @@ with the same two-part name:
 ```
 
 Two owners can then have a repo of the same name without colliding -- and so can
-their deploy keys, which are named `deploy_<owner>__<repo>` for the same reason.
+their deploy keys, which the keyring stores under `<owner>__<repo>` for the same
+reason. The private half never leaves the keyring container; what the editor
+gets is an ssh-agent socket and the public half.
 
 Exactly one level of nesting is allowed. `a/b/c` is refused, and so is anything
 resolving outside `/workspaces` -- the broker compares the _resolved_ path
