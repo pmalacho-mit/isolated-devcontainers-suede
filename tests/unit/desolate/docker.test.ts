@@ -87,16 +87,32 @@ describe("which container actually belongs to a workspace", () => {
   // `--label` could stamp a sibling's folder onto its container and be handed
   // that sibling's editor session. policy.ts refuses the flag; this makes the
   // lookup itself insist on the half of the identity a project never chose.
+  //
+  // The paths below are WORKSPACE paths, and that is not cosmetic. These
+  // fixtures used to name /tmp/desolate-specs/..., i.e. the snapshot desolate
+  // passes to --override-config -- and the CLI does not label with that. It
+  // labels with the config inside the workspace folder, whatever it was told to
+  // read (measured; see labelledConfig in devcontainer.ts). Every caller was
+  // handing this function the snapshot path, so it matched nothing and a
+  // running container reported as absent: "devcontainer is not running after
+  // up". A fixture that agrees with the code and not with the CLI is how that
+  // survived a green suite.
   const candidates = [
-    { id: "impostor", configFile: "/tmp/desolate-specs/attacker/dc.json" },
-    { id: "genuine", configFile: "/tmp/desolate-specs/victim/dc.json" },
+    {
+      id: "impostor",
+      configFile: "/workspaces/attacker/.devcontainer/devcontainer.json",
+    },
+    {
+      id: "genuine",
+      configFile: "/workspaces/victim/.devcontainer/devcontainer.json",
+    },
   ];
 
   test("the container naming OUR config file wins, whatever its position", () => {
     assert.equal(
       selectWorkspaceContainer(
         candidates,
-        "/tmp/desolate-specs/victim/dc.json",
+        "/workspaces/victim/.devcontainer/devcontainer.json",
       ),
       "genuine",
     );
@@ -106,7 +122,7 @@ describe("which container actually belongs to a workspace", () => {
     assert.equal(
       selectWorkspaceContainer(
         [candidates[0]],
-        "/tmp/desolate-specs/victim/dc.json",
+        "/workspaces/victim/.devcontainer/devcontainer.json",
       ),
       "",
     );
@@ -116,7 +132,7 @@ describe("which container actually belongs to a workspace", () => {
     assert.equal(
       selectWorkspaceContainer(
         [{ id: "old", configFile: "" }],
-        "/tmp/desolate-specs/victim/dc.json",
+        "/workspaces/victim/.devcontainer/devcontainer.json",
       ),
       "old",
     );

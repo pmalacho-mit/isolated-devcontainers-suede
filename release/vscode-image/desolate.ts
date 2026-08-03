@@ -71,6 +71,7 @@ import {
   type PortMap,
 } from "./ports.ts";
 import {
+  labelledConfig,
   resolveSpec,
   tryLocateConfig,
   type ResolvedSpec,
@@ -344,11 +345,21 @@ const ownRelayNames = (project: string) =>
  *  `configFile` is the path we hand `--override-config`, which the CLI records
  *  as the second half of the container's identity. Pass it wherever it is
  *  known -- the workspace label on its own is a claim, not a proof. */
-const devcontainerId = (
-  dir: string,
-  includeStopped = false,
-  configFile?: string,
-) => docker.container.forWorkspace(dir, { includeStopped, configFile });
+/**
+ * The container this project's workspace folder belongs to, "" if there is none.
+ *
+ * The config file is derived here rather than taken as an argument, and that is
+ * the point: every caller has a `config` in hand -- the snapshot, or the
+ * rewritten copy from deriveRunConfig -- and it is the WRONG value. The CLI
+ * labels a container with the config inside the workspace folder whatever
+ * --override-config said, so passing what we read matches nothing. See
+ * labelledConfig.
+ */
+const devcontainerId = (dir: string, includeStopped = false) =>
+  docker.container.forWorkspace(dir, {
+    includeStopped,
+    configFile: labelledConfig(dir),
+  });
 
 interface ProjectConfig {
   appPorts: number[];
@@ -554,8 +565,8 @@ const devcontainerUp = (
 /** Trust the proxy CA inside the devcontainer. Runs as container-root via the
  *  daemon (the orchestrator has that authority; the project never needs sudo,
  *  and no postCreateCommand is required). */
-function installProxyCa(dir: string, config: string): void {
-  const id = devcontainerId(dir, false, config);
+function installProxyCa(dir: string): void {
+  const id = devcontainerId(dir);
   if (!id) return;
   if (
     docker.container.execAsRoot(
@@ -601,7 +612,7 @@ function startEditor(
     console.log(
       "desolate: container has stale mounts (runc rc 126) -- recreating...",
     );
-    const stale = devcontainerId(dir, true, config);
+    const stale = devcontainerId(dir, true);
     if (stale) docker.container.remove([stale]);
     devcontainerUp(project, dir, config);
     const retry = run.status("devcontainer", [
@@ -676,13 +687,8 @@ const startRelay = (
  * Relays: one socat container per mapped port, named desolate-relay-<proj>-<port>
  * so the host port is recoverable from the name alone
  */
-function recreateRelays(
-  project: string,
-  dir: string,
-  map: PortMap,
-  config: string,
-): void {
-  const cid = devcontainerId(dir, false, config);
+function recreateRelays(project: string, dir: string, map: PortMap): void {
+  const cid = devcontainerId(dir);
   if (!cid) die("devcontainer is not running after up");
 
   const nets = docker.container.networks(cid);
@@ -830,16 +836,16 @@ async function runProject(
   desolog(`starting devcontainer for ${name} ...`);
   devcontainerUp(name, dir, config, noCache);
   if (willCreate) spec.save(name, fingerprint);
-  installProxyCa(dir, config);
+  installProxyCa(dir);
   startEditor(name, dir, project, token, config);
-  recreateRelays(name, dir, map, config);
+  recreateRelays(name, dir, map);
 
   if (!probeEditor(name, editorPort))
     return die(`editor did not answer through the relay on :${editorPort} -- check the log:
       devcontainer exec --workspace-folder ${dir} cat /tmp/openvscode-desolate.log
       and the relay itself:  docker logs ${relay.name(name, editorPort)}`);
 
-  const id = devcontainerId(dir, false, config);
+  const id = devcontainerId(dir);
   const folder = (id && containerWorkspaceFolder(dir, id)) || dir;
 
   console.log(`\n  ${name} is ready:\n`);
