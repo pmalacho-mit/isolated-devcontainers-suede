@@ -1,4 +1,3 @@
-/// <reference types="node" />
 // desolate -- open a project's devcontainer as a full browser IDE, with dynamic
 // port allocation for dev servers.
 //
@@ -29,7 +28,7 @@
 // forwards each port with a socat relay container on the inner daemon:
 //
 //   Mac 127.0.0.1:8081 -> dind:8081 (relay) -> <devcontainer-ip>:5173
-
+/// <reference types="node" />
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";

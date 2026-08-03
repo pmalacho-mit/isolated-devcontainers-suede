@@ -28,7 +28,7 @@ Four things make that validation sound:
 
   - FAIL CLOSED. Anything we cannot resolve, parse or classify is refused.
 */
-
+/// <reference types="node" />
 import { spawn } from "node:child_process";
 import {
   chmodSync,

@@ -18,9 +18,22 @@ PROJECT=desolate-test
 EDITOR_PORT=3100
 TOKEN="test-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 
-C_DIND=$PROJECT-dind-1
-C_VSCODE=$PROJECT-vscode-1
-C_ORCH=$PROJECT-orchestrator-1
+# These MUST match the container_name overrides in compose.test.yml, not
+# compose's `<project>-<service>-<n>` pattern: docker-compose.yml pins
+# container_name on every service, which overrides that pattern entirely.
+C_DIND=$PROJECT-dind
+C_VSCODE=$PROJECT-vscode
+C_ORCH=$PROJECT-orchestrator
+
+# fail() prints its detail with a fixed indent, so a multi-line diagnostic has
+# to indent its own continuation lines. Diagnostics belong INSIDE the test: the
+# cleanup trap tears the stack down on exit, so anything not captured here
+# cannot be captured afterwards.
+detail() { printf '%s' "$1" | sed '2,$s/^/       /'; }
+# harness.sh has pass/fail/skip but no note(): informational output that is not
+# an assertion. Diagnostics need it -- they explain a result without inventing
+# a pass or a failure.
+note() { printf '       %s\n' "$(detail "$1")"; }
 
 compose() {
   # project-directory must be RELEASE: the build contexts (./vscode-image) and
@@ -100,8 +113,17 @@ group "the inner daemon API is not on the network"
 # DNS rebinding. Assert the absence, so re-adding one has to be deliberate.
 assert_fails "nothing answers the docker API on the old proxy port" \
   curl -s -f --max-time 3 "http://127.0.0.1:2475/_ping"
-assert_not_contains "no stack container publishes a daemon API port" \
-  "$(docker ps --filter "name=$PROJECT" --format '{{.Ports}}')" "2375"
+# `docker ps` prints EXPOSEd ports alongside published ones, and docker:dind
+# carries `EXPOSE 2375 2376` in its image metadata. An EXPOSE is a comment: no
+# listener, no host binding, nothing reachable. Matching the Ports column
+# therefore reports a daemon API that does not exist, while a REAL publish must
+# still be caught -- so assert on the host bindings, which is what "publishes"
+# means. (The daemon's --host flags are pinned to unix:// by
+# tests/static/02-compose-invariants.sh, which covers the listener side.)
+BINDINGS=$(docker ps --filter "name=$PROJECT" -q \
+           | xargs -r docker inspect -f '{{.Name}} {{json .HostConfig.PortBindings}}' 2>/dev/null)
+assert_not_contains "no stack container publishes the daemon API port" "$BINDINGS" "2375"
+assert_not_contains "no stack container publishes the TLS daemon API port" "$BINDINGS" "2376"
 
 group "the editor's token actually gates the editor"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$EDITOR_PORT/")
@@ -221,9 +243,11 @@ if [ -z "${DEVC:-}" ]; then
   skip "E6 server poisoning" "no example-project devcontainer is running"
 else
   BEFORE=$(docker exec "$C_DIND" sha256sum /server-dist/bin/openvscode-server 2>/dev/null | cut -d' ' -f1)
-  # The attack, exactly as a compromised project would run it.
-  docker exec "$C_ORCH" docker exec "$DEVC" \
-    sh -c 'echo MALICIOUS > /vscode-server/bin/openvscode-server' >/dev/null 2>&1
+  # The attack, exactly as a compromised project would run it. Its output is
+  # KEPT: discarding it is what let the write fail silently while the assertion
+  # below still reported the lower layer intact -- a pass that defended nothing.
+  ATTACK=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
+    'echo MALICIOUS > /vscode-server/bin/openvscode-server 2>&1; echo "exit=$?"' 2>&1)
   AFTER=$(docker exec "$C_DIND" sha256sum /server-dist/bin/openvscode-server 2>/dev/null | cut -d' ' -f1)
 
   if [ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ]; then
@@ -235,7 +259,24 @@ else
   # And the project must see only its OWN modification, not a shared one.
   SEEN=$(docker exec "$C_ORCH" docker exec "$DEVC" \
            sh -c 'cat /vscode-server/bin/openvscode-server 2>/dev/null | head -c 9' 2>/dev/null)
-  assert_contains "the writer sees its own copy-up (overlay is working)" "$SEEN" "MALICIOUS"
+  # This is E6's POSITIVE CONTROL: it proves the attack above actually executed.
+  # If it fails, "the pristine server survived" passed vacuously -- nothing was
+  # written, so nothing was defended against -- and the reason has to be
+  # reported here, while the container still exists.
+  if printf '%s' "$SEEN" | grep -q MALICIOUS; then
+    pass "the writer sees its own copy-up (overlay is working)"
+  else
+    E6DIAG=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c '
+      echo "as:     $(id 2>&1)"
+      echo "target: $(ls -la /vscode-server/bin/openvscode-server 2>&1 | head -1)"
+      echo "dir:    $(ls -ld /vscode-server/bin 2>&1 | head -1)"
+      echo "mount:  $(mount 2>/dev/null | grep -i vscode-server | head -1 || echo "(no vscode-server mount line)")"
+      echo "readback: $(head -c 40 /vscode-server/bin/openvscode-server 2>&1 | tr -d "\0" | head -1)"' 2>&1)
+    fail "the writer sees its own copy-up (overlay is working)" \
+      "$(detail "the ATTACK DID NOT RUN, so the pass above is vacuous -- nothing was written.
+write attempt: $ATTACK
+$E6DIAG")"
+  fi
 fi
 
 # =========================================================================
@@ -323,16 +364,60 @@ else
   #    the destination, and mitmproxy dials it from the VM, where the bridge
   #    drops no longer apply. Without an address check in addon.py that is a
   #    route to the Mac and the LAN.
-  SSRF=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
-         "curl -s -o /dev/null -m 6 -w '%{http_code}' http://192.168.5.2/ 2>/dev/null" 2>/dev/null)
+  # curl is not guaranteed: the base image is the project's choice. Fall back to
+  # wget rather than skipping, and keep "no tool" distinct from "no answer" --
+  # the second is a finding (the redirect or the proxy is down), and reporting it
+  # as a skip is how a probe measures nothing and calls it green.
+  SSRF=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c "
+    if command -v curl >/dev/null 2>&1; then
+      curl -s -o /dev/null -m 6 -w '%{http_code}' http://192.168.5.2/ 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+      wget -S -O /dev/null -T 6 http://192.168.5.2/ 2>&1 \
+        | grep -oE 'HTTP/[0-9.]+ [0-9]{3}' | grep -oE '[0-9]{3}' | tail -1
+    else
+      echo NOTOOL
+    fi" 2>/dev/null)
   case "$SSRF" in
     403) pass "the proxy refuses an internal destination (no SSRF to the Mac)" ;;
-    ""|000) skip "internal-destination probe" "no curl in this devcontainer, or no reply" ;;
+    NOTOOL) skip "internal-destination probe" "neither curl nor wget in this devcontainer" ;;
+    ""|000)
+      # No answer at all. Gather the why NOW -- the cleanup trap tears the stack
+      # down on exit, so nothing here can be investigated after the run.
+      SSRFDIAG=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c '
+        echo "tools:    $(command -v curl wget 2>/dev/null | tr "\n" " ")"
+        echo "verbose:  $(curl -sS -m 6 -o /dev/null http://192.168.5.2/ 2>&1 | tail -1)"
+        echo "route:    $(ip route 2>/dev/null | awk "/^default/{print; exit}")"' 2>&1)
+      PROXYUP="(colima not on PATH)"
+      command -v colima >/dev/null 2>&1 && PROXYUP=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- \
+        systemctl is-active desolate-proxy 2>/dev/null || echo "not-active")
+      fail "the proxy refuses an internal destination" \
+        "$(detail "no answer -- :80 is not reaching the proxy from the container world.
+desolate-proxy on the VM: $PROXYUP
+$SSRFDIAG")" ;;
     502) fail "the proxy refuses an internal destination" \
               "got 502 -- the proxy DIALLED it; the address check is not running" ;;
     *)   fail "the proxy refuses an internal destination" \
               "got '$SSRF' -- addon.py must refuse private destination ADDRESSES" ;;
   esac
+
+  # Docker installs its own inter-bridge isolation rules, so the editor can be
+  # unreachable without the nftables drops ever firing. The counters tell the
+  # two apart: a pass with zero packets means Docker did it, and the rule this
+  # suite exists to verify has not actually been exercised.
+  if command -v colima >/dev/null 2>&1; then
+    LATERAL=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- \
+      sudo nft list table inet desolate 2>/dev/null \
+      | grep -E 'iifname .*oifname .*drop' | sed 's/^ *//')
+    if [ -z "$LATERAL" ]; then
+      note "could not read the nft lateral drops (is the VM proxy layer installed?)"
+    elif printf '%s' "$LATERAL" | grep -qE 'packets [1-9]'; then
+      pass "the nftables lateral drop is what stopped it (counters moved)"
+    else
+      note "nft lateral drops all read ZERO -- docker's own bridge isolation blocked"
+      note "this, not the desolate ruleset. The drops are untested here:"
+      note "$LATERAL"
+    fi
+  fi
 
   # 4. and the daemon socket, which must not be visible at all.
   assert_fails "a devcontainer has no inner daemon socket" \
