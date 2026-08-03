@@ -246,7 +246,13 @@ else
   # The attack, exactly as a compromised project would run it. Its output is
   # KEPT: discarding it is what let the write fail silently while the assertion
   # below still reported the lower layer intact -- a pass that defended nothing.
-  ATTACK=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
+  # -u 1000 deliberately. The overlay is chowned 1000:1000 and the stock
+  # devcontainer user is uid 1000, so that is who the attacker is. Running as
+  # root looks stronger and is weaker: example-project drops ALL capabilities,
+  # so root has no CAP_DAC_OVERRIDE and cannot write a file owned by 1000 --
+  # the write fails on permissions before overlayfs is ever involved, and the
+  # "pristine server survived" assertion below then proves nothing.
+  ATTACK=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" sh -c \
     'echo MALICIOUS > /vscode-server/bin/openvscode-server 2>&1; echo "exit=$?"' 2>&1)
   AFTER=$(docker exec "$C_DIND" sha256sum /server-dist/bin/openvscode-server 2>/dev/null | cut -d' ' -f1)
 
@@ -257,7 +263,7 @@ else
          "/server-dist changed: $BEFORE -> $AFTER -- every other project now executes it"
   fi
   # And the project must see only its OWN modification, not a shared one.
-  SEEN=$(docker exec "$C_ORCH" docker exec "$DEVC" \
+  SEEN=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" \
            sh -c 'cat /vscode-server/bin/openvscode-server 2>/dev/null | head -c 9' 2>/dev/null)
   # This is E6's POSITIVE CONTROL: it proves the attack above actually executed.
   # If it fails, "the pristine server survived" passed vacuously -- nothing was
@@ -266,7 +272,7 @@ else
   if printf '%s' "$SEEN" | grep -q MALICIOUS; then
     pass "the writer sees its own copy-up (overlay is working)"
   else
-    E6DIAG=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c '
+    E6DIAG=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" sh -c '
       echo "as:     $(id 2>&1)"
       echo "target: $(ls -la /vscode-server/bin/openvscode-server 2>&1 | head -1)"
       echo "dir:    $(ls -ld /vscode-server/bin 2>&1 | head -1)"
@@ -291,13 +297,25 @@ if [ -z "${DEVC:-}" ]; then
   skip "E7 CA poisoning" "no example-project devcontainer is running"
 else
   CA_BEFORE=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
-  docker exec "$C_ORCH" docker exec "$DEVC" \
-    sh -c 'echo POISONED > /desolate-ca/install-ca.sh' >/dev/null 2>&1
+  # Keep the output. Same lesson as E6: a write that never happened leaves the
+  # hash unchanged and the assertion green, having defended against nothing.
+  CA_ATTACK=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" \
+    sh -c 'echo POISONED > /desolate-ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
   # And the privileged escalation the read-only flag could not stop.
-  docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
-    'mount -o remount,bind,rw /desolate-ca 2>/dev/null; echo POISONED > /desolate-ca/install-ca.sh' \
-    >/dev/null 2>&1
+  CA_ATTACK2=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
+    'mount -o remount,bind,rw /desolate-ca 2>&1; echo POISONED > /desolate-ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
   CA_AFTER=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
+
+  # The positive control: the write must have been ATTEMPTED and REFUSED by the
+  # filesystem, not skipped because the path was absent or the exec failed.
+  case "$CA_ATTACK" in
+    *"Read-only file system"*|*"Permission denied"*)
+      pass "the poisoning attempt actually reached the filesystem and was refused" ;;
+    *) fail "the poisoning attempt actually reached the filesystem and was refused" \
+         "$(detail "the write did not run, so the hash check below is vacuous.
+attempt 1: $CA_ATTACK
+attempt 2: $CA_ATTACK2")" ;;
+  esac
 
   if [ -n "$CA_BEFORE" ] && [ "$CA_BEFORE" = "$CA_AFTER" ]; then
     pass "the shared install-ca.sh survived both write attempts"
@@ -364,46 +382,61 @@ else
   #    the destination, and mitmproxy dials it from the VM, where the bridge
   #    drops no longer apply. Without an address check in addon.py that is a
   #    route to the Mac and the LAN.
-  # curl is not guaranteed: the base image is the project's choice. Fall back to
-  # wget rather than skipping, and keep "no tool" distinct from "no answer" --
-  # the second is a finding (the redirect or the proxy is down), and reporting it
-  # as a skip is how a probe measures nothing and calls it green.
-  SSRF=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c "
-    if command -v curl >/dev/null 2>&1; then
-      curl -s -o /dev/null -m 6 -w '%{http_code}' http://192.168.5.2/ 2>/dev/null
-    elif command -v wget >/dev/null 2>&1; then
-      wget -S -O /dev/null -T 6 http://192.168.5.2/ 2>&1 \
-        | grep -oE 'HTTP/[0-9.]+ [0-9]{3}' | grep -oE '[0-9]{3}' | tail -1
-    else
-      echo NOTOOL
-    fi" 2>/dev/null)
-  case "$SSRF" in
-    403) pass "the proxy refuses an internal destination (no SSRF to the Mac)" ;;
-    NOTOOL) skip "internal-destination probe" "neither curl nor wget in this devcontainer" ;;
-    ""|000)
-      # No answer at all. Gather the why NOW -- the cleanup trap tears the stack
-      # down on exit, so nothing here can be investigated after the run.
-      SSRFDIAG=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c '
-        echo "tools:    $(command -v curl wget 2>/dev/null | tr "\n" " ")"
-        echo "verbose:  $(curl -sS -m 6 -o /dev/null http://192.168.5.2/ 2>&1 | tail -1)"
-        echo "route:    $(ip route 2>/dev/null | awk "/^default/{print; exit}")"' 2>&1)
-      PROXYUP="(colima not on PATH)"
-      command -v colima >/dev/null 2>&1 && PROXYUP=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- \
-        systemctl is-active desolate-proxy 2>/dev/null || echo "not-active")
-      fail "the proxy refuses an internal destination" \
-        "$(detail "no answer -- :80 is not reaching the proxy from the container world.
-desolate-proxy on the VM: $PROXYUP
-$SSRFDIAG")" ;;
-    502) fail "the proxy refuses an internal destination" \
-              "got 502 -- the proxy DIALLED it; the address check is not running" ;;
-    *)   fail "the proxy refuses an internal destination" \
-              "got '$SSRF' -- addon.py must refuse private destination ADDRESSES" ;;
+  # 3. the proxy as a confused deputy, in two parts -- because one probe cannot
+  #    answer both questions and a single ambiguous result is how a test ends up
+  #    asserting nothing.
+  #
+  #    (a) does :80 from the container world reach the proxy at all? Without
+  #        this, (b) passes for the wrong reason forever.
+  #    (b) does an internal destination fail to succeed?
+  #
+  #    (b) cannot prove WHICH layer refused, and deliberately does not claim to.
+  #    mitmproxy connects to the original destination BEFORE the request hook
+  #    runs (connection_strategy defaults to eager, see proxy/layers/modes.py),
+  #    so an internal address with nothing listening is closed at that point and
+  #    addon.py never sees it -- curl reports (52) Empty reply. Contained either
+  #    way; addon.py's own refusal is covered by tests/unit/proxy (E10 family).
+  http_from_devc() { # http_from_devc <url> -> "<code>|<curl exit>"
+    docker exec "$C_ORCH" docker exec "$DEVC" sh -c "
+      if command -v curl >/dev/null 2>&1; then
+        printf '%s|%s' \"\$(curl -s -o /dev/null -m 8 -w '%{http_code}' $1 2>/dev/null)\" \"\$?\"
+      elif command -v wget >/dev/null 2>&1; then
+        printf '%s|wget' \"\$(wget -S -O /dev/null -T 8 $1 2>&1 \
+          | grep -oE 'HTTP/[0-9.]+ [0-9]{3}' | grep -oE '[0-9]{3}' | tail -1)\"
+      else
+        printf 'NOTOOL|'
+      fi" 2>/dev/null
+  }
+
+  PUB=$(http_from_devc http://example.com/)
+  case "${PUB%%|*}" in
+    NOTOOL) skip "interception of :80 from a devcontainer" "neither curl nor wget present" ;;
+    2*|3*|4*|5*) pass "port 80 from a devcontainer is intercepted and answered (${PUB%%|*})" ;;
+    *) fail "port 80 from a devcontainer is intercepted and answered" \
+         "$(detail "got '$PUB' for a PUBLIC destination -- the redirect or the proxy is down,
+so the internal-destination result below proves nothing about the proxy.
+desolate-proxy on the VM: $(command -v colima >/dev/null 2>&1 \
+  && colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active desolate-proxy 2>/dev/null \
+  || echo '(colima not on PATH)')")" ;;
   esac
 
-  # Docker installs its own inter-bridge isolation rules, so the editor can be
-  # unreachable without the nftables drops ever firing. The counters tell the
-  # two apart: a pass with zero packets means Docker did it, and the rule this
-  # suite exists to verify has not actually been exercised.
+  INT=$(http_from_devc http://192.168.5.2/)
+  case "$INT" in
+    NOTOOL*) : ;;  # already skipped above
+    403*) pass "an internal destination is refused by the proxy (403 from addon.py)" ;;
+    2*|3*) fail "an internal destination does not succeed" \
+             "$(detail "got '$INT' -- the container REACHED 192.168.5.2 through the proxy.
+This is the confused-deputy SSRF: addon.py must refuse private destination ADDRESSES.")" ;;
+    502*) pass "an internal destination does not succeed (502: the proxy could not reach it)" ;;
+    *) pass "an internal destination does not succeed (no reply: '$INT')" ;;
+  esac
+
+  # WHICH layer stopped it. Docker installs its own inter-bridge isolation rules
+  # at the same netfilter hook, and they generally get there first -- so zero
+  # counters are the EXPECTED reading, not a fault. It is still worth printing:
+  # it says the desolate drops are a backstop here rather than the mechanism,
+  # which is the opposite of what the ruleset's comments imply, and it means a
+  # regression in those drops would not be caught by the probes above.
   if command -v colima >/dev/null 2>&1; then
     LATERAL=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- \
       sudo nft list table inet desolate 2>/dev/null \
@@ -413,8 +446,9 @@ $SSRFDIAG")" ;;
     elif printf '%s' "$LATERAL" | grep -qE 'packets [1-9]'; then
       pass "the nftables lateral drop is what stopped it (counters moved)"
     else
-      note "nft lateral drops all read ZERO -- docker's own bridge isolation blocked"
-      note "this, not the desolate ruleset. The drops are untested here:"
+      note "nft lateral drops read ZERO: docker's own bridge isolation reached this"
+      note "first (expected). The desolate drops are the backstop, and the probes"
+      note "above do not exercise them:"
       note "$LATERAL"
     fi
   fi
