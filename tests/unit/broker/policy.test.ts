@@ -11,7 +11,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { enforcePolicy, mount } from "../../../release/vscode-image/policy.ts";
+import {
+  enforcePolicy,
+  feature,
+  mount,
+} from "../../../release/vscode-image/policy.ts";
 import type { ResolvedSpec } from "../../../release/vscode-image/devcontainer.ts";
 import { list as listProjects, volumeNamespace } from "../../../release/vscode-image/projects.ts";
 import { parse as parseJsonc, strip as stripJsonc } from "../../../release/vscode-image/jsonc.ts";
@@ -178,6 +182,11 @@ describe("demonstrated escapes (regression)", () => {
     //   --mount type=bind,src=/,dst=/host
     // while the project's own devcontainer.json declared none of it.
     // The policy now enforces on mergedConfiguration, where features land.
+    //
+    // The id is a REGISTRY one, because the local spelling is refused outright
+    // now (see "features must be fetched, not read from the project"). This
+    // case is still the one that matters: a published feature's metadata lands
+    // in merged the same way, and merged is what is enforced on.
     const featureMerged = {
       privileged: true,
       capAdd: ["SYS_ADMIN"],
@@ -188,7 +197,13 @@ describe("demonstrated escapes (regression)", () => {
       ],
     };
     refuses(
-      spec({ image: "x", features: { "./evilfeat": {} } }, featureMerged),
+      spec(
+        {
+          image: "x",
+          features: { "ghcr.io/attacker/features/evilfeat:1": {} },
+        },
+        featureMerged,
+      ),
       /PRIVILEGED/,
     );
     // even with the privilege opt-in, the bind mount and the foreign volume stay refused
@@ -665,6 +680,88 @@ describe("other refused keys", () => {
       /build.options/,
     );
     allows(spec({ build: { dockerfile: "Dockerfile", args: { X: "1" } } }));
+  });
+});
+
+// ===========================================================================
+describe("features must be fetched, not read from the project", () => {
+  // ===========================================================================
+  // E12, demonstrated against @devcontainers/cli 0.88.0. A local feature's
+  // devcontainer-feature.json is read TWICE: once by `read-configuration`,
+  // which is what this policy enforces on, and again when the container is
+  // built. Both reads hit the live project -- the snapshot copy is never
+  // consulted, because --override-config changes which JSON is read, not where
+  // relative paths resolve from.
+  //
+  // With a benign metadata file at validation time and a hostile one swapped in
+  // afterwards, `devcontainer up` ran:
+  //
+  //     --privileged --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+  //     --mount type=bind,src=/,dst=/host
+  //
+  // while the validated snapshot still said "harmless". That is E3 again,
+  // reached around the check rather than through it. The window is the whole
+  // resolve-enforce-spawn-build sequence, and a failed attempt costs nothing.
+  //
+  // So the shape of the id is the rule: a feature has to be something the CLI
+  // FETCHES, not something it reads out of a directory the editor can rewrite.
+
+  test("a local feature is refused", () => {
+    for (const id of ["./feat", "../feat", "/opt/feat", "./a/b", "~/feat"])
+      refuses(spec({ image: "x", features: { [id]: {} } }), /local feature/);
+  });
+
+  test("a published feature is still allowed", () => {
+    allows(
+      spec({
+        image: "x",
+        features: { "ghcr.io/devcontainers/features/docker-in-docker:2": {} },
+      }),
+    );
+    allows(
+      spec({
+        image: "x",
+        features: {
+          "ghcr.io/devcontainers/features/git@sha256:0000000000000000000000000000000000000000000000000000000000000000":
+            {},
+        },
+      }),
+    );
+    allows(
+      spec({
+        image: "x",
+        features: { "https://example.com/feature.tgz": {} },
+      }),
+    );
+  });
+
+  test("an id that is neither is refused rather than guessed at", () => {
+    // Fail closed on the classification itself. If a future CLI grows another
+    // spelling for "read this off disk", it lands here instead of through.
+    refuses(spec({ image: "x", features: { feat: {} } }), /can classify/);
+    refuses(
+      spec({ image: "x", features: { "file://feat": {} } }),
+      /can classify/,
+    );
+    refuses(
+      spec({ image: "x", features: { "http://example.com/f.tgz": {} } }),
+      /can classify/,
+    );
+  });
+
+  test("the classifier itself", () => {
+    assert.equal(feature.origin("./feat"), "local");
+    assert.equal(feature.origin("../../feat"), "local");
+    assert.equal(feature.origin("/abs/feat"), "local");
+    assert.equal(feature.origin("ghcr.io/o/r/f:1"), "registry");
+    assert.equal(feature.origin("https://x/f.tgz"), "tarball");
+    assert.equal(feature.origin("http://x/f.tgz"), "other-scheme");
+    assert.equal(feature.origin("feat"), "unknown");
+  });
+
+  test("no features key means nothing to check", () => {
+    allows(spec({ image: "alpine:3" }));
+    allows(spec({ image: "alpine:3", features: {} }));
   });
 });
 

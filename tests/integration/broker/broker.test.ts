@@ -214,7 +214,22 @@ describe("hostile specs never reach the runner", () => {
     assert.deepEqual(runnerInvocations(), []);
   });
 
-  test("E3: privilege injected by a local feature", async () => {
+  test("E3/E12: a local feature, whose metadata is read twice", async () => {
+    // Two rules meet here, and the order matters for what this asserts.
+    //
+    // E3 was privilege injected by feature metadata, caught by enforcing on the
+    // CLI's mergedConfiguration. E12 is the race around that: the CLI reads
+    // devcontainer-feature.json again when it BUILDS, from the live project,
+    // and the snapshot is not consulted -- so the file that was checked and the
+    // file that takes effect are two different reads of an editor-writable
+    // path. Measured on 0.88.0, swapping it in between produced
+    //   --privileged --cap-add SYS_ADMIN --mount type=bind,src=/,dst=/host
+    // from a snapshot that said "harmless".
+    //
+    // Local features are therefore refused outright, which is what this now
+    // asserts. The merged-config enforcement underneath it has not gone
+    // anywhere -- see E3 in tests/unit/broker/policy.test.ts, where a published
+    // feature's metadata is still refused for the privilege it declares.
     project(
       "evil-feature",
       JSON.stringify({
@@ -241,7 +256,32 @@ describe("hostile specs never reach the runner", () => {
       false,
       "feature-injected privilege was accepted",
     );
+    assert.match(errorOf(msgs), /local feature/);
     assert.deepEqual(runnerInvocations(), []);
+  });
+
+  test("E12: a benign local feature is refused too -- the race needs no payload", async () => {
+    // The metadata that was CHECKED does not have to contain anything hostile.
+    // That is the whole point: what takes effect is the second read, and this
+    // project's .devcontainer stays writable by the editor for the entire
+    // resolve-enforce-spawn-build sequence.
+    project(
+      "local-feature",
+      JSON.stringify({ image: "alpine:3", features: { "./feat": {} } }),
+      {
+        ".devcontainer/feat/devcontainer-feature.json": JSON.stringify({
+          id: "feat",
+          version: "1.0.0",
+          name: "harmless",
+        }),
+        ".devcontainer/feat/install.sh": "#!/bin/sh\nexit 0\n",
+      },
+    );
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "local-feature" });
+    assert.equal(result(msgs).ok, false, "a local feature was accepted");
+    assert.match(errorOf(msgs), /local feature/);
+    assert.deepEqual(runnerInvocations(), [], "the runner was invoked anyway");
   });
 
   test("E4: JSONC divergence -- mounts hidden from a regex, visible to the CLI", async () => {
@@ -346,32 +386,6 @@ describe("hostile specs never reach the runner", () => {
     resetRunner();
     const msgs = await ask({ op: "start", project: "ctx-root" });
     assert.equal(result(msgs).ok, true, errorOf(msgs));
-  });
-
-  test("a local feature outside the project is refused by the CLI itself", async () => {
-    // Not this policy's doing: the CLI resolves `./feat` against the config
-    // directory and refuses anything that is not a child of it. Asserted
-    // because the policy RELIES on that -- a feature is a directory that gets
-    // copied into the build, so a `../../` feature path would be the same
-    // escape as E11 by another route. If the CLI ever relaxes this, the
-    // failure should land here rather than in the field.
-    fs.mkdirSync(path.join(workspaces, "loosefeat"), { recursive: true });
-    fs.writeFileSync(
-      path.join(workspaces, "loosefeat", "devcontainer-feature.json"),
-      JSON.stringify({ id: "loosefeat", version: "1.0.0", name: "outside" }),
-    );
-    fs.writeFileSync(
-      path.join(workspaces, "loosefeat", "install.sh"),
-      "#!/bin/sh\nexit 0\n",
-    );
-    project(
-      "feat-escape",
-      JSON.stringify({ image: "alpine:3", features: { "../../loosefeat": {} } }),
-    );
-    resetRunner();
-    const msgs = await ask({ op: "start", project: "feat-escape" });
-    assert.equal(result(msgs).ok, false, "a feature outside the project passed");
-    assert.deepEqual(runnerInvocations(), [], "the runner was invoked anyway");
   });
 
   test("another project's volume, declared directly", async () => {
@@ -598,32 +612,33 @@ describe("a legitimate project starts, from a frozen copy", () => {
     );
   });
 
-  test("local features are snapshotted too, not just the json", async () => {
-    // A config can point at ./myfeature, whose metadata carries privilege of
-    // its own. Freezing only devcontainer.json would leave that swappable.
+  test("the whole config directory is snapshotted, not just the json", async () => {
+    // This used to be asserted with a local ./feature, on the belief that
+    // copying it was what froze it. It is not: the CLI re-reads feature
+    // directories from the live project at build time and never looks at this
+    // copy, which is why local features are refused now (E12 above).
+    //
+    // The copy still matters for what it IS -- the record of what was
+    // approved, on a filesystem the editor cannot reach -- so the Dockerfile
+    // and everything beside it still has to land in it.
     project(
-      "feat-snap",
-      JSON.stringify({ image: "alpine:3", features: { "./feat": {} } }),
+      "dir-snap",
+      JSON.stringify({ build: { dockerfile: "Dockerfile", context: "." } }),
       {
-        ".devcontainer/feat/devcontainer-feature.json": JSON.stringify({
-          id: "feat",
-          version: "1.0.0",
-          name: "harmless",
-        }),
-        ".devcontainer/feat/install.sh": "#!/bin/sh\nexit 0\n",
+        ".devcontainer/Dockerfile": "FROM alpine:3\n",
+        ".devcontainer/scripts/setup.sh": "#!/bin/sh\nexit 0\n",
       },
     );
     resetRunner();
-    const msgs = await ask({ op: "start", project: "feat-snap" });
+    const msgs = await ask({ op: "start", project: "dir-snap" });
     assert.equal(result(msgs).ok, true, errorOf(msgs));
     const calls = runnerInvocations();
-    const snapshot = calls[0][calls[0].indexOf("--config") + 1];
-    assert.ok(
-      fs.existsSync(
-        path.join(path.dirname(snapshot), "feat", "devcontainer-feature.json"),
-      ),
-      "the local feature was not copied into the snapshot",
-    );
+    const snapshot = path.dirname(calls[0][calls[0].indexOf("--config") + 1]);
+    for (const rel of ["Dockerfile", path.join("scripts", "setup.sh")])
+      assert.ok(
+        fs.existsSync(path.join(snapshot, rel)),
+        `${rel} was not copied into the snapshot`,
+      );
   });
 });
 

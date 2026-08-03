@@ -384,10 +384,14 @@ earlier version of this policy; each now has a named regression test in
   Run compose _inside_ a devcontainer with the docker-in-docker feature instead.
 - **Policy is enforced on the CLI's own `mergedConfiguration`**, not on our
   parse of the file. That is where a _feature_'s `privileged` / `capAdd` /
-  `securityOpt` / `mounts` land -- a local `./myfeature` could otherwise inject
+  `securityOpt` / `mounts` land -- a feature could otherwise inject
   `--privileged --mount type=bind,src=/,dst=/host` without the project's
   devcontainer.json mentioning any of it. It also removes the class of bug
   where our parser and the CLI's disagree about what the file says.
+- **Local features (`"./myfeature"`) are refused**; a feature must be one the
+  CLI _fetches_ -- a registry reference or an `https://` tarball. A local
+  feature's `devcontainer-feature.json` is read twice, and only the first read
+  is the one this policy checked. See "What the freeze does not cover" below.
 - **Mounts must be volumes** named `<project>` or `<project>-*`, checked over
   the merged list. The one exception is the read-only public-CA bind.
 - **`runArgs` is an allowlist**, not a denylist. A denylist has to enumerate
@@ -410,6 +414,47 @@ The validated spec is then **snapshotted** to a directory only the orchestrator
 can write, and the container is started from that copy (`--override-config`).
 Without it the editor could swap the file between the check and the start, and
 the check would be decorative.
+
+### What the freeze does not cover
+
+The snapshot freezes **devcontainer.json, and nothing else**. `--override-config`
+changes which JSON the CLI reads, not where relative paths resolve from, so
+`build.context`, `build.dockerfile` and any feature directory are read again --
+from the live project -- when the container is built.
+
+For build inputs that is handled by the rule below: the paths themselves come
+from the frozen JSON and must stay inside the project, and the files they name
+are the project's own either way.
+
+For **features** it was an escape, and it is why local features are refused.
+The same file is read twice:
+
+```
+read-configuration  ->  .devcontainer/feat/devcontainer-feature.json   # checked
+devcontainer up     ->  .devcontainer/feat/devcontainer-feature.json   # takes effect
+```
+
+Both reads hit `/workspaces`, which the editor can write, and feature metadata
+is one of the few places `privileged`, `capAdd`, `securityOpt` and `mounts` are
+allowed to come from. Measured on `@devcontainers/cli` 0.88.0: with `harmless`
+metadata at check time and hostile metadata swapped in afterwards, `up` ran
+
+```
+--privileged --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+--mount type=bind,src=/,dst=/host
+```
+
+while the approved snapshot still said `harmless`. The window is the whole
+resolve → enforce → spawn → build sequence, and a lost attempt costs the
+attacker nothing.
+
+Refusing local features closes the reachable form of this. What remains is a
+*published* feature whose registry content changes between the two reads, which
+needs a registry the attacker controls; pin features by digest
+(`...@sha256:...`) if that is in your threat model. The complete fix is to make
+the CLI read the snapshot rather than the project -- e.g. by bind-mounting the
+frozen copy over `.devcontainer/` in the orchestrator's own mount namespace for
+the duration of the build -- which is not implemented.
 
 ### A project may only reach its own folder
 

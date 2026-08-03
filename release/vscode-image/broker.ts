@@ -26,6 +26,14 @@ Four things make that validation sound:
     --override-config. Without this the editor could swap the file between
     the check and the start (i.e., a TOCTOU attack).
 
+    The freeze covers devcontainer.json and NOTHING ELSE. --override-config
+    changes which JSON the CLI reads, not where relative paths resolve from,
+    so build.context, build.dockerfile and any feature directory are read
+    again, from the live project, when the container is built. That second
+    read is why local features are refused outright (policy.ts): feature
+    metadata is allowed to declare privileged/capAdd/securityOpt/mounts, and
+    a file the editor can rewrite between the two reads decides what it says.
+
   - CONTAINMENT. A project may only reach its own directory. Two halves,
     because the CLI reads two different trees: making the snapshot means
     following the project's symlinks HERE, in the container holding the inner
