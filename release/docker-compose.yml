@@ -202,16 +202,6 @@ services:
     container_name: desolate-keyring
     user: "1000:1000"
     entrypoint: ["tsx", "/usr/local/lib/desolate/keyring.ts"]
-    environment:
-      # How long the agent may hold private keys with nothing using them. The
-      # keyring proxies the agent socket, so "using" is measurable; after this
-      # it runs `ssh-add -D` and reloads on the next connection.
-      #
-      # This bounds the RESIDENT window, not a live attacker -- reload is on
-      # demand, so anything that can reach the socket can wake the keys. What it
-      # removes is the stack left running overnight with every deploy key sitting
-      # in an agent. Set to 0 to disable and hold keys forever.
-      DESOLATE_KEYRING_IDLE_SECONDS: ${DESOLATE_KEYRING_IDLE_SECONDS:-900}
     volumes:
       # Private keys. Mounted HERE AND NOWHERE ELSE -- that mount list is the
       # whole security property, and tests/static/07-keyring.sh asserts it.

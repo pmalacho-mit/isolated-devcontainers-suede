@@ -119,19 +119,17 @@ assert_contains "the control socket caps how much it will buffer" \
 assert_contains "and how many clients may connect at once" \
   "$(cat "$KEYRING")" "limits.control.concurrent"
 
-group "the agent socket the editor sees is proxied, not the agent itself"
-# The idle unloading below is only measurable because this process sits in the
-# path. An ssh-agent bound directly into the shared volume would let the editor
-# reach it without the keyring ever seeing a request.
-assert_contains "ssh-agent binds a keyring-private socket" "$(cat "$KEYRING")" \
-  'spawn("ssh-agent", ["-D", "-a", UPSTREAM]'
-# The declaration spans lines after a format pass, so read to the semicolon
-# rather than the first line -- this assertion was silently vacuous once
-# prettier wrapped it.
-assert_not_contains "the real agent socket is NOT in the shared volume" \
-  "$(sed -n '/^const UPSTREAM_DIR/,/;/p' "$KEYRING" | tr -d '\n')" 'RUN'
-assert_contains "keys unload once nothing has used them" "$(cat "$KEYRING")" \
-  "idleSeconds"
+group "the keyring holds no private key in its own process"
+# ssh-agent is a separate process that this one starts; the private halves are
+# read from disk into IT, never into node's heap. `createKey` reads back only
+# the .pub. If a future refactor reads a private key here to do something clever
+# with it, that key is then in a process the control socket also serves.
+# Every read must name a .pub. Asserted line-wise rather than by matching the
+# call's arguments: `readFileSync(`${keyPath(alias)}.pub`)` has a nested paren,
+# so a regex bounded by the first `)` stops before the .pub and passes whatever
+# it is shown.
+assert_eq "keyring.ts reads only public halves" \
+  "$(grep -n 'readFileSync' "$KEYRING" | grep -vc '\.pub')" "0"
 
 group "private keys are not identified by filename"
 # A layout that encodes the alias in the filename and parses it back is how a

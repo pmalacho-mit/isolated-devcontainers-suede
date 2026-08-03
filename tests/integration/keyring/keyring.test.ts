@@ -6,13 +6,8 @@
 // tests/unit/desolate/keyring.test.ts covers the path layout by importing the
 // helpers. It cannot cover any of what is here, because all of it only exists
 // once the process is running: whether a private key ever lands in the volume
-// the editor mounts, whether the agent socket the editor sees is the agent or a
-// proxy in front of it, whether an idle window actually empties the agent, and
-// whether a client can kill the process by never sending a newline.
-//
-// The distinction that matters throughout: RUN is the shared volume (the editor
-// mounts it read-only), UPSTREAM is this container's own filesystem. Anything
-// that blurs the two is the bug class this file watches for.
+// the editor mounts, what the agent will and will not hand back, and whether a
+// client can kill the process by never sending a newline.
 //
 // Requires: node >= 22.18, and ssh-agent/ssh-add/ssh-keygen on PATH.
 
@@ -29,21 +24,13 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../../..");
 const KEYRING = path.join(REPO, "release", "vscode-image", "keyring.ts");
 
-/** Short enough to test, long enough that a slow machine does not unload keys
- *  in the middle of the checks that need them loaded. The sweep floor is 5s, so
- *  the real deadline is this plus one tick. */
-const IDLE_SECONDS = 2;
-const SWEEP_FLOOR_MS = 5_000;
-
 let tmp: string;
 let keys: string;
 let run: string;
-let upstream: string;
 let keyring: ChildProcess;
 
 const agentSocket = () => path.join(run, "agent.sock");
 const controlSocket = () => path.join(run, "control.sock");
-const upstreamSocket = () => path.join(upstream, "agent.sock");
 
 /** One JSON line in, one JSON line out -- the protocol newrepo speaks. */
 function ask(request: unknown, timeoutMs = 15_000): Promise<any> {
@@ -105,15 +92,12 @@ before(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "keyring-it-"));
   keys = path.join(tmp, "keys");
   run = path.join(tmp, "run");
-  upstream = path.join(tmp, "private");
 
   keyring = spawn(process.execPath, [KEYRING], {
     env: {
       ...process.env,
       DESOLATE_KEYRING_KEYS: keys,
       DESOLATE_KEYRING_RUN: run,
-      DESOLATE_KEYRING_UPSTREAM: upstream,
-      DESOLATE_KEYRING_IDLE_SECONDS: String(IDLE_SECONDS),
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -209,58 +193,30 @@ describe("no private key reaches the volume the editor mounts", () => {
   });
 });
 
-describe("the agent socket the editor sees", () => {
-  test("is a proxy -- the real agent is not in the shared volume", () => {
-    const inRun = filesUnder(run).filter((f) => f.endsWith("agent.sock"));
-    assert.deepEqual(inRun, [], "an agent.sock file exists under RUN");
-    assert.ok(fs.statSync(agentSocket()).isSocket());
-    assert.ok(fs.statSync(upstreamSocket()).isSocket());
-    assert.notEqual(path.dirname(agentSocket()), path.dirname(upstreamSocket()));
+describe("the agent socket", () => {
+  test("is group-connectable, because that is how the editor reaches it", () => {
+    // Connecting to a unix socket needs WRITE on the inode, so 0755 would leave
+    // the editor unable to use the agent at all. No world bits, so a umask of 0
+    // cannot silently open it to every uid.
+    assert.equal(fs.statSync(agentSocket()).mode & 0o777, 0o660);
   });
 
-  test("keeps the upstream agent owner-only", () => {
-    // Reaching the upstream socket IS reaching the private keys: it must not
-    // carry the group-write bit the editor-facing socket needs.
-    assert.equal(fs.statSync(upstreamSocket()).mode & 0o777, 0o600);
-  });
-
-  test("carries the agent protocol through to ssh-add", async () => {
+  test("serves every key the keyring holds", async () => {
     await ask({ op: "create", alias: "acme__widgets" });
-    assert.ok(
-      fingerprints(agentSocket()).length > 0,
-      "ssh-add saw no identities through the proxy",
-    );
-  });
-});
-
-describe("idle unloading", () => {
-  test("empties the agent once nothing has used it", async () => {
-    assert.ok(fingerprints(agentSocket()).length > 0, "precondition: keys loaded");
-    await sleep(IDLE_SECONDS * 1000 + SWEEP_FLOOR_MS + 1_000);
-    assert.deepEqual(
-      fingerprints(upstreamSocket()),
-      [],
-      "the agent still held keys after the idle window",
-    );
+    const held = (await ask({ op: "list" })).aliases.length;
+    assert.equal(fingerprints(agentSocket()).length, held);
   });
 
-  test("leaves the private keys on disk", () => {
-    assert.ok(fs.existsSync(path.join(keys, "acme__widgets", "id")));
-  });
-
-  test("reloads them on the next use, so git does not break", () => {
-    // The honest limit of this control, stated as a test: reload is on demand,
-    // so anything that can reach the socket can wake the keys. What the idle
-    // window removes is a stack left running overnight with every deploy key
-    // sitting in an agent -- not a live attacker.
-    assert.ok(
-      fingerprints(agentSocket()).length > 0,
-      "connecting through the proxy did not reload the keys",
-    );
-    assert.ok(
-      fingerprints(upstreamSocket()).length > 0,
-      "the reload did not reach the real agent",
-    );
+  test("hands out signatures, not key material", () => {
+    // `ssh-add -L` prints public keys; there is no agent operation that returns
+    // a private half, which is what makes the agent socket safe to share when
+    // the key files are not.
+    const listed = execFileSync("ssh-add", ["-L"], {
+      env: { ...process.env, SSH_AUTH_SOCK: agentSocket() },
+      encoding: "utf8",
+    });
+    assert.ok(listed.includes("ssh-ed25519 "));
+    assert.ok(!listed.includes("PRIVATE KEY"));
   });
 });
 

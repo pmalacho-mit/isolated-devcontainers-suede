@@ -10,7 +10,7 @@
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
-import { createConnection, createServer } from "node:net";
+import { createServer } from "node:net";
 import * as path from "node:path";
 import { isEntryPoint } from "./utils.ts";
 
@@ -19,18 +19,14 @@ const RUN = process.env.DESOLATE_KEYRING_RUN ?? "/run/keyring";
 const PUB = `${RUN}/pub`;
 const CONTROL = `${RUN}/control.sock`;
 
-/** What the editor connects to. NOT the ssh-agent itself -- this process
- *  proxies it, so that "when was a key last used" is a question something in
- *  this container can answer. See `keys` below. */
+/** ssh-agent binds this directly, and the editor connects to it.
+ *
+ *  This process deliberately does NOT sit in between. It did, briefly, to
+ *  measure idleness so keys could be unloaded after a quiet period -- but
+ *  reload was on demand, so anything able to connect could wake the keys, which
+ *  is every attacker the unloading was supposed to bound. It protected against
+ *  nothing and put a moving part in the path of every git operation. */
 const AGENT = `${RUN}/agent.sock`;
-
-/** The REAL ssh-agent socket, on this container's own filesystem rather than in
- *  RUN. That placement is the point: RUN is shared with the editor, so an agent
- *  socket there would let the editor bypass the proxy and with it every idle
- *  bound this file applies. */
-const UPSTREAM_DIR =
-  process.env.DESOLATE_KEYRING_UPSTREAM ?? "/tmp/desolate-keyring";
-const UPSTREAM = `${UPSTREAM_DIR}/agent.sock`;
 
 /** Every fs permission this process sets, spelled out. Octal digits are
  *  owner/group/other, and each digit is read(4) + write(2) + execute(1) --
@@ -45,12 +41,6 @@ const mode = {
    *  A private key. ssh refuses to use one that is group- or world-readable,
    *  and it is right to. */
   privateKey: 0o600,
-
-  /** 0600 -- owner: read, write. group: nothing. other: nothing.
-   *  The upstream ssh-agent socket. Same shape as a private key on purpose:
-   *  reaching it IS reaching the private keys, and nothing outside this
-   *  process has any business connecting to it. */
-  privateSocket: 0o600,
 
   /** 0755 -- owner: read, write, enter. group: read, enter. other: read,
    *  enter. Directories the editor must traverse to reach the published
@@ -116,28 +106,6 @@ export const listAliases = (root: string = KEYS): string[] => {
   }
 };
 
-/** Keys written by the pre-directory layout, which this process can no longer
- *  see.
- *
- *  They are still on the volume, still valid, and still registered on GitHub --
- *  but `listAliases` skips them, so the only symptom would be every push
- *  failing with `Permission denied (publickey)` and a keyring that reports it
- *  is holding zero keys. Say so at startup instead. Deliberately NOT migrated
- *  automatically: the old names were also ambiguous (see above), so picking
- *  which alias a `deploy_x.pub` belonged to is exactly the guess that caused
- *  the disclosure. */
-export const legacyKeys = (root: string = KEYS): string[] => {
-  try {
-    return fs
-      .readdirSync(root, { withFileTypes: true })
-      .filter((e) => e.isFile() && e.name.startsWith("deploy_"))
-      .map((e) => e.name)
-      .sort();
-  } catch {
-    return [];
-  }
-};
-
 /** Publish the PUBLIC half where the editor can read it.
  *
  *  ssh accepts a .pub file as IdentityFile and pairs it with the agent's
@@ -152,84 +120,13 @@ const exportPublic = (alias: string) => {
   fs.chmodSync(pubPath(alias), mode.publicFile);
 };
 
-const agentEnv = () => ({ ...process.env, SSH_AUTH_SOCK: UPSTREAM });
+const agentEnv = () => ({ ...process.env, SSH_AUTH_SOCK: AGENT });
 
 const addToAgent = (alias: string) => {
   execFileSync("ssh-add", [keyPath(alias)], {
     env: agentEnv(),
     stdio: ["ignore", "ignore", "inherit"],
   });
-};
-
-/**
- * How long the agent may hold keys with nothing using them.
- *
- * 0 (or an unparseable value) disables unloading entirely, which is the old
- * behaviour: load once at startup, hold forever.
- */
-const idleSeconds = (() => {
-  const raw = Number(process.env.DESOLATE_KEYRING_IDLE_SECONDS ?? 900);
-  return Number.isFinite(raw) && raw > 0 ? raw : 0;
-})();
-
-/**
- * Which keys the agent currently holds, and for how much longer.
- *
- * WHAT THIS BUYS, PRECISELY. It is not a defence against an editor that is
- * compromised right now: `load()` happens on demand, so an attacker who can
- * connect to the agent socket can always wake the keys back up. What it bounds
- * is the RESIDENT window -- after an idle period the private keys are out of
- * the agent, so a compromise that arrives later, or one whose access has since
- * been cut off, finds an agent holding nothing. It also means a stack left
- * running overnight is not an ssh-agent full of deploy keys waiting.
- *
- * Making this a real control against a live attacker means requiring something
- * the editor cannot do to reload -- an explicit unlock from the host. That is a
- * deliberate non-goal here: it would put a manual step in front of every push
- * after a coffee break. The hook for it is `load()`; nothing else would change.
- *
- * `inUse` is what keeps a long push from being unloaded mid-signature: the
- * sweep only fires when no agent connection is open.
- */
-const keys = {
-  loaded: false,
-  lastUsed: 0,
-  inUse: 0,
-
-  load() {
-    const aliases = listAliases();
-    let loaded = 0;
-    for (const alias of aliases)
-      try {
-        addToAgent(alias);
-        loaded++;
-      } catch {
-        log(`could not load '${alias}'`);
-      }
-    keys.loaded = true;
-    if (loaded) log(`loaded ${loaded} key(s) into the agent`);
-  },
-
-  unload() {
-    try {
-      execFileSync("ssh-add", ["-D"], { env: agentEnv(), stdio: "ignore" });
-      log(`idle for ${idleSeconds}s -- unloaded every key from the agent`);
-    } catch {
-      log(`could not unload keys from the agent`);
-    }
-    keys.loaded = false;
-  },
-
-  /** Something is about to use a key: stamp it, and make sure they are there. */
-  touch() {
-    keys.lastUsed = Date.now();
-    if (!keys.loaded) keys.load();
-  },
-
-  sweep() {
-    if (!idleSeconds || !keys.loaded || keys.inUse > 0) return;
-    if (Date.now() - keys.lastUsed >= idleSeconds * 1000) keys.unload();
-  },
 };
 
 const createKey = (alias: string): string => {
@@ -245,9 +142,6 @@ const createKey = (alias: string): string => {
     log(`generated key for '${alias}'`);
   }
   exportPublic(alias);
-  // Creating a key is a use of the keyring, and the new key has to reach the
-  // agent whether or not the others are currently loaded.
-  keys.touch();
   addToAgent(alias);
   return fs.readFileSync(`${key}.pub`, "utf8").trim();
 };
@@ -319,64 +213,19 @@ const handle = (request: Request): Record<string, unknown> => {
  * Bounds on what a client may do to this process before saying anything valid.
  *
  * The editor is the least trusted container in the stack and it is the only
- * thing that can reach these sockets, so both limits are about the editor
- * rather than about accidents. Without `bytes`, a client that connects and
- * never sends a newline grows the buffer until this process dies -- and this
- * process dying takes git down for every project at once. The broker guards the
- * identical loop for the identical reason (see broker.ts, `request.max`).
+ * thing that can reach this socket, so both limits are about the editor rather
+ * than about accidents. Without `bytes`, a client that connects and never sends
+ * a newline grows the buffer until this process dies -- and this process dying
+ * takes git down for every project at once. The broker guards the identical
+ * loop for the identical reason (see broker.ts, `request.max`).
  *
- * `control` is small because one request per `newrepo` invocation is the real
- * workload. `agent` is generous because a single `git push` opens several
- * short-lived connections and parallel fetches multiply that.
+ * Small numbers because one request per `newrepo` invocation is the real
+ * workload. Nothing here bounds the AGENT socket, which ssh-agent serves
+ * directly; OpenSSH does its own accounting there.
  */
 const limits = {
   control: { bytes: 4096, concurrent: 8 },
-  agent: { concurrent: 64 },
 } as const;
-
-/**
- * Proxy the ssh-agent socket, byte for byte.
- *
- * Deliberately no parsing of the agent protocol: this process does not need to
- * know what is being asked, only that SOMETHING is asking, which is what makes
- * the idle bound in `keys` measurable. Parsing it would be a second
- * implementation of a protocol whose whole input is attacker-controlled, for no
- * gain.
- */
-const serveAgent = () => {
-  let open = 0;
-
-  createServer((client) => {
-    if (open >= limits.agent.concurrent) return client.destroy();
-
-    open++;
-    keys.touch();
-    keys.inUse++;
-
-    const upstream = createConnection(UPSTREAM);
-    let closed = false;
-    const close = () => {
-      if (closed) return;
-      closed = true;
-      open--;
-      keys.inUse--;
-      // Stamp on the way out too: a long-running connection is use, and
-      // otherwise it would count as idle from the moment it opened.
-      keys.lastUsed = Date.now();
-      client.destroy();
-      upstream.destroy();
-    };
-
-    for (const socket of [client, upstream])
-      socket.on("error", close).on("close", close);
-
-    client.pipe(upstream);
-    upstream.pipe(client);
-  }).listen(AGENT, () => {
-    fs.chmodSync(AGENT, mode.socket);
-    log(`agent at ${AGENT}`);
-  });
-};
 
 const serveControl = () => {
   let open = 0;
@@ -429,11 +278,6 @@ const serveControl = () => {
     fs.chmodSync(CONTROL, mode.socket);
     log(`control at ${CONTROL}`);
     log(`holding ${listAliases().length} key(s); public halves in ${PUB}`);
-    log(
-      idleSeconds
-        ? `keys load on first use and unload after ${idleSeconds}s idle`
-        : `idle unloading is DISABLED (DESOLATE_KEYRING_IDLE_SECONDS=0)`,
-    );
   });
 };
 
@@ -447,23 +291,14 @@ const serveControl = () => {
 const main = () => {
   fs.mkdirSync(KEYS, { recursive: true, mode: mode.privateDir });
   fs.mkdirSync(RUN, { recursive: true, mode: mode.publicDir });
-  fs.mkdirSync(UPSTREAM_DIR, { recursive: true, mode: mode.privateDir });
-  for (const stale of [AGENT, CONTROL, UPSTREAM])
+  for (const stale of [AGENT, CONTROL])
     try {
       fs.unlinkSync(stale);
     } catch {
       /* no stale socket */
     }
 
-  const orphans = legacyKeys();
-  if (orphans.length) {
-    log(`WARNING: ${orphans.length} key file(s) use the old flat layout and`);
-    log(`         are NOT being loaded: ${orphans.slice(0, 4).join(", ")}...`);
-    log(`         Re-run 'cli.sh repo add <owner>/<repo>' for each, and`);
-    log(`         re-register the new deploy key on GitHub.`);
-  }
-
-  const agent = spawn("ssh-agent", ["-D", "-a", UPSTREAM], {
+  const agent = spawn("ssh-agent", ["-D", "-a", AGENT], {
     stdio: ["ignore", "ignore", "inherit"],
   });
   // An unhandled 'error' event on a ChildProcess throws, and node prints a spawn
@@ -509,7 +344,7 @@ const main = () => {
 
   const ready = () => {
     try {
-      fs.chmodSync(UPSTREAM, mode.privateSocket);
+      fs.chmodSync(AGENT, mode.socket);
       return true;
     } catch {
       return false;
@@ -517,27 +352,16 @@ const main = () => {
   };
 
   const start = () => {
-    // Public halves are published up front, because the ssh config the editor
-    // already holds names those paths -- but the PRIVATE halves deliberately
-    // stay out of the agent until something asks. A stack that boots and sits
-    // idle holds no usable key at all.
     for (const alias of listAliases())
       try {
         exportPublic(alias);
+        addToAgent(alias);
+        log(`loaded '${alias}'`);
       } catch {
-        log(`could not export the public half of '${alias}'`);
+        log(`could not load '${alias}'`);
       }
 
-    serveAgent();
     serveControl();
-
-    // Granularity, not the deadline: keys can outlive the idle window by up to
-    // one tick. Bounded at both ends -- never faster than 5s, because a short
-    // window should not become a spin; never slower than 60s, because at the
-    // 900s default a quarter-window tick would let keys sit for 19 minutes
-    // while claiming a 15 minute bound.
-    if (idleSeconds)
-      setInterval(keys.sweep, Math.min(60, Math.max(5, idleSeconds / 4)) * 1000);
   };
 
   // ssh-agent creates its socket asynchronously; wait for it rather than racing.
@@ -548,7 +372,7 @@ const main = () => {
       start();
     } else if ((waited += 100) > 10_000) {
       clearInterval(poll);
-      log(`ssh-agent never created ${UPSTREAM}`);
+      log(`ssh-agent never created ${AGENT}`);
       process.exit(1);
     }
   }, 100);
