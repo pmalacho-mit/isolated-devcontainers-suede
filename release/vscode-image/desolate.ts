@@ -34,11 +34,16 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { enforcePolicy } from "./policy.ts";
-import { list as listProjects, volumeNamespace } from "./projects.ts";
+import {
+  list as listProjects,
+  SLASH_REPLACEMENT,
+  validName,
+  volumeNamespace,
+} from "./projects.ts";
 import { parse as parseJsonc } from "./jsonc.ts";
 import { isEntryPoint, run } from "./utils.ts";
 import { parseArgs } from "./args.ts";
-import { createDocker, NetworkAttachment, type Runner } from "./docker.ts";
+import { createDocker, type NetworkAttachment, type Runner } from "./docker.ts";
 import {
   CA_DIR,
   OVERLAY_KEY_LABEL,
@@ -56,7 +61,7 @@ import {
   mintToken,
 } from "./editor.ts";
 import * as relay from "./relays.ts";
-import { snapshotDirectory } from "./snapshot.ts";
+import { snapshotDirectory, snapshot, initDirectory } from "./snapshot.ts";
 import {
   allocatePorts,
   ownRelayPorts,
@@ -334,9 +339,16 @@ const overlay = {
 const ownRelayNames = (project: string) =>
   docker.container.namesWithLabel(relay.label(project));
 
-/** The devcontainer's container id for a workspace folder ("" if none). */
-const devcontainerId = (dir: string, includeStopped = false) =>
-  docker.container.forWorkspace(dir, { includeStopped });
+/** The devcontainer's container id for a workspace folder ("" if none).
+ *
+ *  `configFile` is the path we hand `--override-config`, which the CLI records
+ *  as the second half of the container's identity. Pass it wherever it is
+ *  known -- the workspace label on its own is a claim, not a proof. */
+const devcontainerId = (
+  dir: string,
+  includeStopped = false,
+  configFile?: string,
+) => docker.container.forWorkspace(dir, { includeStopped, configFile });
 
 interface ProjectConfig {
   appPorts: number[];
@@ -390,6 +402,12 @@ function readProjectConfig(spec: ResolvedSpec): ProjectConfig {
  *  project, not one file. The orchestrator's own /tmp, so no other container can
  *  touch what we are about to start from. */
 const RUN_CONFIG_DIR = "/tmp/desolate-run-config";
+
+/** Where a DIRECT invocation (`cli.sh desolate`, i.e. not via the broker)
+ *  snapshots the spec it validated. Deliberately not the broker's own
+ *  directory: that one is wiped when the broker starts, and the two paths
+ *  should not be able to pull the ground out from under each other. */
+const DIRECT_SPEC_DIR = "/tmp/desolate-direct-specs";
 
 /**
  * The CA-trusting derivative of this spec's base image, or "" when the rewrite
@@ -477,10 +495,6 @@ function deriveRunConfig(
 
   const srcDir = path.dirname(src);
   if (config || path.basename(srcDir) === ".devcontainer")
-    // Same containment rule as the broker's snapshot, and for the same reason:
-    // this copy becomes the build context, and this process holds the inner
-    // daemon. Via the broker `srcDir` IS the (already checked) snapshot, so the
-    // boundary is that directory; run directly, it is the project's own folder.
     snapshotDirectory(config ? srcDir : dir, srcDir, out);
 
   const file = `${out}/devcontainer.json`;
@@ -540,8 +554,8 @@ const devcontainerUp = (
 /** Trust the proxy CA inside the devcontainer. Runs as container-root via the
  *  daemon (the orchestrator has that authority; the project never needs sudo,
  *  and no postCreateCommand is required). */
-function installProxyCa(dir: string): void {
-  const id = devcontainerId(dir);
+function installProxyCa(dir: string, config: string): void {
+  const id = devcontainerId(dir, false, config);
   if (!id) return;
   if (
     docker.container.execAsRoot(
@@ -587,7 +601,7 @@ function startEditor(
     console.log(
       "desolate: container has stale mounts (runc rc 126) -- recreating...",
     );
-    const stale = devcontainerId(dir, true);
+    const stale = devcontainerId(dir, true, config);
     if (stale) docker.container.remove([stale]);
     devcontainerUp(project, dir, config);
     const retry = run.status("devcontainer", [
@@ -662,8 +676,13 @@ const startRelay = (
  * Relays: one socat container per mapped port, named desolate-relay-<proj>-<port>
  * so the host port is recoverable from the name alone
  */
-function recreateRelays(project: string, dir: string, map: PortMap): void {
-  const cid = devcontainerId(dir);
+function recreateRelays(
+  project: string,
+  dir: string,
+  map: PortMap,
+  config: string,
+): void {
+  const cid = devcontainerId(dir, false, config);
   if (!cid) die("devcontainer is not running after up");
 
   const nets = docker.container.networks(cid);
@@ -755,8 +774,9 @@ async function runProject(
   rebuild = false,
   noCache = false,
 ): Promise<void> {
-  config ??= tryLocateConfig(dir);
-  if (!config) return die(`no devcontainer.json under ${dir}`);
+  config ??= dieOnError(() =>
+    snapshot(name, { workspaces: WORKSPACES, specs: DIRECT_SPEC_DIR }),
+  );
 
   const project = readProjectConfig(resolveOrDie(dir, config));
   if (project.hadLegacyAppPort)
@@ -810,16 +830,16 @@ async function runProject(
   desolog(`starting devcontainer for ${name} ...`);
   devcontainerUp(name, dir, config, noCache);
   if (willCreate) spec.save(name, fingerprint);
-  installProxyCa(dir);
+  installProxyCa(dir, config);
   startEditor(name, dir, project, token, config);
-  recreateRelays(name, dir, map);
+  recreateRelays(name, dir, map, config);
 
   if (!probeEditor(name, editorPort))
     return die(`editor did not answer through the relay on :${editorPort} -- check the log:
       devcontainer exec --workspace-folder ${dir} cat /tmp/openvscode-desolate.log
       and the relay itself:  docker logs ${relay.name(name, editorPort)}`);
 
-  const id = devcontainerId(dir);
+  const id = devcontainerId(dir, false, config);
   const folder = (id && containerWorkspaceFolder(dir, id)) || dir;
 
   console.log(`\n  ${name} is ready:\n`);
@@ -847,9 +867,19 @@ async function runProject(
 }
 
 async function main(): Promise<void> {
+  initDirectory(DIRECT_SPEC_DIR);
+
   const { command, project, config, rebuild, noCache } = dieOnError(() =>
     parseArgs(process.argv.slice(2), WORKSPACES),
   );
+
+  if (!validName(project))
+    die(`'${project}' is not a usable project name.
+      A project is one path segment under /workspaces, or two for an
+      owner-scoped repo ('owner/repo'). Each segment must start with a letter
+      or digit and hold only [A-Za-z0-9._-], and the name cannot contain 
+      '${SLASH_REPLACEMENT}' (that is how '/' is encoded into docker object names).`);
+
   const dir = `${WORKSPACES}/${project}`;
   if (!fs.existsSync(dir)) die(`no such project: ${dir}`);
 

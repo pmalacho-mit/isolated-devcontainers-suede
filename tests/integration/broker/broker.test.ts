@@ -214,11 +214,11 @@ describe("hostile specs never reach the runner", () => {
     assert.deepEqual(runnerInvocations(), []);
   });
 
-  test("E3/E12: a local feature, whose metadata is read twice", async () => {
+  test("E3/E15: a local feature, whose metadata is read twice", async () => {
     // Two rules meet here, and the order matters for what this asserts.
     //
     // E3 was privilege injected by feature metadata, caught by enforcing on the
-    // CLI's mergedConfiguration. E12 is the race around that: the CLI reads
+    // CLI's mergedConfiguration. E15 is the race around that: the CLI reads
     // devcontainer-feature.json again when it BUILDS, from the live project,
     // and the snapshot is not consulted -- so the file that was checked and the
     // file that takes effect are two different reads of an editor-writable
@@ -260,7 +260,7 @@ describe("hostile specs never reach the runner", () => {
     assert.deepEqual(runnerInvocations(), []);
   });
 
-  test("E12: a benign local feature is refused too -- the race needs no payload", async () => {
+  test("E15: a benign local feature is refused too -- the race needs no payload", async () => {
     // The metadata that was CHECKED does not have to contain anything hostile.
     // That is the whole point: what takes effect is the second read, and this
     // project's .devcontainer stays writable by the editor for the entire
@@ -348,7 +348,7 @@ describe("hostile specs never reach the runner", () => {
     }
   });
 
-  test("E11: build.context reaching out of the project", async () => {
+  test("E14: build.context reaching out of the project", async () => {
     // DEMONSTRATED against @devcontainers/cli 0.88.0 and a real daemon: this
     // exact config, with `COPY victim/secrets.env /stolen` in its Dockerfile,
     // built an image holding the sibling project's file.
@@ -363,11 +363,18 @@ describe("hostile specs never reach the runner", () => {
     project(
       "ctx-escape",
       JSON.stringify({ build: { dockerfile: "Dockerfile", context: "../.." } }),
-      { ".devcontainer/Dockerfile": "FROM alpine:3\nCOPY victim/secrets.env /\n" },
+      {
+        ".devcontainer/Dockerfile":
+          "FROM alpine:3\nCOPY victim/secrets.env /\n",
+      },
     );
     resetRunner();
     const msgs = await ask({ op: "start", project: "ctx-escape" });
-    assert.equal(result(msgs).ok, false, "a context outside the project passed");
+    assert.equal(
+      result(msgs).ok,
+      false,
+      "a context outside the project passed",
+    );
     assert.match(errorOf(msgs), /outside/);
     assert.deepEqual(runnerInvocations(), [], "the runner was invoked anyway");
   });
@@ -400,6 +407,74 @@ describe("hostile specs never reach the runner", () => {
     const msgs = await ask({ op: "start", project: "evil-mount" });
     assert.equal(result(msgs).ok, false);
     assert.match(errorOf(msgs), /namespace/);
+  });
+
+  test("E10: volume-opt -- a bind of dind's filesystem named as a volume", async () => {
+    // The CLI hands a STRING mount to `docker run --mount` unchanged, and the
+    // `local` driver turns type=none,o=bind,device=/ into a bind of the inner
+    // daemon's root. Source and type both look correct to a policy that reads
+    // only source and type, which is why this has to be proven against the real
+    // merged configuration and not just the unit fixture.
+    for (const mount of [
+      "type=volume,source=evil-esc,target=/esc,volume-driver=local,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/",
+      "type=volume,source=evil-esc,target=/esc,volume-opt=device=/var/lib/docker",
+    ]) {
+      project(
+        "evil-esc",
+        JSON.stringify({ image: "alpine:3", mounts: [mount] }),
+      );
+      resetRunner();
+      const msgs = await ask({ op: "start", project: "evil-esc" });
+      assert.equal(result(msgs).ok, false, `${mount} reached the runner`);
+      assert.match(errorOf(msgs), /not on the allowlist/);
+      assert.deepEqual(runnerInvocations(), []);
+    }
+  });
+
+  test("E11: src= after source= -- the mount docker makes is not the one checked", async () => {
+    for (const [name, config] of [
+      [
+        "evil-alias",
+        {
+          image: "alpine:3",
+          mounts: [
+            "type=volume,source=evil-alias-ok,target=/c,src=victim-secrets",
+          ],
+        },
+      ],
+      [
+        "evil-wsmount",
+        {
+          image: "alpine:3",
+          workspaceFolder: "/workspaces/evil-wsmount",
+          workspaceMount:
+            "source=/workspaces/evil-wsmount,target=/workspaces/evil-wsmount,type=bind,src=/workspaces",
+        },
+      ],
+    ] as const) {
+      project(name, JSON.stringify(config));
+      resetRunner();
+      const msgs = await ask({ op: "start", project: name });
+      assert.equal(result(msgs).ok, false, `${name} reached the runner`);
+      assert.deepEqual(runnerInvocations(), []);
+    }
+  });
+
+  test("E12: --label -- claiming another project's container identity", async () => {
+    for (const runArgs of [
+      ["--label", "devcontainer.local_folder=/workspaces/victim"],
+      ["-l", "devcontainer.config_file="],
+    ]) {
+      project("evil-label", JSON.stringify({ image: "alpine:3", runArgs }));
+      resetRunner();
+      const msgs = await ask({ op: "start", project: "evil-label" });
+      assert.equal(
+        result(msgs).ok,
+        false,
+        `runArgs ${JSON.stringify(runArgs)} reached the runner`,
+      );
+      assert.deepEqual(runnerInvocations(), []);
+    }
   });
 });
 
@@ -561,6 +636,42 @@ describe("a legitimate project starts, from a frozen copy", () => {
     );
   });
 
+  test("E13: TOCTOU through a symlinked devcontainer.json", async () => {
+    // The same attack as above, wearing one layer of indirection -- and it used
+    // to work, because `fs.cpSync(..., {dereference: true})` does not
+    // dereference: it wrote a symlink into the snapshot still pointing at the
+    // project. Every read after the "freeze" -- the policy's own
+    // read-configuration, and later `devcontainer up` -- followed the link back
+    // to a file the project can rewrite at any moment.
+    const dir = project("toctou-link", JSON.stringify({ image: "alpine:3" }));
+    const live = path.join(dir, "live-spec.json");
+    fs.writeFileSync(live, JSON.stringify({ image: "alpine:3" }));
+    const config = path.join(dir, ".devcontainer", "devcontainer.json");
+    fs.rmSync(config);
+    fs.symlinkSync(live, config);
+
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "toctou-link" });
+    assert.equal(result(msgs).ok, true, errorOf(msgs));
+
+    const calls = runnerInvocations();
+    const snapshot = calls[0][calls[0].indexOf("--config") + 1];
+    assert.ok(
+      !fs.lstatSync(snapshot).isSymbolicLink(),
+      "the snapshot is a symlink back into the project -- it froze nothing",
+    );
+
+    fs.writeFileSync(
+      live,
+      JSON.stringify({ image: "alpine:3", runArgs: ["--privileged"] }),
+    );
+    assert.equal(
+      JSON.parse(fs.readFileSync(snapshot, "utf8")).runArgs,
+      undefined,
+      "the snapshot followed the link -- TOCTOU window is open",
+    );
+  });
+
   test("a symlink out of the project never reaches the snapshot", async () => {
     // The spec policy cannot see this one: every key in the devcontainer.json
     // below is legal. The theft is in the filesystem underneath it -- the
@@ -582,11 +693,18 @@ describe("a legitimate project starts, from a frozen copy", () => {
     );
     resetRunner();
     const msgs = await ask({ op: "start", project: "link-out" });
-    assert.equal(result(msgs).ok, false, "a link out of the project was copied");
+    assert.equal(
+      result(msgs).ok,
+      false,
+      "a link out of the project was copied",
+    );
     assert.match(errorOf(msgs), /outside/);
     assert.deepEqual(runnerInvocations(), [], "the runner was invoked anyway");
     const leaked = path.join(specDir, "link-out", "key");
-    assert.ok(!fs.existsSync(leaked), `${leaked} holds the orchestrator's file`);
+    assert.ok(
+      !fs.existsSync(leaked),
+      `${leaked} holds the orchestrator's file`,
+    );
   });
 
   test("a symlink INSIDE the project is still dereferenced, not refused", async () => {
@@ -595,7 +713,7 @@ describe("a legitimate project starts, from a frozen copy", () => {
     project(
       "link-in",
       JSON.stringify({ build: { dockerfile: "Dockerfile" } }),
-      { "Dockerfile": "FROM alpine:3\n" },
+      { Dockerfile: "FROM alpine:3\n" },
     );
     fs.symlinkSync(
       "../Dockerfile",
@@ -616,7 +734,7 @@ describe("a legitimate project starts, from a frozen copy", () => {
     // This used to be asserted with a local ./feature, on the belief that
     // copying it was what froze it. It is not: the CLI re-reads feature
     // directories from the live project at build time and never looks at this
-    // copy, which is why local features are refused now (E12 above).
+    // copy, which is why local features are refused now (E15 above).
     //
     // The copy still matters for what it IS -- the record of what was
     // approved, on a filesystem the editor cannot reach -- so the Dockerfile
@@ -640,6 +758,7 @@ describe("a legitimate project starts, from a frozen copy", () => {
         `${rel} was not copied into the snapshot`,
       );
   });
+
 });
 
 // ===========================================================================

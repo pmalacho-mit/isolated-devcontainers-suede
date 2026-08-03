@@ -47,14 +47,20 @@ import {
   fstatSync,
   lstatSync,
   mkdirSync,
+  rmSync,
   openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   writeFileSync,
+  existsSync,
 } from "node:fs";
 import { join, relative } from "node:path";
 import { isWithin } from "./utils.ts";
+
+/** Owner only. Anything able to write here can swap a validated spec for an
+ *  unvalidated one after the check has passed. */
+export const SNAPSHOT_DIRECTORY_MODE = 0o700 as const;
 
 export class ContainmentError extends Error {}
 
@@ -77,16 +83,19 @@ export const resolveWithin = (root: string, target: string): string => {
     real = realpathSync(target);
   } catch {
     return fail(
-      `'${describe(root, target)}' cannot be resolved -- a broken symlink, or ` +
-        `one whose target was removed while the spec was being snapshotted`,
+      `refusing to snapshot '${describe(root, target)}': it cannot be resolved ` +
+        `-- a broken symlink, or one whose target was removed while the spec ` +
+        `was being snapshotted`,
     );
   }
   if (!isWithin(root, real))
     return fail(
-      `'${describe(root, target)}' resolves to '${real}', which is outside ` +
-        `'${root}'. A devcontainer config may only reference files within its ` +
-        `own project: the snapshot becomes the build context, so a link out of ` +
-        `the project would copy somebody else's file into this project's image`,
+      `refusing to snapshot '${describe(root, target)}': it resolves to ` +
+        `'${real}', which is outside '${root}'. A devcontainer config may only ` +
+        `reference files within its own project -- this copy is made in the ` +
+        `orchestrator, which holds the inner Docker socket, so following a link ` +
+        `out of the project reads a file on the project's behalf that the ` +
+        `project cannot reach itself`,
     );
   return real;
 };
@@ -200,4 +209,60 @@ export const snapshotDirectory = (root: string, from: string, to: string) => {
 export const snapshotFile = (root: string, from: string, to: string) => {
   const base = realpathSync(root);
   copyFile(base, resolveWithin(base, from), to);
+};
+
+/**
+ * Wipe rather than reuse: a spec left by a previous run was validated against a
+ * /workspaces that may since have gained or lost projects, which changes who
+ * owns a volume namespace.
+ * @param location
+ */
+export const initDirectory = (location: string) => {
+  rmSync(location, { recursive: true, force: true });
+  mkdirSync(location, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
+};
+
+export interface SnapshotOptions {
+  /** Where projects live -- `/workspaces` in production. */
+  workspaces: string;
+  /** Root the snapshot is written under. Must NOT be in any volume the editor
+   *  mounts, and must be on the orchestrator's own filesystem. */
+  specs: string;
+}
+
+/**
+ * Copy `project`'s devcontainer spec into `specs/<project>` and return the path
+ * to the snapshotted devcontainer.json.
+ *
+ * @throws if the project carries no devcontainer.json in either layout.
+ */
+export const snapshot = (
+  project: string,
+  { workspaces, specs }: SnapshotOptions,
+): string => {
+  const base = join(workspaces, project);
+  const dotDir = join(base, ".devcontainer");
+  const flat = join(base, ".devcontainer.json");
+
+  const dest = join(specs, project);
+  rmSync(dest, { recursive: true, force: true });
+  mkdirSync(dest, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
+
+  if (existsSync(join(dotDir, "devcontainer.json"))) {
+    // The whole directory, not just the json: it is the record of what was
+    // approved. Symlinks are dereferenced, because one into editor-writable
+    // state would still be a live file afterwards -- and refused when they
+    // leave the project, because this copy is made in the orchestrator, where
+    // `.devcontainer/key -> /root/.ssh/id_ed25519` is a file it can read and
+    // the project cannot.
+    snapshotDirectory(base, dotDir, dest);
+    const file = join(dest, "devcontainer.json");
+    if (!existsSync(file)) throw new Error("no devcontainer.json in project");
+    return file;
+  }
+  if (existsSync(flat)) {
+    snapshotFile(base, flat, join(dest, "devcontainer.json"));
+    return join(dest, "devcontainer.json");
+  }
+  throw new Error("no devcontainer.json in project");
 };

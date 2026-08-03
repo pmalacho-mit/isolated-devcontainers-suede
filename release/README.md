@@ -368,9 +368,9 @@ ask us to start it.
 
 Getting that check _right_ is harder than it looks, because a devcontainer's
 privilege can arrive from four places, and only one of them is the top-level
-keys of the file you are reading. Five bypasses were demonstrated against an
-earlier version of this policy; each now has a named regression test in
-`tests/` (`E1`..`E5`). The rules, and what each is actually defending:
+keys of the file you are reading. Every bypass demonstrated against an earlier
+version of this policy has a named regression test in `tests/` (`E1`..`E13`).
+The rules, and what each is actually defending:
 
 - **`initializeCommand` is refused.** It runs on the machine driving the
   devcontainer CLI -- the _orchestrator_, which holds the inner daemon socket.
@@ -394,10 +394,28 @@ earlier version of this policy; each now has a named regression test in
   is the one this policy checked. See "What the freeze does not cover" below.
 - **Mounts must be volumes** named `<project>` or `<project>-*`, checked over
   the merged list. The one exception is the read-only public-CA bind.
+- **A mount's _fields_ are an allowlist too**, and this one is easy to miss.
+  A mount written as a string is handed to `docker run --mount` byte-for-byte,
+  and the fields a `type`/`source`/`target` reader ignores are the dangerous
+  ones: `volume-driver=local` with
+  `volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/` is a bind mount
+  of the inner daemon's root filesystem wearing a volume's name -- and the name
+  can sit inside the project's own namespace, so every other rule here passes
+  it. Only `type`, `source`/`src`, `target`/`dst`/`destination`,
+  `readonly`/`ro` and `consistency` are accepted. Docker refuses an unknown
+  field itself, so refusing more than docker does costs nothing.
+- **Aliases resolve the way docker resolves them.** Docker assigns each field
+  as it walks the spec, so the _last_ spelling wins and
+  `source=mine,src=/workspaces` mounts `/workspaces`. Reading `source ?? src`
+  instead let a project show the policy one mount and docker another.
 - **`runArgs` is an allowlist**, not a denylist. A denylist has to enumerate
   every spelling docker accepts, and it did not: `--network=host` was refused
   while `--network host`, `--net=host`, `--pid=container:<id>`, `--uts=host`
-  and `--cgroupns=host` all sailed through. Unknown flags are now refused.
+  and `--cgroupns=host` all sailed through. Unknown flags are now refused --
+  including `--label`, which looks like inert metadata and is not: the CLI
+  identifies a project's container by label and writes those labels _before_ it
+  appends `runArgs`, so a project could stamp a sibling's identity onto its own
+  container and be handed that sibling's editor session, token and relays.
 - **`workspaceMount`**, if present, must bind exactly this project's own folder.
 - **`build.context` and `build.dockerfile` must stay inside the project** (and
   the legacy top-level `context` / `dockerFile` with them). `"context": "../.."`
@@ -449,7 +467,7 @@ resolve → enforce → spawn → build sequence, and a lost attempt costs the
 attacker nothing.
 
 Refusing local features closes the reachable form of this. What remains is a
-*published* feature whose registry content changes between the two reads, which
+_published_ feature whose registry content changes between the two reads, which
 needs a registry the attacker controls; pin features by digest
 (`...@sha256:...`) if that is in your threat model. The complete fix is to make
 the CLI read the snapshot rather than the project -- e.g. by bind-mounting the
@@ -459,7 +477,7 @@ the duration of the build -- which is not implemented.
 ### A project may only reach its own folder
 
 Two separate rules, because the CLI reads two different trees, and neither is
-visible as a *key* in devcontainer.json -- both are paths underneath one.
+visible as a _key_ in devcontainer.json -- both are paths underneath one.
 
 **Build inputs.** `build.context` and `build.dockerfile` must resolve inside
 the project. They are resolved by the CLI against the directory it read the
@@ -481,7 +499,7 @@ top-level `context` / `dockerFile` spellings, and -- enforced by the CLI itself
 rather than by us -- to local `features` paths, which must be children of
 `.devcontainer/`.
 
-**Snapshot symlinks.** Freezing the spec means *following* the project's
+**Snapshot symlinks.** Freezing the spec means _following_ the project's
 symlinks, in the orchestrator, so every link in `.devcontainer/` must resolve
 inside the project:
 
@@ -494,10 +512,10 @@ Measured on `@devcontainers/cli` 0.88.0, the first one does not reach an image
 today -- the snapshot is not the build context, and BuildKit refuses to follow
 a symlink out of a context. It is refused anyway: the orchestrator should not
 be a file-read oracle for a project, a "frozen copy of the project" holding
-`/root`'s private key is not one, and the day the snapshot *does* become the
+`/root`'s private key is not one, and the day the snapshot _does_ become the
 build context that read turns into an escape. Links that stay inside are still
 dereferenced, so the copy holds real files rather than paths back into
-editor-writable state. A link to a *sibling project* is refused too: that is
+editor-writable state. A link to a _sibling project_ is refused too: that is
 someone else's trust domain.
 
 `preflight.sh` asserts the separation holds: the editor must _fail_ to reach a
@@ -518,11 +536,11 @@ even though they cannot read each other's files. Per-project networks would
 close that; today it is a real gap in "each devcontainer is truly sandboxed".
 
 That gap is deliberately bounded, though, and the boundary is the one that
-matters: devcontainers may reach *each other*, but not the editor. dind sits on
+matters: devcontainers may reach _each other_, but not the editor. dind sits on
 its own bridge (`dindnet`/`br-desolate-in`), the editor and orchestrator on
 `devnet`/`br-desolate`, and the VM's forward chain drops between the two before
 its established-state accept. The split is what makes that drop reliable -- on
-one shared bridge the traffic was *bridged*, so the chain only saw it while
+one shared bridge the traffic was _bridged_, so the chain only saw it while
 `br_netfilter` was passing frames to the inet hooks, and nothing asserted that.
 Had it ever been off, the wall would have been gone with every other check in
 `preflight.sh` still green, because egress to the internet is routed and stays
@@ -540,7 +558,7 @@ token can be a substituted placeholder.
 **The proxy is the other half of the wall.** `:80` and `:443` are REDIRECTed to
 it before the forward chain ever runs, so the drops above never see them, and it
 then dials onward from the VM where no bridge rule applies. `addon.py`
-therefore refuses any request whose destination *address* is internal -- private,
+therefore refuses any request whose destination _address_ is internal -- private,
 shared (`100.64.0.0/10`), loopback, link-local, multicast or reserved -- before
 the network policy is consulted at all. The policy could not close this itself:
 it matches names, an IP literal matches `*`, and a public name whose A record
@@ -1110,8 +1128,10 @@ beyond them.
 
 `tests/` carries a named regression case for every escape that has been
 demonstrated against this design -- policy bypasses via `initializeCommand`,
-compose mode, features, JSONC parser divergence and `runArgs` spellings, plus
-secret exfiltration via a spoofed `Host` header. See `tests/README.md`.
+compose mode, features, JSONC parser divergence, `runArgs` spellings, mount
+driver options, mount-field aliases and container-identity labels, a TOCTOU
+through a symlinked spec, plus secret exfiltration via a spoofed `Host` header.
+See `tests/README.md`.
 
 `./cli.sh preflight` asserts the stack is up AND that dind runs unprivileged
 under sysbox with an active user-namespace (`uid_map` shows container-root
@@ -1177,7 +1197,7 @@ machine.
 | Variable                     | Default         | What it does                                                                                                                                                            |
 | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
-| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. Must sit **outside** `DESOLATE_PORT_MIN..MAX` -- dind publishes that whole range, and `cli.sh up` refuses a collision.  |
+| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. Must sit **outside** `DESOLATE_PORT_MIN..MAX` -- dind publishes that whole range, and `cli.sh up` refuses a collision. |
 | `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8090` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else.                   |
 | `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |
 | `DESOLATE_SKIP_VM_CHECK`     | unset           | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
