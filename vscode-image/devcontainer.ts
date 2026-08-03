@@ -94,6 +94,31 @@ export const tryLocateConfig = (dir: string) => {
 };
 
 /**
+ * The config path the CLI STAMPS on a container it creates -- which is not the
+ * one we told it to read.
+ *
+ * `--override-config` changes which JSON is parsed and nothing else. The
+ * `devcontainer.config_file` label still names the config inside the WORKSPACE
+ * FOLDER, the same place `build.context` resolves against. Measured on
+ * @devcontainers/cli 0.88.0 against a real container:
+ *
+ *   devcontainer up --workspace-folder <ws>/proj \
+ *                   --override-config <specs>/proj/devcontainer.json
+ *   -> devcontainer.config_file=<ws>/proj/.devcontainer/devcontainer.json
+ *
+ * So this, not the path we passed, is the half of a container's identity that
+ * docker.ts's lookup insists on (see selectWorkspaceContainer). Handing that
+ * lookup the override path matches nothing, and the symptom is a container that
+ * starts normally and then cannot be found -- "devcontainer is not running
+ * after up", about a container `docker ps` is showing.
+ *
+ * Empty when the project has no config at all, which is what `desolate --stop`
+ * on a project whose devcontainer.json was deleted depends on: no config known,
+ * so the lookup falls back to matching the workspace alone.
+ */
+export const labelledConfig = (dir: string) => tryLocateConfig(dir) ?? "";
+
+/**
  * Does this directory carry a devcontainer spec, in either of the two layouts
  * the CLI accepts?
  *

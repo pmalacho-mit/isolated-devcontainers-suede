@@ -564,15 +564,40 @@ the network policy is consulted at all. The policy could not close this itself:
 it matches names, an IP literal matches `*`, and a public name whose A record
 points inside satisfies any allowlist.
 
-Override with `"allow_private_destinations": true` only if you are deliberately
-proxying to the LAN, and note that it is all-or-nothing: it also re-opens
-loopback, the cloud metadata endpoint, and devcontainer-to-editor on those two
-ports.
+**And the kernel refuses the same addresses, from the other side.** The check in
+`addon.py` cannot be the only one, because there are three ways for it to be
+absent and none of them look broken:
 
-One hole remains open by construction: `tls_passthrough` globs are tunnelled
-from `tls_clienthello` and never reach the destination check, and the SNI they
-match on is chosen by the client. Every entry added there is a way to reach an
-internal address on `:443`. It ships empty.
+- `connection_strategy=eager` (pinned deliberately -- it is what makes the
+  upstream TLS handshake precede the request hook) dials the original
+  destination as soon as the client connects, which is _before_ the addon can
+  refuse it. The addon bounds what is exchanged; it does not bound whether the
+  connection happens;
+- `tls_passthrough` globs are tunnelled from `tls_clienthello` and never reach
+  the request hook at all, and the SNI they match on is chosen by the client;
+- and an addon that fails to load leaves a working transparent proxy that
+  enforces nothing.
+
+So `nftables-desolate.conf` carries an `output` chain that drops those same
+address ranges for the proxy's **uid**, in the kernel, where none of the three
+apply. Replies and the proxy's own DNS are accepted ahead of the drops -- both
+legitimately go to private addresses, and dropping either takes the whole stack
+down in a way that points nowhere near the rule. The drops are counted, so
+`nft list table inet desolate` is where an attempt to reach the Mac or the LAN
+becomes visible.
+
+Proxying to the LAN on purpose therefore means changing **both**:
+`"allow_private_destinations": true` in `settings.json` _and_ that chain. The
+flag alone now does nothing, which is written down here and in `addon.py`
+because a switch that silently does not switch is worse than a missing one.
+Note it is all-or-nothing either way: it also re-opens loopback, the cloud
+metadata endpoint, and devcontainer-to-editor on those two ports.
+
+What the kernel rule does **not** cover is a public address that should not be
+reachable -- that is the network policy's job, and it ships `default_action:
+allow`. `tls_passthrough` is likewise still a hole in _interception_ (a
+tunnelled connection is never inspected or substituted into); it is no longer a
+hole in reaching internal addresses.
 
 ## Dev servers and dynamic ports
 

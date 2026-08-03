@@ -179,6 +179,19 @@ EOF
 fi
 
 echo "==> nftables"
+# The output chain scopes its drops with `meta skuid desolate-proxy`, and nft
+# resolves that NAME to a uid while parsing. If the account is missing the file
+# does not parse, and `nft -f` is atomic: nothing is applied, so interception
+# and the forward default-deny would be absent together, quietly, on a VM that
+# otherwise looks installed. The account is created at the top of this script;
+# say so plainly if that has somehow not happened rather than letting nft
+# report a syntax error about a line that is not wrong.
+id desolate-proxy >/dev/null 2>&1 || {
+    echo "ERROR: the desolate-proxy account does not exist, so the nftables" >&2
+    echo "       ruleset cannot resolve 'meta skuid desolate-proxy' and NOTHING" >&2
+    echo "       would be applied. Re-run this installer from the top." >&2
+    exit 1
+}
 nft -f /etc/desolate-proxy/nftables-desolate.conf
 
 echo "==> git-over-ssh allowlist"
