@@ -271,7 +271,7 @@ landed on, and repairs them if not:
 
 ```
 cli.sh: egress interception needs attention -- rules are armed for
-        'br-desolate' but the stack is on 'br-a1b2c3d4e5f6'.
+        'br-desolate' but the editor bridge is 'br-a1b2c3d4e5f6'.
 cli.sh: re-provisioning the VM proxy layer...
 ```
 
@@ -423,6 +423,32 @@ just a separate project.
 default bridge with `icc=true`, so they can reach each other over the network
 even though they cannot read each other's files. Per-project networks would
 close that; today it is a real gap in "each devcontainer is truly sandboxed".
+
+That gap is deliberately bounded, though, and the boundary is the one that
+matters: devcontainers may reach *each other*, but not the editor. dind sits on
+its own bridge (`dindnet`/`br-desolate-in`), the editor and orchestrator on
+`devnet`/`br-desolate`, and the VM's forward chain drops between the two before
+its established-state accept. The split is what makes that drop reliable -- on
+one shared bridge the traffic was *bridged*, so the chain only saw it while
+`br_netfilter` was passing frames to the inet hooks, and nothing asserted that.
+Had it ever been off, the wall would have been gone with every other check in
+`preflight.sh` still green, because egress to the internet is routed and stays
+filtered either way. `preflight.sh` section 5b now probes the path directly,
+and `tests/integration/stack` runs the same probes from inside a devcontainer.
+
+One consequence worth knowing: **git over SSH is the editor's alone.** The
+`:22` allowlist accept is scoped to `$DESOLATE_IF`, so a devcontainer cannot
+open an SSH connection anywhere. Deploy keys are minted and used in the editor;
+a project that somehow obtained one still has no route out to use it. Projects
+that fetch dependencies over `git+ssh` (private Go modules, npm git deps,
+submodules) must use HTTPS instead -- which goes through the proxy, where a
+token can be a substituted placeholder.
+
+**Note the remaining hole this does not close.** `:80` and `:443` are REDIRECTed
+to the proxy before the forward chain ever runs, so the drops above never see
+them. The proxy then dials onward from the VM, outside every bridge rule. Until
+`addon.py` refuses internal destination addresses, a devcontainer can still
+reach the editor -- and the Mac, and the LAN -- on those two ports.
 
 ## Dev servers and dynamic ports
 
@@ -1055,8 +1081,11 @@ which recreates the affected containers.
 - **`./cli.sh proxy test` shows no interception** -- the nftables rules are
   bound to the wrong bridge. Re-run `sudo ./install.sh` in the VM with the
   stack up; it re-detects.
-- **git over SSH fails** -- the forward chain is default-deny and allows tcp/22
-  only to addresses in `ssh_allow_v4`/`ssh_allow_v6`. Those hold **GitHub's
+- **git over SSH fails** -- first check WHERE from. The `:22` accept is scoped
+  to the editor bridge, so it fails by design in a devcontainer and no set
+  contents will change that; use HTTPS there. From the editor, the forward
+  chain is default-deny and allows tcp/22 only to addresses in
+  `ssh_allow_v4`/`ssh_allow_v6`. Those hold **GitHub's
   published git ranges**, fetched by `proxy/vm/ssh-allow.sh` at install time and
   refilled after every ruleset reload. Check them:
 
