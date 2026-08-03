@@ -7,29 +7,8 @@ Wants=network-online.target
 User=desolate-proxy
 Group=desolate-proxy
 Environment=DESOLATE_SETTINGS=/etc/desolate-proxy/settings.json
-# Two options below are PINNED because the whole "proven destination" model
-# rests on them, and both are currently mitmproxy defaults -- inherited, not
-# chosen. An upstream default change would weaken the addon silently, with every
-# request still succeeding, which is the same shape of failure as an unasserted
-# sysctl.
-#
-#   connection_strategy=eager
-#       mitmproxy opens the upstream connection, and completes the upstream TLS
-#       handshake, BEFORE the request hook runs. That is what makes the SNI a
-#       PROVEN destination rather than a claim: an attacker who sends
-#       SNI=api.openai.com toward their own address cannot finish the handshake,
-#       so addon.py never sees the request and never substitutes the secret.
-#       Under `lazy` the certificate would be checked after policy had already
-#       decided.
-#
-#   ssl_insecure=false
-#       and that handshake must actually VERIFY. With ssl_insecure=true any
-#       certificate is accepted, the SNI proves nothing, and both the secret
-#       allowlist and the network allowlist decide on an attacker-chosen name.
-#
-# Note that mitmproxy does NOT validate `--set` values against an option's
-# declared choices: `--set connection_strategy=bogus` loads without complaint.
-# tests/static/06-proxy-service.sh asserts the exact strings for that reason.
+# PIN all options required to make the stack work
+# (even if they are currently mitmproxy defaults)
 ExecStart=/opt/desolate-proxy/venv/bin/mitmdump \
     --mode transparent \
     --listen-host 0.0.0.0 --listen-port 18080 \
