@@ -43,6 +43,12 @@ else
     assert_not_contains "the editor does NOT mount keyring-keys" "$VSVOLS" "keyring-keys"
     assert_eq "the editor points at the stack's agent" \
       "$(q '.services.vscode.environment.SSH_AUTH_SOCK')" "/run/keyring/agent.sock"
+    # Connecting to a unix socket is an inode permission check, not a write, so
+    # ro costs the editor nothing -- and it stops a compromised editor rewriting
+    # an exported .pub, which is what every IdentityFile line points at.
+    assert_eq "the editor's copy of keyring-run is READ-ONLY" \
+      "$(q '[.services.vscode.volumes[]? | select(.source == "keyring-run") | .read_only] | join(",")')" \
+      "true"
 
     group "the keyring reads no project content and drives nothing"
     # If it mounted /workspaces it would be running git against project content,
@@ -53,8 +59,14 @@ else
     assert_not_contains "the keyring has no broker socket" "$KRVOLS" "broker-run"
     assert_eq "the keyring publishes no ports" \
       "$(q '[.services.keyring.ports[]?] | length')" "0"
-    assert_eq "the keyring stays on devnet (unreachable from dind)" \
-      "$(q '[.services.keyring.networks | keys[]] | join(",")')" "devnet"
+    # It was on devnet, the editor's bridge, kept apart from the editor only by
+    # a VM-side nftables rule -- a host install step, not a property of this
+    # file. devnet is also the bridge carrying the pre-authorised egress to
+    # GitHub :22, so the key holder was the one container with a way out.
+    assert_eq "the keyring has no network at all" \
+      "$(q '.services.keyring.network_mode')" "none"
+    assert_eq "the keyring joins no bridge" \
+      "$(q '[.services.keyring.networks? // {} | keys[]] | length')" "0"
 
     group "dind cannot see either keyring volume"
     DINDVOLS=$(q '[.services.dind.volumes[]?.source] | join(",")')
@@ -81,7 +93,53 @@ assert_not_contains "newrepo does not run ssh-keygen locally" \
 assert_not_contains "newrepo names no private key path" \
   "$(grep -oE 'deploy_\$\{[a-z.]+\}[^.]' "$NEWREPO" | tr '\n' ' ')" "deploy_"
 assert_contains "identities are pinned by PUBLIC key" "$(cat "$NEWREPO")" \
-  'pub/deploy_${alias}.pub'
+  'pub/${alias}.pub'
 assert_contains "and pinned per host alias" "$(cat "$NEWREPO")" "IdentitiesOnly yes"
+
+group "one key per OWNER and repo, not per repo name"
+# `tag` is owner__repo; `alias` is the bare repo name. Keying the keyring on
+# alias made acme/widgets and other/widgets share one keypair -- and `create` is
+# idempotent, so the second repo was handed the first repo's public key to
+# register. The host alias was already built from tag, so the two drifted apart
+# silently and only a second owner with the same repo name would show it.
+assert_contains "the keyring is keyed on owner__repo" "$(cat "$NEWREPO")" \
+  'op: "create", alias: repo.tag'
+assert_contains "and the identity file is the same key" "$(cat "$NEWREPO")" \
+  "identityFile(repo.tag)"
+assert_not_contains "the bare repo name never reaches the keyring" \
+  "$(grep -oE 'repo\.alias' "$NEWREPO" | tr '\n' ' ')" "repo.alias"
+
+group "the control socket cannot be used to kill the keyring"
+# The editor is the only thing that can reach these sockets and it is the least
+# trusted container in the stack. Without a byte cap, a client that connects and
+# never sends a newline grows the buffer until this process dies -- and it dying
+# takes git down for every project at once. broker.ts guards the identical loop.
+assert_contains "the control socket caps how much it will buffer" \
+  "$(cat "$KEYRING")" "limits.control.bytes"
+assert_contains "and how many clients may connect at once" \
+  "$(cat "$KEYRING")" "limits.control.concurrent"
+
+group "the agent socket the editor sees is proxied, not the agent itself"
+# The idle unloading below is only measurable because this process sits in the
+# path. An ssh-agent bound directly into the shared volume would let the editor
+# reach it without the keyring ever seeing a request.
+assert_contains "ssh-agent binds a keyring-private socket" "$(cat "$KEYRING")" \
+  'spawn("ssh-agent", ["-D", "-a", UPSTREAM]'
+# The declaration spans lines after a format pass, so read to the semicolon
+# rather than the first line -- this assertion was silently vacuous once
+# prettier wrapped it.
+assert_not_contains "the real agent socket is NOT in the shared volume" \
+  "$(sed -n '/^const UPSTREAM_DIR/,/;/p' "$KEYRING" | tr -d '\n')" 'RUN'
+assert_contains "keys unload once nothing has used them" "$(cat "$KEYRING")" \
+  "idleSeconds"
+
+group "private keys are not identified by filename"
+# A layout that encodes the alias in the filename and parses it back is how a
+# private key ended up being served as a public one (see keyring.test.ts). The
+# directory boundary is the fix; assert it did not get flattened back.
+assert_contains "keys live one directory per alias" "$(cat "$KEYRING")" \
+  'path.join(KEYS, alias, "id")'
+assert_not_contains "no alias is parsed back out of a filename" \
+  "$(grep -v '^\s*\*' "$KEYRING" | grep -v '^\s*//')" 'deploy_(.+)'
 
 summary

@@ -21,6 +21,15 @@ else
   node --test "$ROOT"/tests/integration/broker/*.test.ts || RC=1
 fi
 
+printf '\n\033[1m-- keyring (real ssh-agent behind the real control socket) --\033[0m\n'
+if ! command -v ssh-agent >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+  printf '  skip: needs ssh-agent/ssh-add/ssh-keygen (openssh-client)\n'
+elif ! node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit((a>22||(a===22&&b>=18))?0:1)' 2>/dev/null; then
+  printf '  skip: needs node >= 22.18 for native type stripping\n'
+else
+  node --test "$ROOT"/tests/integration/keyring/*.test.ts || RC=1
+fi
+
 printf '\n\033[1m-- proxy (transparent mitmproxy + nftables) --\033[0m\n'
 bash "$ROOT/tests/integration/proxy/run.sh" || RC=1
 
