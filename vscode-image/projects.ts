@@ -14,11 +14,21 @@ import { join } from "node:path";
 import { hasConfig as hasDevcontainerConfig } from "./devcontainer.ts";
 import type { ReplaceAll } from "./utils.ts";
 
+const SLASH_REPLACEMENT = "__";
+
+/** Whether `volumeNamespace` can encode this name without risking a collision. */
+const namespaceable = (project: string) =>
+  !project.includes(SLASH_REPLACEMENT);
+
 export const list = Object.assign(
   /**
    * Every name under `workspaces` that can claim a volume namespace.
    *
    * Names are returned in the `<top>` and `<top>/<sub>` forms (not absolute)
+   *
+   * Names `volumeNamespace` cannot encode are omitted, so one unsupported
+   * directory refuses only itself (at `validate`) rather than every project
+   * that has to be measured against the list.
    *
    * Projects can either live in the `worskpaces` directory or
    * nest one level (e.g.`owner/repo`, allowing two owners to share a repo name).
@@ -55,6 +65,7 @@ export const list = Object.assign(
       // Dotfiles are infrastructure, not projects: `.desolate` alongside them
       // holds this stack's own per-project spec fingerprints.
       if (!candidate.isDirectory() || candidate.name.startsWith(".")) continue;
+      if (!namespaceable(candidate.name)) continue;
 
       const dir = join(workspaces, candidate.name);
       out.push(candidate.name);
@@ -63,7 +74,11 @@ export const list = Object.assign(
 
       try {
         for (const sub of readdirSync(dir, { withFileTypes: true }))
-          if (sub.isDirectory() && !sub.name.startsWith("."))
+          if (
+            sub.isDirectory() &&
+            !sub.name.startsWith(".") &&
+            namespaceable(sub.name)
+          )
             out.push(`${candidate.name}/${sub.name}`);
       } /* unreadable owner dir -- its children simply do not claim */ catch {}
     }
@@ -89,16 +104,24 @@ export const list = Object.assign(
  *  different owners can share a repo name. Docker volume and container names
  *  cannot contain `/`, so that must replaced.
  *
- * @throws If project name remapping could result in a collision
+ * @throws If project name remapping could result in a collision. Callers that
+ * hold a name they did not validate should ask `supports` first -- `list` omits
+ * such names, so reaching the throw means an unvalidated name got this far.
  */
-export const volumeNamespace = <T extends string>(project: T) => {
-  if (project.includes("__"))
-    throw new Error(
-      [
-        `Project name cannot contain a "__" (double underscore)`,
-        `as that is reserved for replacing "/"s (slashes) within volume names`,
-      ].join(" "),
-    );
+export const volumeNamespace = Object.assign(
+  <T extends string>(project: T) => {
+    if (!namespaceable(project))
+      throw new Error(
+        [
+          `Project name cannot contain a "${SLASH_REPLACEMENT}" (double underscore)`,
+          `as that is reserved for replacing "/"s (slashes) within volume names`,
+        ].join(" "),
+      );
 
-  return project.replace(/\//g, "__") as ReplaceAll<T, "/", "__">;
-};
+    return project.replace(
+      /\//g,
+      SLASH_REPLACEMENT,
+    ) as ReplaceAll<T, "/", "__">;
+  },
+  { supports: namespaceable },
+);

@@ -37,20 +37,16 @@ import {
   realpathSync,
   statSync,
   existsSync,
-  readdirSync,
   mkdirSync,
   rmSync,
   unlinkSync,
-  type Dirent,
 } from "node:fs";
 import { createServer } from "node:net";
 import { join, dirname } from "node:path";
-import {
-  resolveSpec,
-  hasConfig as hasDevcontainerConfig,
-} from "./devcontainer.ts";
+import { resolveSpec } from "./devcontainer.ts";
+import { list as listProjects, volumeNamespace } from "./projects.ts";
 import { enforcePolicy, PolicyError } from "./policy.ts";
-import type { Flags } from "./desolate.ts";
+import type { Flags } from "./args.ts";
 import { identity, noop } from "./utils.ts";
 
 type Config = {
@@ -158,6 +154,13 @@ const project = {
         if (!project.validate.syntax(query))
           throw new Error("invalid project name");
 
+        if (!volumeNamespace.supports(query))
+          throw new Error(
+            `project name cannot contain "__" (double underscore): it is how ` +
+              `"/" is encoded into docker object names, so 'a/b' and 'a__b' ` +
+              `would claim the same volume namespace`,
+          );
+
         let real: string;
 
         try {
@@ -181,28 +184,6 @@ const project = {
       },
     );
   })(),
-  list: (): string[] => {
-    const out: string[] = [];
-    let top: Dirent[];
-    try {
-      top = readdirSync(config.workspaces, { withFileTypes: true });
-    } catch {
-      return []; // unreadable /workspaces
-    }
-
-    for (const candidate of top) {
-      if (!candidate.isDirectory() || candidate.name.startsWith(".")) continue;
-      const dir = join(config.workspaces, candidate.name);
-      out.push(candidate.name);
-      if (hasDevcontainerConfig(dir)) continue;
-      try {
-        for (const sub of readdirSync(dir, { withFileTypes: true }))
-          if (sub.isDirectory() && !sub.name.startsWith("."))
-            out.push(`${candidate.name}/${sub.name}`);
-      } /* unreadable owner dir */ catch {}
-    }
-    return out;
-  },
 };
 
 const spec = {
@@ -244,15 +225,6 @@ const spec = {
 
 type Send = (line: string) => void;
 
-/**
- *
- * @param flags
- * @param send
- * @param projects crosses as DESOLATE_PROJECTS: desolate re-enforces the policy on
- * any spec it derives from our snapshot, and the volume-namespace rule awards
- * `<ns>-*` to the longest matching name, so a partial list loosens it.
- * @returns
- */
 const desolate = (validated: string, flags: Flags[], send: Send) =>
   new Promise<number>((resolve) => {
     const { env } = process;
@@ -282,8 +254,10 @@ async function handle(req: unknown, send: Send) {
 
   request.inflight++;
   try {
-    const projects = project.list();
-    if (req.op === "list") return send(JSON.stringify({ ok: true, projects }));
+    if (req.op === "list")
+      return send(
+        JSON.stringify({ ok: true, projects: listProjects(config.workspaces) }),
+      );
 
     const validated = project.validate(req.project);
     let flags: Flags[];
@@ -292,7 +266,12 @@ async function handle(req: unknown, send: Send) {
       case "rebuild": {
         const configPath = spec.snapshot(validated);
         const workspace = join(config.workspaces, validated);
-        enforcePolicy(validated, resolveSpec(workspace, configPath), config);
+        enforcePolicy(
+          validated,
+          resolveSpec(workspace, configPath),
+          config.workspaces,
+          listProjects(config.workspaces),
+        );
         flags = [
           ["--config", configPath],
           ...(req.op === "rebuild" ? (["--rebuild"] as const) : []),
