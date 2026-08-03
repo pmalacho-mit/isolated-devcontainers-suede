@@ -11,6 +11,7 @@ Needs: mitmproxy (same version install.sh pins) and pytest.
 """
 
 import importlib.util
+import ipaddress
 import json
 import os
 import sys
@@ -25,6 +26,12 @@ ADDON_PATH = Path(__file__).resolve().parents[3] / "release" / "proxy" / "vm" / 
 
 SECRET_NAME = "MYAPP-OPENAI-KEY-PLACEHOLDER"
 SECRET_VALUE = "sk-real-value-do-not-leak"
+
+# A PUBLIC address, deliberately. The demonstrated-exfiltration tests below
+# must be blocked by the proven-host check, not by the internal-destination
+# check -- 203.0.113.0/24 (which they used to use) is classified internal, so
+# they would have kept passing with proven_host() removed entirely.
+PUBLIC_ATTACKER = "104.18.7.1"
 
 
 def load_addon(tmp_path, settings=None):
@@ -80,7 +87,7 @@ def test_E6_plaintext_host_spoof_is_refused(tmp_path):
     allowlisted, substituted the real key, and mitmproxy delivered it to the
     original destination. Observed at the attacker: the real secret."""
     _, addon, _ = load_addon(tmp_path)
-    f = make_flow(sni=None, host_header="api.openai.com", dest="203.0.113.9",
+    f = make_flow(sni=None, host_header="api.openai.com", dest=PUBLIC_ATTACKER,
                   headers={"Authorization": f"Bearer {SECRET_NAME}"})
     addon.request(f)
     assert blocked(f), "plaintext exfiltration was NOT blocked"
@@ -94,7 +101,7 @@ def test_E7_tls_sni_host_mismatch_is_refused(tmp_path):
     then set `Host: api.openai.com` inside the encrypted request. Same result:
     the real secret arrived at the attacker."""
     _, addon, _ = load_addon(tmp_path)
-    f = make_flow(sni="evil.example.com", host_header="api.openai.com", dest="203.0.113.9",
+    f = make_flow(sni="evil.example.com", host_header="api.openai.com", dest=PUBLIC_ATTACKER,
                   headers={"Authorization": f"Bearer {SECRET_NAME}"})
     addon.request(f)
     assert blocked(f), "SNI/Host mismatch was NOT blocked"
@@ -346,6 +353,122 @@ def test_proven_host_is_sni_only(tmp_path):
 # ===========================================================================
 # substitution must not disturb the request's destination
 # ===========================================================================
+# ---------------------------------------------------------------------------
+# E10: the proxy as a confused deputy
+# ---------------------------------------------------------------------------
+# nftables REDIRECTs :80/:443 from the container bridges here whatever the
+# destination was, and this process then dials that destination FROM THE VM,
+# where the container-bridge drops no longer apply. So it is the one component
+# standing on both sides of the containment boundary. The network policy cannot
+# close this: it matches names with fnmatch, and the shipped default is
+# {"host": "*"}, which an IP literal matches -- and a name check could not close
+# it either, since a public hostname resolving to 10.x satisfies any allowlist.
+
+
+@pytest.mark.parametrize("dest", [
+    "192.168.5.2",     # the Mac, over Colima's vmnet
+    "172.17.0.2",      # a container on another docker bridge
+    "10.4.1.9",        # the LAN
+    "127.0.0.1",       # the VM itself
+    "169.254.169.254", # cloud metadata
+    "0.0.0.0",
+    "100.64.1.9",      # RFC 6598 shared space -- a tailnet peer. NOT is_private.
+    "::ffff:192.168.5.2",  # the Mac again, spelled as IPv4-mapped IPv6
+    "fd00::1",         # IPv6 ULA
+])
+def test_E10_internal_destinations_are_refused(tmp_path, dest):
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(host_header="example.com", dest=dest)
+    inst.request(f)
+    assert blocked(f), f"{dest} was forwarded"
+
+
+def test_E10b_internal_destination_is_refused_even_with_a_valid_sni(tmp_path):
+    """The name is the part an attacker chooses, so the address is checked first."""
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com", dest="192.168.5.2")
+    inst.request(f)
+    assert blocked(f)
+
+
+def test_E10c_public_destinations_still_pass(tmp_path):
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com", dest="104.18.7.1")
+    inst.request(f)
+    assert not blocked(f)
+
+
+def test_E10d_the_escape_hatch_is_opt_in_and_named(tmp_path):
+    mod, inst, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "allow_private_destinations": True,
+        "secrets": {},
+        "network": [{"action": "allow", "host": "*"}],
+    })
+    f = make_flow(host_header="example.com", dest="192.168.5.2")
+    inst.request(f)
+    assert not blocked(f)
+
+
+def test_E10e_a_hostname_destination_is_not_mistaken_for_an_address(tmp_path):
+    """Non-IP candidates are skipped, not guessed at."""
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(dest="example.com")
+    f.server_conn.peername = None
+    f.server_conn.address = ("example.com", 80)
+    assert mod.DesolateProxy.destination_address(f) is None
+    assert mod.DesolateProxy.is_internal(None) is False
+
+
+def test_E10f_the_connection_address_is_used_when_the_request_carries_a_name(tmp_path):
+    """The DNS-rebinding case, and the reason this is an address check.
+
+    Over TLS mitmproxy fills `request.host` from the SNI, so the request looks
+    like it is going to a perfectly ordinary public name. What the connection
+    actually dials is the resolved address -- and a name whose A record points
+    inside is exactly how an allowlist gets satisfied by an internal target.
+    """
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  dest="api.openai.com")
+    f.server_conn.peername = ("10.1.2.3", 443)
+    inst.request(f)
+    assert blocked(f)
+
+
+def test_E10g_the_regression_tests_above_still_fail_on_the_NAME(tmp_path):
+    """Guards E6/E7 against being silently satisfied by the address check.
+
+    Those two are the demonstrated-exfiltration regressions, and they exist to
+    prove `proven_host()` refuses a spoofed Host. If their destination were in a
+    range `is_internal` rejects, they would keep passing with `proven_host()`
+    deleted -- green, and testing nothing. So: their address must be public, and
+    the block must come from the name.
+    """
+    mod, inst, _ = load_addon(tmp_path)
+    assert mod.DesolateProxy.is_internal(ipaddress.ip_address("104.18.7.1")) is False
+    f = make_flow(sni=None, host_header="api.openai.com", dest="104.18.7.1",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    inst.request(f)
+    assert blocked(f)
+    assert b"internal" not in f.response.content, \
+        "E6 blocked on the destination address, so it is no longer testing the Host spoof"
+
+
+def test_E10h_tls_passthrough_never_reaches_this_check(tmp_path):
+    """A known, deliberate hole -- recorded so it is a decision, not a surprise.
+
+    `tls_clienthello` sets ignore_connection for a matching SNI, and the flow is
+    then tunnelled without ever producing a request hook. The SNI is chosen by
+    the client, so any configured glob is a way to reach an internal address on
+    :443. Empty by default; this asserts the default, and documents the cost of
+    changing it.
+    """
+    mod, inst, _ = load_addon(tmp_path)
+    assert inst.tls_passthrough == [], \
+        "a non-empty default tls_passthrough would bypass the destination check"
+
+
 def test_E9_substitution_preserves_the_host_header(tmp_path):
     """Substituting a secret must not rewrite where the request is going.
 

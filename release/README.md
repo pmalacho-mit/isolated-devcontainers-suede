@@ -444,11 +444,24 @@ that fetch dependencies over `git+ssh` (private Go modules, npm git deps,
 submodules) must use HTTPS instead -- which goes through the proxy, where a
 token can be a substituted placeholder.
 
-**Note the remaining hole this does not close.** `:80` and `:443` are REDIRECTed
-to the proxy before the forward chain ever runs, so the drops above never see
-them. The proxy then dials onward from the VM, outside every bridge rule. Until
-`addon.py` refuses internal destination addresses, a devcontainer can still
-reach the editor -- and the Mac, and the LAN -- on those two ports.
+**The proxy is the other half of the wall.** `:80` and `:443` are REDIRECTed to
+it before the forward chain ever runs, so the drops above never see them, and it
+then dials onward from the VM where no bridge rule applies. `addon.py`
+therefore refuses any request whose destination *address* is internal -- private,
+shared (`100.64.0.0/10`), loopback, link-local, multicast or reserved -- before
+the network policy is consulted at all. The policy could not close this itself:
+it matches names, an IP literal matches `*`, and a public name whose A record
+points inside satisfies any allowlist.
+
+Override with `"allow_private_destinations": true` only if you are deliberately
+proxying to the LAN, and note that it is all-or-nothing: it also re-opens
+loopback, the cloud metadata endpoint, and devcontainer-to-editor on those two
+ports.
+
+One hole remains open by construction: `tls_passthrough` globs are tunnelled
+from `tls_clienthello` and never reach the destination check, and the SNI they
+match on is chosen by the client. Every entry added there is a way to reach an
+internal address on `:443`. It ships empty.
 
 ## Dev servers and dynamic ports
 

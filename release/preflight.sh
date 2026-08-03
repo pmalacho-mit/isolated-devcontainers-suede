@@ -367,6 +367,23 @@ if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet de
              -H "Host: httpbin.org" -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
   [ "$SPOOF" = "403" ] && ok "plaintext secret egress refused (Host header cannot vouch for a destination)" \
     || bad "plaintext spoof returned '$SPOOF', expected 403 -- secrets can be exfiltrated"
+  # The proxy is the one process standing on both sides of the wall: nftables
+  # redirects every :80/:443 here whatever the destination, and this then dials
+  # it from the VM, where the container-bridge drops no longer apply. Without an
+  # address check that makes it a confused deputy for the Mac and the LAN.
+  INTERNAL=$(docker exec desolate-orchestrator sh -c \
+             'curl -s -o /dev/null -w "%{http_code}" --max-time 8 http://192.168.5.2/' \
+             2>/dev/null || true)
+  case "$INTERNAL" in
+    403) ok "the proxy refuses internal destinations (no SSRF to the Mac or LAN)" ;;
+    000|"") bad "no answer for the internal-destination probe -- redirect or proxy is down" ;;
+    502) bad "the proxy DIALLED 192.168.5.2 and failed to connect -- the address"
+         note "check is not running; addon.py must refuse private destination"
+         note "ADDRESSES before consulting the name-matching network policy" ;;
+    *)   bad "internal-destination probe returned '$INTERNAL', expected 403"
+         note "addon.py must refuse private/loopback/link-local destination ADDRESSES"
+         note "before consulting the network policy, which matches on names only" ;;
+  esac
 else
   note "desolate-proxy not installed -- secrets substitution and egress control are OFF"
   note "install it: ./cli.sh vm install"
