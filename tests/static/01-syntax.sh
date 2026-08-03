@@ -166,6 +166,8 @@ declare -A PROVIDER=(
   [docker]="docker-\${DOCKER_VERSION}"  # static tarball
   [git]="git"                           # apt
   [ssh-keygen]="openssh-client"         # apt -- also provides ssh, for git's transport
+  [ssh-agent]="openssh-client"          # apt -- the keyring IS an ssh-agent
+  [ssh-add]="openssh-client"            # apt -- loads keys into that agent
   [sleep]="SKIP"                        # coreutils, in every base image
   [tsx]="tsx"                           # npm global
 )

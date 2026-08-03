@@ -52,6 +52,14 @@ RUN set -eux; \
   chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
   /usr/local/lib/docker/cli-plugins/docker-buildx
 
+# The keyring runs on openssh-client (installed above): ssh-agent holds the
+# private keys, ssh-keygen makes them, ssh-add loads them. Assert the three
+# binaries at BUILD time -- a base-image change that drops any of them should
+# fail here, not leave the keyring crash-looping with no keys in the stack.
+RUN set -eux; \
+  for b in ssh-agent ssh-add ssh-keygen; do command -v "$b" >/dev/null || \
+  { echo "keyring needs $b -- the ssh client package is missing" >&2; exit 1; }; done
+
 # Install git-lfs.
 # `--system` writes the clean/smudge filters to /etc/gitconfig instead of
 # ~/.gitconfig. That is to avoid ambiguity between this image's $HOME 
