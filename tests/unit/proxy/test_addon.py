@@ -572,3 +572,59 @@ def test_E11e_shipped_default_still_allows_everything(tmp_path):
     addon.request(f)
 
     assert not blocked(f)
+
+
+# ===========================================================================
+# settings that must not load
+# ===========================================================================
+
+def test_short_placeholder_is_refused_not_merely_warned(tmp_path):
+    """A placeholder is matched as a SUBSTRING of the URL, every header and the
+    body. A short one collides with unrelated traffic and substitutes the real
+    value into it. cli.sh enforces the floor; a hand-edited settings.json did
+    not, and the addon only logged."""
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {"TOKEN": {"value": SECRET_VALUE, "hosts": ["api.openai.com"]}},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert "TOKEN" not in addon.secrets
+
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"X-Anything": "TOKEN"})
+    addon.request(f)
+    assert SECRET_VALUE not in str(f.request.headers)
+
+
+def test_wildcard_host_allowlist_is_refused(tmp_path):
+    """`"hosts": ["*"]` is not an allowlist. It makes the leak check a no-op and
+    hands the real value to whatever host the request is aimed at -- the one
+    property this whole design exists to provide. The CLI accepts `*` in
+    --hosts, so this is reachable without hand-editing anything."""
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["*"]}},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert SECRET_NAME not in addon.secrets
+
+    f = make_flow(sni="evil.example.com", host_header="evil.example.com",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    addon.request(f)
+    assert SECRET_VALUE not in str(f.request.headers)
+
+
+def test_a_narrow_glob_is_still_accepted(tmp_path):
+    """The refusal is of patterns that match EVERY host, not of globs."""
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["*.openai.com"]}},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert SECRET_NAME in addon.secrets

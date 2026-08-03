@@ -348,6 +348,17 @@ case "$CMD" in
                  # glob can legitimately contain so neither can be broken out of.
                  case "$HOSTS" in *[!A-Za-z0-9.*_,-]*)
                    echo "cli.sh: --hosts may only contain [A-Za-z0-9.*_-] and commas" >&2; exit 1 ;; esac
+                 # A bare "*" is not an allowlist. It matches every host, which
+                 # makes the proxy's leak check a no-op and hands the real value
+                 # to whatever destination a request happens to name -- the one
+                 # thing substitution exists to prevent. The proxy refuses to
+                 # load such a secret; refuse to write one, so the failure lands
+                 # here with an explanation rather than in a journal.
+                 case ",$HOSTS," in *,\*,*|*,\*\*,*)
+                   echo "cli.sh: --hosts '*' matches every host, which defeats the point of" >&2
+                   echo "        substituting the secret at all. Name the hosts it may travel" >&2
+                   echo "        to (e.g. --hosts api.openai.com), or use '*.example.com'." >&2
+                   exit 1 ;; esac
                  HOSTS_JSON=$(printf '%s' "$HOSTS" | awk -F, '{printf "["; for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}; printf "]"}')
                  printf 'value for %s (input hidden): ' "$NAME" >&2
                  stty -echo 2>/dev/null; IFS= read -r VALUE; stty echo 2>/dev/null; echo >&2

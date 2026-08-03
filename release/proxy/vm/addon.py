@@ -110,8 +110,26 @@ class DesolateProxy:
                 log.warning(f"secret {name!r} has no hosts allowlist; skipping (refusing wildcard-by-omission)")
                 continue
             if len(name) < MIN_PLACEHOLDER_LEN:
-                log.warning(f"placeholder {name!r} is short (<{MIN_PLACEHOLDER_LEN} chars); "
-                            f"substring collisions possible")
+                # Was a warning, and a warning was the wrong shape: the secret
+                # loaded anyway, and a short placeholder is not a style problem
+                # but a substitution hazard. Every scan here is a substring
+                # test across the URL, every header and the body, so a
+                # placeholder like "TOKEN" matches inside unrelated traffic and
+                # the real value goes out in its place. cli.sh already refuses
+                # these; a settings.json edited by hand did not.
+                log.error(f"placeholder {name!r} is shorter than {MIN_PLACEHOLDER_LEN} chars; "
+                          f"REFUSING it -- substring collisions would substitute the real "
+                          f"value into unrelated traffic")
+                continue
+            unbounded = [h for h in hosts if set(str(h)) <= {"*", "?"}]
+            if unbounded:
+                # "*" as an allowlist entry is not an allowlist. It turns the
+                # leak check into a no-op and hands the real value to whatever
+                # host the request happens to be aimed at, which is the single
+                # property this design exists to prevent.
+                log.error(f"secret {name!r} allowlists {unbounded} which matches every host; "
+                          f"REFUSING it -- name the hosts the secret may travel to")
+                continue
             secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts]}
 
         self.secrets = secrets
