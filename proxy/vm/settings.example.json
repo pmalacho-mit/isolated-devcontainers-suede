@@ -1,6 +1,8 @@
 {
   "default_action": "allow",
 
+  "allow_private_destinations": false,
+
   "secrets": {
     "DESOLATE-SELFTEST-PLACEHOLDER": {
       "value": "injected-selftest-value-93f2",

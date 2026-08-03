@@ -94,8 +94,52 @@ EOF
 # tests/static/05-cli-queries.sh executes this against a fixture.
 SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
 
+# Existing placeholders that OVERLAP the one being added ($n): either contains
+# the other. Same quoting discipline as SECRET_LIST_JQ -- it travels as a bare
+# argument through `colima ssh`. Also executed by tests/static/05-cli-queries.sh.
+#
+# The proxy substitutes by plain string replace and detects by plain substring
+# search, so MY_KEY and MY_KEY2 cannot coexist: a request carrying MY_KEY2 is
+# judged against MY_KEY's allowlist and gets MY_KEY's value with a stray "2"
+# glued on. addon.py drops both if they ever reach it; refusing here is how you
+# find out at the moment you can still pick another name.
+#
+# `inside($n)` rather than the obvious `$n|contains(.)`: piping into $n rebinds
+# `.` to $n itself, so that spelling asks whether $n contains $n and reports
+# every stored name as a collision. `inside` takes the container as an argument
+# instead, so nothing is rebound. (And `[a,b]|any` rather than `a or b`, because
+# `or` needs spaces around it.)
+SECRET_COLLISION_JQ='(.secrets//{})|keys[]|select(.!=$n)|select([contains($n),inside($n)]|any)'
+
+# Whether a --hosts entry PINS a destination. "*" is not an allowlist, it is the
+# absence of one spelled so it looks deliberate: the secret becomes a bearer
+# token any container may post anywhere, and the proxy's leak detection has
+# nothing left to catch. Wildcards are allowed only where a TLS certificate
+# allows them -- one leading label, over a name with two or more literal labels.
+# addon.py applies the same rule when it loads settings.json.
+host_pattern_pins_a_destination() {
+  case "$1" in
+    '')    return 1 ;;
+    *'*'*) ;;                                    # a wildcard: keep checking
+    *)     return 0 ;;                           # a literal name pins itself
+  esac
+  case "$1" in '*.'*) ;; *) return 1 ;; esac     # ...only as the FIRST label,
+  local rest="${1#\*.}"                          # because '*' does not stop at
+  case "$rest" in *'*'*) return 1 ;; esac        # a dot: '*foo.com' matches
+  case "$rest" in                                # 'evilfoo.com' too.
+    *..*|.*|*.) return 1 ;;                      # no empty labels
+    *.*)        return 0 ;;                      # >= 2 labels ('*.com' is a TLD)
+    *)          return 1 ;;
+  esac
+}
+
 COMPOSE_NET=desolate_devnet
 PINNED_BRIDGE=br-desolate
+# The stack spans TWO bridges (see docker-compose.yml networks:). Both have to
+# be armed, and both have to be checked for drift: arming only the editor's
+# would leave the container world with unfiltered egress and no lateral wall.
+COMPOSE_DIND_NET=desolate_dindnet
+PINNED_DIND_BRIDGE=br-desolate-in
 
 # The bridge the LIVE network actually uses.
 #
@@ -106,16 +150,18 @@ PINNED_BRIDGE=br-desolate
 # load fine (iifname is a name match, not an ifindex) and match nothing, which
 # is exactly the silent no-interception failure we are trying to prevent.
 live_bridge() {
-  local gw
-  gw=$(docker network inspect "$COMPOSE_NET" \
+  local net="${1:-$COMPOSE_NET}" gw
+  gw=$(docker network inspect "$net" \
         -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null) || return 1
   [ -n "$gw" ] || return 1
   vm ip -br addr 2>/dev/null | awk -v gw="$gw" '$3 ~ "^"gw"/" {print $1; exit}'
 }
 
 # Interface the installed ruleset is armed for ("" if never installed).
+# Takes the nft symbol so both halves of the split can be read back.
 armed_bridge() {
-  vm sudo sed -n 's/^define DESOLATE_IF = "\(.*\)"$/\1/p' \
+  local symbol="${1:-DESOLATE_IF}"
+  vm sudo sed -n "s/^define $symbol = \"\(.*\)\"\$/\1/p" \
     /etc/desolate-proxy/nftables-desolate.conf 2>/dev/null
 }
 
@@ -159,20 +205,41 @@ ensure_vm_proxy() {
   [ "${DESOLATE_SKIP_VM_CHECK:-0}" = 1 ] && {
     echo "cli.sh: skipping VM proxy check (DESOLATE_SKIP_VM_CHECK=1)"; return 0; }
 
-  local live armed
-  live=$(live_bridge || true)
+  local live armed live_dind armed_dind
+  live=$(live_bridge "$COMPOSE_NET" || true)
+  live_dind=$(live_bridge "$COMPOSE_DIND_NET" || true)
+  # Resolve what we can. Skipping the WHOLE check because one network is
+  # missing would be a fail-open on exactly the upgrade path this split
+  # creates: devnet already exists, dindnet does not exist yet, and the editor
+  # check that used to run would go quiet at the moment it is most needed.
   if [ -z "$live" ]; then
     echo "cli.sh: could not resolve the bridge for '$COMPOSE_NET' -- skipping the" >&2
     echo "        egress check. preflight will report whether interception is on." >&2
     return 0
   fi
+  if [ -z "$live_dind" ]; then
+    echo "cli.sh: NOTE -- '$COMPOSE_DIND_NET' does not exist yet. The container" >&2
+    echo "        world is still sharing the editor's bridge, so there is no" >&2
+    echo "        lateral wall. Recreate the stack to split them:" >&2
+    echo "          ./cli.sh down && ./cli.sh up" >&2
+  fi
 
-  armed=$(armed_bridge || true)
+  armed=$(armed_bridge DESOLATE_IF || true)
+  armed_dind=$(armed_bridge DESOLATE_DIND_IF || true)
   local why=""
   if [ -z "$armed" ]; then
     why="the egress proxy is not installed in the VM"
   elif [ "$armed" != "$live" ]; then
-    why="rules are armed for '$armed' but the stack is on '$live'"
+    why="rules are armed for '$armed' but the editor bridge is '$live'"
+  elif [ -n "$live_dind" ] && [ "$armed_dind" != "$live_dind" ]; then
+    # This one is easy to miss and expensive to get wrong: it is the interface
+    # every devcontainer's traffic arrives on, so if it is stale the container
+    # world has no egress filter and no lateral drop at all. Only compared when
+    # the network exists -- an absent dindnet is the note printed above, not a
+    # drift that re-provisioning would repair.
+    why="rules are armed for '$armed_dind' but the container bridge is '$live_dind'"
+  elif [ "$live" = "$live_dind" ]; then
+    why="both networks resolve to '$live' -- the editor/container split is gone"
   elif ! vm sudo nft list table inet desolate >/dev/null 2>&1; then
     why="the nftables ruleset is not loaded"
   elif ! vm systemctl is-active --quiet desolate-proxy desolate-nft desolate-proxy-ca desolate-dnsmasq; then
@@ -198,17 +265,25 @@ Override this check (NOT recommended) with DESOLATE_SKIP_VM_CHECK=1.
 EOF
       return 1
     }
-    armed=$(armed_bridge || true)
-    [ "$armed" = "$live" ] || {
-      echo "cli.sh: still armed for '$armed', expected '$live' -- see 'cli.sh preflight'" >&2
+    armed=$(armed_bridge DESOLATE_IF || true)
+    armed_dind=$(armed_bridge DESOLATE_DIND_IF || true)
+    [ "$armed" = "$live" ] && { [ -z "$live_dind" ] || [ "$armed_dind" = "$live_dind" ]; } || {
+      echo "cli.sh: still armed for '$armed'/'$armed_dind', expected" >&2
+      echo "        '$live'/'${live_dind:-(dindnet not created)}' -- see 'cli.sh preflight'" >&2
       return 1
     }
-    echo "cli.sh: egress interception armed for $live"
+    echo "cli.sh: egress interception armed for $live and ${live_dind:-(dindnet pending)}"
   fi
 
   # Pinning exists so the bridge name survives down/up. A network created
   # before the pin keeps br-<hash>, so every recreate silently re-breaks the
   # rules until the network itself is recreated.
+  if [ -n "$live_dind" ] && [ "$live_dind" != "$PINNED_DIND_BRIDGE" ]; then
+    cat <<EOF
+cli.sh: NOTE -- the container bridge is '$live_dind', not the pinned
+        '$PINNED_DIND_BRIDGE'. Same cause and same fix as below.
+EOF
+  fi
   if [ "$live" != "$PINNED_BRIDGE" ]; then
     cat <<EOF
 cli.sh: NOTE -- this stack is on '$live', not the pinned '$PINNED_BRIDGE'.
@@ -342,12 +417,27 @@ case "$CMD" in
                  done
                  [ -n "$HOSTS" ] || { echo "cli.sh: --hosts is required (a secret with no allowlist is refused by the proxy)" >&2; exit 1; }
                  case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
-                 [ "${#NAME}" -ge 12 ] || { echo "cli.sh: placeholder must be >=12 chars (avoids substring collisions)" >&2; exit 1; }
                  # HOSTS is interpolated into a remote shell command via `colima ssh`,
                  # and lands inside a JSON document. Restrict it to what a hostname
                  # glob can legitimately contain so neither can be broken out of.
                  case "$HOSTS" in *[!A-Za-z0-9.*_,-]*)
                    echo "cli.sh: --hosts may only contain [A-Za-z0-9.*_-] and commas" >&2; exit 1 ;; esac
+                 # An empty field would reach the VM as "" in the JSON array,
+                 # where the loop below can no longer see it.
+                 case ",$HOSTS," in *,,*)
+                   echo "cli.sh: --hosts has an empty entry (a stray comma?)" >&2; exit 1 ;; esac
+                 # Each entry has to name where this secret may go. The charset
+                 # check above still lets "*" through, and "*" is the one entry
+                 # that undoes the whole substitution model.
+                 for H in ${HOSTS//,/ }; do
+                   host_pattern_pins_a_destination "$H" || {
+                     echo "cli.sh: --hosts entry '$H' does not name a destination." >&2
+                     echo "        A secret is only bounded by the hosts it may be sent to, so" >&2
+                     echo "        '*' (and '*.com', and '*foo.com' -- a glob does not stop at a" >&2
+                     echo "        dot) are refused. Name the hosts, or wildcard one leading" >&2
+                     echo "        label: --hosts api.openai.com,*.openai.com" >&2
+                     exit 1; }
+                 done
                  HOSTS_JSON=$(printf '%s' "$HOSTS" | awk -F, '{printf "["; for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}; printf "]"}')
                  printf 'value for %s (input hidden): ' "$NAME" >&2
                  stty -echo 2>/dev/null; IFS= read -r VALUE; stty echo 2>/dev/null; echo >&2
@@ -383,10 +473,19 @@ case "$CMD" in
                    T=$(mktemp)
                    trap "rm -f \"$T\"" EXIT INT TERM
                    [ -f "$F" ] || echo "{\"secrets\":{},\"network\":[{\"action\":\"allow\",\"host\":\"*\"}],\"scrub_responses\":true}" > "$F"
+                   OVERLAP=$(jq -r --arg n "$1" "$3" "$F" | paste -sd, -)
+                   [ -z "$OVERLAP" ] || {
+                     echo "cli.sh: placeholder $1 overlaps an existing one: $OVERLAP" >&2
+                     echo "        One name contains the other, and the proxy substitutes by plain" >&2
+                     echo "        string replace: a request carrying the longer name would be" >&2
+                     echo "        judged against the shorter allowlist and receive the wrong" >&2
+                     echo "        value, with the leftover characters glued on. Pick a name that" >&2
+                     echo "        neither contains nor is contained by those." >&2
+                     exit 1; }
                    jq --arg n "$1" --arg v "$V" --argjson h "$2" \
                       ".secrets[\$n] = {value: \$v, hosts: \$h}" "$F" > "$T" \
                      && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" \
-                     && echo "stored"' _ "$NAME" "$HOSTS_JSON"
+                     && echo "stored"' _ "$NAME" "$HOSTS_JSON" "$SECRET_COLLISION_JQ"
                  echo "Use it by putting the PLACEHOLDER in your devcontainer.json:"
                  echo "  \"containerEnv\": { \"YOUR_ENV_VAR\": \"$NAME\" }"
                  ;;
@@ -437,8 +536,10 @@ case "$CMD" in
                         echo "sysbox:       $(docker info --format '{{json .Runtimes}}' 2>/dev/null \
                                                | grep -q sysbox-runc && echo present || echo MISSING)"
                         echo "repo in VM:   $(vm_repo_visible && echo "$SCRIPT_DIR" || echo "not visible")"
-                        echo "live bridge:  $(live_bridge || echo "(network not up)")"
-                        echo "armed bridge: $(armed_bridge || echo "(proxy not installed)")"
+                        echo "live bridges:  editor=$(live_bridge "$COMPOSE_NET" || echo "(not up)")" \
+                             "containers=$(live_bridge "$COMPOSE_DIND_NET" || echo "(not up)")"
+                        echo "armed bridges: editor=$(armed_bridge DESOLATE_IF || echo "(not installed)")" \
+                             "containers=$(armed_bridge DESOLATE_DIND_IF || echo "(not installed)")"
                         echo "units:        ${UNITS:-(unreachable)}"
                         # The VM's own resolver, not the containers'. dnsmasq on
                         # :5353 serves containers; something else must answer on

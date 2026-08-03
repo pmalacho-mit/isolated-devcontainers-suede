@@ -7,11 +7,15 @@ Wants=network-online.target
 User=desolate-proxy
 Group=desolate-proxy
 Environment=DESOLATE_SETTINGS=/etc/desolate-proxy/settings.json
+# PIN all options required to make the stack work
+# (even if they are currently mitmproxy defaults)
 ExecStart=/opt/desolate-proxy/venv/bin/mitmdump \
     --mode transparent \
     --listen-host 0.0.0.0 --listen-port 18080 \
     --set confdir=/var/lib/desolate-proxy \
     --set block_global=false \
+    --set connection_strategy=eager \
+    --set ssl_insecure=false \
     -s /opt/desolate-proxy/addon.py
 Restart=always
 RestartSec=2

@@ -198,6 +198,57 @@ else
 fi
 
 echo
+echo "== 5b. lateral containment (devcontainers must not reach the editor) =="
+# The editor container holds the git deploy keys, so the property that matters
+# most to a project is that it cannot address the editor at all. Devcontainers
+# live inside dind and egress through dind's bridge address, so dind is the
+# right place to stand for this probe -- it is strictly more capable than
+# anything running inside it, and a refusal here is a refusal for all of them.
+VSNET=$(docker inspect -f '{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}' \
+        desolate-vscode 2>/dev/null)
+DINDNET=$(docker inspect -f '{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}' \
+          desolate-dind 2>/dev/null)
+SHARED=""
+for n in $DINDNET; do
+  case " $VSNET " in *" $n "*) SHARED="$SHARED $n" ;; esac
+done
+if [ -n "$SHARED" ]; then
+  bad "dind shares network(s)$SHARED with the editor"
+  note "they must be on separate bridges (devnet / dindnet in docker-compose.yml)"
+  note "a shared bridge makes the traffic BRIDGED, and the nftables forward chain"
+  note "then only sees it while br_netfilter happens to be on -- an invisible wall"
+  note "fix: ./cli.sh down && ./cli.sh up, then re-run 'sudo ./install.sh' in the VM"
+else
+  ok "dind and the editor are on separate networks"
+fi
+
+VSIP=$(docker inspect -f '{{range $n, $c := .NetworkSettings.Networks}}{{$c.IPAddress}} {{end}}' \
+       desolate-vscode 2>/dev/null)
+if [ -z "$VSIP" ]; then
+  note "editor container not running -- skipping the reachability probe"
+elif ! docker exec desolate-dind sh -c 'command -v wget >/dev/null' 2>/dev/null; then
+  note "no wget inside dind -- skipping the reachability probe"
+else
+  REACHED=""
+  for ip in $VSIP; do
+    # -S so the status line lands in the output: the editor answers a tokenless
+    # request with 401/403, and either is still REACHED. Only the absence of any
+    # HTTP reply means the packet did not arrive.
+    OUT=$(docker exec desolate-dind sh -c \
+          "wget -T 4 -q -S -O /dev/null http://$ip:3000/ 2>&1 || true" 2>/dev/null)
+    case "$OUT" in *HTTP/*) REACHED="$REACHED $ip" ;; esac
+  done
+  if [ -n "$REACHED" ]; then
+    bad "the container world CAN reach the editor at$REACHED:3000"
+    note "the ssh deploy keys live in that container; this is the escape that matters"
+    note "check: colima ssh -p ${COLIMA_PROFILE:-desolate} -- sudo nft list table inet desolate"
+    note "the forward chain must drop between the two bridges BEFORE its ct-state accept"
+  else
+    ok "the container world cannot reach the editor on :3000"
+  fi
+fi
+
+echo
 echo "== 6. end-to-end: run a container on the inner daemon =="
 # Split "cannot trust" from "cannot reach" BEFORE the pull. Every inner pull
 # traverses mitmproxy, so an untrusted CA surfaces as an x509 error that never
@@ -316,6 +367,23 @@ if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet de
              -H "Host: httpbin.org" -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
   [ "$SPOOF" = "403" ] && ok "plaintext secret egress refused (Host header cannot vouch for a destination)" \
     || bad "plaintext spoof returned '$SPOOF', expected 403 -- secrets can be exfiltrated"
+  # The proxy is the one process standing on both sides of the wall: nftables
+  # redirects every :80/:443 here whatever the destination, and this then dials
+  # it from the VM, where the container-bridge drops no longer apply. Without an
+  # address check that makes it a confused deputy for the Mac and the LAN.
+  INTERNAL=$(docker exec desolate-orchestrator sh -c \
+             'curl -s -o /dev/null -w "%{http_code}" --max-time 8 http://192.168.5.2/' \
+             2>/dev/null || true)
+  case "$INTERNAL" in
+    403) ok "the proxy refuses internal destinations (no SSRF to the Mac or LAN)" ;;
+    000|"") bad "no answer for the internal-destination probe -- redirect or proxy is down" ;;
+    502) bad "the proxy DIALLED 192.168.5.2 and failed to connect -- the address"
+         note "check is not running; addon.py must refuse private destination"
+         note "ADDRESSES before consulting the name-matching network policy" ;;
+    *)   bad "internal-destination probe returned '$INTERNAL', expected 403"
+         note "addon.py must refuse private/loopback/link-local destination ADDRESSES"
+         note "before consulting the network policy, which matches on names only" ;;
+  esac
 else
   note "desolate-proxy not installed -- secrets substitution and egress control are OFF"
   note "install it: ./cli.sh vm install"

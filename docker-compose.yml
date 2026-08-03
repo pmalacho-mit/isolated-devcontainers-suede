@@ -20,6 +20,10 @@
 #   - The only host-reachable surface is VSCODE_PORT (default 3000) -- the editor,
 #     token-gated -- bound to 127.0.0.1. Nothing else is published except the
 #     dev-server range.
+#   - dind sits on its OWN bridge (dindnet), NOT the one carrying the editor.
+#     Devcontainers live inside dind and egress through its address, so sharing
+#     a bridge with vscode put the editor -- and the git deploy keys in it --
+#     one routable hop from every project. See networks: at the bottom.
 
 name: desolate
 
@@ -140,7 +144,8 @@ services:
       # The SAME two variables are handed to the orchestrator, which is what
       # desolate.ts allocates from. Do NOT hardcode either side.
       - "127.0.0.1:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8090}:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8090}"
-    networks: [devnet]
+    # NOT devnet. dind is the container world; devnet is the editor world.
+    networks: [dindnet]
     restart: unless-stopped
 
   # ── Orchestrator: the ONLY container with inner-dind-daemon access ──────
@@ -237,6 +242,7 @@ volumes:
   server-dist:
 
 networks:
+  # The EDITOR world: vscode + orchestrator.
   devnet:
     driver: bridge
     driver_opts:
@@ -245,3 +251,20 @@ networks:
       # and the VM's nftables rules, which match on iifname, silently stop
       # matching (meaning no proxy). A fixed name makes the rules survive recreation.
       com.docker.network.bridge.name: br-desolate
+
+  # The CONTAINER world: dind, and therefore every devcontainer, since they
+  # egress through dind's address on this bridge.
+  #
+  # Nothing bridges these two networks. Nothing needs to: orchestrator->dind is
+  # a unix socket in the inner-run volume, vscode->orchestrator is a unix socket
+  # in broker-run, and dind's egress goes to the VM itself (proxy 18080, CA
+  # 18081, resolver 5353), which is INPUT rather than FORWARD. The nftables
+  # ruleset drops traffic between the two bridges explicitly, first, ahead of
+  # its established-state accept.
+  dindnet:
+    driver: bridge
+    driver_opts:
+      # Same pin, same reason. Kept to 14 chars: Linux caps interface names at 15
+      # (IFNAMSIZ-1) and silently rejects anything longer, so "br-desolate-dind"
+      # would NOT have worked.
+      com.docker.network.bridge.name: br-desolate-in

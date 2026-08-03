@@ -277,6 +277,32 @@ export const createDocker = (run: Runner) => {
           `tcp-listen:${spec.hostPort},fork,reuseaddr`,
           `tcp:${spec.targetIp}:${spec.targetPort}`,
         ),
+
+      /** True when something answers through this relay's own listener.
+       *
+       *  Runs INSIDE the relay, over the inner daemon's unix socket, because
+       *  the orchestrator has no IP path to the container world -- that is the
+       *  containment boundary, and a probe that needs to cross it is a probe
+       *  that fails as soon as the boundary is real.
+       *
+       *  Any status line counts, 401 and 403 included: the editor answers
+       *  tokenless requests with one, and the question here is whether it
+       *  answered at all. socat is the fallback because it is the one program
+       *  the relay image is guaranteed to carry; a bare TCP connect proves
+       *  less, but proves it without depending on the image's busybox. */
+      answers: (name: string, port: number) =>
+        run.status(
+          [
+            "exec",
+            name,
+            "sh",
+            "-c",
+            `if command -v wget >/dev/null 2>&1; then ` +
+              `wget -S -O /dev/null -T 2 http://127.0.0.1:${port}/ 2>&1 | grep -q 'HTTP/'; ` +
+              `else socat -T 2 /dev/null TCP:127.0.0.1:${port}; fi`,
+          ],
+          true,
+        ) === 0,
     },
   };
 };
