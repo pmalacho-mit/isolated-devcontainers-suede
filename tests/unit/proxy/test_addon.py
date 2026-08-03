@@ -395,3 +395,95 @@ def test_E9b_substitution_still_reaches_the_query_string(tmp_path):
     assert "sk-real" in f.request.path
     assert "MYAPP-KEY-PLACEHOLDER" not in f.request.path
     assert f.request.headers["Host"] == "api.openai.com"
+
+
+# ===========================================================================
+# E10 -- Content-Encoding
+# ===========================================================================
+# The scrub and the leak scan both used `raw_content`, which is the body still
+# in its Content-Encoding. Every one of these passed a real secret through a
+# gzipped response, and gzip is what nearly every JSON API answers with.
+
+def _gzip(data: bytes) -> bytes:
+    import gzip
+    return gzip.compress(data)
+
+
+def test_E10_gzipped_response_echoing_a_secret_is_scrubbed(tmp_path):
+    """VERIFIED BYPASS: an allowlisted endpoint echoes the real key inside a
+    gzipped body. `bvalue in raw_content` is False against compressed bytes, so
+    no scrub fired and the real value entered the container -- the exact thing
+    response scrubbing exists to prevent."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    f.response = tutils.tresp(content=_gzip(f'{{"echo":"{SECRET_VALUE}"}}'.encode()))
+    f.response.headers["Content-Encoding"] = "gzip"
+
+    addon.response(f)
+
+    assert SECRET_VALUE.encode() not in f.response.content
+    assert SECRET_VALUE.encode() not in (f.response.raw_content or b"")
+    assert SECRET_NAME.encode() in f.response.content
+
+
+def test_E10b_gzipped_request_body_carrying_a_placeholder_is_seen(tmp_path):
+    """The same blindness on the request side. A placeholder in a compressed
+    body was invisible, so neither substitution nor leak detection ran: the
+    honeypot case (placeholder aimed at a host it is not allowed for) went
+    unblocked simply because the client had set Content-Encoding."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    f = make_flow(sni="evil.example.com", host_header="evil.example.com",
+                  method="POST", content=_gzip(f'{{"key":"{SECRET_NAME}"}}'.encode()))
+    f.request.headers["Content-Encoding"] = "gzip"
+
+    addon.request(f)
+
+    assert blocked(f), "placeholder toward a non-allowlisted host must be refused"
+
+
+def test_E10c_gzipped_request_body_is_substituted_toward_an_allowed_host(tmp_path):
+    """And the corresponding good path: toward an allowlisted host the value is
+    substituted, and the body the upstream receives stays validly encoded."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  method="POST", content=_gzip(f'{{"key":"{SECRET_NAME}"}}'.encode()))
+    f.request.headers["Content-Encoding"] = "gzip"
+
+    addon.request(f)
+
+    assert not blocked(f)
+    assert SECRET_VALUE.encode() in f.request.content
+    # re-encoded, not smuggled out as plaintext
+    assert SECRET_VALUE.encode() not in (f.request.raw_content or b"")
+
+
+def test_E10d_large_response_is_still_scrubbed(tmp_path):
+    """The old 5 MiB cap skipped inspection of anything larger, so a secret
+    echoed past the cap passed through. mitmproxy has already buffered the whole
+    body by the time this hook runs, so the cap protected nothing."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    padding = b"x" * (6 * 1024 * 1024)
+    f.response = tutils.tresp(content=padding + SECRET_VALUE.encode() + padding)
+
+    addon.response(f)
+
+    assert SECRET_VALUE.encode() not in f.response.content
+
+
+def test_E10e_undecodable_body_fails_closed(tmp_path):
+    """A body that claims gzip and is not gzip cannot be proven clean. It must
+    block rather than pass, since 'unreadable' is not 'contains no secret'."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    f.response = tutils.tresp(content=b"this is definitely not gzip")
+    f.response.headers["Content-Encoding"] = "gzip"
+
+    addon.response(f)
+
+    assert blocked(f), "an undecodable response must not pass unscrubbed"

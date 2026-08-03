@@ -55,8 +55,16 @@ import os
 from mitmproxy import http
 
 SETTINGS_PATH = os.environ.get("DESOLATE_SETTINGS", "/etc/desolate-proxy/settings.json")
-MAX_BODY = 5 * 1024 * 1024  # skip substitution/scrubbing in bodies larger than this
 MIN_PLACEHOLDER_LEN = 12    # shorter placeholders risk accidental substring matches
+
+# There is deliberately NO size cap on body inspection.
+#
+# There used to be one (5 MiB, skip larger bodies), and it was a scrub bypass
+# rather than a memory guard: mitmproxy has already buffered the entire body in
+# memory by the time these hooks run -- streaming is not enabled -- so refusing
+# to LOOK at it saved nothing while letting anything past the cap through
+# unscrubbed. Searching is a memchr scan and allocates nothing; only a body that
+# actually contains a secret is ever copied.
 
 # stdlib logging, not ctx.log: ctx.log is deprecated and its removal would raise
 # inside the request hook -- and mitmproxy answers an addon exception by letting
@@ -163,15 +171,36 @@ class DesolateProxy:
             code, f"desolate-proxy: {msg}\n".encode(), {"content-type": "text/plain"}
         )
 
+    @staticmethod
+    def bodies(message):
+        """Every byte view of a body a peer could read it through.
+
+        `raw_content` is the body still in its Content-Encoding -- gzip, br,
+        zstd -- and `content` is the decoded form. Searching only the raw bytes
+        for a plaintext secret finds nothing in any compressed message, which is
+        most of them; searching only the decoded bytes misses a body whose
+        declared encoding does not apply. Both are checked, and neither is
+        allowed to be the single point of failure.
+
+        Raises whatever `.content` raises when the body cannot be decoded. That
+        is deliberate: every caller runs inside a hook that answers an exception
+        by blocking, and "we could not read this body" must never be treated as
+        "this body is clean".
+        """
+        raw = message.raw_content or b""
+        decoded = message.content or b""
+        return (raw,) if decoded == raw else (raw, decoded)
+
     def _placeholders_in_request(self, flow):
         """Return the set of configured placeholder names present anywhere in the request."""
         found = set()
         url = flow.request.url
         header_blob = "\n".join(f"{k}: {v}" for k, v in flow.request.headers.items(multi=True))
-        body = flow.request.raw_content or b""
-        body_search = body if len(body) <= MAX_BODY else b""
+        bodies = self.bodies(flow.request)
         for name in self.secrets:
-            if name in url or name in header_blob or name.encode() in body_search:
+            if name in url or name in header_blob:
+                found.add(name)
+            elif any(name.encode() in body for body in bodies):
                 found.add(name)
         return found
 
@@ -260,10 +289,12 @@ class DesolateProxy:
             for k, v in list(flow.request.headers.items(multi=True)):
                 if name in v:
                     flow.request.headers[k] = v.replace(name, value)
-            body = flow.request.raw_content or b""
-            if body and len(body) <= MAX_BODY and name.encode() in body:
-                # .content (not .raw_content) so Content-Length / encodings stay correct
-                flow.request.content = flow.request.content.replace(name.encode(), value.encode())
+            # .content on BOTH sides (not .raw_content) so the search sees the
+            # body the peer will read and the write re-encodes it, leaving
+            # Content-Length and Content-Encoding correct.
+            body = flow.request.content or b""
+            if body and name.encode() in body:
+                flow.request.content = body.replace(name.encode(), value.encode())
 
         if found:
             log.info(f"SUBST {method} {proven}{flow.request.path} <- {sorted(found)}")
@@ -284,9 +315,22 @@ class DesolateProxy:
             for k, v in list(flow.response.headers.items(multi=True)):
                 if value in v:
                     flow.response.headers[k] = v.replace(value, name)
-            body = flow.response.raw_content or b""
-            if body and len(body) <= MAX_BODY and bvalue in body:
-                flow.response.content = flow.response.content.replace(bvalue, name.encode())
+            # .content, NOT .raw_content -- and this is the whole fix.
+            #
+            # raw_content is the body still in its Content-Encoding. An
+            # allowlisted endpoint that echoes a secret inside a gzipped
+            # response -- which is nearly every JSON API -- carries the real
+            # value as compressed bytes, so `bvalue in raw_content` was False
+            # and the scrub never fired. The secret then entered the container,
+            # which is exactly the thing scrubbing exists to prevent.
+            #
+            # Reading .content decodes it; assigning .content re-encodes it and
+            # fixes up Content-Length. A body that cannot be decoded raises here
+            # and the wrapper above turns that into a blocked response, because
+            # "unreadable" must not be mistaken for "clean".
+            body = flow.response.content or b""
+            if body and bvalue in body:
+                flow.response.content = body.replace(bvalue, name.encode())
                 log.warning(f"SCRUB response from {flow.request.pretty_host} echoed secret "
                             f"{name!r}; replaced with placeholder")
 
