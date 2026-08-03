@@ -145,6 +145,39 @@ export const mount = {
     allowlist.featureVolumes.some((regex) => regex.test(source)),
 };
 
+/**
+ * Does this path stay inside the directory it is resolved against?
+ *
+ * The devcontainer CLI resolves `build.context` and `build.dockerfile` relative
+ * to the CONFIG FILE, which for us is the broker's snapshot -- so a path that
+ * climbs out of it aims the build context at the orchestrator's filesystem,
+ * where /workspaces (every other project) is mounted. `COPY . /stolen` in the
+ * project's own Dockerfile then lifts the lot into an image the project runs.
+ *
+ * Pure string arithmetic on purpose: this file resolves nothing and touches no
+ * filesystem, and a check that called realpath would be answering a question
+ * about the moment it ran rather than about the spec.
+ */
+const staysInsideItsDirectory = (path: string): boolean => {
+  if (path === "") return false;
+  // Absolute (posix or windows) and home-relative paths never resolve against
+  // the config's directory at all.
+  if (/^[/\\~]/.test(path) || /^[a-zA-Z]:[/\\]/.test(path)) return false;
+
+  let depth = 0;
+  for (const segment of path.split(/[/\\]/)) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") {
+      // Climbing above the starting directory, even if a later segment would
+      // descend back in: `../../workspaces/other` reads another project.
+      if (--depth < 0) return false;
+      continue;
+    }
+    depth++;
+  }
+  return true;
+};
+
 export class PolicyError extends Error {}
 
 const format = {
@@ -420,6 +453,37 @@ const checks = {
     if (read<{ options: any }>("build")?.options !== undefined)
       return fail`"build.options" is not allowed (arbitrary docker build flags)`;
   },
+  buildPathsStayInTheSnapshot: ({ read }) => {
+    const build = read<{ dockerfile?: JSONValue; context?: JSONValue }>("build");
+    const declared: [string, JSONValue | undefined][] = [
+      ["build.dockerfile", build?.dockerfile],
+      ["build.context", build?.context],
+      // The pre-"build" spellings. The CLI still honours both, so a policy that
+      // only knew the nested form would be reading a different file than the
+      // CLI builds from.
+      ["dockerFile", read("dockerFile")],
+      ["context", read("context")],
+    ];
+
+    for (const [key, value] of declared) {
+      if (value === undefined || value === null) continue;
+
+      if (typeof value !== "string")
+        return fail`"${key}" must be a string (got ${typeof value})`;
+
+      if (!staysInsideItsDirectory(value))
+        return fail`
+          "${key}" = '${value}' climbs out of the directory it is resolved
+          against, and must stay inside it. The CLI resolves this against the
+          CONFIG FILE, which desolate relocates to the orchestrator's private
+          snapshot -- so '..' here has never meant your repository root the way
+          it does in an ordinary devcontainer. It meant the snapshot's parent,
+          which is the orchestrator's filesystem, where /workspaces (every other
+          project) is mounted; deep enough and a Dockerfile 'COPY . /somewhere'
+          lifts a sibling project's source into this project's image. Keep the
+          path inside .devcontainer, or use "image" instead of a build.`;
+    }
+  },
   noAppPorts: ({ read }) => {
     if (read("appPort") !== undefined)
       return fail`Remove "appPort"; declare \`customizations.desolate.ports\` instead`;
@@ -532,6 +596,7 @@ export function enforcePolicy(
   checks.noCompose();
   checks.noInitializeCommand();
   checks.noBuildOptions();
+  checks.buildPathsStayInTheSnapshot();
   checks.noAppPorts();
   checks.privilegeMustBeExplicit();
   checks.capAddsOnlyWhenPrivileged();

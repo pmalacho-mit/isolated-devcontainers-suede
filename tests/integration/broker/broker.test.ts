@@ -520,3 +520,70 @@ describe("preconditions", () => {
     assert.match(v, /\d+\.\d+/);
   });
 });
+
+// ===========================================================================
+describe("E12: the snapshot must not import anything from outside the project", () => {
+  // ===========================================================================
+
+  test("a symlink in .devcontainer is refused, not followed", async () => {
+    // The snapshot copied with `dereference: true`, which pulls the link's
+    // TARGET into the build context. A link at .devcontainer/stolen aimed at a
+    // sibling project therefore copied that sibling's whole source next to the
+    // validated spec, where the project's own Dockerfile could COPY it into an
+    // image it runs. A compromised devcontainer can plant this in its own
+    // /workspaces directory without any help from the editor.
+    const victim = project("e12-victim", JSON.stringify({ image: "x" }), {
+      "secret.txt": "the-other-project's-source",
+    });
+    project("e12-thief", JSON.stringify({ image: "x" }));
+
+    fs.symlinkSync(
+      victim,
+      path.join(workspaces, "e12-thief", ".devcontainer", "stolen"),
+    );
+
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "e12-thief" });
+
+    assert.equal(result(msgs).ok, false);
+    assert.match(errorOf(msgs), /symlink/i);
+    assert.deepEqual(runnerInvocations(), [], "the runner must not be reached");
+
+    // and nothing of the victim's may exist in the snapshot
+    const snapshot = path.join(specDir, "e12-thief");
+    if (fs.existsSync(snapshot))
+      assert.ok(
+        !fs.existsSync(path.join(snapshot, "stolen")),
+        "the link's target was copied into the snapshot",
+      );
+  });
+
+  test("a symlink nested deeper in .devcontainer is refused too", async () => {
+    project("e12-nested", JSON.stringify({ image: "x" }), {
+      ".devcontainer/sub/keep.txt": "ordinary file",
+    });
+    fs.symlinkSync(
+      workspaces,
+      path.join(workspaces, "e12-nested", ".devcontainer", "sub", "out"),
+    );
+
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "e12-nested" });
+
+    assert.equal(result(msgs).ok, false);
+    assert.match(errorOf(msgs), /symlink/i);
+    assert.deepEqual(runnerInvocations(), []);
+  });
+
+  test("an ordinary .devcontainer directory still snapshots and starts", async () => {
+    project("e12-fine", JSON.stringify({ image: "x" }), {
+      ".devcontainer/Dockerfile": "FROM scratch\n",
+    });
+
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "e12-fine" });
+
+    assert.equal(result(msgs).ok, true, errorOf(msgs));
+    assert.equal(runnerInvocations().length, 1);
+  });
+});

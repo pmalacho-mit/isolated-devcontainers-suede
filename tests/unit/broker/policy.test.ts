@@ -916,3 +916,78 @@ test("keys that are refused outright are refused by PRESENCE, not truthiness", (
         `${key}: ${JSON.stringify(value)} was accepted`,
       );
 });
+
+// ===========================================================================
+describe("E12: build paths that climb out of the snapshot", () => {
+  // ===========================================================================
+  // The policy refused `build.options` and then stopped looking at `build`.
+  // But the CLI resolves `context` and `dockerfile` relative to the CONFIG
+  // FILE, which the broker deliberately relocates to its private snapshot --
+  // so a relative path with enough `..` in it walks out of that snapshot and
+  // into the orchestrator's filesystem, where /workspaces is mounted. The
+  // project's own Dockerfile then does the reading:
+  //
+  //   "build": { "dockerfile": "Dockerfile", "context": "../../workspaces" }
+  //   COPY . /stolen
+  //
+  // A compromised devcontainer can write this into its OWN devcontainer.json
+  // and wait for the next rebuild, so it does not even need the editor.
+
+  test("E12: build.context may not escape with ..", () => {
+    refuses(
+      spec({ build: { dockerfile: "Dockerfile", context: "../../workspaces" } }),
+      /build\.context/,
+    );
+  });
+
+  test("E12b: build.context may not be absolute", () => {
+    refuses(spec({ build: { dockerfile: "Dockerfile", context: "/" } }), /build\.context/);
+  });
+
+  test("E12c: build.dockerfile may not escape either", () => {
+    // Reading a sibling's Dockerfile is the smaller prize; the bigger one is
+    // that the CLI takes the dockerfile's own directory as the default context.
+    refuses(
+      spec({ build: { dockerfile: "../../other/.devcontainer/Dockerfile" } }),
+      /build\.dockerfile/,
+    );
+  });
+
+  test("E12d: the pre-'build' spellings are covered too", () => {
+    refuses(spec({ dockerFile: "../../elsewhere/Dockerfile" }), /dockerFile/);
+    refuses(spec({ dockerFile: "Dockerfile", context: "../.." }), /context/);
+  });
+
+  test("E12e: descending back in does not launder the climb", () => {
+    // `a/../../b` normalises to `../b`. A depth counter catches it; a naive
+    // `startsWith("..")` test does not.
+    refuses(spec({ build: { context: "sub/../../sneaky" } }), /build\.context/);
+  });
+
+  test("E12f: backslashes are not a way around the segment split", () => {
+    refuses(spec({ build: { context: "..\\..\\workspaces" } }), /build\.context/);
+  });
+
+  test("E12g: a non-string is refused rather than coerced", () => {
+    refuses(spec({ build: { context: ["../.."] } }), /build\.context/);
+  });
+
+  test("E12h: the common `\"context\": \"..\"` idiom is refused, deliberately", () => {
+    // Worth its own case because it is the idiom Microsoft's own docs use for
+    // "build from the repository root", and refusing it looks like a bug until
+    // you see where the config actually lives. Under --override-config the
+    // config file is the snapshot, so `..` resolved to the SPECS directory and
+    // never to the repo root -- the context was already wrong before it was
+    // unsafe. Refusing says so instead of building something silently empty.
+    refuses(spec({ build: { dockerfile: "docker/Dockerfile", context: ".." } }), /climbs out/);
+  });
+
+  test("ordinary in-project build paths are still allowed", () => {
+    allows(spec({ build: { dockerfile: "Dockerfile" } }));
+    allows(spec({ build: { dockerfile: "Dockerfile", context: "." } }));
+    allows(spec({ build: { dockerfile: "./Dockerfile", context: "./ctx" } }));
+    allows(spec({ build: { dockerfile: "docker/Dockerfile", context: "docker" } }));
+    allows(spec({ build: { context: "a/../b" } }));
+    allows(spec({ image: "x" }));
+  });
+});

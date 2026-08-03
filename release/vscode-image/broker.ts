@@ -34,6 +34,8 @@ import {
   chmodSync,
   cpSync,
   copyFileSync,
+  lstatSync,
+  readdirSync,
   realpathSync,
   statSync,
   existsSync,
@@ -194,6 +196,28 @@ const spec = {
    */
   directoryPermissions: 0o700 as const,
   /**
+   * Walk a directory and throw on the first symlink, at any depth.
+   *
+   * lstat, never stat: stat follows the link and reports what it points AT,
+   * which is the one thing this must not do.
+   */
+  refuseSymlinks: (dir: string, relative = "") => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      const shown = relative ? `${relative}/${entry}` : entry;
+      const stats = lstatSync(full);
+      if (stats.isSymbolicLink())
+        throw new Error(
+          `.devcontainer/${shown} is a symlink; refusing to snapshot it. ` +
+            `A link is either followed (copying whatever it points at, ` +
+            `possibly another project, into this build context) or preserved ` +
+            `(leaving editor-writable state inside the validated snapshot). ` +
+            `Replace it with a real file.`,
+        );
+      if (stats.isDirectory()) spec.refuseSymlinks(full, shown);
+    }
+  },
+  /**
    * Freeze the devcontainer spec where the editor cannot reach it, and return
    * the path to the snapshotted devcontainer.json.
    */
@@ -208,8 +232,18 @@ const spec = {
 
     if (existsSync(join(dotDir, "devcontainer.json"))) {
       // The whole directory: the CLI resolves `build.dockerfile` and
-      // `build.context` relative to the config file. `dereference` because a
-      // symlink out of the project would still point at editor-writable state.
+      // `build.context` relative to the config file.
+      //
+      // Symlinks are REFUSED rather than followed. Copying with `dereference`
+      // was the older answer -- the worry being that a symlink left intact
+      // would still point at editor-writable state after the snapshot -- but
+      // dereferencing solves that by pulling the target IN. A link at
+      // `.devcontainer/x -> /workspaces/other-project` therefore copied a
+      // sibling's entire source into the build context, and a Dockerfile
+      // `COPY x /stolen` lifted it into this project's image. Neither
+      // following nor keeping a link is safe, so there is no third option:
+      // refuse.
+      spec.refuseSymlinks(dotDir);
       cpSync(dotDir, dest, { recursive: true, dereference: true });
       const file = join(dest, "devcontainer.json");
       if (!existsSync(file)) throw new Error("no devcontainer.json in project");
