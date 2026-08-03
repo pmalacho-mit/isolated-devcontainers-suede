@@ -96,6 +96,11 @@ SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
 
 COMPOSE_NET=desolate_devnet
 PINNED_BRIDGE=br-desolate
+# The stack spans TWO bridges (see docker-compose.yml networks:). Both have to
+# be armed, and both have to be checked for drift: arming only the editor's
+# would leave the container world with unfiltered egress and no lateral wall.
+COMPOSE_DIND_NET=desolate_dindnet
+PINNED_DIND_BRIDGE=br-desolate-in
 
 # The bridge the LIVE network actually uses.
 #
@@ -106,16 +111,18 @@ PINNED_BRIDGE=br-desolate
 # load fine (iifname is a name match, not an ifindex) and match nothing, which
 # is exactly the silent no-interception failure we are trying to prevent.
 live_bridge() {
-  local gw
-  gw=$(docker network inspect "$COMPOSE_NET" \
+  local net="${1:-$COMPOSE_NET}" gw
+  gw=$(docker network inspect "$net" \
         -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null) || return 1
   [ -n "$gw" ] || return 1
   vm ip -br addr 2>/dev/null | awk -v gw="$gw" '$3 ~ "^"gw"/" {print $1; exit}'
 }
 
 # Interface the installed ruleset is armed for ("" if never installed).
+# Takes the nft symbol so both halves of the split can be read back.
 armed_bridge() {
-  vm sudo sed -n 's/^define DESOLATE_IF = "\(.*\)"$/\1/p' \
+  local symbol="${1:-DESOLATE_IF}"
+  vm sudo sed -n "s/^define $symbol = \"\(.*\)\"\$/\1/p" \
     /etc/desolate-proxy/nftables-desolate.conf 2>/dev/null
 }
 
@@ -159,20 +166,30 @@ ensure_vm_proxy() {
   [ "${DESOLATE_SKIP_VM_CHECK:-0}" = 1 ] && {
     echo "cli.sh: skipping VM proxy check (DESOLATE_SKIP_VM_CHECK=1)"; return 0; }
 
-  local live armed
-  live=$(live_bridge || true)
-  if [ -z "$live" ]; then
-    echo "cli.sh: could not resolve the bridge for '$COMPOSE_NET' -- skipping the" >&2
-    echo "        egress check. preflight will report whether interception is on." >&2
+  local live armed live_dind armed_dind
+  live=$(live_bridge "$COMPOSE_NET" || true)
+  live_dind=$(live_bridge "$COMPOSE_DIND_NET" || true)
+  if [ -z "$live" ] || [ -z "$live_dind" ]; then
+    echo "cli.sh: could not resolve the bridges for '$COMPOSE_NET'/'$COMPOSE_DIND_NET'" >&2
+    echo "        -- skipping the egress check. preflight will report whether" >&2
+    echo "        interception is on." >&2
     return 0
   fi
 
-  armed=$(armed_bridge || true)
+  armed=$(armed_bridge DESOLATE_IF || true)
+  armed_dind=$(armed_bridge DESOLATE_DIND_IF || true)
   local why=""
   if [ -z "$armed" ]; then
     why="the egress proxy is not installed in the VM"
   elif [ "$armed" != "$live" ]; then
-    why="rules are armed for '$armed' but the stack is on '$live'"
+    why="rules are armed for '$armed' but the editor bridge is '$live'"
+  elif [ "$armed_dind" != "$live_dind" ]; then
+    # This one is easy to miss and expensive to get wrong: it is the interface
+    # every devcontainer's traffic arrives on, so if it is stale the container
+    # world has no egress filter and no lateral drop at all.
+    why="rules are armed for '$armed_dind' but the container bridge is '$live_dind'"
+  elif [ "$live" = "$live_dind" ]; then
+    why="both networks resolve to '$live' -- the editor/container split is gone"
   elif ! vm sudo nft list table inet desolate >/dev/null 2>&1; then
     why="the nftables ruleset is not loaded"
   elif ! vm systemctl is-active --quiet desolate-proxy desolate-nft desolate-proxy-ca desolate-dnsmasq; then
@@ -198,17 +215,25 @@ Override this check (NOT recommended) with DESOLATE_SKIP_VM_CHECK=1.
 EOF
       return 1
     }
-    armed=$(armed_bridge || true)
-    [ "$armed" = "$live" ] || {
-      echo "cli.sh: still armed for '$armed', expected '$live' -- see 'cli.sh preflight'" >&2
+    armed=$(armed_bridge DESOLATE_IF || true)
+    armed_dind=$(armed_bridge DESOLATE_DIND_IF || true)
+    [ "$armed" = "$live" ] && [ "$armed_dind" = "$live_dind" ] || {
+      echo "cli.sh: still armed for '$armed'/'$armed_dind', expected" >&2
+      echo "        '$live'/'$live_dind' -- see 'cli.sh preflight'" >&2
       return 1
     }
-    echo "cli.sh: egress interception armed for $live"
+    echo "cli.sh: egress interception armed for $live and $live_dind"
   fi
 
   # Pinning exists so the bridge name survives down/up. A network created
   # before the pin keeps br-<hash>, so every recreate silently re-breaks the
   # rules until the network itself is recreated.
+  if [ "$live_dind" != "$PINNED_DIND_BRIDGE" ]; then
+    cat <<EOF
+cli.sh: NOTE -- the container bridge is '$live_dind', not the pinned
+        '$PINNED_DIND_BRIDGE'. Same cause and same fix as below.
+EOF
+  fi
   if [ "$live" != "$PINNED_BRIDGE" ]; then
     cat <<EOF
 cli.sh: NOTE -- this stack is on '$live', not the pinned '$PINNED_BRIDGE'.
@@ -437,8 +462,10 @@ case "$CMD" in
                         echo "sysbox:       $(docker info --format '{{json .Runtimes}}' 2>/dev/null \
                                                | grep -q sysbox-runc && echo present || echo MISSING)"
                         echo "repo in VM:   $(vm_repo_visible && echo "$SCRIPT_DIR" || echo "not visible")"
-                        echo "live bridge:  $(live_bridge || echo "(network not up)")"
-                        echo "armed bridge: $(armed_bridge || echo "(proxy not installed)")"
+                        echo "live bridges:  editor=$(live_bridge "$COMPOSE_NET" || echo "(not up)")" \
+                             "containers=$(live_bridge "$COMPOSE_DIND_NET" || echo "(not up)")"
+                        echo "armed bridges: editor=$(armed_bridge DESOLATE_IF || echo "(not installed)")" \
+                             "containers=$(armed_bridge DESOLATE_DIND_IF || echo "(not installed)")"
                         echo "units:        ${UNITS:-(unreachable)}"
                         # The VM's own resolver, not the containers'. dnsmasq on
                         # :5353 serves containers; something else must answer on

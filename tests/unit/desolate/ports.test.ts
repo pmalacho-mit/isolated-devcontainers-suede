@@ -19,7 +19,10 @@ import {
   PortsExhaustedError,
   type PortWorld,
 } from "../../../release/vscode-image/ports.ts";
-import { relay } from "../../../release/vscode-image/relays.ts";
+// relays.ts has no `relay` export -- it exports name/hostPort/label/IMAGE
+// individually, so the named import threw at module load and this whole file
+// never ran. Namespace import, which is what every call site here assumes.
+import * as relay from "../../../release/vscode-image/relays.ts";
 
 /** Run `fn`, returning the error it threw. Fails the test if it did not throw. */
 const thrown = (fn: () => unknown): Error => {

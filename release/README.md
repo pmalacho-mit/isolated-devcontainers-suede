@@ -424,6 +424,31 @@ default bridge with `icc=true`, so they can reach each other over the network
 even though they cannot read each other's files. Per-project networks would
 close that; today it is a real gap in "each devcontainer is truly sandboxed".
 
+That gap is deliberately bounded, though, and the boundary is the one that
+matters: devcontainers may reach *each other*, but not the editor. dind sits on
+its own bridge (`dindnet`/`br-desolate-in`), the editor and orchestrator on
+`devnet`/`br-desolate`, and the VM's forward chain drops between the two before
+its established-state accept. The split is what makes that drop reliable -- on
+one shared bridge the traffic was *bridged*, so the chain only saw it while
+`br_netfilter` was passing frames to the inet hooks, and nothing asserted that.
+Had it ever been off, the wall would have been gone with every other check in
+`preflight.sh` still green, because egress to the internet is routed and stays
+filtered either way. `preflight.sh` section 5b now probes the path directly,
+and `tests/integration/stack` runs the same probes from inside a devcontainer.
+
+Two consequences worth knowing:
+
+- **git over SSH is the editor's alone.** The `:22` allowlist accept is scoped
+  to `$DESOLATE_IF`, so a devcontainer cannot open an SSH connection anywhere.
+  Deploy keys are minted and used in the editor; a project that somehow
+  obtained one still has no route out to use it.
+- **The proxy refuses internal destinations.** It is the one process on both
+  sides of the wall -- everything on `:80`/`:443` is redirected to it, and it
+  dials onward from the VM. `addon.py` now refuses any request whose
+  destination *address* is private, loopback, link-local or reserved, before
+  the network policy (which matches names) is consulted at all. Override with
+  `"allow_private_destinations": true` if you really are proxying to the LAN.
+
 ## Dev servers and dynamic ports
 
 A project declares the **container-side** ports it serves, in its

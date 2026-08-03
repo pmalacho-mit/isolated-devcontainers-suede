@@ -10,6 +10,7 @@ devcontainers put in .env files:
                                     {"value": "sk-...", "hosts": ["api.openai.com"]}
 
 Behavior per request:
+  0. Refuse any request whose destination ADDRESS is internal (see below).
   1. Establish the PROVEN destination (see below).
   2. Network policy (ordered allow/deny rules, first match wins).
   3. Scan URL + headers + body for any configured placeholder.
@@ -45,9 +46,34 @@ that name.
 
 Plain HTTP has no SNI and therefore no provable destination at all. Requests
 that carry a placeholder over plaintext are refused rather than guessed at.
+
+---------------------------------------------------------------------------
+WHY INTERNAL DESTINATIONS ARE REFUSED BEFORE ANYTHING ELSE
+---------------------------------------------------------------------------
+nftables REDIRECTs every :80 and :443 from the container bridges here,
+whatever the destination address was. This proxy then dials that destination
+from the VM -- where the source is no longer a container bridge, so neither
+the forward default-deny nor the input drop applies to it. That makes this
+process a confused deputy: the one component standing on both sides of the
+containment boundary.
+
+    curl http://192.168.5.2/     # the Mac, over Colima's vmnet
+    curl http://172.17.0.2/      # a container on another docker bridge
+
+Both were redirected here and both were forwarded, because the network policy
+matches on a NAME (fnmatch) and the shipped default is {"host": "*"} -- which
+an IP literal matches. A name check cannot fix this on its own either: a
+public hostname whose A record points at 127.0.0.1 or 10.x satisfies any
+allowlist (DNS rebinding). So the check below is on the ADDRESS, and it runs
+before the name is consulted at all.
+
+Set "allow_private_destinations": true in settings.json only if you are
+deliberately proxying to something on the LAN, and understand that it removes
+the wall for :80/:443.
 """
 
 import fnmatch
+import ipaddress
 import json
 import logging
 import os
@@ -72,6 +98,7 @@ class DesolateProxy:
         self.default_action = "allow"
         self.scrub_responses = True
         self.tls_passthrough = []  # SNI globs to tunnel without interception
+        self.allow_private_destinations = False
 
     # ---------- config ----------
 
@@ -111,9 +138,11 @@ class DesolateProxy:
         self.default_action = cfg.get("default_action", "allow")
         self.scrub_responses = cfg.get("scrub_responses", True)
         self.tls_passthrough = [h.lower() for h in cfg.get("tls_passthrough", [])]
+        self.allow_private_destinations = bool(cfg.get("allow_private_destinations", False))
         self._mtime = mtime
         log.info(f"loaded {len(self.secrets)} secret(s), {len(self.network)} network rule(s), "
-                 f"default_action={self.default_action}")
+                 f"default_action={self.default_action}, "
+                 f"allow_private_destinations={self.allow_private_destinations}")
 
     # ---------- helpers ----------
 
@@ -133,6 +162,48 @@ class DesolateProxy:
         """
         sni = getattr(flow.client_conn, "sni", None)
         return sni.lower() if sni else None
+
+    @staticmethod
+    def destination_address(flow):
+        """The address this connection actually goes to, or None if not an IP.
+
+        Ordered, and the FIRST thing that parses as an IP literal wins. In
+        transparent mode `request.host` IS the original destination for
+        plaintext, which is the case that matters most; for TLS mitmproxy fills
+        it from the SNI instead, so that falls through to the connection's own
+        addresses. Anything that does not parse is a name, not a destination we
+        can judge here, and is skipped rather than guessed at.
+        """
+        candidates = [getattr(flow.request, "host", None)]
+        conn = getattr(flow, "server_conn", None)
+        for attribute in ("peername", "address"):
+            value = getattr(conn, attribute, None) if conn is not None else None
+            if isinstance(value, (tuple, list)) and value:
+                candidates.append(value[0])
+
+        for candidate in candidates:
+            if not isinstance(candidate, str) or not candidate:
+                continue
+            try:
+                return ipaddress.ip_address(candidate.strip("[]"))
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def is_internal(address):
+        """Whether a container must never be able to reach this address.
+
+        `is_global` is deliberately not the test: it also excludes shared
+        address space and assorted reserved ranges that are not part of this
+        boundary. What matters here is the VM, the Mac over Colima's vmnet, the
+        LAN, the other docker bridges, and the cloud metadata endpoint.
+        """
+        if address is None:
+            return False
+        return (address.is_private or address.is_loopback or address.is_link_local
+                or address.is_multicast or address.is_reserved
+                or address.is_unspecified)
 
     @staticmethod
     def host_header(flow):
@@ -201,6 +272,18 @@ class DesolateProxy:
         method = flow.request.method
         proven = self.proven_host(flow)
         claimed = self.host_header(flow)
+
+        # 0) destination address -- BEFORE the name is consulted, because the
+        # name is the part an attacker chooses. See the module header.
+        if not self.allow_private_destinations:
+            destination = self.destination_address(flow)
+            if self.is_internal(destination):
+                log.warning(f"DENY  {method} -> {destination} (internal destination; "
+                            f"claimed {claimed!r}, sni {proven!r})")
+                self._block(flow, 403,
+                            f"destination {destination} is internal to the host; "
+                            f"containers may not reach it through this proxy")
+                return
 
         # 1) network policy -- on the proven name where we have one.
         policy_host = proven or claimed or flow.request.host

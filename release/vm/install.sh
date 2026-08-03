@@ -50,6 +50,28 @@ if [ "$PROXY_ONLY" = 0 ]; then
         echo "             If dind never becomes healthy, this is why:"
         echo "               docker logs desolate-dind"
     fi
+
+    # Frames bridged between two ports of the SAME docker bridge only reach
+    # nftables' inet hooks when br_netfilter is loaded and bridge-nf-call is on.
+    # The stack no longer RELIES on that -- dind and the editor are on separate
+    # bridges, so the traffic that matters is routed and always filtered -- but
+    # devnet still carries vscode and orchestrator together, and anything added
+    # there later would be silently unprotected without it. Cheap to set, and
+    # the failure it prevents is invisible: egress stays filtered either way, so
+    # every other check in preflight would still pass.
+    if modprobe br_netfilter 2>/dev/null || [ -d /sys/module/br_netfilter ] \
+       || grep -qw br_netfilter /proc/modules 2>/dev/null; then
+        sysctl -q -w net.bridge.bridge-nf-call-iptables=1 2>/dev/null || true
+        sysctl -q -w net.bridge.bridge-nf-call-ip6tables=1 2>/dev/null || true
+        printf 'net.bridge.bridge-nf-call-iptables = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\n' \
+            > /etc/sysctl.d/99-desolate-bridge.conf
+        echo "    br_netfilter on (same-bridge traffic is filtered too)"
+    else
+        echo "    NOTE: br_netfilter unavailable; traffic between two containers on"
+        echo "          the SAME bridge is not filtered by the desolate ruleset."
+        echo "          The dind/editor split does not depend on this, but do not"
+        echo "          co-locate anything new with the editor on devnet."
+    fi
     echo
 
     echo "### 1/2  sysbox"

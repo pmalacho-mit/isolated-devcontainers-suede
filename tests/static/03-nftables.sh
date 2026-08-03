@@ -32,12 +32,50 @@ assert_contains "forward drops QUIC so TLS falls back to interceptable TCP" "$FW
 # allowlist is empty" from "something else dropped it". Normalise it away so the
 # assertion is about the DROP being present and last, not about its spelling.
 nocount() { printf '%s' "$1" | sed 's/ counter / /g'; }
-assert_contains "forward has a catch-all drop" "$(nocount "$FWD")" 'iifname $DESOLATE_IF drop'
+assert_contains "forward has a catch-all drop" "$(nocount "$FWD")" 'iifname $DESOLATE_IFS drop'
 LAST=$(printf '%s' "$FWD" | grep -vE '^\s*(#.*)?$' | grep -v '^    }' | tail -1 | sed 's/^ *//')
-assert_eq "the catch-all drop is the LAST forward rule" "$(nocount "$LAST")" 'iifname $DESOLATE_IF drop'
+assert_eq "the catch-all drop is the LAST forward rule" "$(nocount "$LAST")" 'iifname $DESOLATE_IFS drop'
 # The counters are what make an SSH refusal diagnosable at all, so pin them.
 assert_contains "the catch-all drop counts what it drops" "$FWD" 'counter drop'
 assert_contains "the ssh allowlist accept is counted too" "$FWD" 'tcp dport 22 counter accept'
+
+group "the two bridges are distinct and both are armed"
+# Arming only the editor's bridge would leave the container world -- dind and
+# every devcontainer in it -- with no egress filter and no lateral wall, which
+# is the inverse of what this layer is for.
+EDITOR_IF=$(sed -n 's/^define DESOLATE_IF = "\(.*\)"$/\1/p' "$CONF")
+DIND_IF=$(sed -n 's/^define DESOLATE_DIND_IF = "\(.*\)"$/\1/p' "$CONF")
+assert_eq "DESOLATE_IF is defined" "$([ -n "$EDITOR_IF" ] && echo yes || echo no)" "yes"
+assert_eq "DESOLATE_DIND_IF is defined" "$([ -n "$DIND_IF" ] && echo yes || echo no)" "yes"
+assert_eq "the two interfaces are different" \
+  "$([ "$EDITOR_IF" != "$DIND_IF" ] && echo yes || echo no)" "yes"
+IFS_LINE=$(sed -n 's/^define DESOLATE_IFS = //p' "$CONF")
+assert_contains "DESOLATE_IFS includes the editor bridge" "$IFS_LINE" "$EDITOR_IF"
+assert_contains "DESOLATE_IFS includes the container bridge" "$IFS_LINE" "$DIND_IF"
+
+group "the lateral wall is stated, not inferred"
+# The catch-all drop below happens to block dind->vscode as a side effect. That
+# is not good enough: it is written as an EGRESS rule, so any future rule added
+# above it for egress reasons could open the lateral path without anyone
+# noticing. Assert the drops directly, and assert they precede the ct-state
+# accept -- placed after it, an established flow would cross.
+assert_contains "container->editor is dropped" "$(nocount "$FWD")" \
+  'iifname $DESOLATE_DIND_IF oifname $DESOLATE_IF      drop'
+assert_contains "editor->container is dropped" "$(nocount "$FWD")" \
+  'iifname $DESOLATE_IF      oifname $DESOLATE_DIND_IF drop'
+LATERAL_LINE=$(printf '%s' "$FWD" | grep -n 'oifname \$DESOLATE_IF ' | head -1 | cut -d: -f1)
+CT_LINE=$(printf '%s' "$FWD" | grep -n 'ct state established,related accept' | head -1 | cut -d: -f1)
+assert_eq "the lateral drops come BEFORE the established-state accept" \
+  "$([ -n "$LATERAL_LINE" ] && [ -n "$CT_LINE" ] && [ "$LATERAL_LINE" -lt "$CT_LINE" ] && echo yes || echo no)" "yes"
+
+group "git-over-ssh is the editor's, not the container world's"
+# The editor mints deploy keys and runs git push; a devcontainer has no reason
+# to speak SSH anywhere. Leaving :22 open to the container bridge pre-authorises
+# the exfiltration half of a key theft.
+assert_contains "ssh accept is scoped to the editor bridge" "$(nocount "$FWD")" \
+  'iifname $DESOLATE_IF ip  daddr @ssh_allow_v4 tcp dport 22 accept'
+assert_not_contains "ssh is NOT opened to every desolate interface" "$FWD" \
+  'iifname $DESOLATE_IFS ip  daddr @ssh_allow_v4'
 
 group "interception covers what it must"
 PRE=$(printf '%s' "$RULES" | awk '/chain prerouting/,/^    }/')
@@ -53,9 +91,9 @@ for port in 18080 5353 18081; do
   # the file pads columns, so normalise whitespace before matching
   assert_contains "input allows :$port" "$(printf '%s' "$IN" | tr -s ' ')" "dport $port accept"
 done
-assert_contains "input has a catch-all drop" "$IN" 'iifname $DESOLATE_IF drop'
+assert_contains "input has a catch-all drop" "$IN" 'iifname $DESOLATE_IFS drop'
 LAST_IN=$(printf '%s' "$IN" | grep -vE '^\s*(#.*)?$' | grep -v '^    }' | tail -1 | sed 's/^ *//')
-assert_eq "the catch-all drop is the LAST input rule" "$LAST_IN" 'iifname $DESOLATE_IF drop'
+assert_eq "the catch-all drop is the LAST input rule" "$LAST_IN" 'iifname $DESOLATE_IFS drop'
 # The VM's own SSH, the docker API, anything else on the VM: unreachable.
 assert_not_contains "input does not blanket-accept tcp/22 to the VM" "$IN" "dport 22 accept"
 
