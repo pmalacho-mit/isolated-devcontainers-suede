@@ -2,43 +2,10 @@
 snapshot.ts -- copy a project's devcontainer config somewhere the editor cannot
 reach, dereferencing symlinks but never leaving the project.
 
-The copy exists for TOCTOU reasons (see broker.ts): the container starts from a
+The copy exists for TOCTOU reasons: the container starts from a
 frozen copy of the spec the policy validated, not from the live file. Making
 that copy means DEREFERENCING symlinks -- a link into editor-writable state
 would otherwise still be a live file at build time.
-
-Dereferencing is a file READ, performed with the orchestrator's privileges on
-the project's behalf, and it is the reason this module is not a
-`cpSync(..., { dereference: true })` call:
-
-    ln -s ../../../root/.ssh/id_ed25519 myproject/.devcontainer/key
-
-Committed to a repo, that link is followed HERE, in the one container holding
-the inner Docker socket, and cp would copy what it points at into the snapshot.
-Nothing in the spec policy sees it: every key in that devcontainer.json is
-legal, and the read is in the filesystem underneath it.
-
-Measured against @devcontainers/cli 0.88.0, that copy does not TODAY reach an
-image: `--override-config` changes which JSON is read, not where relative paths
-resolve from, so `build.context` and `build.dockerfile` are taken from the live
-project directory and this snapshot is never handed to `docker build`. The
-stolen bytes land in a directory only the orchestrator can read. Say what is
-verified rather than what sounds worse.
-
-It is still refused, for three reasons that do not depend on that measurement:
-the orchestrator should not be a file-read oracle for a project at all; the
-copy is meant to be a FROZEN COPY OF THE PROJECT, and one containing /root's
-private key is not that; and the day this directory does become the build
-context -- which is the obvious way to make the freeze cover the Dockerfile
-too -- the escape would be live and nothing here would have changed to say so.
-
-A link to a sibling project is refused for the same reason as a link to /root:
-it is somebody else's trust domain. What the LIVE build context may reach is a
-separate rule, enforced by policy.ts (`build.context` must stay in the project)
-and, for symlinks, by BuildKit, which refuses to follow one out of the context.
-
-Refusal, not silent skipping: a snapshot that quietly dropped a file would
-produce a build failure somewhere far away from the cause.
 */
 /// <reference types="node" />
 import {

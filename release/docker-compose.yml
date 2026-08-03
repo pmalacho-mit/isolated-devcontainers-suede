@@ -145,12 +145,6 @@ services:
       # desolate.ts allocates from. Do NOT hardcode either side.
       - "127.0.0.1:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8090}:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8090}"
     # NOT devnet. dind is the container world; devnet is the editor world.
-    # Keeping them on separate bridges makes a devcontainer's packet toward
-    # vscode:3000 a ROUTED hop between bridges, which the VM's nftables forward
-    # chain always sees -- rather than a BRIDGED one, which it sees only while
-    # br_netfilter is passing frames to the inet hooks. That sysctl was never
-    # asserted anywhere, and had it been off the lateral wall would have been
-    # gone with every other check still green.
     networks: [dindnet]
     restart: unless-stopped
 
