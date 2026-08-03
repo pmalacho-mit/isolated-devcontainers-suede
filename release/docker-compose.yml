@@ -1,6 +1,6 @@
 # Safe browser-based dev environment
 #
-#   browser ──127.0.0.1:$VSCODE_PORT──▶ [vscode: OpenVSCode Server]   (default 3000)
+#   browser ──127.0.0.1:$VSCODE_PORT──▶ [vscode: VSCodium Web Host]    (default 3000)
 #                                     │  NO docker socket -- broker client only
 #                                     │  unix socket (broker-run volume)
 #                                     ▼
@@ -46,12 +46,16 @@ services:
         # Binding needs write permission on the directory.
         # (This differs from /run/inner as the orchestrator only CONNECTS to it.)
         chown 1000:1000 /run/broker
-        VER=$$(cat /home/.openvscode-server/package.json 2>/dev/null | head -c 512)
+        VER=$$(cat /home/.desolate-server/.version 2>/dev/null || true)
+        # Fail closed: an image without a version stamp cannot be compared
+        # against what is already seeded, and seeding anyway would leave the
+        # volume claiming a version it does not hold.
+        [ -n "$$VER" ] || { echo "no /home/.desolate-server/.version in the image"; exit 1; }
         CUR=$$(cat /server-dist/.seeded-version 2>/dev/null || true)
-        if [ ! -x /server-dist/bin/openvscode-server ] || [ "$$VER" != "$$CUR" ]; then
-          echo "seeding openvscode-server into server-dist volume..."
+        if [ ! -x /server-dist/bin/codium-server ] || [ "$$VER" != "$$CUR" ]; then
+          echo "seeding editor server $$VER into server-dist volume..."
           rm -rf /server-dist/* 2>/dev/null || true
-          cp -a /home/.openvscode-server/. /server-dist/
+          cp -a /home/.desolate-server/. /server-dist/
           printf '%s' "$$VER" > /server-dist/.seeded-version
         fi
         chown -R 1000:1000 /server-dist
@@ -95,7 +99,7 @@ services:
     command:
       - dockerd
       - --host=unix:///run/inner/docker.sock
-      - --group=1000                  # gid of the openvscode user, grants socket access
+      - --group=1000                  # gid of the editor user, grants socket access
       - --icc=true
       # What the INNER daemon hands its containers. sysbox gives dind
       # soft=1024/hard=524288, and containers inherit the daemon's limits when
@@ -119,7 +123,7 @@ services:
       # This is the pristine editor server, and it is the LOWER LAYER of the
       # per-project overlayfs volume `desolate` builds for each devcontainer
       # (see ensureServerVolume in vscode-image/desolate.ts). Every devcontainer
-      # EXECUTES /vscode-server/bin/openvscode-server out of its own overlay.
+      # EXECUTES /vscode-server/bin/codium-server out of its own overlay.
       # Nothing but volume-init may write here. If a project could reach this
       # directory, it would be writing the binary every OTHER project runs.
       # overlayfs already prevents that from the project side -- writes are
@@ -251,11 +255,11 @@ services:
       # copy one: the private halves never leave the keyring container.
       SSH_AUTH_SOCK: /run/keyring/agent.sock
     entrypoint: 
-      # Overriding the entrypoint of the base image (gitpod/openvscode-server) 
-      # to run the binary with certificate support and exactly the 
-      # flags specified in `command` and nothing else.
+      # Run the editor server with certificate support and exactly the flags
+      # specified in `command` and nothing else. The path must match
+      # DESOLATE_SERVER_ROOT and SERVER_BIN (vscode-image/editor.ts).
       - /usr/local/bin/with-ca
-      - /home/.openvscode-server/bin/openvscode-server
+      - /home/.desolate-server/bin/codium-server
     command:
       - --host=0.0.0.0                # inside the container; host binding is 127.0.0.1 below
       - --port=3000

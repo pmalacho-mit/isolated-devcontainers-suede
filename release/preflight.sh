@@ -87,7 +87,7 @@ echo "== 3. shared server volume (powers desolate) =="
 ec=$(docker inspect -f '{{.State.ExitCode}}' desolate-volume-init 2>/dev/null)
 [ "$ec" = 0 ] && ok "volume-init completed (exit 0)" \
   || bad "volume-init exit=$ec -- docker logs desolate-volume-init"
-if docker exec desolate-dind test -x /server-dist/bin/openvscode-server; then
+if docker exec desolate-dind test -x /server-dist/bin/codium-server; then
   ok "server seeded and visible inside dind (devcontainers can mount it)"
 else
   bad "server-dist not populated in dind"
@@ -104,7 +104,7 @@ for c in desolate-dind desolate-orchestrator; do
   if docker exec "$c" sh -c 'touch /server-dist/.desolate-writetest 2>/dev/null' 2>/dev/null; then
     docker exec "$c" rm -f /server-dist/.desolate-writetest >/dev/null 2>&1
     bad "$c can WRITE /server-dist -- the shared editor server is poisonable"
-    note "every devcontainer executes /vscode-server/bin/openvscode-server from here"
+    note "every devcontainer executes /vscode-server/bin/codium-server from here"
     note "docker-compose.yml must mount server-dist :ro for this service"
   else
     ok "$c holds /server-dist read-only"

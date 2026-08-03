@@ -233,7 +233,7 @@ fi
 # =========================================================================
 group "E6: a project cannot poison the editor server every project executes"
 # =========================================================================
-# /vscode-server/bin/openvscode-server is EXECUTED by every devcontainer. When
+# /vscode-server/bin/codium-server is EXECUTED by every devcontainer. When
 # it was a shared bind of /server-dist, any project could overwrite it and run
 # code in every other project on next start -- no privilege, no policy bypass:
 # the volume is chowned 1000:1000 and the stock devcontainer user is uid 1000.
@@ -242,7 +242,7 @@ group "E6: a project cannot poison the editor server every project executes"
 if [ -z "${DEVC:-}" ]; then
   skip "E6 server poisoning" "no example-project devcontainer is running"
 else
-  BEFORE=$(docker exec "$C_DIND" sha256sum /server-dist/bin/openvscode-server 2>/dev/null | cut -d' ' -f1)
+  BEFORE=$(docker exec "$C_DIND" sha256sum /server-dist/bin/codium-server 2>/dev/null | cut -d' ' -f1)
   # The attack, exactly as a compromised project would run it. Its output is
   # KEPT: discarding it is what let the write fail silently while the assertion
   # below still reported the lower layer intact -- a pass that defended nothing.
@@ -253,8 +253,8 @@ else
   # the write fails on permissions before overlayfs is ever involved, and the
   # "pristine server survived" assertion below then proves nothing.
   ATTACK=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" sh -c \
-    'echo MALICIOUS > /vscode-server/bin/openvscode-server 2>&1; echo "exit=$?"' 2>&1)
-  AFTER=$(docker exec "$C_DIND" sha256sum /server-dist/bin/openvscode-server 2>/dev/null | cut -d' ' -f1)
+    'echo MALICIOUS > /vscode-server/bin/codium-server 2>&1; echo "exit=$?"' 2>&1)
+  AFTER=$(docker exec "$C_DIND" sha256sum /server-dist/bin/codium-server 2>/dev/null | cut -d' ' -f1)
 
   if [ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ]; then
     pass "the pristine server survived a write through the project's view"
@@ -264,7 +264,7 @@ else
   fi
   # And the project must see only its OWN modification, not a shared one.
   SEEN=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" \
-           sh -c 'cat /vscode-server/bin/openvscode-server 2>/dev/null | head -c 9' 2>/dev/null)
+           sh -c 'cat /vscode-server/bin/codium-server 2>/dev/null | head -c 9' 2>/dev/null)
   # This is E6's POSITIVE CONTROL: it proves the attack above actually executed.
   # If it fails, "the pristine server survived" passed vacuously -- nothing was
   # written, so nothing was defended against -- and the reason has to be
@@ -274,10 +274,10 @@ else
   else
     E6DIAG=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" sh -c '
       echo "as:     $(id 2>&1)"
-      echo "target: $(ls -la /vscode-server/bin/openvscode-server 2>&1 | head -1)"
+      echo "target: $(ls -la /vscode-server/bin/codium-server 2>&1 | head -1)"
       echo "dir:    $(ls -ld /vscode-server/bin 2>&1 | head -1)"
       echo "mount:  $(mount 2>/dev/null | grep -i vscode-server | head -1 || echo "(no vscode-server mount line)")"
-      echo "readback: $(head -c 40 /vscode-server/bin/openvscode-server 2>&1 | tr -d "\0" | head -1)"' 2>&1)
+      echo "readback: $(head -c 40 /vscode-server/bin/codium-server 2>&1 | tr -d "\0" | head -1)"' 2>&1)
     fail "the writer sees its own copy-up (overlay is working)" \
       "$(detail "the ATTACK DID NOT RUN, so the pass above is vacuous -- nothing was written.
 write attempt: $ATTACK

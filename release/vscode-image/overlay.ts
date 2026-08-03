@@ -11,6 +11,7 @@
  * the bind rw and write through to the shared original. An overlay whose lower
  * is never writable through the mount is the shape that holds.
  */
+import { SERVER_BIN } from "./editor.ts";
 import { volumeNamespace } from "./projects.ts";
 
 /** The pristine editor server on dind's filesystem -- an overlay LOWER only. */
@@ -46,7 +47,7 @@ export const SHARED_DIRECTORIES: readonly SharedDirectory[] = [
     name: "vscode-server",
     lower: SERVER_SRC,
     target: SERVER_DST,
-    proof: `${SERVER_DST}/bin/openvscode-server`,
+    proof: `${SERVER_DST}/bin/${SERVER_BIN}`,
     identityFile: `${SERVER_SRC}/.seeded-version`,
     missing: `the editor server is not seeded. volume-init populates it at stack start:
       docker logs desolate-volume-init`,

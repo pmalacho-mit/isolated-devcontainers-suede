@@ -137,7 +137,7 @@ done
 
 group "the shared editor server cannot be poisoned by a project"
 # /server-dist is bind-mounted into EVERY devcontainer as /vscode-server, and
-# every devcontainer EXECUTES /vscode-server/bin/openvscode-server. Writable,
+# every devcontainer EXECUTES /vscode-server/bin/codium-server. Writable,
 # that is cross-project code execution with no privilege required: the volume is
 # chowned 1000:1000 and the stock devcontainer user is uid 1000, so project A
 # overwrites the binary and project B runs it. Only volume-init, which seeds it,

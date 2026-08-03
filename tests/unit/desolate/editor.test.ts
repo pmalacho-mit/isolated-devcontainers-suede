@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   EDITOR_INTERNAL_PORT,
   EditorScriptError,
+  SERVER_BIN,
   editorStartScript,
   isValidExtensionId,
   isValidToken,
@@ -122,7 +123,7 @@ describe("the script itself", () => {
   test("takes the server path it is given rather than assuming one", () => {
     assert.match(
       editorStartScript("/somewhere-else", [], TOKEN),
-      /SRV=\/somewhere-else\/bin\/openvscode-server/,
+      new RegExp(`SRV=/somewhere-else/bin/${SERVER_BIN}`),
     );
   });
 

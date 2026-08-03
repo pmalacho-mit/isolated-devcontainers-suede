@@ -162,7 +162,7 @@ head2 "1. can a devcontainer reach the outer stack containers?"
 # at least talk to it, and brute-force or CSRF it, rather than being unable to
 # address it at all.
 run_probes "
-try 'editor (openvscode)' '$VSCODE_IP' 3000
+try 'editor (codium)'     '$VSCODE_IP' 3000
 try 'orchestrator'        '$ORCH_IP'   3000
 "
 
