@@ -38,7 +38,7 @@ const SSH_CONFIG = `${SSH_DIR}/config`;
  *  code here. What it finds when it does is public keys and a socket. */
 const KEYRING_RUN = process.env.DESOLATE_KEYRING_RUN ?? "/run/keyring";
 const KEYRING_CONTROL = `${KEYRING_RUN}/control.sock`;
-const identityFile = (alias: string) => `${KEYRING_RUN}/pub/deploy_${alias}.pub`;
+const identityFile = (alias: string) => `${KEYRING_RUN}/pub/${alias}.pub`;
 
 /** One request, one response, over the keyring's control socket.
  *
@@ -113,7 +113,12 @@ interface Repo {
   project: string;     // "acme/widgets" -- the path under /workspaces
   // Deliberately NO keyPath. There is no private key in this container to
   // point at; the identity is the PUBLIC half the keyring exports, and
-  // `identityFile(alias)` is the only thing that names it.
+  // `identityFile(tag)` is the only thing that names it.
+  //
+  // `tag`, NOT `alias`, is what the keyring is keyed on. They differ exactly
+  // when two owners have a repo of the same name, which is the case the whole
+  // per-repo scheme exists for -- see parseRepo.
+  tag: string;         // acme__widgets
   hostAlias: string;   // github.com-acme__widgets
 }
 
@@ -129,14 +134,21 @@ function parseRepo(ownerRepo: string | undefined, aliasArg?: string): Repo {
   // people already think about repositories.
   const project = `${owner}/${alias}`;
   // The key and ssh host alias are keyed on owner AND repo for the same reason
-  // -- `deploy_widgets` would have been shared by acme/widgets and other/widgets
-  // and silently handed the wrong identity to one of them.
+  // -- a key named `widgets` would have been shared by acme/widgets and
+  // other/widgets, and `create` is idempotent, so the second repo would have
+  // been handed the FIRST repo's public key to register. One keypair for two
+  // repos is the exact blast radius this scheme exists to avoid.
+  //
+  // Both `tag` fields below must stay in step: the ssh config resolves a host
+  // alias built from `tag` to an IdentityFile that must be the key the keyring
+  // stored under the same `tag`.
   const tag = `${owner}__${alias}`;
   return {
     ownerRepo,
     owner,
     alias,
     project,
+    tag,
     hostAlias: `github.com-${tag}`,
   };
 }
@@ -176,8 +188,8 @@ function ensureKey(repo: Repo): void {
 
   // The keyring generates and keeps it. `create` is idempotent, so this both
   // makes a new key and re-exports an existing one's public half.
-  const { pubkey } = keyring({ op: "create", alias: repo.alias });
-  console.log(`newrepo: keyring holds the key for '${repo.alias}'`);
+  const { pubkey } = keyring({ op: "create", alias: repo.tag });
+  console.log(`newrepo: keyring holds the key for '${repo.project}'`);
 
   const configPath = `${SSH_DIR}/config`;
   const config = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
@@ -192,7 +204,7 @@ function ensureKey(repo: Repo): void {
       // GitHub authenticates as whichever repo matches first, so pushing to A
       // can authenticate as B. Pinning the identity per host alias avoids that
       // without the editor ever holding a private key.
-      `  IdentityFile ${identityFile(repo.alias)}`,
+      `  IdentityFile ${identityFile(repo.tag)}`,
       `  IdentitiesOnly yes`,
       ``,
     ].join("\n");

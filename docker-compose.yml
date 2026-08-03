@@ -195,8 +195,8 @@ services:
   # nftables rule reaches it. The keys move out of reach instead.
   #
   # Note what is NOT here: no /workspaces, no inner-run, no docker socket, no
-  # published port. This container reads no project content and talks to
-  # nothing. It hands out an agent socket and public keys.
+  # published port, and no network at all. This container reads no project
+  # content and talks to nothing. It hands out an agent socket and public keys.
   keyring:
     build: ./vscode-image           # same image; ssh-agent + ssh-keygen already in it
     container_name: desolate-keyring
@@ -206,13 +206,24 @@ services:
       # Private keys. Mounted HERE AND NOWHERE ELSE -- that mount list is the
       # whole security property, and tests/static/07-keyring.sh asserts it.
       - keyring-keys:/var/lib/keyring
-      # Agent socket + exported PUBLIC halves. Shared with the editor.
+      # Agent socket + exported PUBLIC halves. Shared with the editor, which
+      # gets it read-only (see below).
       - keyring-run:/run/keyring
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
     pids_limit: 512
-    networks: [devnet]
+    # NO NETWORK. Not devnet, not anything: this process speaks over two unix
+    # sockets in a volume and has no reason to hold an IP.
+    #
+    # It was on devnet, which was wrong in two ways. devnet is the editor's
+    # bridge, and the editor is kept off the keyring only by the VM's nftables
+    # rule `iifname br-desolate oifname br-desolate drop` -- a host install
+    # step, so `docker compose up` on its own gave the editor a route to the
+    # key holder. devnet is also the bridge carrying the pre-authorised egress
+    # to GitHub's :22, so the container holding the keys was the one container
+    # that also held a way out with them.
+    network_mode: none
     restart: unless-stopped
 
   vscode:
@@ -256,7 +267,17 @@ services:
       - vscode-home:/home/workspace   # settings + extensions persist here
       - broker-run:/run/broker        # narrow request channel to orchestrator
       # Agent socket + PUBLIC keys. keyring-keys is deliberately absent.
-      - keyring-run:/run/keyring
+      #
+      # READ-ONLY, and it still works: connecting to a unix socket is an inode
+      # permission check, not a filesystem write, so a ro mount does not block
+      # it (MS_RDONLY only refuses writes to regular files, dirs and symlinks).
+      # The editor never needs to write here -- newrepo reads pub/*.pub paths
+      # and connects to two sockets. Leaving it writable let a compromised
+      # editor rewrite an exported .pub, which is what every `IdentityFile`
+      # line in ~/.ssh/config points at: the per-host identity pinning that
+      # keeps `IdentitiesOnly yes` honest would then be pinning to whatever the
+      # attacker put there.
+      - keyring-run:/run/keyring:ro
     ports:
       # Set VSCODE_PORT in .env to move the editor off 3000 (e.g. when something
       # else on your Mac already uses it). It MUST stay outside of
