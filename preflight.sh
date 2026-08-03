@@ -371,18 +371,51 @@ if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet de
   # redirects every :80/:443 here whatever the destination, and this then dials
   # it from the VM, where the container-bridge drops no longer apply. Without an
   # address check that makes it a confused deputy for the Mac and the LAN.
+  #
+  # What this probe can and cannot conclude, because one ambiguous result is how
+  # a check ends up asserting nothing:
+  #
+  #   - a 403 is addon.py refusing the address, which is the intended path;
+  #   - but it is NOT guaranteed, and demanding it was a false alarm on every
+  #     Mac with nothing listening on :80. `connection_strategy=eager` is pinned
+  #     in desolate-proxy.service, deliberately (tests/static/06-proxy-service.sh
+  #     says why), and eager dials the ORIGINAL DESTINATION before the request
+  #     hook runs. An internal address that does not accept the connection
+  #     therefore dies at that dial and addon.py never sees the request: 502 if
+  #     the connect was refused, no reply at all if the packet was dropped.
+  #     Contained -- by a different layer than the one being named.
+  #
+  # So what is asserted is REACHING it, not which layer stopped it. addon.py's
+  # own refusal is covered by tests/unit/proxy (the E10 family), and
+  # tests/integration/stack reads the same result the same way.
+  #
+  # The plaintext-spoof probe above is the precondition: it got a 403 out of the
+  # addon over :80, so a no-reply here is about the destination rather than a
+  # dead redirect. Without that, "no reply" would pass for the wrong reason
+  # forever.
   INTERNAL=$(docker exec desolate-orchestrator sh -c \
              'curl -s -o /dev/null -w "%{http_code}" --max-time 8 http://192.168.5.2/' \
              2>/dev/null || true)
   case "$INTERNAL" in
-    403) ok "the proxy refuses internal destinations (no SSRF to the Mac or LAN)" ;;
-    000|"") bad "no answer for the internal-destination probe -- redirect or proxy is down" ;;
-    502) bad "the proxy DIALLED 192.168.5.2 and failed to connect -- the address"
-         note "check is not running; addon.py must refuse private destination"
-         note "ADDRESSES before consulting the name-matching network policy" ;;
-    *)   bad "internal-destination probe returned '$INTERNAL', expected 403"
-         note "addon.py must refuse private/loopback/link-local destination ADDRESSES"
-         note "before consulting the network policy, which matches on names only" ;;
+    403)   ok "the proxy refuses internal destinations (403 from addon.py)" ;;
+    502)   ok "internal destination unreachable (502: the proxy dialled it and could not connect)" ;;
+    000|"")
+           if [ "$SPOOF" = "403" ]; then
+             ok "internal destination unreachable (no reply: the dial went nowhere)"
+           else
+             bad "no answer for the internal-destination probe, and :80 did not reach"
+             note "the addon either (the spoof probe above returned '$SPOOF'), so this"
+             note "says nothing about containment -- fix the redirect first."
+             note "./cli.sh proxy status ; ./cli.sh proxy logs"
+           fi ;;
+    # Anything else is an ANSWER, and an answer means the stack reached
+    # 192.168.5.2. Not just 2xx: a 401 from a router's admin page or a 404 from
+    # a service on the Mac is the same reach wearing a different number, so the
+    # two proxy-generated codes above are named and everything else fails.
+    *)     bad "an internal destination ANSWERED ('$INTERNAL') -- the stack reached"
+           note "192.168.5.2 through the proxy. addon.py must refuse private,"
+           note "loopback and link-local destination ADDRESSES before consulting"
+           note "the network policy, which matches on names only." ;;
   esac
 else
   note "desolate-proxy not installed -- secrets substitution and egress control are OFF"
