@@ -274,6 +274,155 @@ def test_secret_with_empty_value_is_ignored(tmp_path):
     assert SECRET_NAME not in addon.secrets
 
 
+@pytest.mark.parametrize("hosts", [
+    ["*"],                              # the whole point: no allowlist at all
+    ["**"],
+    ["*.*"],
+    ["*.com"],                          # a whole TLD
+    ["*openai.com"],                    # fnmatch: also matches evilopenai.com
+    ["api.*"],
+    ["?"],
+    [""],
+    ["api.openai.com", "*"],            # one good entry does not redeem the list
+])
+def test_a_wildcard_allowlist_is_refused(tmp_path, hosts):
+    """An allowlist that does not pin a destination is not an allowlist.
+
+    With `hosts: ["*"]` the placeholder is a bearer token again: any container
+    can post it anywhere and the proxy will helpfully swap the real key in.
+    """
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": hosts}},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert SECRET_NAME not in addon.secrets, f"hosts={hosts} was accepted"
+
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    addon.request(f)
+    # nothing loaded, so nothing to substitute: the placeholder travels as itself
+    assert f.request.headers["Authorization"] == f"Bearer {SECRET_NAME}"
+
+
+@pytest.mark.parametrize("hosts", [
+    ["api.openai.com"],
+    ["*.openai.com"],
+    ["api.openai.com", "*.openai.com"],
+    ["localhost"],                      # a literal name pins itself, however short
+])
+def test_a_pinned_allowlist_still_loads(tmp_path, hosts):
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": hosts}},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert SECRET_NAME in addon.secrets, f"hosts={hosts} was refused"
+
+
+def test_the_network_allowlist_may_still_be_a_wildcard(tmp_path):
+    """The host check applies to SECRETS, not to the network rules.
+
+    `{"host": "*"}` is the shipped `network` default and means something
+    defensible -- the path is default-deny, the destination set is not. Reusing
+    the secrets rule there would refuse the stock settings file.
+    """
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    assert addon.network == [{"action": "allow", "host": "*"}]
+    f = make_flow(sni="deb.debian.org", host_header="deb.debian.org")
+    addon.request(f)
+    assert not blocked(f)
+
+
+# ---------------------------------------------------------------------------
+# overlapping placeholder names
+# ---------------------------------------------------------------------------
+# Substitution is a plain string replace and detection a plain substring
+# search, so a name that contains another cannot be handled correctly by
+# either. The check this replaced was a minimum name LENGTH, which does not
+# prevent it at all -- the pair below is 29 and 31 characters.
+
+OVERLAPPING = SECRET_NAME + "-2"
+
+
+def test_overlapping_placeholders_are_both_dropped(tmp_path):
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {
+            SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]},
+            OVERLAPPING: {"value": "sk-the-other-one", "hosts": ["api.openai.com"]},
+        },
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert addon.secrets == {}, "keeping either one leaves the ambiguity in place"
+
+
+def test_the_overlap_this_prevents(tmp_path):
+    """What the drop is protecting against, spelled out as the request it breaks.
+
+    Without the check, a request carrying only the LONGER placeholder also
+    'contains' the shorter one, so it is judged against the shorter one's
+    allowlist and gets its value spliced in -- leaving '-2' glued to a real
+    API key, addressed to a host the user never allowlisted for it.
+    """
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    # the pair, forced past the config check to demonstrate the mechanism
+    addon.secrets = {
+        SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]},
+        OVERLAPPING: {"value": "sk-the-other-one", "hosts": ["api.anthropic.com"]},
+    }
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {OVERLAPPING}"})
+    assert addon._placeholders_in_request(f) == {SECRET_NAME, OVERLAPPING}, \
+        "the shorter name is found inside the longer one -- this is the whole problem"
+
+
+def test_short_names_are_fine_when_nothing_overlaps(tmp_path):
+    """The length bar is gone; a short name that collides with nothing works.
+
+    Length was never the property that mattered. Overlap is.
+    """
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {
+            "K1": {"value": "sk-one", "hosts": ["api.openai.com"]},
+            "K2": {"value": "sk-two", "hosts": ["api.openai.com"]},
+        },
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert set(addon.secrets) == {"K1", "K2"}
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": "Bearer K1"})
+    addon.request(f)
+    assert f.request.headers["Authorization"] == "Bearer sk-one"
+
+
+def test_a_secret_dropped_for_overlap_takes_its_neighbours_with_it_only(tmp_path):
+    """One bad pair must not disarm the rest of the store."""
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {
+            SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]},
+            OVERLAPPING: {"value": "sk-other", "hosts": ["api.openai.com"]},
+            "UNRELATED-PLACEHOLDER": {"value": "sk-fine", "hosts": ["api.openai.com"]},
+        },
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert set(addon.secrets) == {"UNRELATED-PLACEHOLDER"}
+
+
 def test_settings_reload_picks_up_changes(tmp_path):
     _, addon, path = load_addon(tmp_path)
     addon._maybe_reload()

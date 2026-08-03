@@ -834,8 +834,26 @@ Two consequences you will notice:
 ./cli.sh secret rm NAME
 ```
 
-Placeholders must be >=12 chars and globally unique; a project prefix
-(`MYAPP-*`) is the convention. A secret with no host allowlist is refused.
+A project prefix (`MYAPP-*`) is the convention. Two rules are enforced when a
+secret is added, and again when the proxy loads its settings -- a secret that
+breaks either is refused rather than stored, or dropped rather than loaded:
+
+- **No placeholder may contain another.** Substitution is a plain string
+  replace, so with `MYAPP-KEY` and `MYAPP-KEY-2` both registered, a request
+  carrying the second is judged against the first's allowlist and receives the
+  first's value with a stray `-2` glued on. (A minimum name length used to
+  stand in for this check. It never prevented it: both of those names are long.)
+- **The allowlist must name where the secret may go.** A secret with no
+  allowlist is refused, and so is `--hosts '*'`: a wildcard destination turns
+  the placeholder back into a bearer token that any container can post
+  anywhere, which is the one thing this design exists to prevent. Wildcards are
+  accepted only where a TLS certificate accepts them -- one leading label, over
+  a name with at least two literal labels: `*.openai.com` yes, `*.com` and
+  `*openai.com` no (a glob does not stop at a dot, so the latter also matches
+  `evilopenai.com`).
+
+The `network` rules in `settings.json` are a separate list with a separate job
+and still accept `{"host": "*"}` -- see "What this does not give you" below.
 
 ### Why this is stronger than a secrets file
 

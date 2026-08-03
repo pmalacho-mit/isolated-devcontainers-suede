@@ -94,6 +94,45 @@ EOF
 # tests/static/05-cli-queries.sh executes this against a fixture.
 SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
 
+# Existing placeholders that OVERLAP the one being added ($n): either contains
+# the other. Same quoting discipline as SECRET_LIST_JQ -- it travels as a bare
+# argument through `colima ssh`. Also executed by tests/static/05-cli-queries.sh.
+#
+# The proxy substitutes by plain string replace and detects by plain substring
+# search, so MY_KEY and MY_KEY2 cannot coexist: a request carrying MY_KEY2 is
+# judged against MY_KEY's allowlist and gets MY_KEY's value with a stray "2"
+# glued on. addon.py drops both if they ever reach it; refusing here is how you
+# find out at the moment you can still pick another name.
+#
+# `inside($n)` rather than the obvious `$n|contains(.)`: piping into $n rebinds
+# `.` to $n itself, so that spelling asks whether $n contains $n and reports
+# every stored name as a collision. `inside` takes the container as an argument
+# instead, so nothing is rebound. (And `[a,b]|any` rather than `a or b`, because
+# `or` needs spaces around it.)
+SECRET_COLLISION_JQ='(.secrets//{})|keys[]|select(.!=$n)|select([contains($n),inside($n)]|any)'
+
+# Whether a --hosts entry PINS a destination. "*" is not an allowlist, it is the
+# absence of one spelled so it looks deliberate: the secret becomes a bearer
+# token any container may post anywhere, and the proxy's leak detection has
+# nothing left to catch. Wildcards are allowed only where a TLS certificate
+# allows them -- one leading label, over a name with two or more literal labels.
+# addon.py applies the same rule when it loads settings.json.
+host_pattern_pins_a_destination() {
+  case "$1" in
+    '')    return 1 ;;
+    *'*'*) ;;                                    # a wildcard: keep checking
+    *)     return 0 ;;                           # a literal name pins itself
+  esac
+  case "$1" in '*.'*) ;; *) return 1 ;; esac     # ...only as the FIRST label,
+  local rest="${1#\*.}"                          # because '*' does not stop at
+  case "$rest" in *'*'*) return 1 ;; esac        # a dot: '*foo.com' matches
+  case "$rest" in                                # 'evilfoo.com' too.
+    *..*|.*|*.) return 1 ;;                      # no empty labels
+    *.*)        return 0 ;;                      # >= 2 labels ('*.com' is a TLD)
+    *)          return 1 ;;
+  esac
+}
+
 COMPOSE_NET=desolate_devnet
 PINNED_BRIDGE=br-desolate
 # The stack spans TWO bridges (see docker-compose.yml networks:). Both have to
@@ -378,12 +417,27 @@ case "$CMD" in
                  done
                  [ -n "$HOSTS" ] || { echo "cli.sh: --hosts is required (a secret with no allowlist is refused by the proxy)" >&2; exit 1; }
                  case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
-                 [ "${#NAME}" -ge 12 ] || { echo "cli.sh: placeholder must be >=12 chars (avoids substring collisions)" >&2; exit 1; }
                  # HOSTS is interpolated into a remote shell command via `colima ssh`,
                  # and lands inside a JSON document. Restrict it to what a hostname
                  # glob can legitimately contain so neither can be broken out of.
                  case "$HOSTS" in *[!A-Za-z0-9.*_,-]*)
                    echo "cli.sh: --hosts may only contain [A-Za-z0-9.*_-] and commas" >&2; exit 1 ;; esac
+                 # An empty field would reach the VM as "" in the JSON array,
+                 # where the loop below can no longer see it.
+                 case ",$HOSTS," in *,,*)
+                   echo "cli.sh: --hosts has an empty entry (a stray comma?)" >&2; exit 1 ;; esac
+                 # Each entry has to name where this secret may go. The charset
+                 # check above still lets "*" through, and "*" is the one entry
+                 # that undoes the whole substitution model.
+                 for H in ${HOSTS//,/ }; do
+                   host_pattern_pins_a_destination "$H" || {
+                     echo "cli.sh: --hosts entry '$H' does not name a destination." >&2
+                     echo "        A secret is only bounded by the hosts it may be sent to, so" >&2
+                     echo "        '*' (and '*.com', and '*foo.com' -- a glob does not stop at a" >&2
+                     echo "        dot) are refused. Name the hosts, or wildcard one leading" >&2
+                     echo "        label: --hosts api.openai.com,*.openai.com" >&2
+                     exit 1; }
+                 done
                  HOSTS_JSON=$(printf '%s' "$HOSTS" | awk -F, '{printf "["; for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}; printf "]"}')
                  printf 'value for %s (input hidden): ' "$NAME" >&2
                  stty -echo 2>/dev/null; IFS= read -r VALUE; stty echo 2>/dev/null; echo >&2
@@ -419,10 +473,19 @@ case "$CMD" in
                    T=$(mktemp)
                    trap "rm -f \"$T\"" EXIT INT TERM
                    [ -f "$F" ] || echo "{\"secrets\":{},\"network\":[{\"action\":\"allow\",\"host\":\"*\"}],\"scrub_responses\":true}" > "$F"
+                   OVERLAP=$(jq -r --arg n "$1" "$3" "$F" | paste -sd, -)
+                   [ -z "$OVERLAP" ] || {
+                     echo "cli.sh: placeholder $1 overlaps an existing one: $OVERLAP" >&2
+                     echo "        One name contains the other, and the proxy substitutes by plain" >&2
+                     echo "        string replace: a request carrying the longer name would be" >&2
+                     echo "        judged against the shorter allowlist and receive the wrong" >&2
+                     echo "        value, with the leftover characters glued on. Pick a name that" >&2
+                     echo "        neither contains nor is contained by those." >&2
+                     exit 1; }
                    jq --arg n "$1" --arg v "$V" --argjson h "$2" \
                       ".secrets[\$n] = {value: \$v, hosts: \$h}" "$F" > "$T" \
                      && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" \
-                     && echo "stored"' _ "$NAME" "$HOSTS_JSON"
+                     && echo "stored"' _ "$NAME" "$HOSTS_JSON" "$SECRET_COLLISION_JQ"
                  echo "Use it by putting the PLACEHOLDER in your devcontainer.json:"
                  echo "  \"containerEnv\": { \"YOUR_ENV_VAR\": \"$NAME\" }"
                  ;;

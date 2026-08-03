@@ -75,6 +75,30 @@ to `tls_passthrough` is a hole in this check, not just in interception.
 Set "allow_private_destinations": true in settings.json only if you are
 deliberately proxying to something on the LAN, and understand that it removes
 the wall for :80/:443.
+
+---------------------------------------------------------------------------
+WHAT MAKES A SECRET'S CONFIGURATION USABLE AT ALL
+---------------------------------------------------------------------------
+Two properties of a `secrets` entry are load-bearing, and both fail quietly.
+They are checked when settings.json is read, and a secret that fails either is
+DROPPED -- which is the safe direction: an unknown placeholder is substituted
+nowhere, so it travels as itself and no value can leave.
+
+  * Every entry in `hosts` must PIN a destination. "*" is not an allowlist,
+    it is the absence of one spelled so it looks deliberate, and it turns the
+    placeholder back into a bearer token that any container may post
+    anywhere. Wildcards are accepted only where a TLS certificate accepts
+    them: one leading label, over a name with at least two literal labels of
+    its own. So "*.openai.com" is fine, while "*", "*.com" and "*openai.com"
+    are not -- fnmatch's "*" does not stop at a dot, so that last one also
+    matches "evilopenai.com".
+
+  * No placeholder name may contain another. Substitution is a plain string
+    replace and detection a plain substring search, so with MY_KEY and
+    MY_KEY2 both configured, a request carrying MY_KEY2 is judged against
+    MY_KEY's allowlist and receives MY_KEY's value with a stray "2" left
+    glued to it. A minimum name LENGTH used to stand in for this check; it
+    never prevented the thing it was named for.
 """
 
 import fnmatch
@@ -82,12 +106,39 @@ import ipaddress
 import json
 import logging
 import os
+import re
 
 from mitmproxy import http
 
 SETTINGS_PATH = os.environ.get("DESOLATE_SETTINGS", "/etc/desolate-proxy/settings.json")
 MAX_BODY = 5 * 1024 * 1024  # skip substitution/scrubbing in bodies larger than this
-MIN_PLACEHOLDER_LEN = 12    # shorter placeholders risk accidental substring matches
+
+GLOB_META = re.compile(r"[*?\[\]]")
+# "*." followed by two or more literal labels -- the one wildcard shape a TLS
+# certificate would also accept. See the header.
+PINNED_WILDCARD = re.compile(r"\*\.(?:[^*?\[\]./]+\.)+[^*?\[\]./]+\Z")
+
+
+def host_pattern_problem(pattern):
+    """Why this `hosts` entry cannot pin a destination, or None if it can.
+
+    Only the SECRET allowlist goes through here. The `network` rules are a
+    different list with a different job -- they decide reachability, where a
+    deliberate "*" is the shipped default and means "the path is default-deny,
+    the destination set is not".
+    """
+    if not isinstance(pattern, str) or not pattern.strip():
+        return "is empty"
+    if not GLOB_META.search(pattern):
+        return None                      # a literal name pins itself
+    if PINNED_WILDCARD.fullmatch(pattern):
+        return None
+    if not GLOB_META.sub("", pattern).strip("."):
+        return ("matches every host, so this secret would have no allowlist at "
+                "all -- name the hosts it may be sent to")
+    return ("puts a wildcard somewhere it cannot be trusted: only "
+            "'*.<name>.<tld>' is accepted, because '*' does not stop at a dot "
+            "('*foo.com' also matches 'evilfoo.com', and '*.com' is a whole TLD)")
 
 # stdlib logging, not ctx.log: ctx.log is deprecated and its removal would raise
 # inside the request hook -- and mitmproxy answers an addon exception by letting
@@ -133,10 +184,16 @@ class DesolateProxy:
             if not hosts:
                 log.warning(f"secret {name!r} has no hosts allowlist; skipping (refusing wildcard-by-omission)")
                 continue
-            if len(name) < MIN_PLACEHOLDER_LEN:
-                log.warning(f"placeholder {name!r} is short (<{MIN_PLACEHOLDER_LEN} chars); "
-                            f"substring collisions possible")
+            problems = [(h, p) for h in hosts if (p := host_pattern_problem(h))]
+            if problems:
+                for host, problem in problems:
+                    log.error(f"secret {name!r}: host {host!r} {problem}")
+                log.warning(f"secret {name!r} skipping (its allowlist does not pin a destination)")
+                continue
             secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts]}
+
+        for name in self._overlapping(secrets):
+            del secrets[name]
 
         self.secrets = secrets
         self.network = cfg.get("network", [])
@@ -150,6 +207,30 @@ class DesolateProxy:
                  f"allow_private_destinations={self.allow_private_destinations}")
 
     # ---------- helpers ----------
+
+    @staticmethod
+    def _overlapping(secrets):
+        """Placeholder names that contain, or are contained by, another one.
+
+        Both members of a colliding pair are returned, never just one: keeping
+        the longer would quietly change which secret a request is judged
+        against, and this file's whole job is to make that decision legible.
+
+        A minimum name length was the previous defence, and it does not
+        actually defend: MYAPP-OPENAI-KEY and MYAPP-OPENAI-KEY-2 clear any
+        length bar and still collide. See the module header for what the
+        collision does to a request.
+        """
+        names = sorted(secrets)
+        overlapping = set()
+        for index, name in enumerate(names):
+            for other in names[index + 1:]:
+                if name in other or other in name:
+                    log.error(f"placeholders {name!r} and {other!r} overlap (one contains "
+                              f"the other), so neither can be substituted unambiguously; "
+                              f"dropping both -- rename one")
+                    overlapping.update((name, other))
+        return overlapping
 
     @staticmethod
     def _host_matches(host, patterns):
@@ -336,7 +417,9 @@ class DesolateProxy:
                     self._block(flow, 403, f"secret {name} is not permitted for host {proven}")
                     return
 
-        # 3) substitution
+        # 3) substitution. Order does not matter here, and that is a property
+        # the config check buys: no loaded placeholder contains another (see
+        # _overlapping), so no replacement can land inside a different one.
         for name in found:
             value = self.secrets[name]["value"]
             # .path, NOT .url -- and this is load-bearing, not style.
