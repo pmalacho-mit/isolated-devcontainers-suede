@@ -137,6 +137,7 @@ EOF
 DESOLATE_SETTINGS="$WORK/settings.json" "$MITM" \
   --mode transparent --listen-host 0.0.0.0 --listen-port "$PORT" \
   --set confdir="$WORK/confdir" --set block_global=false \
+  --set connection_strategy=eager --set ssl_insecure=false \
   --set ssl_verify_upstream_trusted_ca="$WORK/ca.pem" \
   -s "$RELEASE/proxy/vm/addon.py" > "$WORK/mitm.log" 2>&1 &
 MITM_PID=$!

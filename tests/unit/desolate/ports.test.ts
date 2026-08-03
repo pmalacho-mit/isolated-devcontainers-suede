@@ -46,7 +46,10 @@ describe("portRange", () => {
 
   test("an empty string is absent, not zero", () => {
     // `DESOLATE_PORT_MIN=` in a .env is how a variable gets unset by accident.
-    assert.deepEqual(portRange({ DESOLATE_PORT_MIN: "" }), { min: 8080, max: 8090 });
+    assert.deepEqual(portRange({ DESOLATE_PORT_MIN: "" }), {
+      min: 8080,
+      max: 8090,
+    });
   });
 
   test("both bounds are read", () => {
@@ -90,11 +93,20 @@ describe("allocatePorts", () => {
     // The two are unrelated numbers and mixing them up produces a relay that
     // dials the wrong side. 5173 is the container's; 8081 is the Mac's.
     const map = allocatePorts(world(), [5173]);
-    assert.deepEqual([...map], [["editor", 8080], ["5173", 8081]]);
+    assert.deepEqual(
+      [...map],
+      [
+        ["editor", 8080],
+        ["5173", 8081],
+      ],
+    );
   });
 
   test("a previous allocation is kept, so a bookmarked URL still works", () => {
-    const previous = new Map([["editor", 8085], ["5173", 8083]]);
+    const previous = new Map([
+      ["editor", 8085],
+      ["5173", 8083],
+    ]);
     const map = allocatePorts(world({ previous }), [5173]);
     assert.equal(map.get("editor"), 8085);
     assert.equal(map.get("5173"), 8083);
@@ -138,7 +150,11 @@ describe("allocatePorts", () => {
   test("no two labels get the same port within one allocation", () => {
     const map = allocatePorts(world(), [3000, 4000, 5000]);
     const assigned = [...map.values()];
-    assert.equal(new Set(assigned).size, assigned.length, `collided: ${assigned}`);
+    assert.equal(
+      new Set(assigned).size,
+      assigned.length,
+      `collided: ${assigned}`,
+    );
   });
 
   test("a duplicated app port yields one entry and strands a host port", () => {
@@ -147,7 +163,11 @@ describe("allocatePorts", () => {
     // first port stays marked taken while nothing serves it.
     const map = allocatePorts(world(), [5173, 5173]);
     assert.equal(map.size, 2, "same label twice is still one entry");
-    assert.equal(map.get("5173"), 8082, "the later claim overwrites the earlier");
+    assert.equal(
+      map.get("5173"),
+      8082,
+      "the later claim overwrites the earlier",
+    );
   });
 
   test("exhaustion names who holds every port in the range", () => {
@@ -157,7 +177,10 @@ describe("allocatePorts", () => {
       [8081, "relay-for-beta"],
     ]);
     const error = thrown(() =>
-      allocatePorts(world({ range, published, ownRelayPorts: new Set([8082]) }), [1, 2]),
+      allocatePorts(
+        world({ range, published, ownRelayPorts: new Set([8082]) }),
+        [1, 2],
+      ),
     );
     assert.ok(error instanceof PortsExhaustedError);
 
@@ -223,14 +246,21 @@ describe("relay names carry the host port back", () => {
   });
 
   test("a nested project's slash does not break the port suffix", () => {
-    assert.equal(relay.name("owner/repo", 8080), "desolate-relay-owner__repo-8080");
+    assert.equal(
+      relay.name("owner/repo", 8080),
+      "desolate-relay-owner__repo-8080",
+    );
     assert.equal(relay.hostPort("desolate-relay-owner__repo-8080"), 8080);
   });
 
   test("a name with no trailing port yields undefined, not NaN", () => {
     // Number("") is 0 and Number("repo") is NaN; either one entering the
     // own-ports set would corrupt the availability test.
-    for (const name of ["desolate-relay-myapp", "desolate-relay-myapp-", "some-other-container"])
+    for (const name of [
+      "desolate-relay-myapp",
+      "desolate-relay-myapp-",
+      "some-other-container",
+    ])
       assert.equal(relay.hostPort(name), undefined, name);
   });
 
@@ -246,13 +276,24 @@ describe("relay names carry the host port back", () => {
 
 describe("the port map file", () => {
   test("round-trips", () => {
-    const map = new Map([["editor", 8080], ["5173", 8081]]);
+    const map = new Map([
+      ["editor", 8080],
+      ["5173", 8081],
+    ]);
     assert.deepEqual([...portMapFile.parse(portMapFile.format(map))], [...map]);
   });
 
   test("tolerates a truncated or hand-edited file", () => {
-    const parsed = portMapFile.parse("editor 8080\ngarbage\n\n  5173   8081  \n");
-    assert.deepEqual([...parsed], [["editor", 8080], ["5173", 8081]]);
+    const parsed = portMapFile.parse(
+      "editor 8080\ngarbage\n\n  5173   8081  \n",
+    );
+    assert.deepEqual(
+      [...parsed],
+      [
+        ["editor", 8080],
+        ["5173", 8081],
+      ],
+    );
   });
 
   test("a non-numeric port is dropped rather than becoming NaN", () => {

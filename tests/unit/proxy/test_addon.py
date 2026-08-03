@@ -11,6 +11,7 @@ Needs: mitmproxy (same version install.sh pins) and pytest.
 """
 
 import importlib.util
+import ipaddress
 import json
 import os
 import sys
@@ -25,6 +26,12 @@ ADDON_PATH = Path(__file__).resolve().parents[3] / "release" / "proxy" / "vm" / 
 
 SECRET_NAME = "MYAPP-OPENAI-KEY-PLACEHOLDER"
 SECRET_VALUE = "sk-real-value-do-not-leak"
+
+# A PUBLIC address, deliberately. The demonstrated-exfiltration tests below
+# must be blocked by the proven-host check, not by the internal-destination
+# check -- 203.0.113.0/24 (which they used to use) is classified internal, so
+# they would have kept passing with proven_host() removed entirely.
+PUBLIC_ATTACKER = "104.18.7.1"
 
 
 def load_addon(tmp_path, settings=None):
@@ -80,7 +87,7 @@ def test_E6_plaintext_host_spoof_is_refused(tmp_path):
     allowlisted, substituted the real key, and mitmproxy delivered it to the
     original destination. Observed at the attacker: the real secret."""
     _, addon, _ = load_addon(tmp_path)
-    f = make_flow(sni=None, host_header="api.openai.com", dest="203.0.113.9",
+    f = make_flow(sni=None, host_header="api.openai.com", dest=PUBLIC_ATTACKER,
                   headers={"Authorization": f"Bearer {SECRET_NAME}"})
     addon.request(f)
     assert blocked(f), "plaintext exfiltration was NOT blocked"
@@ -94,7 +101,7 @@ def test_E7_tls_sni_host_mismatch_is_refused(tmp_path):
     then set `Host: api.openai.com` inside the encrypted request. Same result:
     the real secret arrived at the attacker."""
     _, addon, _ = load_addon(tmp_path)
-    f = make_flow(sni="evil.example.com", host_header="api.openai.com", dest="203.0.113.9",
+    f = make_flow(sni="evil.example.com", host_header="api.openai.com", dest=PUBLIC_ATTACKER,
                   headers={"Authorization": f"Bearer {SECRET_NAME}"})
     addon.request(f)
     assert blocked(f), "SNI/Host mismatch was NOT blocked"
@@ -267,6 +274,155 @@ def test_secret_with_empty_value_is_ignored(tmp_path):
     assert SECRET_NAME not in addon.secrets
 
 
+@pytest.mark.parametrize("hosts", [
+    ["*"],                              # the whole point: no allowlist at all
+    ["**"],
+    ["*.*"],
+    ["*.com"],                          # a whole TLD
+    ["*openai.com"],                    # fnmatch: also matches evilopenai.com
+    ["api.*"],
+    ["?"],
+    [""],
+    ["api.openai.com", "*"],            # one good entry does not redeem the list
+])
+def test_a_wildcard_allowlist_is_refused(tmp_path, hosts):
+    """An allowlist that does not pin a destination is not an allowlist.
+
+    With `hosts: ["*"]` the placeholder is a bearer token again: any container
+    can post it anywhere and the proxy will helpfully swap the real key in.
+    """
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": hosts}},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert SECRET_NAME not in addon.secrets, f"hosts={hosts} was accepted"
+
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    addon.request(f)
+    # nothing loaded, so nothing to substitute: the placeholder travels as itself
+    assert f.request.headers["Authorization"] == f"Bearer {SECRET_NAME}"
+
+
+@pytest.mark.parametrize("hosts", [
+    ["api.openai.com"],
+    ["*.openai.com"],
+    ["api.openai.com", "*.openai.com"],
+    ["localhost"],                      # a literal name pins itself, however short
+])
+def test_a_pinned_allowlist_still_loads(tmp_path, hosts):
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": hosts}},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert SECRET_NAME in addon.secrets, f"hosts={hosts} was refused"
+
+
+def test_the_network_allowlist_may_still_be_a_wildcard(tmp_path):
+    """The host check applies to SECRETS, not to the network rules.
+
+    `{"host": "*"}` is the shipped `network` default and means something
+    defensible -- the path is default-deny, the destination set is not. Reusing
+    the secrets rule there would refuse the stock settings file.
+    """
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    assert addon.network == [{"action": "allow", "host": "*"}]
+    f = make_flow(sni="deb.debian.org", host_header="deb.debian.org")
+    addon.request(f)
+    assert not blocked(f)
+
+
+# ---------------------------------------------------------------------------
+# overlapping placeholder names
+# ---------------------------------------------------------------------------
+# Substitution is a plain string replace and detection a plain substring
+# search, so a name that contains another cannot be handled correctly by
+# either. The check this replaced was a minimum name LENGTH, which does not
+# prevent it at all -- the pair below is 29 and 31 characters.
+
+OVERLAPPING = SECRET_NAME + "-2"
+
+
+def test_overlapping_placeholders_are_both_dropped(tmp_path):
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {
+            SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]},
+            OVERLAPPING: {"value": "sk-the-other-one", "hosts": ["api.openai.com"]},
+        },
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert addon.secrets == {}, "keeping either one leaves the ambiguity in place"
+
+
+def test_the_overlap_this_prevents(tmp_path):
+    """What the drop is protecting against, spelled out as the request it breaks.
+
+    Without the check, a request carrying only the LONGER placeholder also
+    'contains' the shorter one, so it is judged against the shorter one's
+    allowlist and gets its value spliced in -- leaving '-2' glued to a real
+    API key, addressed to a host the user never allowlisted for it.
+    """
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    # the pair, forced past the config check to demonstrate the mechanism
+    addon.secrets = {
+        SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]},
+        OVERLAPPING: {"value": "sk-the-other-one", "hosts": ["api.anthropic.com"]},
+    }
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {OVERLAPPING}"})
+    assert addon._placeholders_in_request(f) == {SECRET_NAME, OVERLAPPING}, \
+        "the shorter name is found inside the longer one -- this is the whole problem"
+
+
+def test_short_names_are_fine_when_nothing_overlaps(tmp_path):
+    """The length bar is gone; a short name that collides with nothing works.
+
+    Length was never the property that mattered. Overlap is.
+    """
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {
+            "K1": {"value": "sk-one", "hosts": ["api.openai.com"]},
+            "K2": {"value": "sk-two", "hosts": ["api.openai.com"]},
+        },
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert set(addon.secrets) == {"K1", "K2"}
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": "Bearer K1"})
+    addon.request(f)
+    assert f.request.headers["Authorization"] == "Bearer sk-one"
+
+
+def test_a_secret_dropped_for_overlap_takes_its_neighbours_with_it_only(tmp_path):
+    """One bad pair must not disarm the rest of the store."""
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {
+            SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]},
+            OVERLAPPING: {"value": "sk-other", "hosts": ["api.openai.com"]},
+            "UNRELATED-PLACEHOLDER": {"value": "sk-fine", "hosts": ["api.openai.com"]},
+        },
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert set(addon.secrets) == {"UNRELATED-PLACEHOLDER"}
+
+
 def test_settings_reload_picks_up_changes(tmp_path):
     _, addon, path = load_addon(tmp_path)
     addon._maybe_reload()
@@ -346,6 +502,122 @@ def test_proven_host_is_sni_only(tmp_path):
 # ===========================================================================
 # substitution must not disturb the request's destination
 # ===========================================================================
+# ---------------------------------------------------------------------------
+# E10: the proxy as a confused deputy
+# ---------------------------------------------------------------------------
+# nftables REDIRECTs :80/:443 from the container bridges here whatever the
+# destination was, and this process then dials that destination FROM THE VM,
+# where the container-bridge drops no longer apply. So it is the one component
+# standing on both sides of the containment boundary. The network policy cannot
+# close this: it matches names with fnmatch, and the shipped default is
+# {"host": "*"}, which an IP literal matches -- and a name check could not close
+# it either, since a public hostname resolving to 10.x satisfies any allowlist.
+
+
+@pytest.mark.parametrize("dest", [
+    "192.168.5.2",     # the Mac, over Colima's vmnet
+    "172.17.0.2",      # a container on another docker bridge
+    "10.4.1.9",        # the LAN
+    "127.0.0.1",       # the VM itself
+    "169.254.169.254", # cloud metadata
+    "0.0.0.0",
+    "100.64.1.9",      # RFC 6598 shared space -- a tailnet peer. NOT is_private.
+    "::ffff:192.168.5.2",  # the Mac again, spelled as IPv4-mapped IPv6
+    "fd00::1",         # IPv6 ULA
+])
+def test_E10_internal_destinations_are_refused(tmp_path, dest):
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(host_header="example.com", dest=dest)
+    inst.request(f)
+    assert blocked(f), f"{dest} was forwarded"
+
+
+def test_E10b_internal_destination_is_refused_even_with_a_valid_sni(tmp_path):
+    """The name is the part an attacker chooses, so the address is checked first."""
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com", dest="192.168.5.2")
+    inst.request(f)
+    assert blocked(f)
+
+
+def test_E10c_public_destinations_still_pass(tmp_path):
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com", dest="104.18.7.1")
+    inst.request(f)
+    assert not blocked(f)
+
+
+def test_E10d_the_escape_hatch_is_opt_in_and_named(tmp_path):
+    mod, inst, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "allow_private_destinations": True,
+        "secrets": {},
+        "network": [{"action": "allow", "host": "*"}],
+    })
+    f = make_flow(host_header="example.com", dest="192.168.5.2")
+    inst.request(f)
+    assert not blocked(f)
+
+
+def test_E10e_a_hostname_destination_is_not_mistaken_for_an_address(tmp_path):
+    """Non-IP candidates are skipped, not guessed at."""
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(dest="example.com")
+    f.server_conn.peername = None
+    f.server_conn.address = ("example.com", 80)
+    assert mod.DesolateProxy.destination_address(f) is None
+    assert mod.DesolateProxy.is_internal(None) is False
+
+
+def test_E10f_the_connection_address_is_used_when_the_request_carries_a_name(tmp_path):
+    """The DNS-rebinding case, and the reason this is an address check.
+
+    Over TLS mitmproxy fills `request.host` from the SNI, so the request looks
+    like it is going to a perfectly ordinary public name. What the connection
+    actually dials is the resolved address -- and a name whose A record points
+    inside is exactly how an allowlist gets satisfied by an internal target.
+    """
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  dest="api.openai.com")
+    f.server_conn.peername = ("10.1.2.3", 443)
+    inst.request(f)
+    assert blocked(f)
+
+
+def test_E10g_the_regression_tests_above_still_fail_on_the_NAME(tmp_path):
+    """Guards E6/E7 against being silently satisfied by the address check.
+
+    Those two are the demonstrated-exfiltration regressions, and they exist to
+    prove `proven_host()` refuses a spoofed Host. If their destination were in a
+    range `is_internal` rejects, they would keep passing with `proven_host()`
+    deleted -- green, and testing nothing. So: their address must be public, and
+    the block must come from the name.
+    """
+    mod, inst, _ = load_addon(tmp_path)
+    assert mod.DesolateProxy.is_internal(ipaddress.ip_address("104.18.7.1")) is False
+    f = make_flow(sni=None, host_header="api.openai.com", dest="104.18.7.1",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    inst.request(f)
+    assert blocked(f)
+    assert b"internal" not in f.response.content, \
+        "E6 blocked on the destination address, so it is no longer testing the Host spoof"
+
+
+def test_E10h_tls_passthrough_never_reaches_this_check(tmp_path):
+    """A known, deliberate hole -- recorded so it is a decision, not a surprise.
+
+    `tls_clienthello` sets ignore_connection for a matching SNI, and the flow is
+    then tunnelled without ever producing a request hook. The SNI is chosen by
+    the client, so any configured glob is a way to reach an internal address on
+    :443. Empty by default; this asserts the default, and documents the cost of
+    changing it.
+    """
+    mod, inst, _ = load_addon(tmp_path)
+    assert inst.tls_passthrough == [], \
+        "a non-empty default tls_passthrough would bypass the destination check"
+
+
 def test_E9_substitution_preserves_the_host_header(tmp_path):
     """Substituting a secret must not rewrite where the request is going.
 

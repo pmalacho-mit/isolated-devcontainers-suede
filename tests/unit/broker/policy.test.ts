@@ -11,7 +11,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { enforcePolicy, mount } from "../../../release/vscode-image/policy.ts";
+import {
+  enforcePolicy,
+  feature,
+  mount,
+} from "../../../release/vscode-image/policy.ts";
 import type { ResolvedSpec } from "../../../release/vscode-image/devcontainer.ts";
 import { list as listProjects, volumeNamespace } from "../../../release/vscode-image/projects.ts";
 import { parse as parseJsonc, strip as stripJsonc } from "../../../release/vscode-image/jsonc.ts";
@@ -46,7 +50,25 @@ const alone = (project: string): EnforceArgs => ["/workspaces", [project]];
  *  What this deliberately does NOT copy is the CLI's type normalisation
  *  ("true" -> true, "SYS_ADMIN" -> ["SYS_ADMIN"]). E6 exists to prove the policy
  *  holds without leaning on it, so values reach merged verbatim. */
-function spec(configuration: any, feature: any = {}): ResolvedSpec {
+function spec(
+  configuration: any,
+  feature: any = {},
+  /** Which project's config this is, i.e. where the CLI read it from. */
+  project: string = PROJECT,
+): ResolvedSpec {
+  // The CLI reports where it read the file, and overwrites the key if a
+  // project writes its own (measured on 0.88.0). It is what `build.context`
+  // resolves against, so a fixture without it is not a spec the CLI emits.
+  configuration = {
+    configFilePath: {
+      $mid: 1,
+      fsPath: `/workspaces/${project}/.devcontainer/devcontainer.json`,
+      path: `/workspaces/${project}/.devcontainer/devcontainer.json`,
+      scheme: "vscode-fileHost",
+    },
+    ...configuration,
+  };
+
   const declaredByBoth = (key: string) =>
     configuration?.[key] !== undefined && feature?.[key] !== undefined;
   const asList = (v: any) => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
@@ -160,6 +182,11 @@ describe("demonstrated escapes (regression)", () => {
     //   --mount type=bind,src=/,dst=/host
     // while the project's own devcontainer.json declared none of it.
     // The policy now enforces on mergedConfiguration, where features land.
+    //
+    // The id is a REGISTRY one, because the local spelling is refused outright
+    // now (see "features must be fetched, not read from the project"). This
+    // case is still the one that matters: a published feature's metadata lands
+    // in merged the same way, and merged is what is enforced on.
     const featureMerged = {
       privileged: true,
       capAdd: ["SYS_ADMIN"],
@@ -170,7 +197,13 @@ describe("demonstrated escapes (regression)", () => {
       ],
     };
     refuses(
-      spec({ image: "x", features: { "./evilfeat": {} } }, featureMerged),
+      spec(
+        {
+          image: "x",
+          features: { "ghcr.io/attacker/features/evilfeat:1": {} },
+        },
+        featureMerged,
+      ),
       /PRIVILEGED/,
     );
     // even with the privilege opt-in, the bind mount and the foreign volume stay refused
@@ -754,6 +787,198 @@ describe("other refused keys", () => {
       /build.options/,
     );
     allows(spec({ build: { dockerfile: "Dockerfile", args: { X: "1" } } }));
+  });
+});
+
+// ===========================================================================
+describe("features must be fetched, not read from the project", () => {
+  // ===========================================================================
+  // E15, demonstrated against @devcontainers/cli 0.88.0. A local feature's
+  // devcontainer-feature.json is read TWICE: once by `read-configuration`,
+  // which is what this policy enforces on, and again when the container is
+  // built. Both reads hit the live project -- the snapshot copy is never
+  // consulted, because --override-config changes which JSON is read, not where
+  // relative paths resolve from.
+  //
+  // With a benign metadata file at validation time and a hostile one swapped in
+  // afterwards, `devcontainer up` ran:
+  //
+  //     --privileged --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+  //     --mount type=bind,src=/,dst=/host
+  //
+  // while the validated snapshot still said "harmless". That is E3 again,
+  // reached around the check rather than through it. The window is the whole
+  // resolve-enforce-spawn-build sequence, and a failed attempt costs nothing.
+  //
+  // So the shape of the id is the rule: a feature has to be something the CLI
+  // FETCHES, not something it reads out of a directory the editor can rewrite.
+
+  test("a local feature is refused", () => {
+    for (const id of ["./feat", "../feat", "/opt/feat", "./a/b", "~/feat"])
+      refuses(spec({ image: "x", features: { [id]: {} } }), /local feature/);
+  });
+
+  test("a published feature is still allowed", () => {
+    allows(
+      spec({
+        image: "x",
+        features: { "ghcr.io/devcontainers/features/docker-in-docker:2": {} },
+      }),
+    );
+    allows(
+      spec({
+        image: "x",
+        features: {
+          "ghcr.io/devcontainers/features/git@sha256:0000000000000000000000000000000000000000000000000000000000000000":
+            {},
+        },
+      }),
+    );
+    allows(
+      spec({
+        image: "x",
+        features: { "https://example.com/feature.tgz": {} },
+      }),
+    );
+  });
+
+  test("an id that is neither is refused rather than guessed at", () => {
+    // Fail closed on the classification itself. If a future CLI grows another
+    // spelling for "read this off disk", it lands here instead of through.
+    refuses(spec({ image: "x", features: { feat: {} } }), /can classify/);
+    refuses(
+      spec({ image: "x", features: { "file://feat": {} } }),
+      /can classify/,
+    );
+    refuses(
+      spec({ image: "x", features: { "http://example.com/f.tgz": {} } }),
+      /can classify/,
+    );
+  });
+
+  test("the classifier itself", () => {
+    assert.equal(feature.origin("./feat"), "local");
+    assert.equal(feature.origin("../../feat"), "local");
+    assert.equal(feature.origin("/abs/feat"), "local");
+    assert.equal(feature.origin("ghcr.io/o/r/f:1"), "registry");
+    assert.equal(feature.origin("https://x/f.tgz"), "tarball");
+    assert.equal(feature.origin("http://x/f.tgz"), "other-scheme");
+    assert.equal(feature.origin("feat"), "unknown");
+  });
+
+  test("no features key means nothing to check", () => {
+    allows(spec({ image: "alpine:3" }));
+    allows(spec({ image: "alpine:3", features: {} }));
+  });
+});
+
+// ===========================================================================
+describe("build inputs stay inside the project", () => {
+  // ===========================================================================
+  // DEMONSTRATED, against @devcontainers/cli 0.88.0 and a real daemon: a
+  // project whose devcontainer.json said
+  //
+  //     { "build": { "dockerfile": "Dockerfile", "context": "../.." } }
+  //
+  // with `COPY victim/secrets.env /stolen` in its Dockerfile produced an image
+  // holding a SIBLING PROJECT's file. Every key in that config is legal, so
+  // nothing else in this policy looks at it.
+  //
+  // The snapshot does not help here, and that surprised us: --override-config
+  // changes which JSON the CLI reads, not where relative paths resolve from.
+  // `configFilePath` still names the file in /workspaces, and the context is
+  // read from there -- so this is about the LIVE project directory.
+
+  /** A spec whose config was read from the nested (.devcontainer/) layout. */
+  const nested = (build: any) => spec({ build });
+
+  /** ...and from the flat one, where the base directory is the project root
+   *  and the very same "context": ".." means one level higher. */
+  const flat = (build: any) =>
+    spec({
+      build,
+      configFilePath: {
+        fsPath: `/workspaces/${PROJECT}/.devcontainer.json`,
+        path: `/workspaces/${PROJECT}/.devcontainer.json`,
+        scheme: "vscode-fileHost",
+      },
+    });
+
+  test("a context reaching /workspaces is refused", () => {
+    refuses(nested({ dockerfile: "Dockerfile", context: "../.." }), /outside/);
+    refuses(nested({ context: "../../other-project" }), /outside/);
+    refuses(nested({ context: "/workspaces" }), /outside/);
+    refuses(nested({ context: "/" }), /outside/);
+  });
+
+  test("a context reaching the project ROOT is fine -- it is the common idiom", () => {
+    // .devcontainer/devcontainer.json + "context": ".." is how most projects
+    // build from their repo root. Refusing it would push people to copy files
+    // into .devcontainer/ instead, which is worse and teaches nothing.
+    allows(nested({ dockerfile: "Dockerfile", context: ".." }));
+    allows(nested({ dockerfile: "../Dockerfile", context: ".." }));
+    allows(nested({ dockerfile: "Dockerfile", context: "." }));
+    allows(nested({ dockerfile: "Dockerfile", context: "./sub" }));
+    allows(nested({ dockerfile: "Dockerfile" }));
+  });
+
+  test("the same '..' is refused in the flat layout, where it means more", () => {
+    // The string in the file is identical; only the directory the CLI read it
+    // from differs. This is why the base is taken from the CLI's own report
+    // instead of being derived from the project name.
+    allows(flat({ dockerfile: "Dockerfile", context: "." }));
+    refuses(flat({ dockerfile: "Dockerfile", context: ".." }), /outside/);
+  });
+
+  test("a dockerfile outside the project is refused", () => {
+    // Also demonstrated: the built image came from ../../Dockerfile.evil.
+    refuses(nested({ dockerfile: "../../Dockerfile.evil" }), /outside/);
+    refuses(nested({ dockerfile: "/etc/passwd" }), /outside/);
+  });
+
+  test("the legacy top-level spelling is refused too", () => {
+    // A synonym the CLI still honours is a bypass if the policy only knows the
+    // modern one.
+    refuses(spec({ image: "x", context: "../.." }), /outside/);
+    refuses(spec({ image: "x", dockerFile: "../../Dockerfile" }), /outside/);
+  });
+
+  test("a project whose name is a prefix of another is not inside it", () => {
+    // /workspaces/myapp-secrets starts with /workspaces/myapp as a string, so
+    // a containment test without the separator would let this through.
+    refuses(nested({ context: "../../myapp-secrets" }), /outside/);
+    // ...while a directory of that name INSIDE the project is the project's own.
+    allows(nested({ context: "../myapp-secrets" }));
+  });
+
+  test("a non-string path is refused rather than coerced", () => {
+    refuses(nested({ context: ["../.."] }), /must be a string/);
+  });
+
+  test("no build key means nothing to check", () => {
+    allows(spec({ image: "alpine:3" }));
+  });
+
+  test("a spec that does not say where it was read from is refused", () => {
+    // Fail closed: without configFilePath there is no way to know what ".."
+    // resolves to, and guessing the layout is how a check becomes decorative.
+    const blind: ResolvedSpec = {
+      configuration: { build: { context: ".." } },
+      mergedConfiguration: { build: { context: ".." } },
+    };
+    refuses(blind, /configFilePath/);
+  });
+
+  test("a config claimed to live outside the project is refused", () => {
+    const elsewhere = spec({
+      build: { context: "." },
+      configFilePath: {
+        fsPath: "/tmp/lie/devcontainer.json",
+        path: "/tmp/lie/devcontainer.json",
+        scheme: "vscode-fileHost",
+      },
+    });
+    refuses(elsewhere, /outside/);
   });
 });
 

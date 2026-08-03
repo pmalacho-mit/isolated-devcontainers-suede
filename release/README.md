@@ -271,7 +271,7 @@ landed on, and repairs them if not:
 
 ```
 cli.sh: egress interception needs attention -- rules are armed for
-        'br-desolate' but the stack is on 'br-a1b2c3d4e5f6'.
+        'br-desolate' but the editor bridge is 'br-a1b2c3d4e5f6'.
 cli.sh: re-provisioning the VM proxy layer...
 ```
 
@@ -384,10 +384,14 @@ The rules, and what each is actually defending:
   Run compose _inside_ a devcontainer with the docker-in-docker feature instead.
 - **Policy is enforced on the CLI's own `mergedConfiguration`**, not on our
   parse of the file. That is where a _feature_'s `privileged` / `capAdd` /
-  `securityOpt` / `mounts` land -- a local `./myfeature` could otherwise inject
+  `securityOpt` / `mounts` land -- a feature could otherwise inject
   `--privileged --mount type=bind,src=/,dst=/host` without the project's
   devcontainer.json mentioning any of it. It also removes the class of bug
   where our parser and the CLI's disagree about what the file says.
+- **Local features (`"./myfeature"`) are refused**; a feature must be one the
+  CLI _fetches_ -- a registry reference or an `https://` tarball. A local
+  feature's `devcontainer-feature.json` is read twice, and only the first read
+  is the one this policy checked. See "What the freeze does not cover" below.
 - **Mounts must be volumes** named `<project>` or `<project>-*`, checked over
   the merged list. The one exception is the read-only public-CA bind.
 - **A mount's _fields_ are an allowlist too**, and this one is easy to miss.
@@ -413,6 +417,10 @@ The rules, and what each is actually defending:
   appends `runArgs`, so a project could stamp a sibling's identity onto its own
   container and be handed that sibling's editor session, token and relays.
 - **`workspaceMount`**, if present, must bind exactly this project's own folder.
+- **`build.context` and `build.dockerfile` must stay inside the project** (and
+  the legacy top-level `context` / `dockerFile` with them). `"context": "../.."`
+  built an image containing a sibling project's file -- see "A project may only
+  reach its own folder" below.
 - **`appPort` is refused** (it collides with the relay bind).
 - **Privilege must be opted into explicitly**, in the project's own file:
   `"customizations": {"desolate": {"allowPrivileged": true}}`. The
@@ -425,16 +433,90 @@ can write, and the container is started from that copy (`--override-config`).
 Without it the editor could swap the file between the check and the start, and
 the check would be decorative.
 
-Two things about the snapshot are worth knowing, because both were once wrong
-in ways nothing reported:
+### What the freeze does not cover
 
-- **Both entry points snapshot.** `cli.sh desolate` reaches the runner directly
-  rather than through the broker, and used to validate the live file and start
-  from it. The Mac is the trust root; the file it validates is not.
-- **The copy is dereferenced by hand.** `fs.cpSync(..., {dereference: true})`
-  does not dereference -- on node 24 it reproduces a symlink in the destination,
-  still pointing at the original -- so a project whose `devcontainer.json` was a
-  link had its spec read live at every step, and the freeze froze nothing.
+The snapshot freezes **devcontainer.json, and nothing else**. `--override-config`
+changes which JSON the CLI reads, not where relative paths resolve from, so
+`build.context`, `build.dockerfile` and any feature directory are read again --
+from the live project -- when the container is built.
+
+For build inputs that is handled by the rule below: the paths themselves come
+from the frozen JSON and must stay inside the project, and the files they name
+are the project's own either way.
+
+For **features** it was an escape, and it is why local features are refused.
+The same file is read twice:
+
+```
+read-configuration  ->  .devcontainer/feat/devcontainer-feature.json   # checked
+devcontainer up     ->  .devcontainer/feat/devcontainer-feature.json   # takes effect
+```
+
+Both reads hit `/workspaces`, which the editor can write, and feature metadata
+is one of the few places `privileged`, `capAdd`, `securityOpt` and `mounts` are
+allowed to come from. Measured on `@devcontainers/cli` 0.88.0: with `harmless`
+metadata at check time and hostile metadata swapped in afterwards, `up` ran
+
+```
+--privileged --cap-add SYS_ADMIN --security-opt seccomp=unconfined
+--mount type=bind,src=/,dst=/host
+```
+
+while the approved snapshot still said `harmless`. The window is the whole
+resolve → enforce → spawn → build sequence, and a lost attempt costs the
+attacker nothing.
+
+Refusing local features closes the reachable form of this. What remains is a
+_published_ feature whose registry content changes between the two reads, which
+needs a registry the attacker controls; pin features by digest
+(`...@sha256:...`) if that is in your threat model. The complete fix is to make
+the CLI read the snapshot rather than the project -- e.g. by bind-mounting the
+frozen copy over `.devcontainer/` in the orchestrator's own mount namespace for
+the duration of the build -- which is not implemented.
+
+### A project may only reach its own folder
+
+Two separate rules, because the CLI reads two different trees, and neither is
+visible as a _key_ in devcontainer.json -- both are paths underneath one.
+
+**Build inputs.** `build.context` and `build.dockerfile` must resolve inside
+the project. They are resolved by the CLI against the directory it read the
+config from, which is the **live** project folder -- `--override-config`
+changes which JSON is read, not where relative paths point. So:
+
+```jsonc
+// .devcontainer/devcontainer.json
+{ "build": { "dockerfile": "Dockerfile", "context": ".." } }     // fine: the repo root
+{ "build": { "dockerfile": "Dockerfile", "context": "../.." } }  // refused
+```
+
+The second one is `/workspaces` -- every sibling project's source code, shipped
+to the daemon as a build context, where one `COPY victim/secrets.env /` in the
+project's own Dockerfile collects it. That was demonstrated against a real
+daemon before the rule existed; `tests/integration/broker` runs it. The same
+applies to `dockerfile` (`../../Dockerfile.evil` also built), to the legacy
+top-level `context` / `dockerFile` spellings, and -- enforced by the CLI itself
+rather than by us -- to local `features` paths, which must be children of
+`.devcontainer/`.
+
+**Snapshot symlinks.** Freezing the spec means _following_ the project's
+symlinks, in the orchestrator, so every link in `.devcontainer/` must resolve
+inside the project:
+
+```
+myproject/.devcontainer/key -> ../../../root/.ssh/id_ed25519   # refused
+myproject/.devcontainer/Dockerfile -> ../Dockerfile            # fine
+```
+
+Measured on `@devcontainers/cli` 0.88.0, the first one does not reach an image
+today -- the snapshot is not the build context, and BuildKit refuses to follow
+a symlink out of a context. It is refused anyway: the orchestrator should not
+be a file-read oracle for a project, a "frozen copy of the project" holding
+`/root`'s private key is not one, and the day the snapshot _does_ become the
+build context that read turns into an escape. Links that stay inside are still
+dereferenced, so the copy holds real files rather than paths back into
+editor-writable state. A link to a _sibling project_ is refused too: that is
+someone else's trust domain.
 
 `preflight.sh` asserts the separation holds: the editor must _fail_ to reach a
 daemon, must not mount the socket volume, and the broker socket must be
@@ -452,6 +534,45 @@ just a separate project.
 default bridge with `icc=true`, so they can reach each other over the network
 even though they cannot read each other's files. Per-project networks would
 close that; today it is a real gap in "each devcontainer is truly sandboxed".
+
+That gap is deliberately bounded, though, and the boundary is the one that
+matters: devcontainers may reach _each other_, but not the editor. dind sits on
+its own bridge (`dindnet`/`br-desolate-in`), the editor and orchestrator on
+`devnet`/`br-desolate`, and the VM's forward chain drops between the two before
+its established-state accept. The split is what makes that drop reliable -- on
+one shared bridge the traffic was _bridged_, so the chain only saw it while
+`br_netfilter` was passing frames to the inet hooks, and nothing asserted that.
+Had it ever been off, the wall would have been gone with every other check in
+`preflight.sh` still green, because egress to the internet is routed and stays
+filtered either way. `preflight.sh` section 5b now probes the path directly,
+and `tests/integration/stack` runs the same probes from inside a devcontainer.
+
+One consequence worth knowing: **git over SSH is the editor's alone.** The
+`:22` allowlist accept is scoped to `$DESOLATE_IF`, so a devcontainer cannot
+open an SSH connection anywhere. Deploy keys are minted and used in the editor;
+a project that somehow obtained one still has no route out to use it. Projects
+that fetch dependencies over `git+ssh` (private Go modules, npm git deps,
+submodules) must use HTTPS instead -- which goes through the proxy, where a
+token can be a substituted placeholder.
+
+**The proxy is the other half of the wall.** `:80` and `:443` are REDIRECTed to
+it before the forward chain ever runs, so the drops above never see them, and it
+then dials onward from the VM where no bridge rule applies. `addon.py`
+therefore refuses any request whose destination _address_ is internal -- private,
+shared (`100.64.0.0/10`), loopback, link-local, multicast or reserved -- before
+the network policy is consulted at all. The policy could not close this itself:
+it matches names, an IP literal matches `*`, and a public name whose A record
+points inside satisfies any allowlist.
+
+Override with `"allow_private_destinations": true` only if you are deliberately
+proxying to the LAN, and note that it is all-or-nothing: it also re-opens
+loopback, the cloud metadata endpoint, and devcontainer-to-editor on those two
+ports.
+
+One hole remains open by construction: `tls_passthrough` globs are tunnelled
+from `tls_clienthello` and never reach the destination check, and the SNI they
+match on is chosen by the client. Every entry added there is a way to reach an
+internal address on `:443`. It ships empty.
 
 ## Dev servers and dynamic ports
 
@@ -824,8 +945,26 @@ Two consequences you will notice:
 ./cli.sh secret rm NAME
 ```
 
-Placeholders must be >=12 chars and globally unique; a project prefix
-(`MYAPP-*`) is the convention. A secret with no host allowlist is refused.
+A project prefix (`MYAPP-*`) is the convention. Two rules are enforced when a
+secret is added, and again when the proxy loads its settings -- a secret that
+breaks either is refused rather than stored, or dropped rather than loaded:
+
+- **No placeholder may contain another.** Substitution is a plain string
+  replace, so with `MYAPP-KEY` and `MYAPP-KEY-2` both registered, a request
+  carrying the second is judged against the first's allowlist and receives the
+  first's value with a stray `-2` glued on. (A minimum name length used to
+  stand in for this check. It never prevented it: both of those names are long.)
+- **The allowlist must name where the secret may go.** A secret with no
+  allowlist is refused, and so is `--hosts '*'`: a wildcard destination turns
+  the placeholder back into a bearer token that any container can post
+  anywhere, which is the one thing this design exists to prevent. Wildcards are
+  accepted only where a TLS certificate accepts them -- one leading label, over
+  a name with at least two literal labels: `*.openai.com` yes, `*.com` and
+  `*openai.com` no (a glob does not stop at a dot, so the latter also matches
+  `evilopenai.com`).
+
+The `network` rules in `settings.json` are a separate list with a separate job
+and still accept `{"host": "*"}` -- see "What this does not give you" below.
 
 ### Why this is stronger than a secrets file
 
@@ -1028,7 +1167,8 @@ VM's -- proof the escape reads nothing of the host.
   unix socket. Nothing is published to reach it.
 - `vscode-image/` -- one image, two roles. `broker.ts` (orchestrator: narrow
   request API, snapshotting and ground-truth resolution), `policy.ts` (the spec
-  policy itself -- pure and unit-tested), `desolate-client.ts` (editor:
+  policy itself -- pure and unit-tested), `snapshot.ts` (the copy that freezes a
+  spec, refusing any symlink that leaves the project), `desolate-client.ts` (editor:
   `desolate`), `desolate.ts` (the real runner, `desolate-run`, orchestrator
   only), and `newrepo.ts` (per-repo deploy keys; git only, no daemon needed).
 - `tests/` -- static invariants, unit tests and integration tests, including a
@@ -1057,7 +1197,7 @@ machine.
 | Variable                     | Default         | What it does                                                                                                                                                            |
 | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
-| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. Must sit **outside** `DESOLATE_PORT_MIN..MAX` -- dind publishes that whole range, and `cli.sh up` refuses a collision.  |
+| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. Must sit **outside** `DESOLATE_PORT_MIN..MAX` -- dind publishes that whole range, and `cli.sh up` refuses a collision. |
 | `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8090` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else.                   |
 | `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |
 | `DESOLATE_SKIP_VM_CHECK`     | unset           | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
@@ -1086,8 +1226,11 @@ which recreates the affected containers.
 - **`./cli.sh proxy test` shows no interception** -- the nftables rules are
   bound to the wrong bridge. Re-run `sudo ./install.sh` in the VM with the
   stack up; it re-detects.
-- **git over SSH fails** -- the forward chain is default-deny and allows tcp/22
-  only to addresses in `ssh_allow_v4`/`ssh_allow_v6`. Those hold **GitHub's
+- **git over SSH fails** -- first check WHERE from. The `:22` accept is scoped
+  to the editor bridge, so it fails by design in a devcontainer and no set
+  contents will change that; use HTTPS there. From the editor, the forward
+  chain is default-deny and allows tcp/22 only to addresses in
+  `ssh_allow_v4`/`ssh_allow_v6`. Those hold **GitHub's
   published git ranges**, fetched by `proxy/vm/ssh-allow.sh` at install time and
   refilled after every ruleset reload. Check them:
 

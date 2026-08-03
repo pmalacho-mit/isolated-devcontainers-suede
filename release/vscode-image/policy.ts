@@ -1,9 +1,11 @@
 // policy.ts -- the spec policy the broker enforces before starting a project.
 //
 // Pure and side-effect free (so it's easy to test)
+import { posix } from "node:path";
 import type { ResolvedSpec } from "./devcontainer.ts";
 import { volumeNamespace } from "./projects.ts";
 import {
+  isWithin,
   type ItemFromSet,
   type JSONValue,
   nonNullObject,
@@ -199,6 +201,29 @@ export const mount = {
     allowlist.featureVolumes.some((regex) => regex.test(source)),
 };
 
+export const feature = {
+  /**
+   * Where the CLI will look for this feature, judged by the SHAPE of its id.
+   *
+   * An allowlist of the two remote spellings, for the same reason `runArgs` is
+   * an allowlist: the interesting answer is "somewhere on this filesystem",
+   * and a denylist of the path spellings the CLI understands today
+   * (`./x`, `../x`, `/x`) is a list that a future CLI can quietly extend.
+   * Anything not recognisably remote is `unknown`, and refused.
+   */
+  origin: (id: string) => {
+    if (/^https:\/\//i.test(id)) return "tarball" as const;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(id)) return "other-scheme" as const;
+    if (/^[.~/]/.test(id)) return "local" as const;
+    // <registry>/<namespace>/<name>[:tag|@digest]. Not validated further --
+    // what matters here is only that it is neither a path nor a URL, so the
+    // CLI fetches it over the network instead of reading a directory the
+    // editor can rewrite.
+    if (/^[^\s]+\/[^\s]+$/.test(id)) return "registry" as const;
+    return "unknown" as const;
+  },
+};
+
 export class PolicyError extends Error {}
 
 const format = {
@@ -390,6 +415,40 @@ const helpers = {
 
     return helpers.refuseForeignVolume(payload, mounted, origin);
   },
+  /**
+   * The directory the CLI resolves this spec's relative paths against.
+   *
+   * Ground truth, from `read-configuration`, for the same reason the rest of
+   * this file enforces on `mergedConfiguration`: deriving it here would be a
+   * guess about which layout the CLI picked, and the CLI is the one that
+   * resolves `build.context`. It cannot be spoofed by writing `configFilePath`
+   * into devcontainer.json -- the CLI overwrites the key with the path it
+   * actually read (measured on @devcontainers/cli 0.88.0) -- and it is checked
+   * against the project anyway, so a future CLI that stopped overwriting it
+   * would fail closed here rather than open somewhere else.
+   */
+  configDirectory: ({ read, project, workspaces }: Payload) => {
+    const declared = read<{ fsPath?: string }>("configFilePath") ?? null;
+    const file =
+      nonNullObject(declared) && typeof declared.fsPath === "string"
+        ? declared.fsPath
+        : undefined;
+
+    if (!file)
+      return fail`
+        internal: the resolved spec does not say which file the CLI read
+        ("configFilePath"), so there is no way to tell what a relative
+        "build.context" would resolve to -- refusing to approve it`;
+
+    const directory = posix.dirname(file);
+    const root = posix.join(workspaces, project);
+    if (!isWithin(root, directory))
+      return fail`
+        internal: the CLI read this project's configuration from '${file}',
+        which is outside '${root}' -- refusing to approve it`;
+
+    return { directory, root };
+  },
   runArgs: {
     /**
      * Parse the name of an arg, and extract it's inline value (e.g. flag=value)
@@ -478,6 +537,37 @@ const checks = {
     if (read("appPort") !== undefined)
       return fail`Remove "appPort"; declare \`customizations.desolate.ports\` instead`;
   },
+  featuresMustBeFetched: ({ read }) => {
+    const declared = read("features");
+    if (declared === undefined) return;
+
+    if (!nonNullObject(declared))
+      return fail`"features" must be an object mapping feature ids to options`;
+
+    for (const id of Object.keys(declared)) {
+      const origin = feature.origin(id);
+      if (origin === "registry" || origin === "tarball") continue;
+
+      if (origin === "local")
+        return fail`
+          local feature '${id}' is not allowed. Its
+          devcontainer-feature.json is read from your project TWICE -- once
+          when this policy resolves the spec, and again when the container is
+          built -- and only the first read is the one that was checked.
+          Anything able to write the project in between decides what the
+          second read says, and feature metadata is exactly where
+          "privileged", "capAdd", "securityOpt" and "mounts" are allowed to
+          come from. Publish the feature and reference it by registry
+          instead: "ghcr.io/<owner>/<repo>/<feature>:<version>".`;
+
+      return fail`
+        feature '${id}' is not a feature this policy can classify (expected
+        "<registry>/<namespace>/<name>:<version>" or an "https://" tarball).
+        It is refused rather than guessed at, because the alternative reading
+        -- a path into the project -- is one the editor can rewrite after this
+        check has passed.`;
+    }
+  },
   privilegeMustBeExplicit: (payload) => {
     if (payload.read.truthy("privileged"))
       if (!helpers.allowPrivileged(payload))
@@ -524,6 +614,40 @@ const checks = {
 
       if (flag === "--tmpfs" && !value.startsWith("/"))
         return fail`--tmpfs '${value}' must be an absolute in-container path`;
+    }
+  },
+  buildPathsStayInOwnProject: (payload) => {
+    const { read } = payload;
+
+    const build =
+      read<{ context?: string; dockerfile?: string }>("build") ?? null;
+    const declared: [key: string, value: JSONValue | undefined][] = [
+      ["build.context", nonNullObject(build) ? build.context : undefined],
+      ["build.dockerfile", nonNullObject(build) ? build.dockerfile : undefined],
+      // The pre-"build" spelling. The CLI still accepts it, and a rule that
+      // only knew the modern one would be a rule with a synonym for a bypass.
+      ["context", read("context")],
+      ["dockerFile", read("dockerFile")],
+    ];
+
+    if (declared.every(([, value]) => value === undefined)) return;
+
+    const { directory, root } = helpers.configDirectory(payload);
+
+    for (const [key, value] of declared) {
+      if (value === undefined) continue;
+      if (typeof value !== "string")
+        return fail`"${key}" must be a string (got ${typeof value})`;
+
+      const resolved = posix.resolve(directory, value);
+      if (!isWithin(root, resolved))
+        return fail`
+          "${key}" is '${value}', which resolves to '${resolved}' -- outside
+          this project's folder ('${root}'). The build context is read from
+          disk and shipped to the daemon, so a path that leaves the project
+          copies somebody else's files into an image this project owns:
+          '"context": "../.."' is every sibling project's source code. Keep
+          build inputs inside the project.`;
     }
   },
   workspaceMountIsOwnFolder: ({ read, project, workspaces }) => {
@@ -587,10 +711,12 @@ export function enforcePolicy(
   checks.noInitializeCommand();
   checks.noBuildOptions();
   checks.noAppPorts();
+  checks.featuresMustBeFetched();
   checks.privilegeMustBeExplicit();
   checks.capAddsOnlyWhenPrivileged();
   checks.securityOptKeepsTheSandbox();
   checks.mountsStayInOwnNamespace();
   checks.runArgsOnAllowlist();
+  checks.buildPathsStayInOwnProject();
   checks.workspaceMountIsOwnFolder();
 }

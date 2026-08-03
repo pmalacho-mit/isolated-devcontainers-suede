@@ -54,6 +54,63 @@ esac
 EMPTY=$(printf '%s' '{"secrets":{}}' | jq -r "$PROG" 2>&1)
 assert_eq "an empty store yields no rows" "$EMPTY" ""
 
+group "the 'secret add' collision jq program"
+# Same extraction discipline: this one decides whether a new placeholder may be
+# stored at all, and it runs inside the VM where a mistake is invisible from
+# here. Two secrets whose names overlap cannot both be substituted -- the proxy
+# replaces by plain string search -- so registering the second must be refused.
+COLLIDE=$(sed -n "s/^SECRET_COLLISION_JQ='\(.*\)'$/\1/p" "$RELEASE/cli.sh")
+if [ -z "$COLLIDE" ]; then
+  fail "found SECRET_COLLISION_JQ in cli.sh" "sed matched nothing -- was it renamed?"
+else
+  pass "found SECRET_COLLISION_JQ in cli.sh"
+
+  STORE='{"secrets":{"MYAPP-OPENAI-KEY":{"value":"x","hosts":["a.com"]},"OTHER-KEY":{"value":"y","hosts":["b.com"]}}}'
+  collides() { printf '%s' "$STORE" | jq -r --arg n "$1" "$COLLIDE" 2>&1 | paste -sd, -; }
+
+  assert_eq "a longer name containing an existing one is caught" \
+            "$(collides MYAPP-OPENAI-KEY-2)" "MYAPP-OPENAI-KEY"
+  assert_eq "a shorter name contained BY an existing one is caught too" \
+            "$(collides MYAPP-OPENAI)" "MYAPP-OPENAI-KEY"
+  assert_eq "an unrelated name is free" "$(collides MYAPP-STRIPE-KEY)" ""
+  # Re-adding the same name is how you rotate a value; it must not self-collide.
+  assert_eq "re-adding the same name is not a collision" "$(collides MYAPP-OPENAI-KEY)" ""
+  assert_eq "an empty store collides with nothing" \
+            "$(printf '%s' '{}' | jq -r --arg n K "$COLLIDE" 2>&1 | paste -sd, -)" ""
+
+  case "$COLLIDE" in
+    *'"'*) fail "the program survives 'colima ssh' re-parsing" "it contains a double quote" ;;
+    *' '*) fail "the program survives 'colima ssh' re-parsing" "it contains a space" ;;
+    *)     pass "the program survives 'colima ssh' re-parsing" ;;
+  esac
+fi
+
+group "the --hosts allowlist has to name a destination"
+# '*' as a secret's allowlist is the absence of an allowlist: the placeholder
+# becomes a bearer token any container can post anywhere and still have the
+# real key swapped in. addon.py refuses the same shapes on load (see
+# tests/unit/proxy); this is the half that tells you at registration time.
+# Extracted and EXECUTED, so the two cannot drift into disagreeing.
+FN=$(sed -n '/^host_pattern_pins_a_destination()/,/^}/p' "$RELEASE/cli.sh")
+if [ -z "$FN" ]; then
+  fail "found host_pattern_pins_a_destination in cli.sh" "sed matched nothing -- was it renamed?"
+else
+  pass "found host_pattern_pins_a_destination in cli.sh"
+  eval "$FN"
+
+  for h in api.openai.com openai.com '*.openai.com' '*.eu.openai.com' localhost; do
+    if host_pattern_pins_a_destination "$h"; then pass "accepts $h"
+    else fail "accepts $h" "a legitimate allowlist entry was refused"; fi
+  done
+
+  # '*foo.com' is the subtle one: fnmatch's '*' does not stop at a dot, so it
+  # matches 'evilfoo.com' as well -- an attacker-registrable name.
+  for h in '*' '**' '*.*' '*.com' '*openai.com' 'api.*' '*.openai.' '*..com' ''; do
+    if host_pattern_pins_a_destination "$h"; then fail "refuses '$h'" "it pins nothing"
+    else pass "refuses '$h'"; fi
+  done
+fi
+
 group "the jq expressions in ssh-allow.sh"
 # Third jq bug in this codebase, and none were caught by anything: a jq program
 # is a string in one language embedded in another, so `bash -n` sees a valid

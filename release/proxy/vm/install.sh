@@ -13,6 +13,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 COMPOSE_NET="${DESOLATE_NET:-desolate_devnet}"
+COMPOSE_DIND_NET="${DESOLATE_DIND_NET:-desolate_dindnet}"
 
 echo "==> packages"
 apt-get update -qq
@@ -65,29 +66,57 @@ install -m 0755 ../container/install-ca.sh /var/lib/desolate-proxy/public/instal
 install -m 0755 ../container/trust-proxy-in-builds.sh /var/lib/desolate-proxy/public/trust-proxy-in-builds.sh
 install -m 0755 ssh-allow.sh /opt/desolate-proxy/ssh-allow.sh
 
-echo "==> detect bridge interface for network '$COMPOSE_NET'"
-BRIDGE=""
-GW=$(docker network inspect "$COMPOSE_NET" -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
-if [ -n "$GW" ]; then
-    BRIDGE=$(ip -br addr | awk -v gw="$GW" '$3 ~ "^"gw"/" {print $1}' | head -1)
+# Both bridges, because the stack is split across two networks and BOTH must be
+# armed. Arming only the editor's would leave the container world -- dind, and
+# every devcontainer inside it -- with unfiltered egress and no lateral wall,
+# which is the exact inverse of what this layer is for.
+detect_bridge() {   # detect_bridge <compose network> <pinned name>
+    local network="$1" pinned="$2" gateway found
+    gateway=$(docker network inspect "$network" \
+                -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)
+    if [ -n "$gateway" ]; then
+        found=$(ip -br addr | awk -v gw="$gateway" '$3 ~ "^"gw"/" {print $1}' | head -1)
+    fi
+    if [ -z "${found:-}" ]; then
+        # Network not created yet (first install before `cli.sh up`).
+        # docker-compose.yml pins the bridge name, so we can name it in advance
+        # instead of guessing docker0 and silently protecting the wrong iface.
+        echo "    NOTE: '$network' does not exist yet; using the name pinned in" >&2
+        echo "          docker-compose.yml ($pinned). It will match once up." >&2
+        printf '%s' "$pinned"
+        return
+    fi
+    if [ "$found" != "$pinned" ]; then
+        echo "    WARNING: detected '$found' for '$network', but docker-compose.yml" >&2
+        echo "             pins '$pinned'. Using the detected name. If you edited the" >&2
+        echo "             compose network, keep nftables-desolate.conf in step." >&2
+    fi
+    echo "    detected: $found (network $network, gateway $gateway)" >&2
+    printf '%s' "$found"
+}
+
+echo "==> detect bridge interfaces"
+BRIDGE=$(detect_bridge "$COMPOSE_NET" br-desolate)
+DIND_BRIDGE=$(detect_bridge "$COMPOSE_DIND_NET" br-desolate-in)
+if [ "$BRIDGE" = "$DIND_BRIDGE" ]; then
+    cat >&2 <<EOF
+
+    ERROR: both networks resolve to the same bridge ('$BRIDGE').
+
+    The editor and the container world would share one L2 segment, and the
+    lateral drop between them could not be expressed -- a devcontainer would be
+    one routable hop from the editor container and the git deploy keys in it.
+    This is what the two pinned bridge names in docker-compose.yml prevent, so
+    the usual cause is a stack whose networks predate the split:
+      ./cli.sh down && ./cli.sh up
+    then re-run this.
+EOF
+    exit 1
 fi
-if [ -z "$BRIDGE" ]; then
-    # Network not created yet (first install before `cli.sh up`). docker-compose.yml
-    # pins the bridge name, so we can name it in advance instead of guessing
-    # docker0 and silently protecting the wrong interface.
-    BRIDGE=br-desolate
-    echo "    NOTE: '$COMPOSE_NET' does not exist yet; using the name pinned in"
-    echo "          docker-compose.yml ($BRIDGE). It will match once the stack is up."
-elif [ "$BRIDGE" != "br-desolate" ]; then
-    echo "    WARNING: detected '$BRIDGE', but docker-compose.yml pins 'br-desolate'."
-    echo "             Using the detected name. If you edited the compose network,"
-    echo "             keep nftables-desolate.conf's DESOLATE_IF in step with it."
-    echo "    detected: $BRIDGE (gateway $GW)"
-else
-    echo "    detected: $BRIDGE (gateway $GW)"
-fi
-sed "s|define DESOLATE_IF = \".*\"|define DESOLATE_IF = \"$BRIDGE\"|" nftables-desolate.conf \
-    > /etc/desolate-proxy/nftables-desolate.conf
+sed -e "s|define DESOLATE_IF = \".*\"|define DESOLATE_IF = \"$BRIDGE\"|" \
+    -e "s|define DESOLATE_DIND_IF = \".*\"|define DESOLATE_DIND_IF = \"$DIND_BRIDGE\"|" \
+    -e "s|define DESOLATE_IFS = .*|define DESOLATE_IFS = { \"$BRIDGE\", \"$DIND_BRIDGE\" }|" \
+    nftables-desolate.conf > /etc/desolate-proxy/nftables-desolate.conf
 
 echo "==> container resolver (dedicated dnsmasq on :5353)"
 # REPAIR: earlier versions installed this as a drop-in, which moved the VM's own
@@ -182,5 +211,6 @@ systemctl enable -q --now desolate-nft desolate-proxy desolate-proxy-ca
 echo "==> done"
 systemctl --no-pager --plain status desolate-proxy | head -5
 echo
-echo "Interface: $BRIDGE   Proxy: :18080   CA: :18081   DNS: :5353"
+echo "Interfaces: $BRIDGE (editor), $DIND_BRIDGE (containers)"
+echo "Proxy: :18080   CA: :18081   DNS: :5353"
 echo "Add secrets from your Mac:  ./cli.sh secret add NAME --hosts api.example.com"

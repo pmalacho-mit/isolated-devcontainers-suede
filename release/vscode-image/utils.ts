@@ -15,6 +15,19 @@ export const isEntryPoint = (moduleUrl: string) =>
 export const identity = <T>(value: T) => value;
 export const noop = () => {};
 
+/**
+ * Is `candidate` at or under `root`? Both must be absolute, and already
+ * resolved if resolution matters to the caller (this is a string comparison,
+ * not a filesystem question).
+ *
+ * The separator is the whole point: a bare `startsWith` accepts
+ * `/workspaces/web-api` as being inside `/workspaces/web`, which is a
+ * different project.
+ */
+export const isWithin = (root: string, candidate: string) =>
+  candidate === root ||
+  candidate.startsWith(root.endsWith("/") ? root : `${root}/`);
+
 export type Expand<T> = T extends infer O ? { [K in keyof O]: O[K] } : never;
 
 export type ExpandDeep<T> = T extends infer O

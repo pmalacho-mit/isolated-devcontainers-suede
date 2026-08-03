@@ -18,9 +18,22 @@ PROJECT=desolate-test
 EDITOR_PORT=3100
 TOKEN="test-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 
-C_DIND=$PROJECT-dind-1
-C_VSCODE=$PROJECT-vscode-1
-C_ORCH=$PROJECT-orchestrator-1
+# These MUST match the container_name overrides in compose.test.yml, not
+# compose's `<project>-<service>-<n>` pattern: docker-compose.yml pins
+# container_name on every service, which overrides that pattern entirely.
+C_DIND=$PROJECT-dind
+C_VSCODE=$PROJECT-vscode
+C_ORCH=$PROJECT-orchestrator
+
+# fail() prints its detail with a fixed indent, so a multi-line diagnostic has
+# to indent its own continuation lines. Diagnostics belong INSIDE the test: the
+# cleanup trap tears the stack down on exit, so anything not captured here
+# cannot be captured afterwards.
+detail() { printf '%s' "$1" | sed '2,$s/^/       /'; }
+# harness.sh has pass/fail/skip but no note(): informational output that is not
+# an assertion. Diagnostics need it -- they explain a result without inventing
+# a pass or a failure.
+note() { printf '       %s\n' "$(detail "$1")"; }
 
 compose() {
   # project-directory must be RELEASE: the build contexts (./vscode-image) and
@@ -100,8 +113,17 @@ group "the inner daemon API is not on the network"
 # DNS rebinding. Assert the absence, so re-adding one has to be deliberate.
 assert_fails "nothing answers the docker API on the old proxy port" \
   curl -s -f --max-time 3 "http://127.0.0.1:2475/_ping"
-assert_not_contains "no stack container publishes a daemon API port" \
-  "$(docker ps --filter "name=$PROJECT" --format '{{.Ports}}')" "2375"
+# `docker ps` prints EXPOSEd ports alongside published ones, and docker:dind
+# carries `EXPOSE 2375 2376` in its image metadata. An EXPOSE is a comment: no
+# listener, no host binding, nothing reachable. Matching the Ports column
+# therefore reports a daemon API that does not exist, while a REAL publish must
+# still be caught -- so assert on the host bindings, which is what "publishes"
+# means. (The daemon's --host flags are pinned to unix:// by
+# tests/static/02-compose-invariants.sh, which covers the listener side.)
+BINDINGS=$(docker ps --filter "name=$PROJECT" -q \
+           | xargs -r docker inspect -f '{{.Name}} {{json .HostConfig.PortBindings}}' 2>/dev/null)
+assert_not_contains "no stack container publishes the daemon API port" "$BINDINGS" "2375"
+assert_not_contains "no stack container publishes the TLS daemon API port" "$BINDINGS" "2376"
 
 group "the editor's token actually gates the editor"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$EDITOR_PORT/")
@@ -196,7 +218,14 @@ if printf '%s' "$OUT" | grep -q "is ready:"; then
   case "$CODE" in 200|302|401|403) pass "the project editor answers through the relay (HTTP $CODE)" ;;
     *) fail "the project editor answers through the relay" "got '$CODE' on 127.0.0.1:$MAC_PORT" ;; esac
   assert_ok "desolate --ports reports the map" ed desolate --ports example-project
-  assert_ok "desolate --stop tears it down" ed desolate --stop example-project
+  # Capture the devcontainer id BEFORE stopping it. E6/E7/E8 all exec into it,
+  # and `docker ps -q` lists only RUNNING containers -- looking it up after the
+  # stop below yields "", which turned all three escape tests into silent skips.
+  DEVC=$(docker exec "$C_ORCH" docker ps -q \
+           --filter label=devcontainer.local_folder=/workspaces/example-project 2>/dev/null | head -1)
+  [ -n "$DEVC" ] && pass "the devcontainer id was captured for the escape tests" \
+    || fail "the devcontainer id was captured for the escape tests" \
+            "E6, E7 and E8 will skip -- they are the escape tests that matter"
 else
   fail "desolate example-project succeeded" "$(printf '%s' "$OUT" | tail -5)"
 fi
@@ -210,15 +239,21 @@ group "E6: a project cannot poison the editor server every project executes"
 # the volume is chowned 1000:1000 and the stock devcontainer user is uid 1000.
 # Each project now gets an overlayfs volume whose lower is the pristine server,
 # and overlayfs never writes down. This proves the lower survives the attempt.
-DEVC=$(docker exec "$C_ORCH" docker ps -q \
-         --filter label=devcontainer.local_folder=/workspaces/example-project 2>/dev/null | head -1)
-if [ -z "$DEVC" ]; then
+if [ -z "${DEVC:-}" ]; then
   skip "E6 server poisoning" "no example-project devcontainer is running"
 else
   BEFORE=$(docker exec "$C_DIND" sha256sum /server-dist/bin/openvscode-server 2>/dev/null | cut -d' ' -f1)
-  # The attack, exactly as a compromised project would run it.
-  docker exec "$C_ORCH" docker exec "$DEVC" \
-    sh -c 'echo MALICIOUS > /vscode-server/bin/openvscode-server' >/dev/null 2>&1
+  # The attack, exactly as a compromised project would run it. Its output is
+  # KEPT: discarding it is what let the write fail silently while the assertion
+  # below still reported the lower layer intact -- a pass that defended nothing.
+  # -u 1000 deliberately. The overlay is chowned 1000:1000 and the stock
+  # devcontainer user is uid 1000, so that is who the attacker is. Running as
+  # root looks stronger and is weaker: example-project drops ALL capabilities,
+  # so root has no CAP_DAC_OVERRIDE and cannot write a file owned by 1000 --
+  # the write fails on permissions before overlayfs is ever involved, and the
+  # "pristine server survived" assertion below then proves nothing.
+  ATTACK=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" sh -c \
+    'echo MALICIOUS > /vscode-server/bin/openvscode-server 2>&1; echo "exit=$?"' 2>&1)
   AFTER=$(docker exec "$C_DIND" sha256sum /server-dist/bin/openvscode-server 2>/dev/null | cut -d' ' -f1)
 
   if [ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ]; then
@@ -228,9 +263,26 @@ else
          "/server-dist changed: $BEFORE -> $AFTER -- every other project now executes it"
   fi
   # And the project must see only its OWN modification, not a shared one.
-  SEEN=$(docker exec "$C_ORCH" docker exec "$DEVC" \
+  SEEN=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" \
            sh -c 'cat /vscode-server/bin/openvscode-server 2>/dev/null | head -c 9' 2>/dev/null)
-  assert_contains "the writer sees its own copy-up (overlay is working)" "$SEEN" "MALICIOUS"
+  # This is E6's POSITIVE CONTROL: it proves the attack above actually executed.
+  # If it fails, "the pristine server survived" passed vacuously -- nothing was
+  # written, so nothing was defended against -- and the reason has to be
+  # reported here, while the container still exists.
+  if printf '%s' "$SEEN" | grep -q MALICIOUS; then
+    pass "the writer sees its own copy-up (overlay is working)"
+  else
+    E6DIAG=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" sh -c '
+      echo "as:     $(id 2>&1)"
+      echo "target: $(ls -la /vscode-server/bin/openvscode-server 2>&1 | head -1)"
+      echo "dir:    $(ls -ld /vscode-server/bin 2>&1 | head -1)"
+      echo "mount:  $(mount 2>/dev/null | grep -i vscode-server | head -1 || echo "(no vscode-server mount line)")"
+      echo "readback: $(head -c 40 /vscode-server/bin/openvscode-server 2>&1 | tr -d "\0" | head -1)"' 2>&1)
+    fail "the writer sees its own copy-up (overlay is working)" \
+      "$(detail "the ATTACK DID NOT RUN, so the pass above is vacuous -- nothing was written.
+write attempt: $ATTACK
+$E6DIAG")"
+  fi
 fi
 
 # =========================================================================
@@ -245,13 +297,25 @@ if [ -z "${DEVC:-}" ]; then
   skip "E7 CA poisoning" "no example-project devcontainer is running"
 else
   CA_BEFORE=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
-  docker exec "$C_ORCH" docker exec "$DEVC" \
-    sh -c 'echo POISONED > /desolate-ca/install-ca.sh' >/dev/null 2>&1
+  # Keep the output. Same lesson as E6: a write that never happened leaves the
+  # hash unchanged and the assertion green, having defended against nothing.
+  CA_ATTACK=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" \
+    sh -c 'echo POISONED > /desolate-ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
   # And the privileged escalation the read-only flag could not stop.
-  docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
-    'mount -o remount,bind,rw /desolate-ca 2>/dev/null; echo POISONED > /desolate-ca/install-ca.sh' \
-    >/dev/null 2>&1
+  CA_ATTACK2=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
+    'mount -o remount,bind,rw /desolate-ca 2>&1; echo POISONED > /desolate-ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
   CA_AFTER=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
+
+  # The positive control: the write must have been ATTEMPTED and REFUSED by the
+  # filesystem, not skipped because the path was absent or the exec failed.
+  case "$CA_ATTACK" in
+    *"Read-only file system"*|*"Permission denied"*)
+      pass "the poisoning attempt actually reached the filesystem and was refused" ;;
+    *) fail "the poisoning attempt actually reached the filesystem and was refused" \
+         "$(detail "the write did not run, so the hash check below is vacuous.
+attempt 1: $CA_ATTACK
+attempt 2: $CA_ATTACK2")" ;;
+  esac
 
   if [ -n "$CA_BEFORE" ] && [ "$CA_BEFORE" = "$CA_AFTER" ]; then
     pass "the shared install-ca.sh survived both write attempts"
@@ -259,6 +323,144 @@ else
     fail "the shared install-ca.sh survived both write attempts" \
          "changed: $CA_BEFORE -> $CA_AFTER -- this runs as root in every devcontainer"
   fi
+fi
+
+# =========================================================================
+group "E8: an attacker standing in a DEVCONTAINER"
+# =========================================================================
+# Everything above stands the attacker in the editor. This is the other half of
+# the threat model and it was untested: a compromised project, inside dind,
+# trying to reach the editor container -- which is where the git deploy keys
+# are minted and kept. Every probe below runs INSIDE the project's container.
+if [ -z "${DEVC:-}" ]; then
+  skip "E8 devcontainer escape" "no example-project devcontainer is running"
+else
+  # Try curl, then wget, then bash's /dev/tcp: the base image is the project's
+  # choice, and a probe that silently finds no tool would report containment
+  # that was never tested.
+  reach() { # reach <ip> <port> -> non-empty output means a TCP connection completed
+    docker exec "$C_ORCH" docker exec "$DEVC" sh -c "
+      if command -v curl >/dev/null 2>&1; then
+        curl -s -o /dev/null -m 4 -w 'REACHED-%{http_code}' http://$1:$2/ 2>/dev/null \
+          | grep -v 'REACHED-000' || true
+      elif command -v wget >/dev/null 2>&1; then
+        wget -T 4 -q -S -O /dev/null http://$1:$2/ 2>&1 | grep -o 'HTTP/[0-9.]*' | head -1
+      else
+        (exec 3<>/dev/tcp/$1/$2) 2>/dev/null && echo REACHED-tcp
+      fi" 2>/dev/null
+  }
+  probes=0
+
+  # 1. the editor, by container IP on every network it holds.
+  for ip in $(docker inspect -f '{{range $n, $c := .NetworkSettings.Networks}}{{$c.IPAddress}} {{end}}' \
+              "$C_VSCODE" 2>/dev/null); do
+    probes=$((probes+1))
+    # A 401/403 is still REACHED -- the editor answers tokenless requests with
+    # one. Only the absence of any reply means the packet did not arrive.
+    OUT=$(reach "$ip" 3000)
+    if [ -n "$OUT" ]; then
+      fail "a devcontainer cannot reach the editor at $ip:3000" \
+           "got '$OUT' -- the ssh deploy keys live in that container"
+    else
+      pass "a devcontainer cannot reach the editor at $ip:3000"
+    fi
+  done
+  [ "$probes" = 0 ] && skip "editor reachability" "could not resolve the editor's addresses"
+
+  # 2. the default gateway, which is dind's bridge address on the VM.
+  GW=$(docker exec "$C_ORCH" docker exec "$DEVC" \
+       sh -c "ip route 2>/dev/null | awk '/^default/{print \$3; exit}'" 2>/dev/null)
+  if [ -n "$GW" ]; then
+    OUT=$(reach "$GW" 3000)
+    [ -z "$OUT" ] && pass "a devcontainer cannot reach the gateway on :3000" \
+      || fail "a devcontainer cannot reach the gateway on :3000" "got '$OUT'"
+  else
+    skip "gateway probe" "no default route reported inside the devcontainer"
+  fi
+
+  # 3. the proxy as a confused deputy. :80 is REDIRECTed to mitmproxy whatever
+  #    the destination, and mitmproxy dials it from the VM, where the bridge
+  #    drops no longer apply. Without an address check in addon.py that is a
+  #    route to the Mac and the LAN.
+  # 3. the proxy as a confused deputy, in two parts -- because one probe cannot
+  #    answer both questions and a single ambiguous result is how a test ends up
+  #    asserting nothing.
+  #
+  #    (a) does :80 from the container world reach the proxy at all? Without
+  #        this, (b) passes for the wrong reason forever.
+  #    (b) does an internal destination fail to succeed?
+  #
+  #    (b) cannot prove WHICH layer refused, and deliberately does not claim to.
+  #    mitmproxy connects to the original destination BEFORE the request hook
+  #    runs (connection_strategy defaults to eager, see proxy/layers/modes.py),
+  #    so an internal address with nothing listening is closed at that point and
+  #    addon.py never sees it -- curl reports (52) Empty reply. Contained either
+  #    way; addon.py's own refusal is covered by tests/unit/proxy (E10 family).
+  http_from_devc() { # http_from_devc <url> -> "<code>|<curl exit>"
+    docker exec "$C_ORCH" docker exec "$DEVC" sh -c "
+      if command -v curl >/dev/null 2>&1; then
+        printf '%s|%s' \"\$(curl -s -o /dev/null -m 8 -w '%{http_code}' $1 2>/dev/null)\" \"\$?\"
+      elif command -v wget >/dev/null 2>&1; then
+        printf '%s|wget' \"\$(wget -S -O /dev/null -T 8 $1 2>&1 \
+          | grep -oE 'HTTP/[0-9.]+ [0-9]{3}' | grep -oE '[0-9]{3}' | tail -1)\"
+      else
+        printf 'NOTOOL|'
+      fi" 2>/dev/null
+  }
+
+  PUB=$(http_from_devc http://example.com/)
+  case "${PUB%%|*}" in
+    NOTOOL) skip "interception of :80 from a devcontainer" "neither curl nor wget present" ;;
+    2*|3*|4*|5*) pass "port 80 from a devcontainer is intercepted and answered (${PUB%%|*})" ;;
+    *) fail "port 80 from a devcontainer is intercepted and answered" \
+         "$(detail "got '$PUB' for a PUBLIC destination -- the redirect or the proxy is down,
+so the internal-destination result below proves nothing about the proxy.
+desolate-proxy on the VM: $(command -v colima >/dev/null 2>&1 \
+  && colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active desolate-proxy 2>/dev/null \
+  || echo '(colima not on PATH)')")" ;;
+  esac
+
+  INT=$(http_from_devc http://192.168.5.2/)
+  case "$INT" in
+    NOTOOL*) : ;;  # already skipped above
+    403*) pass "an internal destination is refused by the proxy (403 from addon.py)" ;;
+    2*|3*) fail "an internal destination does not succeed" \
+             "$(detail "got '$INT' -- the container REACHED 192.168.5.2 through the proxy.
+This is the confused-deputy SSRF: addon.py must refuse private destination ADDRESSES.")" ;;
+    502*) pass "an internal destination does not succeed (502: the proxy could not reach it)" ;;
+    *) pass "an internal destination does not succeed (no reply: '$INT')" ;;
+  esac
+
+  # WHICH layer stopped it. Docker installs its own inter-bridge isolation rules
+  # at the same netfilter hook, and they generally get there first -- so zero
+  # counters are the EXPECTED reading, not a fault. It is still worth printing:
+  # it says the desolate drops are a backstop here rather than the mechanism,
+  # which is the opposite of what the ruleset's comments imply, and it means a
+  # regression in those drops would not be caught by the probes above.
+  if command -v colima >/dev/null 2>&1; then
+    LATERAL=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- \
+      sudo nft list table inet desolate 2>/dev/null \
+      | grep -E 'iifname .*oifname .*drop' | sed 's/^ *//')
+    if [ -z "$LATERAL" ]; then
+      note "could not read the nft lateral drops (is the VM proxy layer installed?)"
+    elif printf '%s' "$LATERAL" | grep -qE 'packets [1-9]'; then
+      pass "the nftables lateral drop is what stopped it (counters moved)"
+    else
+      note "nft lateral drops read ZERO: docker's own bridge isolation reached this"
+      note "first (expected). The desolate drops are the backstop, and the probes"
+      note "above do not exercise them:"
+      note "$LATERAL"
+    fi
+  fi
+
+  # 4. and the daemon socket, which must not be visible at all.
+  assert_fails "a devcontainer has no inner daemon socket" \
+    docker exec "$C_ORCH" docker exec "$DEVC" test -S /run/inner/docker.sock
+
+  # Teardown moved here from the end-to-end group above: E6, E7 and E8 all need
+  # the container RUNNING, and stopping it before them is what made all three
+  # skip silently.
+  assert_ok "desolate --stop tears it down" ed desolate --stop example-project
 fi
 
 group "host-side visibility into the inner daemon still works"

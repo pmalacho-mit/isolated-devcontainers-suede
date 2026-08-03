@@ -1,4 +1,3 @@
-/// <reference types="node" />
 // desolate -- open a project's devcontainer as a full browser IDE, with dynamic
 // port allocation for dev servers.
 //
@@ -29,7 +28,7 @@
 // forwards each port with a socat relay container on the inner daemon:
 //
 //   Mac 127.0.0.1:8081 -> dind:8081 (relay) -> <devcontainer-ip>:5173
-
+/// <reference types="node" />
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -41,7 +40,6 @@ import {
   validName,
   volumeNamespace,
 } from "./projects.ts";
-import { copyDereferenced, snapshot } from "./snapshot.ts";
 import { parse as parseJsonc } from "./jsonc.ts";
 import { isEntryPoint, run } from "./utils.ts";
 import { parseArgs } from "./args.ts";
@@ -63,6 +61,7 @@ import {
   mintToken,
 } from "./editor.ts";
 import * as relay from "./relays.ts";
+import { snapshotDirectory, snapshot, initDirectory } from "./snapshot.ts";
 import {
   allocatePorts,
   ownRelayPorts,
@@ -496,7 +495,7 @@ function deriveRunConfig(
 
   const srcDir = path.dirname(src);
   if (config || path.basename(srcDir) === ".devcontainer")
-    copyDereferenced(srcDir, out);
+    snapshotDirectory(config ? srcDir : dir, srcDir, out);
 
   const file = `${out}/devcontainer.json`;
   fs.writeFileSync(file, JSON.stringify(spec, null, 2));
@@ -722,21 +721,19 @@ function recreateRelays(
 }
 
 /**
- * dind's eth0 (unless overidden in environment) --
- * the same interface path the Mac's traffic uses */
-const PROBE_HOST = process.env.DEVC_PROBE_HOST ?? "dind";
-
-async function probeEditor(port: number): Promise<boolean> {
-  const config = { timeoutMs: 2000, retries: 5, gapMs: 1000 } as const;
+ * Is the project's editor answering? Asked THROUGH the project's own relay,
+ * from inside it.
+ *
+ * `docker exec` reaches the relay over the inner daemon's unix socket, crossing
+ * no bridge at all, and lands on the far side of the wall by design. It tests
+ * everything except the two pure docker publishes that carry the Mac's traffic in.
+ */
+function probeEditor(project: string, port: number): boolean {
+  const config = { retries: 5, gapMs: 1000 } as const;
+  const name = relay.name(project, port);
   for (let attempt = 0; attempt < config.retries; attempt++) {
-    try {
-      await fetch(`http://${PROBE_HOST}:${port}/`, {
-        signal: AbortSignal.timeout(config.timeoutMs),
-      });
-      return true; // any response at all means reachable
-    } catch {
-      await new Promise((r) => setTimeout(r, config.gapMs));
-    }
+    if (docker.relay.answers(name, port)) return true;
+    if (attempt < config.retries - 1) sleep(config.gapMs);
   }
   return false;
 }
@@ -837,9 +834,10 @@ async function runProject(
   startEditor(name, dir, project, token, config);
   recreateRelays(name, dir, map, config);
 
-  if (!(await probeEditor(editorPort)))
-    return die(`editor not reachable through ${PROBE_HOST}:${editorPort} -- check the log:
-      devcontainer exec --workspace-folder ${dir} cat /tmp/openvscode-desolate.log`);
+  if (!probeEditor(name, editorPort))
+    return die(`editor did not answer through the relay on :${editorPort} -- check the log:
+      devcontainer exec --workspace-folder ${dir} cat /tmp/openvscode-desolate.log
+      and the relay itself:  docker logs ${relay.name(name, editorPort)}`);
 
   const id = devcontainerId(dir, false, config);
   const folder = (id && containerWorkspaceFolder(dir, id)) || dir;
@@ -869,6 +867,8 @@ async function runProject(
 }
 
 async function main(): Promise<void> {
+  initDirectory(DIRECT_SPEC_DIR);
+
   const { command, project, config, rebuild, noCache } = dieOnError(() =>
     parseArgs(process.argv.slice(2), WORKSPACES),
   );

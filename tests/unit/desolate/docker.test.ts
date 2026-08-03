@@ -277,6 +277,36 @@ describe("relays", () => {
     assert.equal(calls[0][calls[0].indexOf("--restart") + 1], "unless-stopped");
   });
 
+  test("the readiness probe runs INSIDE the relay, not across a bridge", () => {
+    // The whole point: `docker exec` travels the inner daemon's unix socket,
+    // so the probe needs no IP route from the editor world to the container
+    // world. A probe that dialled dind by name or address would pass only
+    // while the lateral wall was down.
+    const { docker, calls } = recorder();
+    docker.relay.answers("desolate-relay-myapp-8081", 8081);
+    const argv = calls[0];
+    assert.equal(argv[0], "exec");
+    assert.equal(argv[1], "desolate-relay-myapp-8081");
+    assert.ok(
+      argv.at(-1)!.includes("127.0.0.1:8081"),
+      "the probe must dial the relay's own listener on loopback",
+    );
+    assert.ok(
+      !argv.some((a) => /(^|[^\w])dind([^\w]|$)/.test(a)),
+      "the probe must not name dind at all",
+    );
+  });
+
+  test("any HTTP status counts as an answer, 401 and 403 included", () => {
+    // openvscode-server replies 403 to a tokenless request. Treating that as
+    // unreachable would fail every start with the editor working perfectly.
+    const { docker, calls } = recorder();
+    docker.relay.answers("desolate-relay-myapp-8081", 8081);
+    const script = calls[0].at(-1)!;
+    assert.ok(script.includes("HTTP/"), "matches on the status line, not the exit code");
+    assert.ok(script.includes("socat"), "falls back to a TCP connect without busybox");
+  });
+
   test("the socat arguments come after the image, never before", () => {
     const { docker, calls } = recorder();
     docker.relay.start(spec);

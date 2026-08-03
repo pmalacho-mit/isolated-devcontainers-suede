@@ -102,6 +102,30 @@ assert_eq "nftables DESOLATE_IF matches the pinned bridge" "$NFT_IF" "$BRIDGE"
 # Linux caps interface names at 15 characters; a longer one is silently rejected.
 assert_eq "bridge name fits IFNAMSIZ" "$([ "${#BRIDGE}" -le 15 ] && echo yes || echo no)" "yes"
 
+DIND_BRIDGE=$(q '.networks.dindnet.driver_opts."com.docker.network.bridge.name" // "UNPINNED"')
+assert_eq "compose pins the container bridge name too" \
+  "$([ "$DIND_BRIDGE" = UNPINNED ] && echo no || echo yes)" "yes"
+assert_eq "container bridge name fits IFNAMSIZ" \
+  "$([ "${#DIND_BRIDGE}" -le 15 ] && echo yes || echo no)" "yes"
+NFT_DIND_IF=$(sed -n 's/^define DESOLATE_DIND_IF = "\(.*\)"$/\1/p' "$RELEASE/proxy/vm/nftables-desolate.conf")
+assert_eq "nftables DESOLATE_DIND_IF matches the pinned container bridge" \
+  "$NFT_DIND_IF" "$DIND_BRIDGE"
+
+group "the editor and the container world are on separate bridges"
+# This is the lateral wall. dind holds every devcontainer and they egress
+# through its address, so sharing a bridge with vscode put the editor -- and the
+# git deploy keys inside it -- one hop away, filtered only by a chain that sees
+# bridged frames while br_netfilter happens to be on. Across two bridges the
+# same packet is routed, and the nftables forward chain always sees it.
+DIND_NETS=$(q '[.services.dind.networks // {} | keys[]] | join(",")')
+assert_eq "dind is on dindnet only" "$DIND_NETS" "dindnet"
+for svc in vscode orchestrator; do
+  assert_eq "$svc is not on the container bridge" \
+    "$(q "[.services.\"$svc\".networks // {} | keys[] | select(. == \"dindnet\")] | length")" "0"
+done
+assert_eq "the two networks are not the same bridge" \
+  "$([ "$BRIDGE" != "$DIND_BRIDGE" ] && echo yes || echo no)" "yes"
+
 group "the long-running services start under with-ca"
 # The other half of the invariant tested in 01-syntax.sh. Both matter: this one
 # gives the broker (and anything it spawns) proxy-CA trust, the wrapper scripts

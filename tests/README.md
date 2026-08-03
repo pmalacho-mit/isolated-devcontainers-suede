@@ -25,6 +25,14 @@ parser (`E10`, `E11`), docker's last-label-wins rule (`E12`), node's `cpSync`
 it, not by reading its documentation: `E13` exists because `{dereference: true}`
 does not dereference, which the docs do not say.
 
+Two more turn on WHERE the CLI reads, not how it parses. `--override-config`
+changes which JSON is read and nothing else, so `build.context` still resolves
+against the live project (`E14`: `"context": "../.."` built an image holding a
+sibling project's file) and a local feature's metadata is read again at build
+time, after the policy has approved the first read (`E15`: swapping it in
+between produced `--privileged --mount type=bind,src=/,dst=/host` from a
+snapshot that said `harmless`). Both were measured, not deduced.
+
 | layer | needs | what it proves |
 |---|---|---|
 | `static/` | bash, jq, docker compose (config only) | the invariants decided by config alone: no daemon in the editor, loopback-only ports, sysbox runtime, nftables default-deny, and that the compose bridge name and `DESOLATE_IF` cannot drift apart |

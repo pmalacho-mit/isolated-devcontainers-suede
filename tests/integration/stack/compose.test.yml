@@ -1,5 +1,18 @@
-# Overrides that let a TEST stack run beside a real one: different project
-# name (passed with -p), different host ports, no clash on 3000/8080-8090.
+# Overrides for the TEST stack: its own container names and its own host ports.
+#
+# The container names are the load-bearing part. docker-compose.yml pins
+# `container_name:` on every service, and `container_name` OVERRIDES compose's
+# `<project>-<service>-<n>` naming -- so `-p desolate-test` alone changed the
+# project label and nothing else, and every container came up as `desolate-*`.
+# The harness looked for `desolate-test-dind-1`, found nothing, and reported
+# `no such object` for the whole suite while `compose up` reported success.
+#
+# NOTE: this stack still cannot run CONCURRENTLY with a real one. The two
+# bridge names in docker-compose.yml are pinned (br-desolate / br-desolate-in),
+# and a second bridge cannot take an existing interface name. Overriding them
+# here would be worse: the VM's nftables rules are armed for the pinned names,
+# so a renamed test bridge gets no interception at all and E8's proxy probes
+# would silently pass by measuring nothing. Run `./cli.sh down` first.
 #
 # The inner-side port numbers are deliberately unchanged. desolate allocates
 # relay ports from DESOLATE_PORT_MIN..MAX inside dind's namespace, so only the
@@ -7,9 +20,15 @@
 # container side without moving the orchestrator's env is exactly the drift
 # that tests/static/02-compose-invariants.sh exists to catch.
 services:
+  volume-init:
+    container_name: desolate-test-volume-init
   dind:
+    container_name: desolate-test-dind
     ports: !override
       - "127.0.0.1:8180-8190:8080-8090"
+  orchestrator:
+    container_name: desolate-test-orchestrator
   vscode:
+    container_name: desolate-test-vscode
     ports: !override
       - "127.0.0.1:3100:3000"

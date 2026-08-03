@@ -1,110 +1,192 @@
-/**
- * snapshot.ts -- freeze a project's devcontainer spec where the editor cannot
- * reach it.
- *
- * This is the TOCTOU defence, and it is the reason validating the spec means
- * anything at all: /workspaces is writable by the editor (and by the project's
- * own container), so a spec that is validated in place can be swapped for
- * another between the check and `devcontainer up`. The copy lives on the
- * orchestrator's own filesystem, in a 0700 directory, and the container is
- * started from THAT via --override-config.
- *
- * It lives here rather than in broker.ts because there are TWO ways into
- * desolate -- the broker (from the editor) and `desolate-run` (from the Mac,
- * via `cli.sh desolate`) -- and only the first used to snapshot. The Mac is the
- * trust root, but the FILE it validates is not: it is attacker-authored content
- * in a directory attacker-controlled code can rewrite. Both entry points need
- * the same guarantee, so both call the same function.
- */
+/*
+snapshot.ts -- copy a project's devcontainer config somewhere the editor cannot
+reach, dereferencing symlinks but never leaving the project.
+
+The copy exists for TOCTOU reasons: the container starts from a
+frozen copy of the spec the policy validated, not from the live file. Making
+that copy means DEREFERENCING symlinks -- a link into editor-writable state
+would otherwise still be a live file at build time.
+*/
+/// <reference types="node" />
 import {
-  copyFileSync,
-  existsSync,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
   mkdirSync,
-  readdirSync,
   rmSync,
-  statSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+  existsSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { isWithin } from "./utils.ts";
 
 /** Owner only. Anything able to write here can swap a validated spec for an
  *  unvalidated one after the check has passed. */
 export const SNAPSHOT_DIRECTORY_MODE = 0o700 as const;
 
-/** A symlink cycle inside .devcontainer would otherwise recurse forever. Far
- *  above any real spec directory, so hitting it means something is wrong. */
-const MAX_DEPTH = 32;
+export class ContainmentError extends Error {}
+
+const fail = (message: string): never => {
+  throw new ContainmentError(message);
+};
+
+/** Describe a path the way the person who wrote the symlink would recognise it. */
+const describe = (root: string, path: string) => relative(root, path) || ".";
 
 /**
- * Copy `from` to `to`, reading THROUGH every symlink on the way.
+ * Resolve `target` and refuse it unless it lands inside `root`.
  *
- * Not `fs.cpSync(..., { dereference: true })`, which is what this used to be
- * and which does not do it. A symlink inside the copied tree is reproduced in
- * the destination AS A SYMLINK, still pointing at the original, so the copy is
- * not a copy: `.devcontainer/devcontainer.json` as a link to a file the project
- * can rewrite left the policy validating one document and `devcontainer up`
- * reading whatever replaced it -- the exact attack the snapshot exists to stop.
- *
- * WHY it does not do it, because "cpSync is broken" is not a maintainable note.
- * `lib/internal/fs/cp/cp-sync.js` has two implementations of copyDir:
- *
- *     function copyDir(src, dest, opts, mkDir, srcMode) {
- *       if (!opts.filter) {
- *         return fsBinding.cpSyncCopyDir(src, dest, opts.force, opts.dereference, ...);
- *       }
- *       ... JS walk, calling getStats() per entry, which honours dereference ...
- *
- * The JS walk is correct. The C++ fast path ignores `dereference` for directory
- * entries -- and it is the one that runs, because it is selected by the ABSENCE
- * of an unrelated option. Measured on node 24.18 (the version the image pins),
- * `{recursive: true, dereference: true}` keeps nested symlinks while
- * `{recursive: true, dereference: true, filter: () => true}` resolves them.
- *
- * So `filter: () => true` is a working one-line "fix", and it is not used here
- * on purpose: a security boundary that depends on passing a no-op filter to
- * select a differently-behaved code path is one upstream can take away without
- * ever touching a documented API. tests/unit/broker/snapshot.test.ts pins the
- * node behaviour itself, so if this is fixed upstream we are told.
- *
- * `cp -RL` and `rsync -aL` both dereference correctly and were the alternative;
- * see the note in that test file for why this walk was preferred.
- *
- * `statSync` follows links, so a link to a directory is walked as a directory
- * and `copyFileSync` reads a link's TARGET into a fresh regular file.
- *
- * @throws on a broken link, a cycle, or anything that is not a regular file or
- * directory -- all of which are refusals, not copies. A spec we cannot freeze
- * is a spec we cannot honestly claim to have validated.
+ * `root` must already be a real path -- resolving it here on every call would
+ * hide the case where the project directory ITSELF is a link.
  */
-export const copyDereferenced = (from: string, to: string, depth = 0): void => {
-  if (depth > MAX_DEPTH)
-    throw new Error(
-      `refusing to snapshot ${from}: more than ${MAX_DEPTH} levels deep ` +
-        `(a symlink cycle inside .devcontainer?)`,
-    );
-
-  let stats: ReturnType<typeof statSync>;
+export const resolveWithin = (root: string, target: string): string => {
+  let real: string;
   try {
-    stats = statSync(from);
-  } catch (err: any) {
-    throw new Error(
-      `refusing to snapshot ${from}: ${err?.code ?? err?.message ?? err} ` +
-        `(a symlink pointing nowhere, or a path we cannot read)`,
+    real = realpathSync(target);
+  } catch {
+    return fail(
+      `refusing to snapshot '${describe(root, target)}': it cannot be resolved ` +
+        `-- a broken symlink, or one whose target was removed while the spec ` +
+        `was being snapshotted`,
     );
   }
-
-  if (stats.isDirectory()) {
-    mkdirSync(to, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
-    for (const entry of readdirSync(from))
-      copyDereferenced(join(from, entry), join(to, entry), depth + 1);
-    return;
-  }
-
-  if (!stats.isFile())
-    throw new Error(
-      `refusing to snapshot ${from}: not a regular file or directory`,
+  if (!isWithin(root, real))
+    return fail(
+      `refusing to snapshot '${describe(root, target)}': it resolves to ` +
+        `'${real}', which is outside '${root}'. A devcontainer config may only ` +
+        `reference files within its own project -- this copy is made in the ` +
+        `orchestrator, which holds the inner Docker socket, so following a link ` +
+        `out of the project reads a file on the project's behalf that the ` +
+        `project cannot reach itself`,
     );
+  return real;
+};
 
-  copyFileSync(from, to);
+/**
+ * Copy one already-resolved regular file.
+ *
+ * O_NOFOLLOW closes the gap between resolving a link and reading what it
+ * pointed at. `real` was not a symlink when realpath returned it, and the
+ * editor can write /workspaces at any moment, so if it IS one by the time this
+ * opens it, the tree changed underneath the check and the copy is refused
+ * rather than followed.
+ */
+const copyFile = (root: string, real: string, destination: string) => {
+  let descriptor: number;
+  try {
+    descriptor = openSync(real, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return fail(
+      `'${describe(root, real)}' could not be read as a plain file -- it ` +
+        `changed while the spec was being snapshotted`,
+    );
+  }
+  try {
+    const stats = fstatSync(descriptor);
+    if (!stats.isFile())
+      fail(`'${describe(root, real)}' is not a regular file`);
+    // mode: a build context can legitimately carry executable scripts, and cp
+    // preserved that. Ownership deliberately does not follow -- the snapshot
+    // belongs to the orchestrator.
+    writeFileSync(destination, readFileSync(descriptor), {
+      mode: stats.mode & 0o777,
+    });
+  } finally {
+    closeSync(descriptor);
+  }
+};
+
+const copyTree = (
+  root: string,
+  from: string,
+  to: string,
+  visited: Set<string>,
+) => {
+  mkdirSync(to, { recursive: true, mode: 0o700 });
+
+  for (const entry of readdirSync(from, { withFileTypes: true })) {
+    const source = join(from, entry.name);
+    const destination = join(to, entry.name);
+
+    // Dirent reports on the LINK, never on what it points at, which is what
+    // makes the three cases below distinguishable at all.
+    if (entry.isSymbolicLink()) {
+      const real = resolveWithin(root, source);
+      if (lstatSync(real).isDirectory()) {
+        // Only a link can produce a cycle; a real directory cannot contain
+        // itself. Without this, `.devcontainer/self -> .` recurses until the
+        // path is too long to open, and the failure names neither the link nor
+        // the project.
+        if (visited.has(real))
+          fail(
+            `'${describe(root, source)}' points at '${describe(root, real)}', ` +
+              `which is already being copied -- the config directory contains a ` +
+              `symlink cycle`,
+          );
+        visited.add(real);
+        copyTree(root, real, destination, visited);
+      } else {
+        copyFile(root, real, destination);
+      }
+      continue;
+    }
+
+    if (entry.isDirectory()) {
+      copyTree(root, source, destination, visited);
+      continue;
+    }
+
+    if (entry.isFile()) {
+      copyFile(root, source, destination);
+      continue;
+    }
+
+    fail(
+      `'${describe(root, source)}' is neither a file, a directory, nor a ` +
+        `symlink to one, so it cannot be snapshotted`,
+    );
+  }
+};
+
+/**
+ * Copy `from` (a directory inside `root`) to `to`, dereferencing every symlink
+ * that stays inside `root` and refusing every one that does not.
+ *
+ * @param root the project directory; the containment boundary
+ * @param from the directory to copy (`root` itself, or below it)
+ * @param to   where the copy lands -- outside `root`, and not editor-writable
+ * @throws ContainmentError naming the offending path
+ */
+export const snapshotDirectory = (root: string, from: string, to: string) => {
+  const base = realpathSync(root);
+  const source = resolveWithin(base, from);
+  copyTree(base, source, to, new Set([source]));
+};
+
+/**
+ * The single-file case (`.devcontainer.json` in the project root), under the
+ * same rule: the file may be a link, but not one that leaves the project.
+ * @throws ContainmentError naming the offending path
+ */
+export const snapshotFile = (root: string, from: string, to: string) => {
+  const base = realpathSync(root);
+  copyFile(base, resolveWithin(base, from), to);
+};
+
+/**
+ * Wipe rather than reuse: a spec left by a previous run was validated against a
+ * /workspaces that may since have gained or lost projects, which changes who
+ * owns a volume namespace.
+ * @param location
+ */
+export const initDirectory = (location: string) => {
+  rmSync(location, { recursive: true, force: true });
+  mkdirSync(location, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
 };
 
 export interface SnapshotOptions {
@@ -134,25 +216,20 @@ export const snapshot = (
   mkdirSync(dest, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
 
   if (existsSync(join(dotDir, "devcontainer.json"))) {
-    copyDereferenced(dotDir, dest);
+    // The whole directory, not just the json: it is the record of what was
+    // approved. Symlinks are dereferenced, because one into editor-writable
+    // state would still be a live file afterwards -- and refused when they
+    // leave the project, because this copy is made in the orchestrator, where
+    // `.devcontainer/key -> /root/.ssh/id_ed25519` is a file it can read and
+    // the project cannot.
+    snapshotDirectory(base, dotDir, dest);
     const file = join(dest, "devcontainer.json");
     if (!existsSync(file)) throw new Error("no devcontainer.json in project");
     return file;
   }
   if (existsSync(flat)) {
-    copyFileSync(flat, join(dest, "devcontainer.json"));
+    snapshotFile(base, flat, join(dest, "devcontainer.json"));
     return join(dest, "devcontainer.json");
   }
   throw new Error("no devcontainer.json in project");
-};
-
-/**
- * Wipe rather than reuse: a spec left by a previous run was validated against a
- * /workspaces that may since have gained or lost projects, which changes who
- * owns a volume namespace.
- * @param location
- */
-export const initDirectory = (location: string) => {
-  rmSync(location, { recursive: true, force: true });
-  mkdirSync(location, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
 };
