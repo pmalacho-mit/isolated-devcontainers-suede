@@ -45,7 +45,7 @@ The name is `desolate` = **de**v + i**solate**.
 ```
 
 **One** host-reachable surface, loopback-only: `3000` by default (`VSCODE_PORT`),
-the editor, token-gated. (Plus the dev-server range, 8080-8090 by default, once a
+the editor, token-gated. (Plus the dev-server range, 8080-8119 by default, once a
 project is running.)
 
 There is deliberately no network path to the inner Docker daemon.
@@ -374,7 +374,7 @@ proxy can only do its job if containers trust its certificate. That's what the
 publisher is for, and it's why a devcontainer that skips installing the CA gets
 TLS errors.
 
-Your own dev servers (ports 8080-8090 by default) are deliberately left out of
+Your own dev servers (ports 8080-8119 by default) are deliberately left out of
 all this -- that range belongs to your projects.
 
 > [!NOTE]
@@ -470,6 +470,9 @@ the rules would go stale again each time.
 ./cli.sh repo add owner/repo    # per-repo deploy key (in-container) + clone
                                 # -> /workspaces/owner/repo
 ./cli.sh desolate owner/repo    # open it
+./cli.sh worktree add owner/repo wip     # a second branch, in its own devcontainer
+./cli.sh worktree list owner/repo
+./cli.sh worktree remove owner/repo wip
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
 ./cli.sh down                   # stop (down -v also deletes volumes; confirms)
@@ -757,7 +760,7 @@ collide):
 "customizations": { "desolate": { "ports": [5173] } }
 ```
 
-`desolate` allocates a free host port from **8080-8090** at start, remembers it
+`desolate` allocates a free host port from **8080-8119** at start, remembers it
 per project (stable URLs across restarts), and forwards it via a socat relay.
 Start your dev server bound to `0.0.0.0` (e.g. `npx vite --host 0.0.0.0`); the
 URL `desolate` printed answers once the server is up. Do **not** put `appPort`
@@ -966,12 +969,14 @@ container outside `/workspaces` -- packages installed ad hoc, a local database.
 
 ### Changing the range
 
-8080-8090 is the default, not a constant. Set both bounds in the `.env` next to
-`docker-compose.yml` and restart:
+8080-8119 is the default, not a constant. Forty ports sounds generous until you
+count: every target takes one for its editor before it asks for a single dev
+server, and a project's worktrees are targets of their own. Set both bounds in
+the `.env` next to `docker-compose.yml` and restart:
 
 ```bash
 DESOLATE_PORT_MIN=8080
-DESOLATE_PORT_MAX=8120
+DESOLATE_PORT_MAX=8159
 ```
 
 ```bash
@@ -999,7 +1004,8 @@ The usual cause is simply too many projects at once -- `desolate --stop <other>`
 frees a port immediately. The other cause is worth knowing: relay containers run
 with `restart: unless-stopped`, so if a project's devcontainer is deleted by
 hand rather than through `desolate --stop`, its relays survive and keep holding
-their ports. `./cli.sh observe ps` lists them as `desolate-relay-<project>-<port>`.
+their ports. `./cli.sh observe ps` lists them as `desolate-relay-<project>-<port>`,
+or `desolate-relay-<project>--wt--<worktree>-<port>` for a worktree.
 
 ## How projects are laid out
 
@@ -1070,6 +1076,88 @@ otherwise share one volume. Name it explicitly instead:
 ```
 
 The error message says this, including the exact name to use.
+
+## Worktrees: several branches of one repo at once
+
+A project may carry **worktrees** -- checkouts of other branches, each running in
+its own devcontainer with its own editor, ports and volumes:
+
+```bash
+./cli.sh worktree add pmalacho-mit/suede wip          # branch 'wip'; add a ref to differ
+./cli.sh worktree add pmalacho-mit/suede fix 'hotfix/123'
+./cli.sh desolate pmalacho-mit/suede --worktree wip   # opens it; creates it if absent
+./cli.sh worktree list pmalacho-mit/suede
+./cli.sh worktree remove pmalacho-mit/suede wip       # stop it first
+```
+
+They live in a fixed, dot-prefixed place, so they can never be mistaken for
+projects of their own:
+
+```
+/workspaces/pmalacho-mit/suede/                  <- the project; open it as usual
+/workspaces/pmalacho-mit/suede/.worktrees/wip/   <- a worktree, opened with --worktree wip
+```
+
+⚠️ **Worktrees are parallelism, not a boundary.** A worktree is isolated from
+every *other project*, exactly as before. It is **not** isolated from its
+project or from a sibling worktree: git shares `.git/config` and `.git/hooks`
+across all of them, both are executable configuration, and both are writable
+from inside any of them. So a compromised worktree reaches its siblings, the
+main tree, and the editor. If two branches must not reach each other, clone the
+repo twice -- two projects are a real boundary; two worktrees are not.
+
+### What you will notice
+
+- **The root tree stays on `main`.** Git enforces this itself: `git worktree add`
+  refuses a branch that is already checked out somewhere, with
+  `fatal: 'main' is already used by worktree at ...`. That message is surfaced
+  as-is, because it is clearer than anything worth wrapping it in.
+- **`--worktree` names a directory, not a branch.** One path segment,
+  `[A-Za-z0-9._-]`, starting alphanumeric. Branches may contain `/`; docker
+  object names may not, so the directory is what gets encoded. Pass the branch
+  separately if it differs.
+- **The main tree does not show `.worktrees`.** Its container gets an empty
+  tmpfs there, so one filename means one file in that editor. This happens only
+  once every worktree is *locked* (see below) -- if you created one by hand with
+  plain `git worktree add`, the directory stays visible instead, which is the
+  safe direction. Like every other mount, it is decided when the container is
+  created, so a project already running when you add your first worktree needs
+  `desolate --rebuild <project>` before the mask appears.
+- **`git worktree list` inside a worktree names paths that are not there.** Its
+  siblings and the main tree are not mounted in that container. They are locked,
+  so nothing prunes them; the output is just confusing.
+
+### Why every desolate worktree is locked
+
+`git worktree lock` marks a worktree exempt from pruning, and desolate applies
+it at creation. Without it this feature would quietly destroy work: a worktree
+whose directory is missing counts as *prunable*, and pruning deletes the admin
+directory that holds its HEAD, index and refs -- so the directory can come back
+and git still cannot open it. Hiding `.worktrees` from the main tree is exactly
+what makes them look missing there. The mask and the lock ship together, and the
+mask is skipped when the lock is not there.
+
+Two things prune, on different clocks (measured on git 2.51): `git worktree
+prune` acts immediately, and `gc` -- including the `gc.auto` that fires on
+ordinary commands like `commit` -- acts once `gc.worktreePruneExpire` has
+passed, three months by default. So the unlocked version of this feature fails
+either the first time somebody prunes by hand or, silently, a quarter later.
+
+`cli.sh worktree remove` unlocks and removes in one step, after removing the
+target's container, relays, volumes and saved state.
+
+### Names
+
+A worktree is written `owner/repo@name` wherever a target is printed, and
+encoded as `owner__repo--wt--name` in docker object names -- the same trick as
+`/` -> `__`, one level down. Both sequences are therefore **forbidden inside
+project and worktree names**: without that, a project literally called
+`owner__repo--wt--name` would claim a worktree's volume namespace. Such a
+directory is refused when you try to start it and left out of the list that
+decides who owns a volume, so it can only ever refuse itself.
+
+A project with no worktree is named exactly as it always was. Nothing about an
+existing stack moves.
 
 ## Secrets: placeholders in, real values never
 
@@ -1464,7 +1552,7 @@ machine.
 | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
 | `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. Must sit **outside** `DESOLATE_PORT_MIN..MAX` -- dind publishes that whole range, and `cli.sh up` refuses a collision. |
-| `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8090` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else.                   |
+| `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8119` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else.                   |
 | `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |
 | `DESOLATE_SKIP_VM_CHECK`     | unset           | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
 

@@ -565,6 +565,121 @@ describe("request-level validation", () => {
 });
 
 // ===========================================================================
+describe("worktrees are targets of their own", () => {
+  // ===========================================================================
+  // The broker never creates one -- `git worktree add` fires the repository's
+  // hooks and this process holds the inner Docker socket. It only has to route
+  // an existing one correctly, and refuse every name that is not one.
+
+  const worktreeSpec = (name: string) => {
+    const dir = path.join(
+      workspaces, "acme", "widgets", ".worktrees", name, ".devcontainer",
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const own = path.join(workspaces, "acme", "widgets", ".worktrees", name);
+    fs.writeFileSync(
+      path.join(dir, "devcontainer.json"),
+      JSON.stringify({
+        image: "alpine:3",
+        workspaceFolder: own,
+        workspaceMount: `source=${own},target=${own},type=bind`,
+      }),
+    );
+    return own;
+  };
+
+  test("a worktree reaches the runner, named on the command line", async () => {
+    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
+    worktreeSpec("feature123");
+    resetRunner();
+
+    const msgs = await ask({
+      op: "start", project: "acme/widgets", worktree: "feature123",
+    });
+    assert.equal(result(msgs).ok, true, errorOf(msgs));
+
+    const [argv] = runnerInvocations();
+    assert.ok(argv, "the runner was never invoked");
+    assert.deepEqual(argv.slice(-3), [
+      "--worktree", "feature123", "acme/widgets",
+    ]);
+  });
+
+  test("its spec is read from the WORKTREE, not from the project", async () => {
+    // Each branch is developed with the devcontainer.json on that branch. A
+    // broker that snapshotted the project root would validate one file and
+    // start another.
+    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
+    worktreeSpec("feature123");
+    resetRunner();
+
+    await ask({ op: "start", project: "acme/widgets", worktree: "feature123" });
+    const config = runnerInvocations()[0]?.[
+      runnerInvocations()[0].indexOf("--config") + 1
+    ];
+    assert.ok(config, "no --config was passed");
+    const frozen = JSON.parse(fs.readFileSync(config, "utf8"));
+    assert.match(String(frozen.workspaceFolder), /\.worktrees\/feature123$/);
+  });
+
+  test("a worktree that is not there is refused, never created", async () => {
+    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
+    const msgs = await ask({
+      op: "start", project: "acme/widgets", worktree: "ghost",
+    });
+    assert.equal(result(msgs).ok, false, "a missing worktree was accepted");
+    assert.match(errorOf(msgs), /missing/);
+    assert.equal(
+      fs.existsSync(path.join(workspaces, "acme/widgets/.worktrees/ghost")),
+      false,
+      "the broker created a worktree",
+    );
+    assert.deepEqual(runnerInvocations(), []);
+  });
+
+  test("a name that is not one path segment is refused", async () => {
+    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
+    for (const worktree of ["../..", "a/b", ".hidden", "a--wt--b", "-x"]) {
+      resetRunner();
+      const msgs = await ask({ op: "start", project: "acme/widgets", worktree });
+      assert.equal(result(msgs).ok, false, `worktree '${worktree}' accepted`);
+      assert.deepEqual(runnerInvocations(), [], worktree);
+    }
+  });
+
+  test("a symlinked worktree pointing elsewhere is refused", async () => {
+    // The same realpath rule the project name has always had, one level down:
+    // a legally-named link is still not the directory it claims to be.
+    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
+    project("other/repo", JSON.stringify({ image: "alpine:3" }));
+    const worktrees = path.join(workspaces, "acme/widgets/.worktrees");
+    fs.mkdirSync(worktrees, { recursive: true });
+    fs.symlinkSync(
+      path.join(workspaces, "other/repo"),
+      path.join(worktrees, "elsewhere"),
+    );
+    resetRunner();
+
+    const msgs = await ask({
+      op: "start", project: "acme/widgets", worktree: "elsewhere",
+    });
+    assert.equal(result(msgs).ok, false, "a symlinked worktree was accepted");
+    assert.deepEqual(runnerInvocations(), []);
+  });
+
+  test("list names worktrees in the form you would type back", async () => {
+    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
+    worktreeSpec("feature123");
+    const msgs = await ask({ op: "list" });
+    assert.ok(
+      result(msgs).projects.includes("acme/widgets@feature123"),
+      `${result(msgs).projects}`,
+    );
+  });
+});
+
+// ===========================================================================
 describe("a legitimate project starts, from a frozen copy", () => {
   // ===========================================================================
 

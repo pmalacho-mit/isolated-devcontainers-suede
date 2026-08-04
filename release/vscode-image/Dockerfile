@@ -192,10 +192,14 @@ COPY --chown=1000:1000 *.ts /usr/local/lib/desolate/
 #   desolate      (vscode)       -> broker client over the unix socket
 #   desolate-run  (orchestrator) -> the real thing; useless without the socket
 #   newrepo       (vscode)       -> git only, no daemon access needed
+#   worktree      (vscode)       -> git only, and git ONLY belongs here: it obeys
+#                                   the project's own config and hooks, which the
+#                                   orchestrator must never execute
 RUN printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/desolate-client.ts "$@"\n' > /usr/local/bin/desolate \
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/desolate.ts "$@"\n' > /usr/local/bin/desolate-run \
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/newrepo.ts "$@"\n' > /usr/local/bin/newrepo \
-  && chmod +x /usr/local/bin/desolate /usr/local/bin/desolate-run /usr/local/bin/newrepo
+  && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/worktrees.ts "$@"\n' > /usr/local/bin/worktree \
+  && chmod +x /usr/local/bin/desolate /usr/local/bin/desolate-run /usr/local/bin/newrepo /usr/local/bin/worktree
 
 # Optional: pre-bake pinned extensions from Open VSX instead of letting the
 # running editor pull them ad hoc. Example:

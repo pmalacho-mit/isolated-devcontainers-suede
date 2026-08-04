@@ -23,6 +23,7 @@ import {
   existsSync,
 } from "node:fs";
 import { join, relative } from "node:path";
+import type { Target } from "./projects.ts";
 import { isWithin } from "./utils.ts";
 
 /** Owner only. Anything able to write here can swap a validated spec for an
@@ -189,28 +190,30 @@ export const initDirectory = (location: string) => {
 };
 
 export interface SnapshotOptions {
-  /** Where projects live -- `/workspaces` in production. */
-  workspaces: string;
   /** Root the snapshot is written under. Must NOT be in any volume the editor
    *  mounts, and must be on the orchestrator's own filesystem. */
   specs: string;
 }
 
 /**
- * Copy `project`'s devcontainer spec into `specs/<project>` and return the path
- * to the snapshotted devcontainer.json.
+ * Copy this target's devcontainer spec into `specs/<namespace>` and return the
+ * path to the snapshotted devcontainer.json.
  *
- * @throws if the project carries no devcontainer.json in either layout.
+ * The spec is read from the target's OWN directory, which for a worktree is not
+ * its project's: each branch carries the devcontainer.json it is developed
+ * with. The namespace is what keeps two of them from landing on one copy.
+ *
+ * @throws if the target carries no devcontainer.json in either layout.
  */
 export const snapshot = (
-  project: string,
-  { workspaces, specs }: SnapshotOptions,
+  target: Target,
+  { specs }: SnapshotOptions,
 ): string => {
-  const base = join(workspaces, project);
+  const base = target.dir;
   const dotDir = join(base, ".devcontainer");
   const flat = join(base, ".devcontainer.json");
 
-  const dest = join(specs, project);
+  const dest = join(specs, target.namespace);
   rmSync(dest, { recursive: true, force: true });
   mkdirSync(dest, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
 

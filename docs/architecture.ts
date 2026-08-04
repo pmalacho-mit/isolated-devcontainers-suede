@@ -37,7 +37,7 @@ type EditorPort = {
 
 /** The second surface, and only once a project is running. */
 type DevServerPorts = {
-  range: "8080-8090";
+  range: "8080-8119";
   allocated: "one per declared port";
 };
 

@@ -20,6 +20,10 @@ import {
   type PortWorld,
 } from "../../../release/vscode-image/ports.ts";
 import * as relay from "../../../release/vscode-image/relays.ts";
+import { target } from "../../../release/vscode-image/projects.ts";
+
+/** The target a name denotes, in the default workspace. */
+const named = (project: string) => target("/workspaces", project);
 
 /** Run `fn`, returning the error it threw. Fails the test if it did not throw. */
 const thrown = (fn: () => unknown): Error => {
@@ -41,14 +45,14 @@ const world = (over: Partial<PortWorld> = {}): PortWorld => ({
 
 describe("portRange", () => {
   test("defaults match the range dind publishes", () => {
-    assert.deepEqual(portRange({}), { min: 8080, max: 8090 });
+    assert.deepEqual(portRange({}), { min: 8080, max: 8119 });
   });
 
   test("an empty string is absent, not zero", () => {
     // `DESOLATE_PORT_MIN=` in a .env is how a variable gets unset by accident.
     assert.deepEqual(portRange({ DESOLATE_PORT_MIN: "" }), {
       min: 8080,
-      max: 8090,
+      max: 8119,
     });
   });
 
@@ -130,12 +134,42 @@ describe("allocatePorts", () => {
     const map = allocatePorts(
       world({
         previous: new Map([["editor", 8085]]),
-        published: new Map([[8085, relay.name("myapp", 8085)]]),
+        published: new Map([[8085, relay.name(named("myapp"), 8085)]]),
         ownRelayPorts: new Set([8085]),
       }),
       [],
     );
     assert.equal(map.get("editor"), 8085);
+  });
+
+  test("two worktrees of one project each keep their own stable port", () => {
+    // They allocate independently, from saved maps of their own, so the only
+    // thing stopping them fighting over one port is that each sees the other's
+    // relay as published -- and recognises only ITS OWN as reusable.
+    const project = target("/workspaces", "acme/widgets");
+    const feature = target("/workspaces", "acme/widgets", "feature123");
+    const other = target("/workspaces", "acme/widgets", "other");
+
+    const running = new Map([
+      [8080, relay.name(project, 8080)],
+      [8081, relay.name(feature, 8081)],
+      [8082, relay.name(other, 8082)],
+    ]);
+
+    for (const [held, target] of [
+      [8081, feature],
+      [8082, other],
+    ] as const) {
+      const map = allocatePorts(
+        world({
+          published: running,
+          previous: new Map([["editor", held]]),
+          ownRelayPorts: ownRelayPorts([relay.name(target, held)]),
+        }),
+        [],
+      );
+      assert.equal(map.get("editor"), held, target.name);
+    }
   });
 
   test("ports in use by other containers are skipped", () => {
@@ -242,12 +276,12 @@ describe("relay names carry the host port back", () => {
   test("compose and decompose agree", () => {
     for (const project of ["myapp", "owner/repo"])
       for (const port of [8080, 65535])
-        assert.equal(relay.hostPort(relay.name(project, port)), port);
+        assert.equal(relay.hostPort(relay.name(named(project), port)), port);
   });
 
   test("a nested project's slash does not break the port suffix", () => {
     assert.equal(
-      relay.name("owner/repo", 8080),
+      relay.name(named("owner/repo"), 8080),
       "desolate-relay-owner__repo-8080",
     );
     assert.equal(relay.hostPort("desolate-relay-owner__repo-8080"), 8080);
@@ -266,9 +300,9 @@ describe("relay names carry the host port back", () => {
 
   test("ownRelayPorts drops anything unparseable", () => {
     const ports = ownRelayPorts([
-      relay.name("myapp", 8080),
+      relay.name(named("myapp"), 8080),
       "desolate-relay-myapp",
-      relay.name("myapp", 8081),
+      relay.name(named("myapp"), 8081),
     ]);
     assert.deepEqual([...ports].sort(), [8080, 8081]);
   });

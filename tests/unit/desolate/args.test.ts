@@ -27,6 +27,7 @@ describe("parseArgs", () => {
     assert.deepEqual(parse("myapp"), {
       command: "run",
       project: "myapp",
+      worktree: undefined,
       config: undefined,
       rebuild: false,
       noCache: false,

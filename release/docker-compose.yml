@@ -144,10 +144,10 @@ services:
       #   (joined to the devcontainer's network) -> devcontainer bridge IP.
       # Widen the range in .env with the following variables:
       #   DESOLATE_PORT_MIN=8080
-      #   DESOLATE_PORT_MAX=8120
+      #   DESOLATE_PORT_MAX=8159
       # The SAME two variables are handed to the orchestrator, which is what
       # desolate.ts allocates from. Do NOT hardcode either side.
-      - "127.0.0.1:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8090}:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8090}"
+      - "127.0.0.1:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8119}:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8119}"
     # NOT devnet. dind is the container world; devnet is the editor world.
     networks: [dindnet]
     restart: unless-stopped
@@ -171,7 +171,7 @@ services:
       # The range desolate.ts allocates relay ports from. MUST be the same two
       # variables dind publishes above.
       DESOLATE_PORT_MIN: ${DESOLATE_PORT_MIN:-8080}
-      DESOLATE_PORT_MAX: ${DESOLATE_PORT_MAX:-8090}
+      DESOLATE_PORT_MAX: ${DESOLATE_PORT_MAX:-8119}
     entrypoint: ["/usr/local/bin/with-ca", "tsx", "/usr/local/lib/desolate/broker.ts"]
     volumes:
       - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)

@@ -9,6 +9,8 @@
 #   ./isolated-devcontainers-suede/cli.sh secret list | rm NAME
 #   ./isolated-devcontainers-suede/cli.sh proxy status | logs | test
 #   ./isolated-devcontainers-suede/cli.sh repo add owner/repo       # per-repo deploy key + clone
+#   ./isolated-devcontainers-suede/cli.sh worktree add owner/repo wip   # a branch in its own devcontainer
+#   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh <any command...>          # runs in the editor container
@@ -23,7 +25,7 @@ COLIMA_PROFILE="${COLIMA_PROFILE:-desolate}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 usage() {
-  sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -346,7 +348,7 @@ require_free_vscode_port() {
   local port min max
   port=$(vscode_port)
   min=$(env_value DESOLATE_PORT_MIN); min=${min:-8080}
-  max=$(env_value DESOLATE_PORT_MAX); max=${max:-8090}
+  max=$(env_value DESOLATE_PORT_MAX); max=${max:-8119}
   case "$port" in
     ''|*[!0-9]*)
       echo "cli.sh: VSCODE_PORT='$port' is not a port number (1-65535)" >&2; exit 1 ;;
@@ -635,6 +637,27 @@ case "$CMD" in
                  echo "Next: ./cli.sh desolate ${OR%%/*}/$AL" ;;
                status) docker exec "$CONTAINER" newrepo status ;;
                *) echo "usage: cli.sh repo {add owner/repo [alias] | status}" >&2; exit 1 ;;
+             esac ;;
+
+  worktree)  ensure_running
+             # `git worktree add` fires the repository's own hooks, so it runs
+             # in the EDITOR container, which already executes project content.
+             # The orchestrator holds the inner Docker socket and must never.
+             SUB="${1:-list}"; shift || true
+             case "$SUB" in
+               list|add)
+                 exec docker exec "${TTY[@]}" "$CONTAINER" worktree "$SUB" "$@" ;;
+               remove)
+                 PROJ="${1:?usage: cli.sh worktree remove <project> <name>}"
+                 NAME="${2:?usage: cli.sh worktree remove <project> <name>}"
+                 # Order matters and neither half can do the other's job: the
+                 # container and its volumes live on the inner daemon (the
+                 # orchestrator's side), the worktree itself is git (the
+                 # editor's side). Purge first -- once git has removed the
+                 # directory there is nothing left to identify the container by.
+                 docker exec "$ORCHESTRATOR" desolate-run --purge --worktree "$NAME" "$PROJ" || exit 1
+                 exec docker exec "${TTY[@]}" "$CONTAINER" worktree remove "$PROJ" "$NAME" ;;
+               *) echo "usage: cli.sh worktree {list <project>|add <project> <name> [<branch>]|remove <project> <name>}" >&2; exit 1 ;;
              esac ;;
 
   desolate)  ensure_running

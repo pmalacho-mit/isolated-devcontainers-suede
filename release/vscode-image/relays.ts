@@ -6,13 +6,13 @@
  * form other code reads back, so composing and decomposing it must be one pair
  * of functions rather than a template literal in each caller.
  */
-import { volumeNamespace } from "./projects.ts";
+import type { Target } from "./projects.ts";
 
 const PREFIX = "desolate-relay";
 export const IMAGE = "alpine/socat";
 
-export const name = (project: string, hostPort: number) =>
-  `${PREFIX}-${volumeNamespace(project)}-${hostPort}`;
+export const name = ({ namespace }: Target, hostPort: number) =>
+  `${PREFIX}-${namespace}-${hostPort}`;
 
 /** The host port a relay name encodes, or undefined if it encodes none.
  *
@@ -24,5 +24,9 @@ export const hostPort = (name: string): number | undefined => {
   return /^\d+$/.test(trailing) ? Number(trailing) : undefined;
 };
 
-/** Matches every relay of one project, and no other container. */
-export const label = (project: string) => `desolate.relay=${project}`;
+/** Matches every relay of one target, and no other container.
+ *
+ *  The label value is the target's WRITTEN name, not its namespace: label
+ *  values are unconstrained, and `acme/widgets@feature123` is what the user
+ *  would type to stop it. */
+export const label = (target: Target) => `desolate.relay=${target.name}`;
