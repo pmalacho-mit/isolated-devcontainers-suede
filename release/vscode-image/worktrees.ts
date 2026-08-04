@@ -33,7 +33,7 @@ import {
   mkdirSync,
   readFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   WORKTREES_DIRECTORY,
   target as resolveTarget,
@@ -55,14 +55,47 @@ export const LOCK_REASON =
 
 const gitDirectory = ({ projectDir }: Target) => join(projectDir, ".git");
 
-/** The file `git worktree lock` writes.
+/**
+ * The admin directory git keeps this worktree's HEAD, index and lock in.
  *
- *  Read rather than asked of git, because the orchestrator needs the answer and
- *  running git there would execute the project's own config and hooks. */
-const lockFile = (worktree: Target) =>
-  join(gitDirectory(worktree), "worktrees", worktree.worktree!, "locked");
+ * Taken from the worktree's own `.git` FILE, which names it outright, rather
+ * than rebuilt from the worktree's directory name -- git does not promise the
+ * two match. Two worktrees whose directories share a basename get `<name>` and
+ * `<name>1`, and which gets which depends on the order they were created:
+ *
+ *   .worktrees/wip   -> .git/worktrees/wip1     (this one, created second)
+ *   elsewhere/wip    -> .git/worktrees/wip      (made outside desolate)
+ *
+ * Rebuilding the path there reads a STRANGER's lock, and in one direction that
+ * is not fail-safe: a locked foreign `wip` would report an unlocked
+ * `.worktrees/wip` as locked, the mask would go on, and the prune the lock
+ * exists to prevent would take it.
+ *
+ * "" when there is no readable `.git` file -- a root target, or a worktree that
+ * is not one. Every caller treats that as NOT locked.
+ */
+const adminDirectory = (worktree: Target) => {
+  let pointer: string;
+  try {
+    pointer = readFileSync(join(worktree.dir, ".git"), "utf8");
+  } catch {
+    return "";
+  }
+  const named = /^gitdir:\s*(.+?)\s*$/m.exec(pointer)?.[1];
+  // git writes it absolute; resolving against the worktree covers a hand-edited
+  // relative one without letting it land wherever the cwd happens to be.
+  return named ? resolve(worktree.dir, named) : "";
+};
 
-export const isLocked = (worktree: Target) => existsSync(lockFile(worktree));
+/** Is this worktree exempt from pruning?
+ *
+ *  Asked of the filesystem rather than of git, because the orchestrator needs
+ *  the answer and running git there would execute the project's own config and
+ *  hooks. */
+export const isLocked = (worktree: Target) => {
+  const admin = adminDirectory(worktree);
+  return admin !== "" && existsSync(join(admin, "locked"));
+};
 
 /**
  * A worktree's container has to see the project's `.git` at one absolute path,

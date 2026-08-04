@@ -16,6 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { target } from "../../../release/vscode-image/projects.ts";
+import { isLocked, unlocked } from "../../../release/vscode-image/worktrees.ts";
+
 const COMMAND = fileURLToPath(
   new URL("../../../release/vscode-image/worktrees.ts", import.meta.url),
 );
@@ -156,6 +159,42 @@ describe("the lock is what survives a prune", () => {
     assert.throws(() =>
       git(join(box.dir, ".worktrees", "loose"), "status", "--porcelain"),
     );
+  });
+});
+
+describe("which admin directory belongs to which worktree", () => {
+  test("git disambiguates colliding basenames, and isLocked follows it", () => {
+    // The layout the orchestrator's mask decision rests on. Rebuilding the
+    // admin path from the worktree's NAME reads a stranger's lock here, and in
+    // this direction it is not fail-safe: the foreign `wip` is locked, ours is
+    // not, and a `true` would turn the mask on over a prunable worktree.
+    const box = repository();
+    git(box.dir, "worktree", "add", "-q", "-b", "other", "elsewhere/wip");
+    git(box.dir, "worktree", "add", "-q", "-b", "ours", ".worktrees/wip");
+    git(box.dir, "worktree", "lock", "--reason", "by hand", "elsewhere/wip");
+
+    // Not an assumption -- read back what git actually did.
+    assert.match(
+      fs.readFileSync(join(box.dir, ".worktrees", "wip", ".git"), "utf8"),
+      /worktrees\/wip1$/m,
+      "git stopped disambiguating; the rest of this test proves nothing",
+    );
+    assert.ok(fs.existsSync(join(box.dir, ".git/worktrees/wip/locked")));
+
+    assert.equal(isLocked(target(box.workspaces, "acme/widgets", "wip")), false);
+    assert.deepEqual(
+      unlocked(target(box.workspaces, "acme/widgets")).map(({ name }) => name),
+      ["acme/widgets@wip"],
+    );
+  });
+
+  test("and reports OUR lock as ours, under the suffixed directory", () => {
+    const box = repository();
+    git(box.dir, "worktree", "add", "-q", "-b", "other", "elsewhere/wip");
+    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "wip").ok);
+
+    assert.equal(isLocked(target(box.workspaces, "acme/widgets", "wip")), true);
+    assert.deepEqual(unlocked(target(box.workspaces, "acme/widgets")), []);
   });
 });
 

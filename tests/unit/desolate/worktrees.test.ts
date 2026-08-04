@@ -37,19 +37,37 @@ const sandbox = () => {
     return target(workspaces, name);
   };
 
-  /** A worktree as `git worktree add` leaves it: a directory, plus an admin
-   *  directory under `.git/worktrees` that carries `locked` when it is. */
-  const worktree = (project: string, name: string, { locked = true } = {}) => {
-    fs.mkdirSync(join(workspaces, project, ".worktrees", name), {
-      recursive: true,
-    });
-    const admin = join(workspaces, project, ".git", "worktrees", name);
-    fs.mkdirSync(admin, { recursive: true });
-    if (locked) fs.writeFileSync(join(admin, "locked"), "desolate: ...\n");
+  /** A worktree as `git worktree add` leaves it: a directory whose `.git` is a
+   *  FILE naming an admin directory, and that admin directory.
+   *
+   *  `admin` is separate from `name` because git does not promise they match --
+   *  colliding basenames get `<name>` and `<name>1`. */
+  const worktree = (
+    project: string,
+    name: string,
+    { locked = true, admin = name } = {},
+  ) => {
+    const dir = join(workspaces, project, ".worktrees", name);
+    const adminDir = join(workspaces, project, ".git", "worktrees", admin);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(adminDir, { recursive: true });
+    fs.writeFileSync(join(dir, ".git"), `gitdir: ${adminDir}\n`);
+    if (locked) fs.writeFileSync(join(adminDir, "locked"), "desolate: ...\n");
     return target(workspaces, project, name);
   };
 
-  return { workspaces, project, worktree };
+  /** A worktree of the same project living somewhere OTHER than `.worktrees`,
+   *  which is where a colliding admin directory comes from. */
+  const foreign = (project: string, name: string, { locked = true } = {}) => {
+    const dir = join(workspaces, project, "elsewhere", name);
+    const adminDir = join(workspaces, project, ".git", "worktrees", name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(adminDir, { recursive: true });
+    fs.writeFileSync(join(dir, ".git"), `gitdir: ${adminDir}\n`);
+    if (locked) fs.writeFileSync(join(adminDir, "locked"), "by hand\n");
+  };
+
+  return { workspaces, project, worktree, foreign };
 };
 
 describe("a worktree's container", () => {
@@ -137,5 +155,38 @@ describe("the main tree's view of .worktrees", () => {
 
     assert.equal(isLocked(locked), true);
     assert.equal(isLocked(loose), false);
+  });
+
+  test("a colliding basename does not make a STRANGER's lock ours", () => {
+    // git disambiguates admin directories by suffix, so `.worktrees/wip` can
+    // sit behind `.git/worktrees/wip1` while `.git/worktrees/wip` belongs to a
+    // worktree made by hand somewhere else in the repo. Rebuilding the path
+    // from the name reads that one: the unlocked worktree reports locked, the
+    // mask goes on, and the prune takes it. Which way round the two were
+    // created decides it, so this is a bug you meet once and cannot undo.
+    const box = sandbox();
+    const root = box.project("acme/widgets");
+    box.foreign("acme/widgets", "wip", { locked: true });
+    const ours = box.worktree("acme/widgets", "wip", {
+      locked: false,
+      admin: "wip1",
+    });
+
+    assert.equal(isLocked(ours), false);
+    assert.deepEqual(unlocked(root).map(({ name }) => name), [ours.name]);
+    assert.deepEqual(runArgs(root), []);
+  });
+
+  test("a worktree with no readable .git counts as unlocked", () => {
+    // Fail-safe by construction: an answer we cannot establish must never turn
+    // the mask on. A root target lands here too -- its `.git` is a directory.
+    const box = sandbox();
+    const root = box.project("acme/widgets");
+    const ours = box.worktree("acme/widgets", "wip");
+    fs.rmSync(join(ours.dir, ".git"));
+
+    assert.equal(isLocked(ours), false);
+    assert.equal(isLocked(root), false);
+    assert.deepEqual(runArgs(root), []);
   });
 });
