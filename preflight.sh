@@ -172,11 +172,11 @@ fi
 # variables, so these agree unless a running container predates an .env edit --
 # and the failure mode is silent: the relay starts, the URL just never answers.
 PMIN=$(docker exec desolate-orchestrator printenv DESOLATE_PORT_MIN 2>/dev/null || echo 8080)
-PMAX=$(docker exec desolate-orchestrator printenv DESOLATE_PORT_MAX 2>/dev/null || echo 8090)
+PMAX=$(docker exec desolate-orchestrator printenv DESOLATE_PORT_MAX 2>/dev/null || echo 8119)
 PUB=" $(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}' \
         desolate-dind 2>/dev/null) "
 missing=""
-for p in $(seq "${PMIN:-8080}" "${PMAX:-8090}"); do
+for p in $(seq "${PMIN:-8080}" "${PMAX:-8119}"); do
   case "$PUB" in *" $p "*) ;; *) missing="$missing $p" ;; esac
 done
 if [ -z "$missing" ]; then

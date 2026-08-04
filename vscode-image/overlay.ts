@@ -12,7 +12,7 @@
  * is never writable through the mount is the shape that holds.
  */
 import { SERVER_BIN } from "./editor.ts";
-import { volumeNamespace } from "./projects.ts";
+import type { Target } from "./projects.ts";
 
 /** The pristine editor server on dind's filesystem -- an overlay LOWER only. */
 export const SERVER_SRC = "/server-dist";
@@ -67,15 +67,19 @@ export const SHARED_DIRECTORIES: readonly SharedDirectory[] = [
   },
 ];
 
-/** The volumes one project's view of a shared directory is made of.
+/** The volumes one target's view of a shared directory is made of.
  *
- *  Both names sit inside the project's own policy namespace, so the mounts
- *  desolate injects are ones the project could have asked for itself -- the
- *  policy re-check on the derived spec has to pass them. */
-export const overlayVolumes = (project: string, name: string) => {
-  const namespace = volumeNamespace(project);
-  return { view: `${namespace}-${name}`, data: `${namespace}-${name}-data` };
-};
+ *  Both names sit inside the target's own policy namespace, so the mounts
+ *  desolate injects are ones the target could have asked for itself -- the
+ *  policy re-check on the derived spec has to pass them.
+ *
+ *  A worktree gets its own pair, rather than sharing the project's: the editor
+ *  server is EXECUTED in every container, and a shared writable view would let
+ *  one worktree overwrite the binary its siblings and the main tree run. */
+export const overlayVolumes = ({ namespace }: Target, name: string) => ({
+  view: `${namespace}-${name}`,
+  data: `${namespace}-${name}-data`,
+});
 
 /** The mount options an overlay view of `lower` backed by `data` must have.
  *

@@ -1,13 +1,19 @@
 /**
- * projects.ts -- what counts as a project, and who can claim a volume namespace.
+ * projects.ts -- what counts as a target, and who can claim a volume namespace.
+ *
+ * A TARGET is one directory desolate can start: a project, or one of that
+ * project's worktrees. It is the currency the rest of the stack deals in,
+ * because every docker object and state file is named from its namespace and
+ * nothing else may be.
  *
  * Implications for naming projects:
  * - Only two levels supported:
  *  - projects in the root of /workspaces
  *  - projects nested under a parent (matching the owner/repo layout)
  * - Projects cannot start with a `.`
- * - Usage of `__` within a project name is forbidden, as a volume name collision
- *   can happen in the case of `parent/child` vs `parent__child`
+ * - `__` and `--wt--` are forbidden within a project or worktree name: they are
+ *   how `/` and `@` are encoded, so `parent/child` vs `parent__child` (and
+ *   `repo@wt` vs `repo--wt--wt`) would claim the same volume namespace.
  */
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -15,24 +21,168 @@ import { hasConfig as hasDevcontainerConfig } from "./devcontainer.ts";
 import type { ReplaceAll } from "./utils.ts";
 
 export const SLASH_REPLACEMENT = "__";
+/** How a worktree is written on a command line and printed back. */
+export const WORKTREE_MARKER = "@";
+/** How a worktree is spelled inside a docker object name. */
+export const WORKTREE_REPLACEMENT = "--wt--";
+/** Where a project's worktrees live, relative to the project.
+ *
+ *  Dot-prefixed on purpose: `list` skips dot-prefixed names at every level it
+ *  enumerates, so this directory can never be mistaken for a project or an
+ *  owner directory. */
+export const WORKTREES_DIRECTORY = ".worktrees";
+
+const RESERVED = [SLASH_REPLACEMENT, WORKTREE_REPLACEMENT] as const;
 
 /** Whether `volumeNamespace` can encode this name without risking a collision. */
-const namespaceable = (project: string) => !project.includes(SLASH_REPLACEMENT);
+const namespaceable = (name: string) =>
+  !RESERVED.some((sequence) => name.includes(sequence));
+
+type Namespace<T extends string> = ReplaceAll<
+  ReplaceAll<T, "/", typeof SLASH_REPLACEMENT>,
+  typeof WORKTREE_MARKER,
+  typeof WORKTREE_REPLACEMENT
+>;
+
+/** A name usable as a docker object name.
+ *
+ *  Projects may be nested one level -- `owner/repo` -- so that repositories from
+ *  different owners can share a repo name, and each may carry worktrees --
+ *  `owner/repo@feature`. Docker volume and container names can contain neither
+ *  `/` nor `@`, so both must be replaced.
+ *
+ * @throws If the remapping could result in a collision. Callers that hold a
+ * name they did not validate should ask `supports` first -- `list` omits such
+ * names, so reaching the throw means an unvalidated name got this far.
+ */
+export const volumeNamespace = Object.assign(
+  <T extends string>(name: T) => {
+    if (!namespaceable(name))
+      throw new Error(
+        [
+          `'${name}' cannot contain a "${SLASH_REPLACEMENT}" (double underscore)`,
+          `or a "${WORKTREE_REPLACEMENT}": those are reserved for replacing "/"s`,
+          `(slashes) and "${WORKTREE_MARKER}"s (worktrees) within volume names`,
+        ].join(" "),
+      );
+
+    return name
+      .replaceAll("/", SLASH_REPLACEMENT)
+      .replaceAll(WORKTREE_MARKER, WORKTREE_REPLACEMENT) as Namespace<T>;
+  },
+  { supports: namespaceable },
+);
+
+/** One startable directory, with every name derived from it computed once. */
+export interface Target {
+  /** How it is written on a command line and printed back: `owner/repo`, or
+   *  `owner/repo@feature` for a worktree. Never a docker object name. */
+  name: string;
+  project: string;
+  /** Absent for the branch checked out at the project root. */
+  worktree?: string;
+  workspaces: string;
+  /** The project's own checkout -- where `.git` and `.worktrees` live. */
+  projectDir: string;
+  /** This target's own tree: its workspace folder, and where its spec is read
+   *  from. The project itself, unless this is a worktree. */
+  dir: string;
+  /** The prefix of every docker object and state file this target owns.
+   *
+   *  The ternary below is the entire cost of keeping a worktree-less target
+   *  byte-identical to what it has always been named. Encoding the worktree
+   *  unconditionally would re-provision every existing stack, silently. */
+  namespace: string;
+}
+
+/** @throws if the name cannot be encoded into a docker object name. */
+export const target = (
+  workspaces: string,
+  project: string,
+  worktree?: string,
+): Target => {
+  const name = worktree ? `${project}${WORKTREE_MARKER}${worktree}` : project;
+  const projectDir = join(workspaces, project);
+  return {
+    name,
+    project,
+    worktree,
+    workspaces,
+    projectDir,
+    dir: worktree ? join(projectDir, WORKTREES_DIRECTORY, worktree) : projectDir,
+    namespace: volumeNamespace(name),
+  };
+};
+
+/** Directories under `dir` that could claim a namespace of their own.
+ *
+ *  Dotfiles are infrastructure, not projects: `.desolate` alongside them holds
+ *  this stack's own per-target spec fingerprints, and `.worktrees` is reached
+ *  deliberately rather than enumerated as a sibling.
+ *
+ *  @throws if `dir` is unreadable. */
+const subdirectories = Object.assign(
+  (dir: string) =>
+    readdirSync(dir, { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          !entry.name.startsWith(".") &&
+          namespaceable(entry.name),
+      )
+      .map((entry) => entry.name),
+  {
+    /** [] rather than a throw: an unreadable owner directory means its children
+     *  simply do not claim, not that every other project is unmeasurable. */
+    orNone: (dir: string) => {
+      try {
+        return subdirectories(dir);
+      } catch {
+        return [];
+      }
+    },
+  },
+);
+
+/** This project's worktrees, whether or not they carry a devcontainer spec. */
+export const worktreesOf = ({ workspaces, project }: Target): Target[] =>
+  subdirectories
+    .orNone(join(workspaces, project, WORKTREES_DIRECTORY))
+    .map((worktree) => target(workspaces, project, worktree));
+
+const withWorktrees = (workspaces: string, project: string): Target[] => {
+  const root = target(workspaces, project);
+  return [root, ...worktreesOf(root)];
+};
+
+/** @throws naming `workspaces`, because an empty list silently WIDENS every
+ *  volume-namespace claim rather than narrowing one. */
+const topLevel = (workspaces: string) => {
+  try {
+    return subdirectories(workspaces);
+  } catch (err: any) {
+    throw new Error(
+      [
+        `cannot enumerate projects: ${workspaces} is unreadable`,
+        `(${err?.code ?? err?.message ?? err}). Refusing to continue, because`,
+        `an empty project list silently WIDENS every volume-namespace claim.`,
+      ].join(" "),
+    );
+  }
+};
 
 export const list = Object.assign(
   /**
-   * Every name under `workspaces` that can claim a volume namespace.
-   *
-   * Names are returned in the `<top>` and `<top>/<sub>` forms (not absolute)
+   * Every target under `workspaces` that can claim a volume namespace.
    *
    * Names `volumeNamespace` cannot encode are omitted, so one unsupported
    * directory refuses only itself (at `validate`) rather than every project
    * that has to be measured against the list.
    *
-   * Projects can either live in the `worskpaces` directory or
-   * nest one level (e.g.`owner/repo`, allowing two owners to share a repo name).
-   * A top-level directory is therefore one of two things,
-   * and its own devcontainer spec is what distinguishes them:
+   * Projects can either live in the `workspaces` directory or nest one level
+   * (e.g. `owner/repo`, allowing two owners to share a repo name). A top-level
+   * directory is therefore one of two things, and its own devcontainer spec is
+   * what distinguishes them:
    *
    *   - it HAS a spec       -> it is a project. Its subdirectories are its own
    *                            source tree, not sibling projects.
@@ -44,45 +194,19 @@ export const list = Object.assign(
    *
    * @throws if `workspaces` is unreadable
    */
-  (workspaces: string): string[] => {
-    const out: string[] = [];
+  (workspaces: string): Target[] => {
+    const targets: Target[] = [];
 
-    let top;
-    try {
-      top = readdirSync(workspaces, { withFileTypes: true });
-    } catch (err: any) {
-      throw new Error(
-        [
-          `cannot enumerate projects: ${workspaces} is unreadable`,
-          `(${err?.code ?? err?.message ?? err}). Refusing to continue, because`,
-          `an empty project list silently WIDENS every volume-namespace claim.`,
-        ].join(" "),
-      );
+    for (const top of topLevel(workspaces)) {
+      targets.push(...withWorktrees(workspaces, top));
+
+      if (hasDevcontainerConfig(join(workspaces, top))) continue;
+
+      for (const sub of subdirectories.orNone(join(workspaces, top)))
+        targets.push(...withWorktrees(workspaces, `${top}/${sub}`));
     }
 
-    for (const candidate of top) {
-      // Dotfiles are infrastructure, not projects: `.desolate` alongside them
-      // holds this stack's own per-project spec fingerprints.
-      if (!candidate.isDirectory() || candidate.name.startsWith(".")) continue;
-      if (!namespaceable(candidate.name)) continue;
-
-      const dir = join(workspaces, candidate.name);
-      out.push(candidate.name);
-
-      if (hasDevcontainerConfig(dir)) continue;
-
-      try {
-        for (const sub of readdirSync(dir, { withFileTypes: true }))
-          if (
-            sub.isDirectory() &&
-            !sub.name.startsWith(".") &&
-            namespaceable(sub.name)
-          )
-            out.push(`${candidate.name}/${sub.name}`);
-      } /* unreadable owner dir -- its children simply do not claim */ catch {}
-    }
-
-    return out;
+    return targets;
   },
   {
     /**
@@ -90,56 +214,39 @@ export const list = Object.assign(
      * "what can I open?", rather than "who could contest this volume name?").
      */
     startable: (workspaces: string) =>
-      list(workspaces).filter((name) =>
-        hasDevcontainerConfig(join(workspaces, name)),
-      ),
+      list(workspaces).filter(({ dir }) => hasDevcontainerConfig(dir)),
   },
 );
+
+/** Longest single path segment of a name, in characters. Two of them plus a
+ *  slash is the ceiling for a whole project name. */
+const MAX_SEGMENT = 64;
+/** Must START with alphanumeric, which rules out "..", ".", hidden dirs, and
+ *  anything beginning with a dash. */
+const SEGMENT = `[a-zA-Z0-9][a-zA-Z0-9._-]{0,${MAX_SEGMENT - 1}}`;
+
+const spelledAs =
+  (pattern: RegExp) =>
+  (query: unknown): query is string =>
+    typeof query === "string" && pattern.test(query) && namespaceable(query);
 
 /**
  * Is this a syntactically valid project name -- one or two plain path segments
  * that can be turned into a volume namespace?
- */
-export const validName = (() => {
-  /** Longest single path segment of a project name, in characters. Two of them
-   *  plus a slash is the ceiling for a whole name. */
-  const maxSegment = 64;
-  /** Must START with alphanumeric, which rules out "..", ".", hidden dirs, and
-   *  anything beginning with a dash. */
-  const segment = `[a-zA-Z0-9][a-zA-Z0-9._-]{0,${maxSegment - 1}}`;
-  /** A direct child of /workspaces, or one level deeper so a repo can be scoped
-   *  by its owner. */
-  const pattern = new RegExp(`^${segment}(?:/${segment})?$`);
-
-  return (query: unknown): query is string =>
-    typeof query === "string" && pattern.test(query) && namespaceable(query);
-})();
-
-/** A project name usable as a docker object name.
  *
- *  Projects may be nested one level -- `owner/repo` -- so that repositories from
- *  different owners can share a repo name. Docker volume and container names
- *  cannot contain `/`, so that must replaced.
- *
- * @throws If project name remapping could result in a collision. Callers that
- * hold a name they did not validate should ask `supports` first -- `list` omits
- * such names, so reaching the throw means an unvalidated name got this far.
+ * A direct child of /workspaces, or one level deeper so a repo can be scoped by
+ * its owner.
  */
-export const volumeNamespace = Object.assign(
-  <T extends string>(project: T) => {
-    if (!namespaceable(project))
-      throw new Error(
-        [
-          `Project name cannot contain a "${SLASH_REPLACEMENT}" (double underscore)`,
-          `as that is reserved for replacing "/"s (slashes) within volume names`,
-        ].join(" "),
-      );
-
-    return project.replace(/\//g, SLASH_REPLACEMENT) as ReplaceAll<
-      T,
-      "/",
-      "__"
-    >;
-  },
-  { supports: namespaceable },
+export const validName = spelledAs(
+  new RegExp(`^${SEGMENT}(?:/${SEGMENT})?$`),
 );
+
+/**
+ * Is this a valid worktree name -- exactly ONE path segment?
+ *
+ * A worktree names a DIRECTORY, not a branch. Branch names may contain `/`
+ * (`feature/123`), which would need an encoding into volume names that has to
+ * round-trip and cannot collide with the `/` -> `__` rule already in use. One
+ * segment avoids the question, and refuses `.worktrees/a/b` along with it.
+ */
+export const validWorktree = spelledAs(new RegExp(`^${SEGMENT}$`));

@@ -5,11 +5,14 @@
  * subprocess. Turning a UsageError into an exit code is the entry point's job.
  */
 
-export type Command = "run" | "stop" | "ports";
+export type Command = "run" | "stop" | "ports" | "purge";
 
 export type Args = {
   command: Command;
   project: string;
+  /** One of the project's worktrees, rather than the branch checked out at its
+   *  root. Names a DIRECTORY under `.worktrees`, never a branch. */
+  worktree?: string;
   config?: string;
   rebuild: boolean;
   noCache: boolean;
@@ -20,6 +23,7 @@ export type Flags =
   | "--stop"
   | "--ports"
   | ["--config", string]
+  | ["--worktree", string]
   | "--rebuild"
   | [
       "--rebuild",
@@ -29,8 +33,10 @@ export type Flags =
     ];
 
 export const USAGE =
-  `usage: desolate [--config <path>] [--rebuild [--no-cache]] [--stop|--ports] <project>
-       <project> is 'name' or 'owner/name', relative to /workspaces` as const;
+  `usage: desolate [--config <path>] [--worktree <name>] [--rebuild [--no-cache]]
+                [--stop|--ports|--purge] <project>
+       <project> is 'name' or 'owner/name', relative to /workspaces
+       <name> is a directory under <project>/.worktrees` as const;
 
 export class UsageError extends Error {
   constructor(preamble?: string) {
@@ -51,6 +57,7 @@ const projectName = (raw: string, workspaces: string) =>
 export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let command: Command = "run";
   let config: string | undefined;
+  let worktree: string | undefined;
   let rebuild = false;
   let noCache = false;
   const positional: string[] = [];
@@ -62,11 +69,17 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--config":
         config = queue.shift() ?? "";
         break;
+      case "--worktree":
+        worktree = queue.shift() ?? "";
+        break;
       case "--stop":
         command = "stop";
         break;
       case "--ports":
         command = "ports";
+        break;
+      case "--purge":
+        command = "purge";
         break;
       case "--rebuild":
         rebuild = true;
@@ -92,6 +105,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   return {
     command,
     project: projectName(raw, workspaces),
+    worktree,
     config,
     rebuild,
     noCache,

@@ -23,10 +23,15 @@ export class PortsExhaustedError extends Error {}
 
 /** Read a port range from the environment, falling back to the compose default.
  *
+ *  The default has to match docker-compose.yml's publish exactly, and forty
+ *  ports is what a project's worktrees need: each target takes one for its
+ *  editor before it asks for a single dev server, so a repo with three branches
+ *  open is already four.
+ *
  *  @throws PortRangeError if a bound is not a port, or the range is empty. */
 export const portRange = (
   environment: Record<string, string | undefined>,
-  fallback: PortRange = { min: 8080, max: 8090 },
+  fallback: PortRange = { min: 8080, max: 8119 },
 ): PortRange => {
   const read = (name: string, whenAbsent: number): number => {
     const raw = environment[name];
@@ -90,7 +95,10 @@ const exhausted = (label: string, world: PortWorld, taken: Set<number>) => {
       All ${max - min + 1} ports are spoken for:
 
 ${held.join("\n")}
-      Free some:  desolate --stop <project>
+      Free some:  desolate --stop <project> [--worktree <name>]
+      Every target holds a port for its editor, and a project's worktrees are
+      targets of their own -- the holders above name each one, because a relay
+      is called desolate-relay-<project>[--wt--<worktree>]-<port>.
       Or widen the range in the .env next to docker-compose.yml and
       restart the stack, so dind republishes it and this allocator and
       that publish stay in agreement:

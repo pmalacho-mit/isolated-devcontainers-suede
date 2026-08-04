@@ -16,16 +16,19 @@ import {
   unlinkSync,
 } from "node:fs";
 import { createServer } from "node:net";
-import { join, dirname } from "node:path";
+import { dirname } from "node:path";
 import { resolveSpec } from "./devcontainer.ts";
 import {
   snapshot,
   initDirectory as initSnapshotDirectory,
 } from "./snapshot.ts";
 import {
-  list as listProjects,
+  list as listTargets,
+  target as resolveTarget,
   validName,
+  validWorktree,
   volumeNamespace,
+  type Target,
 } from "./projects.ts";
 import { enforcePolicy, PolicyError } from "./policy.ts";
 import type { Flags } from "./args.ts";
@@ -75,7 +78,7 @@ type Operation = (typeof operations)[number];
 type Request = {
   [op in Operation]: op extends "list"
     ? { op: op }
-    : { op: op; project: string };
+    : { op: op; project: string; worktree?: string };
 }[Operation];
 
 const request = {
@@ -98,16 +101,27 @@ const request = {
     typeof query.op === "string" &&
     operations.includes(query["op"] as Operation) &&
     (query.op === "list" ||
-      ("project" in query && typeof query.project === "string")),
+      ("project" in query &&
+        typeof query.project === "string" &&
+        (!("worktree" in query) ||
+          query.worktree === undefined ||
+          typeof query.worktree === "string"))),
 };
 
 /**
- * Project must be a plain name (one or two segments) AND resolve to exactly
- * that path under /workspaces -- the realpath comparison is what stops a
- * legally-named symlink pointing anywhere it likes.
+ * The target must be a plain name (one or two segments, plus at most one
+ * worktree segment) AND resolve to exactly the path those names denote -- the
+ * realpath comparison is what stops a legally-named symlink pointing anywhere
+ * it likes, including at another project's `.worktrees`.
  */
-const validate = (project: string): string => {
+const validate = (project: string, worktree?: string): Target => {
   if (!validName(project)) throw new Error("invalid project name");
+
+  if (worktree !== undefined && !validWorktree(worktree))
+    throw new Error(
+      "invalid worktree name: ONE path segment under <project>/.worktrees, " +
+        "starting with a letter or digit (it names a directory, not a branch)",
+    );
 
   if (!volumeNamespace.supports(project))
     throw new Error(
@@ -116,32 +130,46 @@ const validate = (project: string): string => {
         `would claim the same volume namespace`,
     );
 
+  const target = resolveTarget(config.workspaces, project, worktree);
+  const expected = resolveTarget(
+    realpathSync(config.workspaces),
+    project,
+    worktree,
+  ).dir;
+
   let real: string;
 
   try {
-    real = realpathSync(join(config.workspaces, project));
+    real = realpathSync(target.dir);
   } catch {
-    throw new Error("project is missing");
+    throw new Error(worktree ? "worktree is missing" : "project is missing");
   }
 
-  if (real !== join(realpathSync(config.workspaces), project))
+  if (real !== expected)
     throw new Error(
       "project must resolve to that exact path under /workspaces",
     );
 
   if (!statSync(real).isDirectory())
     throw new Error("project is not a directory");
-  return project;
+  return target;
 };
 
 type Send = (payload: string | Record<string, any>) => void;
 
-const desolate = (validated: string, flags: Flags[], send: Send) =>
+const desolate = (target: Target, flags: Flags[], send: Send) =>
   new Promise<number>((resolve) => {
     const { env } = process;
+    const worktree: Flags[] = target.worktree
+      ? [["--worktree", target.worktree]]
+      : [];
     const child = spawn(
       "tsx",
-      [config.runner, ...flags.flatMap(identity), validated],
+      [
+        config.runner,
+        ...[...flags, ...worktree].flatMap(identity),
+        target.project,
+      ],
       { env, stdio: ["ignore", "pipe", "pipe"] },
     );
     const relay = (buf: Buffer) => {
@@ -166,18 +194,19 @@ async function handle(req: unknown, send: Send) {
   request.inflight++;
   try {
     if (req.op === "list")
-      return send({ ok: true, projects: listProjects(config.workspaces) });
+      return send({
+        ok: true,
+        projects: listTargets(config.workspaces).map(({ name }) => name),
+      });
 
-    const validated = validate(req.project);
+    const target = validate(req.project, req.worktree);
     let flags: Flags[];
     switch (req.op) {
       case "start":
       case "rebuild": {
-        const configPath = snapshot(validated, config);
-        const workspace = join(config.workspaces, validated);
-        const resolved = resolveSpec(workspace, configPath);
-        const projects = listProjects(config.workspaces);
-        enforcePolicy(validated, resolved, config.workspaces, projects);
+        const configPath = snapshot(target, config);
+        const resolved = resolveSpec(target.dir, configPath);
+        enforcePolicy(target, resolved, listTargets(config.workspaces));
         flags = [["--config", configPath]];
         if (req.op === "rebuild") flags.push("--rebuild");
         break;
@@ -188,7 +217,7 @@ async function handle(req: unknown, send: Send) {
         break;
     }
 
-    const code = await desolate(validated, flags, send);
+    const code = await desolate(target, flags, send);
     send({ ok: code === 0, exit: code });
   } finally {
     request.inflight--;
