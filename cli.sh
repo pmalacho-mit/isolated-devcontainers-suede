@@ -555,6 +555,40 @@ case "$CMD" in
              case "$SUB" in
                status) colima ssh -p "$COLIMA_PROFILE" -- sudo systemctl --no-pager --plain status desolate-proxy | head -8 ;;
                logs)   colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${1:-50}" --no-pager ;;
+               audit)  # What was contacted, and whether a secret went with it.
+                       #
+                       # Reads the AUDIT lines addon.py emits (one per request,
+                       # fixed field order) rather than the prose log lines
+                       # beside them, which are for humans and change freely.
+                       #
+                       # Neither carries a secret VALUE, and neither carries a
+                       # query string -- a token in a URL would otherwise end up
+                       # in journald, which is not the 0600 file secrets are
+                       # supposed to live in. Names only; that is the point of
+                       # the column.
+                       N="${1:-200}"
+                       case "$N" in *[!0-9]*) echo "cli.sh: proxy audit takes a line count" >&2; exit 1 ;; esac
+                       colima ssh -p "$COLIMA_PROFILE" -- \
+                         sudo journalctl -u desolate-proxy -n "$N" --no-pager -o cat \
+                       | grep -a "^AUDIT " \
+                       | sed -e 's/^AUDIT //' \
+                       | awk '
+                           {
+                             verdict=""; method=""; host=""; path=""; secrets="";
+                             for (i = 1; i <= NF; i++) {
+                               split($i, kv, "=");
+                               v = substr($i, index($i, "=") + 1);
+                               if (kv[1] == "verdict") verdict = v;
+                               else if (kv[1] == "method") method = v;
+                               else if (kv[1] == "host")  host = v;
+                               else if (kv[1] == "path")  path = v;
+                               else if (kv[1] == "secrets") secrets = v;
+                             }
+                             if (secrets == "-") secrets = "";
+                             printf "%-14s %-6s %s%s%s\n", verdict, method, host, path,
+                                    (secrets == "" ? "" : "   <- " secrets);
+                           }'
+                       ;;
                test)   ensure_running
                        # `with-ca` is load-bearing: the orchestrator trusts the
                        # proxy CA via that wrapper's env vars, and `docker exec`
