@@ -262,7 +262,15 @@ services:
       # specified in `command` and nothing else. The path must match
       # DESOLATE_SERVER_ROOT and SERVER_BIN (vscode-image/editor.ts).
       - /usr/local/bin/with-ca
-      - /home/.desolate-server/bin/codium-server
+      # Seeds the workspace-trust defaults on first start; see shell-entry.sh.
+      - /usr/local/bin/shell-entry
+      # The SHELL root, not the server root: same build, hardlinked, with the
+      # git/github extensions removed. This editor can reach the keyring's agent
+      # socket, and the git extension is what turns a hostile repository into
+      # code execution here -- it runs `git`, and `git` obeys that repository's
+      # own .git/config. Devcontainers are seeded from DESOLATE_SERVER_ROOT and
+      # keep git, where there is no agent socket to reach.
+      - /home/.desolate-shell/bin/codium-server
     command:
       - --host=0.0.0.0                # inside the container; host binding is 127.0.0.1 below
       - --port=3000
