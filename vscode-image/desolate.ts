@@ -55,6 +55,7 @@ import {
 } from "./overlay.ts";
 import {
   EDITOR_INTERNAL_PORT,
+  EDITOR_LOG,
   editorStartScript,
   isValidExtensionId,
   isValidToken,
@@ -842,7 +843,7 @@ async function runProject(
 
   if (!probeEditor(name, editorPort))
     return die(`editor did not answer through the relay on :${editorPort} -- check the log:
-      devcontainer exec --workspace-folder ${dir} cat /tmp/openvscode-desolate.log
+      devcontainer exec --workspace-folder ${dir} cat ${EDITOR_LOG}
       and the relay itself:  docker logs ${relay.name(name, editorPort)}`);
 
   const id = devcontainerId(dir);

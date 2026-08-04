@@ -112,7 +112,7 @@ again with new numbers; flags you leave out keep their current values:
 
 ```bash
 colima stop desolate
-colima start desolate --cpus 10 --memory 24 --disk 200
+colima start desolate --cpus 8 --memory 40 --disk 200
 ```
 
 > [!WARNING]
