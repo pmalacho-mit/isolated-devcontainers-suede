@@ -291,7 +291,7 @@ else
 fi
 
 echo
-echo "== 7. egress proxy (secrets never enter containers) =="
+echo "== 7. egress proxy (secrets live in the VM, not in containers) =="
 if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet desolate-proxy 2>/dev/null; then
   ok "desolate-proxy is running in the VM"
   # Two resolvers, two ports, both required: :5353 serves containers via the

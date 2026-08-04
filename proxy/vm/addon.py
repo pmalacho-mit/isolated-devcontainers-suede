@@ -22,8 +22,13 @@ Behavior per request:
      Unlike step 2 this NEVER falls back: no SNI means no substitution.
   5. Otherwise substitute every occurrence with the real value.
   6. On responses, scrub real values back to placeholders, so an endpoint that
-     echoes a secret does not hand it to the container. Bodies over MAX_BODY
-     are passed through unscrubbed; headers are scrubbed at any size.
+     echoes a secret VERBATIM does not hand it to the container -- see "WHAT
+     SCRUBBING IS, AND WHAT IT IS NOT" below for how far that goes.
+
+Bodies are read DECODED, in both directions, at any size -- see `decoded_body`
+and the note beside SETTINGS_PATH. Searching the encoded bytes found nothing in
+a gzipped message, which is most of them, and a size cap turned the largest
+responses into the ones that went unscrubbed.
 
 Redirect safety falls out of the model: substitution is decided per-request,
 so a redirect to an unlisted host receives the placeholder, which trips rule 4.
@@ -75,6 +80,29 @@ destination in transparent mode -- would close it, at the cost of denying
 every plaintext request in a deny-by-default deployment unless the allowlist
 carries addresses as well as names. Pinned by
 tests/unit/proxy/test_addon.py::test_the_network_allowlist_is_spoofable_over_plaintext.
+
+---------------------------------------------------------------------------
+WHAT SCRUBBING IS, AND WHAT IT IS NOT
+---------------------------------------------------------------------------
+Step 6 matches the value EXACTLY, which covers the two cases worth covering: an
+endpoint that echoes a credential by accident, and the cheap deliberate path --
+substitution rewrites request BODIES, so a container can store the placeholder
+through an allowlisted API and have the real value written down server-side.
+Reading it back returns the placeholder, and that path is closed.
+
+It is not a boundary, because an exact match is all it is. An allowlisted host
+that can TRANSFORM its input defeats it in one request:
+
+    {"prompt": "reverse this: MYAPP-OPENAI-KEY"}
+      -> the model is handed the real key and answers with it reversed
+      -> nothing matches, nothing is scrubbed, the container reverses it back
+
+Any secret allowlisted to a service that computes on what you send it -- every
+LLM API -- is therefore recoverable by a compromised container. This is a
+property of substitution itself, not a defect in the scrubber, and no amount of
+work here fixes it. What survives is the BOUND: the real value can only ever be
+sent to that secret's allowlisted hosts. Bounding where a secret goes is the
+guarantee; keeping it unknown to a compromised container is not.
 
 ---------------------------------------------------------------------------
 WHY INTERNAL DESTINATIONS ARE REFUSED BEFORE ANYTHING ELSE
@@ -151,7 +179,16 @@ import re
 from mitmproxy import http
 
 SETTINGS_PATH = os.environ.get("DESOLATE_SETTINGS", "/etc/desolate-proxy/settings.json")
-MAX_BODY = 5 * 1024 * 1024  # skip substitution/scrubbing in bodies larger than this
+
+# There is deliberately NO size cap on body inspection.
+#
+# A 5 MiB cap used to skip larger bodies, and it read as a memory guard without
+# being one: streaming is not enabled, so mitmproxy has already buffered the
+# whole body before these hooks run. Declining to LOOK at it freed nothing and
+# skipped the scrub on exactly the responses most likely to be carrying bulk
+# data. The cost of removing it is that a body is decoded before it is
+# searched, so a highly-compressed one is expanded in the proxy; that is the
+# accepted price of being able to see what is in it at all.
 
 GLOB_META = re.compile(r"[*?\[\]]")
 # "*." followed by two or more literal labels -- the one wildcard shape a TLS
@@ -375,17 +412,33 @@ class DesolateProxy:
             code, f"desolate-proxy: {msg}\n".encode(), {"content-type": "text/plain"}
         )
 
+    @staticmethod
+    def decoded_body(message):
+        """The body as its peer will read it, whatever Content-Encoding says.
+
+        `raw_content` is the body still in its encoding, so searching it for a
+        plaintext secret finds nothing in any gzipped message -- which is most
+        of them. Reading `.content` decodes; assigning it re-encodes and fixes
+        up Content-Length, so a body leaves in the encoding it arrived in.
+
+        Raises ValueError when the body cannot be decoded, and every caller
+        runs inside a hook that answers an exception by blocking. That is the
+        point: "we could not read this body" must never be taken for "this body
+        holds no secret".
+        """
+        return message.content or b""
+
     def _placeholders_in_request(self, flow):
         """Return the set of configured placeholder names present anywhere in the request."""
-        found = set()
+        if not self.secrets:
+            return set()
         url = flow.request.url
         header_blob = "\n".join(f"{k}: {v}" for k, v in flow.request.headers.items(multi=True))
-        body = flow.request.raw_content or b""
-        body_search = body if len(body) <= MAX_BODY else b""
-        for name in self.secrets:
-            if name in url or name in header_blob or name.encode() in body_search:
-                found.add(name)
-        return found
+        body = self.decoded_body(flow.request)
+        return {
+            name for name in self.secrets
+            if name in url or name in header_blob or name.encode() in body
+        }
 
     # ---------- mitmproxy hooks ----------
 
@@ -460,6 +513,12 @@ class DesolateProxy:
         # 3) substitution. Order does not matter here, and that is a property
         # the config check buys: no loaded placeholder contains another (see
         # _overlapping), so no replacement can land inside a different one.
+        #
+        # The body is decoded once, substituted into for every secret, and
+        # written back once. Assigning `.content` per secret would re-encode
+        # the whole body and rewrite Content-Length once per name.
+        body = self.decoded_body(flow.request) if found else b""
+        substituted = body
         for name in found:
             value = self.secrets[name]["value"]
             # .path, NOT .url -- and this is load-bearing, not style.
@@ -486,10 +545,11 @@ class DesolateProxy:
             for k, v in list(flow.request.headers.items(multi=True)):
                 if name in v:
                     flow.request.headers[k] = v.replace(name, value)
-            body = flow.request.raw_content or b""
-            if body and len(body) <= MAX_BODY and name.encode() in body:
-                # .content (not .raw_content) so Content-Length / encodings stay correct
-                flow.request.content = flow.request.content.replace(name.encode(), value.encode())
+            if name.encode() in substituted:
+                substituted = substituted.replace(name.encode(), value.encode())
+
+        if substituted is not body:
+            flow.request.content = substituted
 
         if found:
             log.info(f"SUBST {method} {proven}{flow.request.path} <- {sorted(found)}")
@@ -503,18 +563,26 @@ class DesolateProxy:
             self._block(flow, 502, "internal policy error; response withheld")
 
     def _response(self, flow: http.HTTPFlow):
-        if not self.scrub_responses or not flow.response:
+        if not self.scrub_responses or not flow.response or not self.secrets:
             return
+        # Decoded once, scrubbed for every secret, written back once -- see the
+        # matching note on the request side. Reading `.content` per secret also
+        # costs more than it looks: mitmproxy's decode cache holds ONE entry and
+        # confirms a hit by comparing the whole encoded body.
+        body = self.decoded_body(flow.response)
+        scrubbed = body
         for name, entry in self.secrets.items():
             value, bvalue = entry["value"], entry["value"].encode()
             for k, v in list(flow.response.headers.items(multi=True)):
                 if value in v:
                     flow.response.headers[k] = v.replace(value, name)
-            body = flow.response.raw_content or b""
-            if body and len(body) <= MAX_BODY and bvalue in body:
-                flow.response.content = flow.response.content.replace(bvalue, name.encode())
+            if bvalue in scrubbed:
+                scrubbed = scrubbed.replace(bvalue, name.encode())
                 log.warning(f"SCRUB response from {flow.request.pretty_host} echoed secret "
                             f"{name!r}; replaced with placeholder")
+
+        if scrubbed is not body:
+            flow.response.content = scrubbed
 
 
 addons = [DesolateProxy()]
