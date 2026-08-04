@@ -11,6 +11,7 @@ Needs: mitmproxy (same version install.sh pins) and pytest.
 """
 
 import importlib.util
+import logging
 import ipaddress
 import json
 import os
@@ -667,3 +668,52 @@ def test_E9b_substitution_still_reaches_the_query_string(tmp_path):
     assert "sk-real" in f.request.path
     assert "MYAPP-KEY-PLACEHOLDER" not in f.request.path
     assert f.request.headers["Host"] == "api.openai.com"
+
+
+def _audit_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("AUDIT ")]
+
+
+def test_E12a_audit_line_never_carries_a_secret_value(tmp_path, caplog):
+    """The audit line is parsed by `cli.sh proxy audit` and persisted in
+    journald. A secret VALUE reaching it would put a real credential somewhere
+    other than the one 0600 file meant to hold them -- most easily via a query
+    string, which is exactly where an API token tends to live."""
+    caplog.set_level(logging.INFO)
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com", dest="104.18.7.1")
+    f.request.path = f"/v1/models?key={SECRET_NAME}&page=2"
+    inst.request(f)
+    lines = _audit_lines(caplog)
+    assert lines, "no AUDIT line emitted"
+    line = lines[0]
+    assert SECRET_VALUE not in line, "the audit line leaked the real secret value"
+    path_field = line.split("path=")[1].split(" ")[0]
+    assert "?" not in path_field, "kept a query string, which is where a token would be"
+    assert f"secrets={SECRET_NAME}" in line, "the substituted name should be reported"
+
+
+def test_E12b_substitution_log_does_not_echo_the_value_either(tmp_path, caplog):
+    """Same hazard, older line. SUBST logged flow.request.path AFTER the
+    substitution loop had run, and .path covers the query string."""
+    caplog.set_level(logging.INFO)
+    mod, inst, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com", dest="104.18.7.1")
+    f.request.path = f"/v1/models?key={SECRET_NAME}"
+    inst.request(f)
+    everything = " ".join(r.getMessage() for r in caplog.records)
+    assert SECRET_VALUE not in everything, "a log line echoed the substituted secret"
+    assert f.request.path.endswith(SECRET_VALUE), \
+        "the request itself must still carry the real value"
+
+
+def test_E12c_every_verdict_reaches_the_audit(tmp_path, caplog):
+    """An audit that only records substitutions cannot answer 'what did this
+    container contact', which is the question it exists for."""
+    caplog.set_level(logging.INFO)
+    mod, inst, _ = load_addon(tmp_path)
+    inst.request(make_flow(sni="example.com", host_header="example.com", dest="104.18.7.1"))
+    inst.request(make_flow(sni=None, host_header="api.openai.com", dest="192.168.5.2"))
+    verdicts = " ".join(_audit_lines(caplog))
+    assert "verdict=ALLOW" in verdicts, f"no ALLOW verdict in: {verdicts}"
+    assert "verdict=DENY-INTERNAL" in verdicts, f"no DENY verdict in: {verdicts}"

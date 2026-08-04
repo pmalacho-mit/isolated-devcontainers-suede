@@ -67,6 +67,34 @@ RUN set -eux; \
   printf '%s' "${VSCODIUM_VERSION}" > "${DESOLATE_SERVER_ROOT}/.version"; \
   test -x "${DESOLATE_SERVER_ROOT}/bin/codium-server"
 
+# A SECOND tree for the OUTER editor, with the git extensions removed.
+#
+# The outer editor is the one container that can reach the keyring's agent
+# socket, and the built-in git extension is what makes a repository executable
+# there: it invokes `git` against project content, and `git` obeys that
+# project's own .git/config -- core.fsmonitor, core.pager, core.hooksPath,
+# filter.*.clean -- plus .gitattributes selecting filters from the SYSTEM
+# gitconfig, which this image populates with git-lfs. Restricted Mode does not
+# help: the git extension declares limited untrusted support and runs anyway.
+#
+# Removing the directory is the control. `--disable-extension` exists in the
+# server's argument parser but is undocumented for this server and is a runtime
+# flag someone can drop from `command:`; an extension that is not on disk cannot
+# be enabled by a setting, a flag, or a workspace.
+#
+# `cp -al` hardlinks, so the second tree costs a few MB rather than another
+# copy, and DESOLATE_SERVER_ROOT stays complete -- devcontainers are seeded from
+# it and DO want git in their own editor, where there is no agent socket to
+# reach and the project is already trusted with its own source.
+ENV DESOLATE_SHELL_ROOT=/home/.desolate-shell
+RUN set -eux; \
+  cp -al "${DESOLATE_SERVER_ROOT}" "${DESOLATE_SHELL_ROOT}"; \
+  for ext in git git-base github github-authentication; do \
+  rm -rf "${DESOLATE_SHELL_ROOT}/extensions/$ext"; done; \
+  test ! -e "${DESOLATE_SHELL_ROOT}/extensions/git"; \
+  test -e "${DESOLATE_SERVER_ROOT}/extensions/git"; \
+  test -x "${DESOLATE_SHELL_ROOT}/bin/codium-server"
+
 # Install node
 RUN set -eux; \
   arch="$(uname -m)"; \
@@ -148,7 +176,8 @@ RUN mkdir -p /workspaces && chown 1000:1000 /workspaces
 # in the process tree that inherited them -- and `docker exec` starts a fresh
 # process from the image config, inheriting nothing the entrypoint exported.
 COPY with-ca.sh /usr/local/bin/with-ca
-RUN chmod +x /usr/local/bin/with-ca
+COPY shell-entry.sh /usr/local/bin/shell-entry
+RUN chmod +x /usr/local/bin/with-ca /usr/local/bin/shell-entry
 
 # Copy over all supporting scripts; this image is used across two containers
 # with distinct roles:

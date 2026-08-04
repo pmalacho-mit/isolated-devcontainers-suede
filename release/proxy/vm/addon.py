@@ -287,6 +287,32 @@ class DesolateProxy:
                 continue
         return None
 
+    def audit(self, flow, verdict, host, route, method, secrets):
+        """One machine-readable line per request, for `cli.sh proxy audit`.
+
+        Separate from the human log lines above on purpose. Those are prose and
+        change freely; this is parsed by a shell script on the Mac, so it is a
+        fixed field order with a stable prefix.
+
+        NEVER a query string, and NEVER a secret VALUE -- only names. The
+        request URL is attacker-influenced and a query string is exactly where a
+        token would sit, so `route` arrives already stripped by the caller. The
+        whole point of substitution is that a real value exists in one 0600 file
+        on this VM; writing one into journald would quietly make that false.
+        """
+        try:
+            log.info(
+                "AUDIT "
+                f"verdict={verdict} "
+                f"method={method} "
+                f"host={host or '?'} "
+                f"path={route or '/'} "
+                f"secrets={','.join(secrets) if secrets else '-'}"
+            )
+        except Exception:
+            # An audit line must never be the reason a request fails.
+            pass
+
     @staticmethod
     def is_internal(address):
         """Whether a container must never be able to reach this address.
@@ -392,6 +418,8 @@ class DesolateProxy:
             if self.is_internal(destination):
                 log.warning(f"DENY  {method} -> {destination} (internal destination; "
                             f"claimed {claimed!r}, sni {proven!r})")
+                self.audit(flow, "DENY-INTERNAL", str(destination),
+                           flow.request.path.split("?", 1)[0], method, [])
                 self._block(flow, 403,
                             f"destination {destination} is internal to the host; "
                             f"containers may not reach it through this proxy")
@@ -401,6 +429,8 @@ class DesolateProxy:
         policy_host = proven or claimed or flow.request.host
         if not self._network_allowed(policy_host, method):
             log.warning(f"DENY  {method} {policy_host}{flow.request.path} (network policy)")
+            self.audit(flow, "DENY-POLICY", policy_host,
+                       flow.request.path.split("?", 1)[0], method, [])
             self._block(flow, 403, f"network policy denied {method} {policy_host}")
             return
 
@@ -427,6 +457,10 @@ class DesolateProxy:
                                 f"(allowed: {self.secrets[name]['hosts']}) -- blocked")
                     self._block(flow, 403, f"secret {name} is not permitted for host {proven}")
                     return
+
+        # Captured BEFORE substitution and stripped of its query string, for the
+        # audit line and the SUBST log below. See the comment at the log call.
+        route = flow.request.path.split("?", 1)[0]
 
         # 3) substitution. Order does not matter here, and that is a property
         # the config check buys: no loaded placeholder contains another (see
@@ -463,7 +497,17 @@ class DesolateProxy:
                 flow.request.content = flow.request.content.replace(name.encode(), value.encode())
 
         if found:
-            log.info(f"SUBST {method} {proven}{flow.request.path} <- {sorted(found)}")
+            # `route` was captured BEFORE the loop above and has its query string
+            # stripped. Both halves matter: `flow.request.path` covers path AND
+            # query, and the substitution has already run by the time we get
+            # here -- so logging it would write the REAL secret value into the
+            # journal for any placeholder that appeared in a query string.
+            # Secrets are supposed to exist in exactly one place on this VM,
+            # 0600 in /etc/desolate-proxy/settings.json, and journald is not it.
+            log.info(f"SUBST {method} {proven}{route} <- {sorted(found)}")
+            self.audit(flow, "SUBST", proven, route, method, sorted(found))
+        else:
+            self.audit(flow, "ALLOW", proven or claimed, route, method, [])
 
     def response(self, flow: http.HTTPFlow):
         try:

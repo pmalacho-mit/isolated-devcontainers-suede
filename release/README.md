@@ -21,13 +21,21 @@ The name is `desolate` = **de**v + i**solate**.
 |  +- Colima VM (Ubuntu; sysbox + desolate-proxy) --------------------+   |
 |  |  SECRETS LIVE HERE ONLY: /etc/desolate-proxy/settings.json (0600)  |   |
 |  |  all container egress is force-redirected through the proxy      |   |
-|  |  +- dind -- UNPRIVILEGED via sysbox-runc --------------------+  |   |
-|  |  |  inner dockerd   <- devcontainers + relays live here      |  |   |
-|  |  |   |- [orchestrator] --- HOLDS THE SOCKET; serves broker    |  |   |
-|  |  |   |- [vscode: editor] -- NO socket; broker client only     |  |   |
-|  |  |   \- devcontainer (your project)                          |  |   |
-|  |  |        \- optional level-3 container (e.g. FastAPI)       |  |   |
-|  |  +-----------------------------------------------------------+  |   |
+|  |  devnet (br-desolate)          dindnet (br-desolate-in)         |   |
+|  |  +- [vscode] the shell -----+   +- dind -- sysbox-runc -------+  |   |
+|  |  |  NO docker socket        |   |  inner dockerd              |  |   |
+|  |  |  /workspaces rw          |   |   |- devcontainer (project) |  |   |
+|  |  |  agent socket (ro)       |   |   |    \- codium-server     |  |   |
+|  |  +--------------------------+   |   |    \- level-3 container |  |   |
+|  |  +- [orchestrator] ---------+   |   \- relay (socat)          |  |   |
+|  |  |  HOLDS THE SOCKET        |   +-----------------------------+  |   |
+|  |  |  serves the broker       |                                    |   |
+|  |  +--------------------------+   the VM's forward chain DROPS     |   |
+|  |  +- [keyring] --------------+   between these two bridges        |   |
+|  |  |  NO NETWORK AT ALL       |                                    |   |
+|  |  |  the only raw private    |                                    |   |
+|  |  |  keys in the stack       |                                    |   |
+|  |  +--------------------------+                                    |   |
 |  +----------------------------------------------------------------+   |
 |  Host /var/run/docker.sock: mounted NOWHERE                          |
 +-----------------------------------------------------------------------+
@@ -46,6 +54,138 @@ There is deliberately no network path to the inner Docker daemon.
 > the orchestrator regardless -- while an unauthenticated HTTP port on loopback is
 > reachable from any browser aimed at a hostile page (DNS rebinding), which a unix
 > socket is not. `./cli.sh observe` replaces it.
+
+## What holds, and what does not
+
+This design does not claim your code is safe. It claims your **credentials** and
+your **machine** are, and it gives up the rest deliberately. If you are an open
+source developer that is close to the trade you already made when you published
+the repository.
+
+### The four boundaries
+
+| # | Boundary | Verdict |
+| - | -------- | ------- |
+| 1 | A project can exfiltrate **its own** source | **Conceded, by design** |
+| 2 | A project can reach a **sibling** project's source | Holds — unless that project sets `allowPrivileged` |
+| 3 | A project can read the **editor's** credentials | Holds — raw keys are unreachable |
+| 4 | A project can escape to the **VM** or your **Mac** | Holds — sysbox, and it is the boundary everything else rests on |
+
+### 1. Your own source is forfeit, and that is not a bug
+
+Anything running in a project's devcontainer — a dependency's install script, an
+agent, an extension, a compromised toolchain — can read and transmit that
+project's code. Nothing here prevents that, and nothing could: the code has to
+be readable by the thing that builds it.
+
+What it *cannot* do is send that code anywhere it likes. All `:80`/`:443` egress
+is force-redirected through the VM's proxy, which refuses destinations that
+resolve inside the network and applies your allowlist to the rest. Exfiltration
+becomes a request to a host you approved, which is a much smaller and much more
+auditable target than "the internet".
+
+**For an open source developer this is close to free.** The source is already
+public. What is not public is the key that can push to it, and the tokens in
+your proxy settings — and those are on the other side of boundaries 3 and 4.
+
+### 2. Siblings are separated, until a project asks not to be
+
+A project's `workspaceMount` must bind exactly `/workspaces/<project>`, volumes
+are confined to its own namespace, and bind mounts are refused outright. The two
+mounts `desolate` injects — the editor server and the CA scripts — are
+per-project overlays, so a project writing to either changes only its own view.
+
+The exception is `allowPrivileged`, which a project requests **in its own
+`devcontainer.json`**. A privileged devcontainer is privileged relative to dind,
+and dind mounts `/workspaces` whole. So enabling it means:
+
+- every project's source becomes readable by that project,
+- every project's editor token in `/workspaces/.desolate/` becomes readable,
+- and proxy-injected secrets become **usable** by that project against every
+  allowlisted host.
+
+It does **not** reach the keyring (no mounts, no network) or the VM (sysbox).
+Treat `allowPrivileged` as "this project may read all my other projects", and
+note that it is currently grantable by cloning a repository that declares it.
+
+### 3. Credentials: usable while compromised, never copyable
+
+This is the boundary that took the most work, because the obvious version of it
+was false.
+
+The editor shares `/workspaces` read-write with every devcontainer, and **a
+repository is executable configuration**. `.git/config` carries
+`core.fsmonitor`, `core.pager`, `core.hooksPath`, `filter.*.clean`,
+`diff.*.textconv`; `.git/hooks/` is a directory of programs; `.gitattributes`
+selects filters defined in the *system* gitconfig, and this image installs
+git-lfs `--system`. Running `git status` in a hostile repository is running its
+code. No firewall rule touches this — it is a shared filesystem, not a socket.
+
+Pinning `.git` does not fix it either, because the selector (`.gitattributes`,
+`.lfsconfig`) lives in the worktree, which is the thing you are editing.
+
+So the credentials moved instead. The `keyring` container holds every private
+key, has **no network at all** (`network_mode: none`), mounts no project
+content, and exposes exactly two unix sockets into a volume the editor mounts
+**read-only**:
+
+- an **ssh-agent socket** — the editor can sign with a key, and can never read
+  one;
+- a **control socket** with `create`, `list`, `pubkey`, `remove` and
+  deliberately no operation that returns private key material.
+
+`~/.ssh/config` in the editor pins `IdentityFile` to the **public** half per
+host alias, so `IdentitiesOnly yes` still works with several deploy keys loaded
+without the editor holding any of them.
+
+**What this buys, precisely.** A compromised editor can *use* your deploy keys
+for as long as it is compromised — it can push to repositories you have
+configured. It cannot *copy* one. The incident therefore ends when you restart a
+container, rather than when you have rotated every deploy key on every
+repository and audited what was done with them in the meantime. That is the
+whole claim, and it is worth being exact about, because "the keys are safe" is
+not what is being said.
+
+Proxy secrets work the same way and always have: placeholders go into the
+container, real values are substituted at the proxy toward proven destinations,
+and no container ever holds one.
+
+### 4. The VM and your Mac
+
+dind runs under sysbox in a user namespace, so container-root maps to an
+unprivileged VM user. A `--privileged` devcontainer is privileged relative to
+dind only; capabilities in a non-initial user namespace apply to that
+namespace's own resources, so it cannot load modules, touch VM devices, or reach
+the VM. `/etc/desolate-proxy/settings.json` — the only place your real secrets
+exist — is `0600` and owned by the proxy user on VM disk. Everything above rests
+on this boundary; it is also the best-tested one (`tests/probes/`, `preflight`,
+and the Red Guild escape as a live check).
+
+### The part you should actually worry about
+
+Not exfiltration of source — you publish that. The realistic bad day is:
+
+1. you clone a repository, or pull a dependency, that is hostile;
+2. you open it in the **outer editor** (the one at `:3000`), and it executes;
+3. while you are compromised, it pushes to repositories you have keys for.
+
+Step 3 is bounded (no key theft, no VM, no Mac) but it is real. Two habits make
+it much smaller, and both are cheap:
+
+- **Edit inside the project editor, not the outer one.** Each project runs its
+  own `codium-server` inside its devcontainer, reached through the dev-server
+  port. Code executed there has no agent socket. Use the outer editor for
+  `desolate` and `cli.sh repo`, not for browsing project code.
+- **Do not trust workspaces you have not read.** VS Code's workspace trust is on
+  by default, and Restricted Mode blocks automatic tasks — but trusting
+  `/workspaces` once trusts every repository you later clone into it, including
+  hostile ones. Trust individual project folders, or leave the outer editor
+  untrusted entirely. Note that Restricted Mode does **not** stop the git paths
+  above; it only stops tasks and extensions.
+
+Use write-scoped deploy keys only where you need to push, and read-only
+elsewhere. A read-only key turns the worst case from "someone pushed to my repo"
+into "someone read a public repository".
 
 ## Requirements
 
@@ -1093,6 +1233,22 @@ Boundaries, strongest first:
   touch the VM. This is the boundary that makes the design safe regardless of
   credential hygiene: even a fully-privileged leaked key in a project can't
   escalate past here to reach other projects or the VM.
+- **editor <-> keyring** -- a process boundary plus a read-only mount, and it
+  is the reason a compromised editor is survivable. The keyring holds every
+  private key, has no network at all, and mounts no project content. The editor
+  reaches it through an ssh-agent socket (sign, never read) and a control socket
+  with no operation that returns key material. `keyring-run` is mounted `ro` in
+  the editor, which still permits `connect()` -- `MS_RDONLY` refuses writes to
+  regular files, directories and symlinks, not sockets -- while preventing a
+  compromised editor from rewriting an exported `.pub` and so subverting the
+  per-host identity pinning that keeps `IdentitiesOnly yes` honest.
+- **project <-> editor** -- the weakest boundary in the stack, and the one that
+  is not enforced by a mechanism at all. They share `/workspaces` read-write,
+  and a repository's `.git/config`, `.git/hooks/` and `.gitattributes` are
+  executable configuration consumed by the editor's git. Assume any project you
+  open in the outer editor can execute there. The design response is not to
+  prevent it but to make it survivable: there is nothing in that container worth
+  stealing, only capabilities that stop when it restarts.
 - **dind <-> containers** -- Linux namespaces, and the weakest of the three.
   This is the layer to be precise about.
 
@@ -1181,7 +1337,7 @@ VM's -- proof the escape reads nothing of the host.
 ## Components
 
 - `docker-compose.yml` -- the stack: `volume-init` (one-shot), `dind`
-  (sysbox-runc), `vscode` (OpenVSCode Server), `orchestrator` (the broker).
+  (sysbox-runc), `vscode` (VSCodium web host), `orchestrator` (the broker), `keyring` (ssh-agent).
 - `cli.sh` -- the one command you run on the Mac (see Daily use).
 - `preflight.sh` -- post-start verification, including the containment proof.
 - `vscode-image/Dockerfile` also installs **git-lfs** and **git-subrepo**, both
@@ -1192,12 +1348,20 @@ VM's -- proof the escape reads nothing of the host.
   set; it is how this repo itself vendors `release/` and `.suede/*`.
 - `observe.sh` -- views of the inner daemon from the Mac, via the orchestrator's
   unix socket. Nothing is published to reach it.
+- `vscode-image/keyring.ts` -- the keyring service. The only container holding
+  raw private keys, with no network and no project content. Keys are stored one
+  directory per alias with fixed filenames inside; the earlier layout encoded
+  the alias into the filename and parsed it back, which let an alias ending in
+  `.pub` have its PRIVATE half served as a public one. `tests/unit/desolate/
+  keyring.test.ts` pins the layout, and `tests/integration/keyring` runs the
+  laundering attempt against a live keyring.
 - `vscode-image/` -- one image, two roles. `broker.ts` (orchestrator: narrow
   request API, snapshotting and ground-truth resolution), `policy.ts` (the spec
   policy itself -- pure and unit-tested), `snapshot.ts` (the copy that freezes a
   spec, refusing any symlink that leaves the project), `desolate-client.ts` (editor:
   `desolate`), `desolate.ts` (the real runner, `desolate-run`, orchestrator
-  only), and `newrepo.ts` (per-repo deploy keys; git only, no daemon needed).
+  only), and `newrepo.ts` (per-repo deploy keys -- it asks the keyring to mint them and
+  never handles a private half itself).
 - `tests/` -- static invariants, unit tests and integration tests, including a
   regression case per demonstrated escape. `./tests/run.sh`.
 - `vm/` -- VM provisioning. `install.sh` is the single entry point behind
