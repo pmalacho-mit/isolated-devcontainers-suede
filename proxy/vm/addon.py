@@ -12,13 +12,18 @@ devcontainers put in .env files:
 Behavior per request:
   0. Refuse any request whose destination ADDRESS is internal (see below).
   1. Establish the PROVEN destination (see below).
-  2. Network policy (ordered allow/deny rules, first match wins).
+  2. Network policy (ordered allow/deny rules, first match wins), on the proven
+     name WHERE THERE IS ONE. Plaintext has none, so that path falls back to
+     the Host header and the policy is only as good as a name the client chose
+     -- see "WHAT THE NETWORK POLICY DOES NOT DECIDE" below.
   3. Scan URL + headers + body for any configured placeholder.
   4. If a placeholder is found but the proven destination is NOT in that
      secret's allowlist -> block 403 (leak detection / honeypot defense).
+     Unlike step 2 this NEVER falls back: no SNI means no substitution.
   5. Otherwise substitute every occurrence with the real value.
-  6. On responses, scrub real values back to placeholders so a secret can
-     never enter the container even if an endpoint echoes it.
+  6. On responses, scrub real values back to placeholders, so an endpoint that
+     echoes a secret does not hand it to the container. Bodies over MAX_BODY
+     are passed through unscrubbed; headers are scrubbed at any size.
 
 Redirect safety falls out of the model: substitution is decided per-request,
 so a redirect to an unlisted host receives the placeholder, which trips rule 4.
@@ -46,6 +51,30 @@ that name.
 
 Plain HTTP has no SNI and therefore no provable destination at all. Requests
 that carry a placeholder over plaintext are refused rather than guessed at.
+
+---------------------------------------------------------------------------
+WHAT THE NETWORK POLICY DOES NOT DECIDE
+---------------------------------------------------------------------------
+Everything above is about SECRETS, and holds. The `network` rules are a
+separate list with a weaker guarantee, and the difference is worth stating
+where someone turning them on will read it.
+
+They match on a NAME, and plaintext has no proven one -- so `_request` judges
+plaintext on the Host header. With `default_action: "deny"`, a container
+therefore still reaches any PUBLIC address on :80 by claiming an allowlisted
+name it does not control:
+
+    curl http://<any-public-ip>/ -H 'Host: deb.debian.org'
+
+Bounded on both sides: no secret can ride that path (step 4 above has no
+fallback, so a placeholder over plaintext is 403 whatever the Host says), and
+no internal address can (the address check below runs first, and the kernel
+runs behind it). What is NOT bounded is the destination set for ordinary
+plaintext traffic. Judging plaintext on `request.host` -- which IS the original
+destination in transparent mode -- would close it, at the cost of denying
+every plaintext request in a deny-by-default deployment unless the allowlist
+carries addresses as well as names. Pinned by
+tests/unit/proxy/test_addon.py::test_the_network_allowlist_is_spoofable_over_plaintext.
 
 ---------------------------------------------------------------------------
 WHY INTERNAL DESTINATIONS ARE REFUSED BEFORE ANYTHING ELSE

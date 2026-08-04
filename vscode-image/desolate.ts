@@ -10,8 +10,8 @@
 // A project is a directory under /workspaces, either a direct child or ONE
 // level deeper so repositories can be scoped by owner (`cli.sh repo add` clones
 // to /workspaces/<owner>/<repo>). Docker object names cannot contain "/", so
-// volumes, relay containers and state files use the encoded form from
-// policy.ts: `owner/repo` -> `owner__repo`.
+// volumes, relay containers and state files use `volumeNamespace`'s encoded
+// form: `owner/repo` -> `owner__repo`.
 //
 // Plain start REUSES an existing container: `devcontainer up` finds it by label
 // and starts it without re-reading devcontainer.json. So editing the spec and
@@ -79,9 +79,6 @@ import {
 } from "./devcontainer.ts";
 import { caTrustingImage, installInstructions } from "./certificates.ts";
 
-// ---------------------------------------------------------------------------
-// Configuration constants
-// ---------------------------------------------------------------------------
 const WORKSPACES = "/workspaces";
 
 // Piping our output to `head`/`grep -q` closes stdout early; bash tools
@@ -193,20 +190,11 @@ const ports = {
 };
 
 const spec = {
-  /**
-   * Capture what the running container was actually built from.
-   * @param dir
-   * @param config
-   */
+  /** Capture what the running container was actually built from. */
   fingerprint: (dir: string, config?: string) => {
     const parts: string[] = [];
-    /**
-     *
-     * @param path
-     * @param label relative location, as the absolute path of `config` changes
-     * every call, so hasing on it would cause a miss every subsequnet run
-     * @returns
-     */
+    /** @param label the location RELATIVE to the tree being walked. A snapshot's
+     *  absolute path changes every call, so hashing it would miss every run. */
     const walk = (path: string, label: string) => {
       let stats: fs.Stats;
       try {
@@ -341,11 +329,6 @@ const overlay = {
 const ownRelayNames = (project: string) =>
   docker.container.namesWithLabel(relay.label(project));
 
-/** The devcontainer's container id for a workspace folder ("" if none).
- *
- *  `configFile` is the path we hand `--override-config`, which the CLI records
- *  as the second half of the container's identity. Pass it wherever it is
- *  known -- the workspace label on its own is a claim, not a proof. */
 /**
  * The container this project's workspace folder belongs to, "" if there is none.
  *
@@ -473,7 +456,7 @@ function deriveRunConfig(
   try {
     spec = parseJsonc(fs.readFileSync(src, "utf8"));
   } catch {
-    return die(`Faild to parse devcontainer config for ${project}`);
+    return die(`Failed to parse devcontainer config for ${project}`);
   }
 
   if (typeof spec !== "object" || spec === null)
@@ -684,10 +667,7 @@ const startRelay = (
   );
 };
 
-/**
- * Relays: one socat container per mapped port, named desolate-relay-<proj>-<port>
- * so the host port is recoverable from the name alone
- */
+/** One relay per mapped port, replacing whatever this project had before. */
 function recreateRelays(project: string, dir: string, map: PortMap): void {
   const cid = devcontainerId(dir);
   if (!cid) die("devcontainer is not running after up");

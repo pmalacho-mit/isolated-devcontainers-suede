@@ -86,9 +86,8 @@ export const list = Object.assign(
   },
   {
     /**
-     * The subset of `listProjects` that can actually be started right now
-     * (to answer a human wondering "what can I open?", instead of a policy
-     * asking "who could contest this volume name?")
+     * The subset of `list` that can actually be started right now (answering
+     * "what can I open?", rather than "who could contest this volume name?").
      */
     startable: (workspaces: string) =>
       list(workspaces).filter((name) =>

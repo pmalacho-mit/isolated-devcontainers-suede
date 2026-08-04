@@ -15,22 +15,27 @@ The name is `desolate` = **de**v + i**solate**.
 ## Architecture
 
 ```
-+- macOS ---------------------------------------------------------------+
-|  browser --> 127.0.0.1:3000 (?token)     ./cli.sh observe (no port)   |
-|                                                                       |
-|  +- Colima VM (Ubuntu; sysbox + desolate-proxy) --------------------+   |
-|  |  SECRETS LIVE HERE ONLY: /etc/desolate-proxy/settings.json (0600)  |   |
-|  |  all container egress is force-redirected through the proxy      |   |
-|  |  +- dind -- UNPRIVILEGED via sysbox-runc --------------------+  |   |
-|  |  |  inner dockerd   <- devcontainers + relays live here      |  |   |
-|  |  |   |- [orchestrator] --- HOLDS THE SOCKET; serves broker    |  |   |
-|  |  |   |- [vscode: editor] -- NO socket; broker client only     |  |   |
-|  |  |   \- devcontainer (your project)                          |  |   |
-|  |  |        \- optional level-3 container (e.g. FastAPI)       |  |   |
-|  |  +-----------------------------------------------------------+  |   |
-|  +----------------------------------------------------------------+   |
-|  Host /var/run/docker.sock: mounted NOWHERE                          |
-+-----------------------------------------------------------------------+
++- macOS ------------------------------------------------------------------+
+|  browser --> 127.0.0.1:3000 (?token)        ./cli.sh observe (no port)   |
+|                                                                          |
+|  +- Colima VM (Ubuntu; sysbox + desolate-proxy) ----------------------+  |
+|  |  SECRETS LIVE HERE ONLY: /etc/desolate-proxy/settings.json (0600)  |  |
+|  |  all container egress is force-redirected through the proxy        |  |
+|  |                                                                    |  |
+|  |  devnet -- the EDITOR world                                        |  |
+|  |    [vscode: editor]  NO docker socket; a broker client only        |  |
+|  |    [orchestrator]    HOLDS THE SOCKET; serves the broker           |  |
+|  |    [keyring]         NO network at all; the private SSH keys       |  |
+|  |                                                                    |  |
+|  |  dindnet -- the CONTAINER world; nothing routes between the two    |  |
+|  |  +- dind -- UNPRIVILEGED via sysbox-runc ------------------------+ |  |
+|  |  |  inner dockerd  <- devcontainers + relays live here           | |  |
+|  |  |    devcontainer (your project)                                | |  |
+|  |  |      \- optional level-3 container (e.g. FastAPI)             | |  |
+|  |  +---------------------------------------------------------------+ |  |
+|  +--------------------------------------------------------------------+  |
+|  Host /var/run/docker.sock: mounted NOWHERE                              |
++--------------------------------------------------------------------------+
 ```
 
 **One** host-reachable surface, loopback-only: `3000` by default (`VSCODE_PORT`),
@@ -369,7 +374,7 @@ ask us to start it.
 Getting that check _right_ is harder than it looks, because a devcontainer's
 privilege can arrive from four places, and only one of them is the top-level
 keys of the file you are reading. Every bypass demonstrated against an earlier
-version of this policy has a named regression test in `tests/` (`E1`..`E13`).
+version of this policy has a named regression test in `tests/` (`E1`..`E15`).
 The rules, and what each is actually defending:
 
 - **`initializeCommand` is refused.** It runs on the machine driving the
@@ -789,8 +794,15 @@ needs deriving, and it is closer to what production actually does.
 ### Applying changes to devcontainer.json
 
 ```bash
-desolate --rebuild <project>              # recreate the container from the current spec
-desolate --rebuild --no-cache <project>   # and rebuild the image ignoring layer cache
+desolate --rebuild <project>              # in the editor, or ./cli.sh desolate --rebuild <project>
+```
+
+`--no-cache` (rebuild the image ignoring the layer cache, not just the
+container) is **only available from the Mac**, because the broker's op
+vocabulary has no verb for it:
+
+```bash
+./cli.sh desolate --rebuild --no-cache <project>
 ```
 
 **Starting a project reuses its existing container.** `devcontainer up` finds
@@ -933,8 +945,8 @@ Colima VM  /etc/desolate-proxy/settings.json  (0600, VM disk only)
 
 Your code reads `$OPENAI_API_KEY` and sends `Authorization: Bearer
 MYAPP-OPENAI-KEY` exactly as normal. On the way out the proxy swaps in the real
-key. Responses are scrubbed on the way back, so the real value cannot re-enter
-the container even if an endpoint echoes it.
+key. Responses are scrubbed on the way back, so the real value does not re-enter
+the container when an endpoint echoes it -- with one size limit, below.
 
 ### What "toward that secret's allowlisted hosts" has to mean
 
@@ -1013,6 +1025,27 @@ are not will bite:
   so the path is default-deny but the _destination set_ is not. Set
   `default_action: "deny"` and an explicit `network` allowlist in
   `/etc/desolate-proxy/settings.json` if you want that too.
+- **That destination allowlist bounds HTTPS, not plain HTTP.** The `network`
+  rules match on a name, and over plaintext there is no proven one -- so the
+  addon falls back to the `Host` header, which the client picks independently
+  of the IP it connects to. With `default_action: "deny"`, a container still
+  reaches any _public_ address on `:80` by naming an allowlisted host:
+
+  ```bash
+  curl http://<any-public-ip>/ -H 'Host: deb.debian.org'   # allowed
+  ```
+
+  This does **not** move a secret: substitution needs an SNI, so a placeholder
+  over plaintext is refused with 403 whatever the `Host` says. And internal
+  addresses stay refused, by the address check ahead of the policy and by the
+  kernel behind it. What it means is that "deny by default" is a statement
+  about your TLS traffic. `tests/unit/proxy` pins this so a fix is deliberate.
+- **Response scrubbing stops at 5 MB.** Bodies larger than that are passed
+  through untouched, so an endpoint that echoes your key inside a very large
+  response hands the real value back to the container. Headers are scrubbed at
+  any size, and the request side of the same limit is harmless -- an oversized
+  body is not searched, so nothing in it is substituted and no real value
+  leaves.
 - **Secrets are not scoped per project.** The proxy sees requests from the
   whole stack and cannot tell which devcontainer sent one. Any project can
   _use_ any other project's placeholder toward that secret's allowlisted hosts
@@ -1181,7 +1214,8 @@ VM's -- proof the escape reads nothing of the host.
 ## Components
 
 - `docker-compose.yml` -- the stack: `volume-init` (one-shot), `dind`
-  (sysbox-runc), `vscode` (OpenVSCode Server), `orchestrator` (the broker).
+  (sysbox-runc), `vscode` (VSCodium's reh-web server), `orchestrator` (the
+  broker), `keyring` (the private SSH keys; no network, no `/workspaces`).
 - `cli.sh` -- the one command you run on the Mac (see Daily use).
 - `preflight.sh` -- post-start verification, including the containment proof.
 - `vscode-image/Dockerfile` also installs **git-lfs** and **git-subrepo**, both
@@ -1192,12 +1226,14 @@ VM's -- proof the escape reads nothing of the host.
   set; it is how this repo itself vendors `release/` and `.suede/*`.
 - `observe.sh` -- views of the inner daemon from the Mac, via the orchestrator's
   unix socket. Nothing is published to reach it.
-- `vscode-image/` -- one image, two roles. `broker.ts` (orchestrator: narrow
+- `vscode-image/` -- one image, three roles. `broker.ts` (orchestrator: narrow
   request API, snapshotting and ground-truth resolution), `policy.ts` (the spec
   policy itself -- pure and unit-tested), `snapshot.ts` (the copy that freezes a
   spec, refusing any symlink that leaves the project), `desolate-client.ts` (editor:
   `desolate`), `desolate.ts` (the real runner, `desolate-run`, orchestrator
-  only), and `newrepo.ts` (per-repo deploy keys; git only, no daemon needed).
+  only), `newrepo.ts` (per-repo deploy keys; git only, no daemon needed), and
+  `keyring.ts` (the key holder: an ssh-agent plus a control socket with no
+  operation that returns private key material).
 - `tests/` -- static invariants, unit tests and integration tests, including a
   regression case per demonstrated escape. `./tests/run.sh`.
 - `vm/` -- VM provisioning. `install.sh` is the single entry point behind
@@ -1208,11 +1244,12 @@ VM's -- proof the escape reads nothing of the host.
   dnsmasq resolver, systemd units, and an idempotent `install.sh`.
 - `proxy/container/install-ca.sh` -- trusts the proxy CA inside a container.
   You never call it: `desolate` runs it for you.
-  Two example projects live in `samples/` in the source repo -- `example-project`
-  (a minimal hardened devcontainer) and `sample-fastapi` (the full three-level
-  chain plus secrets). They are fixtures and documentation, deliberately outside
-  this shipped tree, so they are not part of an install. Copy one into
-  `/workspaces/<name>` to try it.
+
+Two example projects live in `samples/` in the source repo -- `example-project`
+(a minimal hardened devcontainer) and `sample-fastapi` (the full three-level
+chain plus secrets). They are fixtures and documentation, deliberately outside
+this shipped tree, so they are not part of an install. Copy one into
+`/workspaces/<name>` to try it.
 
 ## Configuration
 
