@@ -121,9 +121,9 @@ services:
       # MUST match the vscode mount path so devcontainer bind mounts resolve
       - workspaces:/workspaces
       # This is the pristine editor server, and it is the LOWER LAYER of the
-      # per-project overlayfs volume `desolate` builds for each devcontainer
-      # (see ensureServerVolume in vscode-image/desolate.ts). Every devcontainer
-      # EXECUTES /vscode-server/bin/codium-server out of its own overlay.
+      # per-project overlayfs volume `desolate` builds for each devcontainer.
+      # Every devcontainer EXECUTES /vscode-server/bin/codium-server out of its
+      # own overlay.
       # Nothing but volume-init may write here. If a project could reach this
       # directory, it would be writing the binary every OTHER project runs.
       # overlayfs already prevents that from the project side -- writes are
@@ -236,10 +236,13 @@ services:
     depends_on:
       dind:
         condition: service_healthy
+      # Ordering only. Neither socket is guaranteed to be bound yet -- both
+      # processes create theirs after start -- so the editor's clients report a
+      # missing socket rather than assuming one.
       orchestrator:
-        condition: service_started    # broker socket must exist
+        condition: service_started
       keyring:
-        condition: service_started    # agent socket must exist
+        condition: service_started
     user: "1000:1000"
     environment:
       # NO DOCKER_HOST. The editor has no daemon access at all.

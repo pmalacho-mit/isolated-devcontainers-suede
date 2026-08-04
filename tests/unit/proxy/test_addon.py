@@ -6,7 +6,7 @@ previous version of this addon -- transparent mitmproxy, nftables REDIRECT,
 containers on a bridge -- and each one delivered the real secret to an
 attacker-controlled server. They are regression tests.
 
-Run: tests/unit/proxy/run.sh   (or: pytest tests/unit/proxy)
+Run: ./tests/run.sh unit   (or: pytest tests/unit/proxy)
 Needs: mitmproxy (same version install.sh pins) and pytest.
 """
 
@@ -225,6 +225,55 @@ def test_network_policy_deny(tmp_path):
     denied = make_flow(sni="evil.example.com", host_header="evil.example.com")
     addon.request(denied)
     assert denied.response is not None and denied.response.status_code == 403
+
+
+def test_the_network_allowlist_is_spoofable_over_plaintext(tmp_path):
+    """KNOWN GAP, pinned so it cannot change by accident.
+
+    Leak detection is decided strictly on the PROVEN destination (the TLS SNI),
+    and refuses a placeholder over plaintext outright -- that is E6 above. The
+    NETWORK policy is not: `policy_host = proven or claimed or request.host`
+    falls back to the Host header, which over plain HTTP the client chooses
+    independently of the IP it connects to. So with `default_action: "deny"`,
+    any container reaches any PUBLIC address on :80 by naming an allowlisted
+    host in a header nothing verifies.
+
+    What this is NOT: a way to move a secret. Substitution needs an SNI, so the
+    placeholder travels as itself. Internal addresses are still refused by the
+    destination-address check ahead of this, and by the kernel behind it.
+
+    What it IS: the destination allowlist bounds HTTPS and does not bound
+    plaintext. Anyone turning `default_action: "deny"` on should know that.
+    Making it hold would mean judging plaintext on `request.host` -- the real
+    destination in transparent mode -- rather than on the claimed name.
+    """
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "deny",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]}},
+        "network": [{"action": "allow", "host": "*.debian.org"}],
+        "scrub_responses": True,
+    })
+
+    spoofed = make_flow(sni=None, host_header="deb.debian.org", dest=PUBLIC_ATTACKER)
+    addon.request(spoofed)
+    assert spoofed.response is None, (
+        "plaintext Host spoofing is now refused -- good. Delete this test and "
+        "the matching paragraph in release/README.md."
+    )
+
+    # The two things that DO still hold, asserted here so the gap above is
+    # never mistaken for a wider one.
+    honest = make_flow(sni=None, host_header=None, dest=PUBLIC_ATTACKER)
+    addon.request(honest)
+    assert honest.response is not None and honest.response.status_code == 403, (
+        "with no name claimed, the destination IP is judged and denied"
+    )
+
+    carrying = make_flow(sni=None, host_header="deb.debian.org", dest=PUBLIC_ATTACKER,
+                         headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    addon.request(carrying)
+    assert blocked(carrying), "a secret must never ride the plaintext path"
+    assert SECRET_VALUE not in str(carrying.request.headers)
 
 
 def test_method_scoped_network_rule(tmp_path):
@@ -459,6 +508,50 @@ def test_response_body_and_headers_are_scrubbed(tmp_path):
     assert SECRET_VALUE.encode() not in f.response.content
     assert SECRET_NAME.encode() in f.response.content
     assert f.response.headers["X-Echo"] == SECRET_NAME
+
+
+def test_scrubbing_stops_at_MAX_BODY(tmp_path):
+    """KNOWN GAP, pinned so it cannot change by accident.
+
+    Scrubbing is what makes "the real value cannot re-enter the container"
+    true, and it has a size ceiling: a response body over MAX_BODY is passed
+    through untouched, secret and all. The header scan has no such limit, so
+    this is bodies only.
+
+    The REQUEST side of the same ceiling is safe in the other direction -- an
+    oversized body is not searched, so no placeholder in it is substituted and
+    the real value never leaves. Asserted here too, because the two halves read
+    identically and only one of them is harmless.
+    """
+    mod, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+
+    under = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    under.response = tutils.tresp(content=b"x" * (mod.MAX_BODY - 100) + SECRET_VALUE.encode())
+    addon.response(under)
+    assert SECRET_VALUE.encode() not in under.response.content
+
+    over = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    over.response = tutils.tresp(content=b"x" * (mod.MAX_BODY + 100) + SECRET_VALUE.encode())
+    addon.response(over)
+    assert SECRET_VALUE.encode() in over.response.content, (
+        "oversized responses are now scrubbed -- good. Delete this test and the "
+        "caveat it documents in release/README.md."
+    )
+
+    # A header of any size is still scrubbed, whatever the body weighs.
+    over.response.headers["X-Echo"] = SECRET_VALUE
+    addon.response(over)
+    assert over.response.headers["X-Echo"] == SECRET_NAME
+
+    # Requests: too big to search means too big to substitute into.
+    outbound = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                         method="POST",
+                         content=b"x" * (mod.MAX_BODY + 100) + SECRET_NAME.encode())
+    addon.request(outbound)
+    assert outbound.response is None
+    assert SECRET_VALUE.encode() not in outbound.request.raw_content
+    assert SECRET_NAME.encode() in outbound.request.raw_content
 
 
 def test_scrubbing_can_be_disabled(tmp_path):

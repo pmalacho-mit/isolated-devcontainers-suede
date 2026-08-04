@@ -64,9 +64,9 @@ release/                 THE SHIPPED TREE
   vm/                    VM provisioning: install.sh + install-sysbox.sh
   proxy/vm/              egress+secrets layer: mitmproxy addon, nftables,
                          dnsmasq, systemd units
-  vscode-image/          one image, two roles -- broker.ts (orchestrator) and
-                         the editor; policy.ts is the spec policy, pure and
-                         unit-tested
+  vscode-image/          one image, three roles -- broker.ts (orchestrator),
+                         the editor, and keyring.ts (the private SSH keys);
+                         policy.ts is the spec policy, pure and unit-tested
 samples/                 example devcontainers; fixtures, NOT shipped
 tests/                   static / unit / integration -- see tests/README.md
 .devcontainer/           the INSECURE bootstrap container this work happens in

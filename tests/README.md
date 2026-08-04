@@ -2,6 +2,7 @@
 
 ```bash
 ./tests/run.sh                 # static + unit -- fast, no docker daemon needed
+./tests/run.sh environments    # the unit suite on the shipped toolchain
 ./tests/run.sh integration     # starts containers
 ./tests/run.sh all
 ```
@@ -37,8 +38,11 @@ snapshot that said `harmless`). Both were measured, not deduced.
 |---|---|---|
 | `static/` | bash, jq, docker compose (config only) | the invariants decided by config alone: no daemon in the editor, loopback-only ports, sysbox runtime, nftables default-deny, and that the compose bridge name and `DESOLATE_IF` cannot drift apart |
 | `unit/broker/` | node >= 22.18 | the spec policy, in isolation: every refused key, the runArgs allowlist, the mount-field allowlist and its alias rule, the JSONC scanner, the spec snapshot's copying, and that the repo's own example projects still pass |
+| `unit/desolate/` | node >= 22.18 | the runner's pure parts: the command line, port allocation, the docker argv, the overlay volume names, the editor script's interpolation guards, the keyring's path layout |
 | `unit/proxy/` | python + mitmproxy + pytest | the addon's decisions: proven-destination vs claimed Host, allowlists, fail-closed on internal error, response scrubbing |
+| `environments/` | docker daemon | the unit suite re-run inside containers that mirror the shipped runtime -- the pinned node/tsx, and the docker CLI actually accepting the argv `docker.ts` builds |
 | `integration/broker/` | node >= 22.18, `devcontainer` on PATH | the real broker over its unix socket, enforcing on the real CLI's `mergedConfiguration`, with a stub runner. Also the TOCTOU snapshot |
+| `integration/keyring/` | node >= 22.18, openssh-client | the real keyring process behind its real control socket: that no private key reaches the volume the editor mounts, and that a client cannot kill it |
 | `integration/proxy/` | root, nft, docker, mitmproxy | the addon under a real transparent proxy with real nftables REDIRECT, checking what an attacker-controlled server actually received |
 | `integration/stack/` | docker daemon with `sysbox-runc` | the whole stack, attacked from inside the editor container |
 
@@ -53,7 +57,9 @@ This matters more than it looks, because several suites cannot run in the
 |---|---|---|
 | `static` | devcontainer or Mac | `docker compose config` needs **no** daemon |
 | `unit` | devcontainer or Mac | pure node + python |
+| `environments` | devcontainer or Mac | builds images; needs a reachable daemon |
 | `integration/broker` | devcontainer or Mac | needs the `devcontainer` CLI on PATH |
+| `integration/keyring` | devcontainer or Mac | needs ssh-agent/ssh-add/ssh-keygen |
 | `integration/proxy` | Linux, as root | loads real nftables rules; skips elsewhere |
 | `integration/stack` | **Mac only** | needs Colima + sysbox; refuses to fake it |
 
@@ -126,7 +132,8 @@ once the question is settled.
 
 | probe | question | run it |
 |---|---|---|
-| `dind-overlay-volume.sh` | can each project get a private copy-on-write view of the shared editor server, instead of the read-only bind it gets today? | answered; kept for reference |
+| `dind-overlay-volume.sh` | can each project get a private copy-on-write view of the shared editor server, instead of a read-only bind? | **answered yes; the design now depends on it.** Kept as the diagnostic for when `desolate` refuses to build one |
+| `nested-sysbox.sh` | does sysbox nest inside sysbox on this kernel? If it does, every devcontainer becomes user-namespaced and `allowPrivileged` can be deleted rather than merely audited | **Mac, VM with sysbox; the stack need not be up** |
 | `loopback-cookie-scope.sh` | the editor and every project's dev server share `127.0.0.1`, and cookies are scoped by host and not by port -- can a page served by one devcontainer read the main editor's credential out of the shared jar? | **Mac, live stack** |
 | `devnet-reachability.sh` | the nftables forward chain ends in a drop, but container-to-container traffic on the same bridge is switched rather than routed -- does the drop actually cover it? | **Mac, live stack** |
 

@@ -73,9 +73,9 @@ type Devcontainer = { workspace: "one directory under /workspaces" };
 /** Anything the project runs itself, on its own daemon. */
 type Level3Container = { example: "FastAPI, from a compose.yml" };
 
-/* -- inside dind ----------------------------------------------------------- */
+/* -- beside dind, on the editor bridge -------------------------------------- */
 
-/** OpenVSCode Server: a universal file editor with no daemon access. */
+/** VSCodium's reh-web server: a universal file editor with no daemon access. */
 type Editor = { serves: "/workspaces"; dockerAccess: never };
 
 /** Holds the socket; serves the broker. */
@@ -83,6 +83,9 @@ type Orchestrator = {
   holds: "the inner daemon socket";
   serves: "the broker";
 };
+
+/** The only container with raw private keys. No network, no /workspaces. */
+type Keyring = { holds: "the deploy keys"; handsOut: "an agent socket only" };
 
 /** The inner daemon's socket. Exactly one container holds it. */
 type InnerDockerSocket = { holders: "the orchestrator, and nothing else" };
@@ -145,12 +148,16 @@ export type Overview = Flowchart.Diagram<
           [
             Flowchart.Node<EgressProxy, "hexagon", false>,
             Flowchart.Subgraph<
-              "dind -- unprivileged, via sysbox",
+              "devnet -- the editor world",
               [
                 Flowchart.Node<Editor, "subroutine", false>,
                 Flowchart.Node<Orchestrator, "subroutine", false>,
-                Flowchart.Node<Devcontainer, "rectangle", false>,
+                Flowchart.Node<Keyring, "subroutine", false>,
               ]
+            >,
+            Flowchart.Subgraph<
+              "dindnet -- dind, unprivileged via sysbox",
+              [Flowchart.Node<Devcontainer, "rectangle", false>]
             >,
           ]
         >,
@@ -159,6 +166,7 @@ export type Overview = Flowchart.Diagram<
     Flowchart.Node<Internet, "circle", false>,
     Flowchart.Connect<Browser, Editor, "3000, token-gated">,
     Flowchart.Connect<Editor, Orchestrator, "one broker op">,
+    Flowchart.Connect<Editor, Keyring, "a unix socket, never a key">,
     Flowchart.Connect<Orchestrator, Devcontainer, "starts it">,
     Flowchart.Connect<Devcontainer, EgressProxy, "all egress", "thick">,
     Flowchart.Connect<EgressProxy, Internet>,
@@ -218,7 +226,7 @@ export type HostSurfaces = Flowchart.Diagram<
       ]
     >,
     Flowchart.Subgraph<
-      "inside dind",
+      "in the Colima VM",
       [
         Flowchart.Node<Editor, "subroutine">,
         Flowchart.Node<Orchestrator, "subroutine">,

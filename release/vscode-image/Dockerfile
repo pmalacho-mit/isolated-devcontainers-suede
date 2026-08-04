@@ -14,7 +14,7 @@ FROM debian:bookworm-slim
 
 USER root
 
-# Pin software versions installed by this image (while other images canb 'float').
+# Pin software versions installed by this image (while other images can 'float').
 # DOCKER_VERSION is the CLI only -- the daemon it drives is docker-compose.yml's `docker:#-dind`
 # VSCODIUM_* pins the editor server; the sums are the ones published beside the
 # release tarballs, and a mismatch must fail the build rather than warn.
@@ -39,10 +39,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libstdc++6 \
   && rm -rf /var/lib/apt/lists/*
 
-# The user the gitpod base image used to supply. HOME is set explicitly rather
-# than inherited: docker-compose.yml mounts vscode-home at /home/workspace, and
-# an image whose passwd entry disagreed with $HOME is exactly the ambiguity the
-# git-lfs `--system` install below was working around.
+# uid 1000, which dockerd's `--group=1000` grants the inner socket to. HOME is
+# set to the same path the passwd entry names: an image where the two disagree
+# is exactly the ambiguity the git-lfs `--system` install below works around.
 RUN groupadd -g 1000 desolate \
   && useradd -u 1000 -g 1000 -m -d /home/workspace -s /bin/bash desolate
 ENV HOME=/home/workspace

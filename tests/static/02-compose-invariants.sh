@@ -136,12 +136,13 @@ for svc in orchestrator vscode; do
 done
 
 group "the shared editor server cannot be poisoned by a project"
-# /server-dist is bind-mounted into EVERY devcontainer as /vscode-server, and
-# every devcontainer EXECUTES /vscode-server/bin/codium-server. Writable,
-# that is cross-project code execution with no privilege required: the volume is
-# chowned 1000:1000 and the stock devcontainer user is uid 1000, so project A
-# overwrites the binary and project B runs it. Only volume-init, which seeds it,
-# may hold it read-write.
+# /server-dist is the LOWER layer of the per-project overlay every devcontainer
+# mounts at /vscode-server, and every devcontainer EXECUTES
+# /vscode-server/bin/codium-server out of it. The overlay is what stops a
+# project writing down into the lower; this is the second lock, on the two
+# services that hold the lower directly. Writable there, a compromised dind or
+# orchestrator overwrites the binary every project runs. Only volume-init,
+# which seeds it, may hold it read-write.
 for svc in dind orchestrator; do
   assert_eq "$svc mounts server-dist read-only" \
     "$(q "[.services.\"$svc\".volumes[]? | select(.source == \"server-dist\") | .read_only] | first")" "true"

@@ -122,9 +122,11 @@ export const createDocker = (run: Runner) => {
   const container = {
     /** The devcontainer's container id for a workspace folder ("" if none).
      *
-     *  Pass `configFile` -- the path handed to `--override-config` -- wherever
-     *  it is known: it is the half of the CLI's identity that a project could
-     *  not forge even when it could still set labels. */
+     *  `configFile` is the second half of the CLI's identity, and the half a
+     *  project could not forge even when it could still set labels -- so pass
+     *  it wherever it is known. It is the config the CLI STAMPS, which is the
+     *  one inside the workspace folder whatever `--override-config` said; see
+     *  `labelledConfig`. Passing an override path matches nothing. */
     forWorkspace: (
       dir: string,
       { includeStopped = false, configFile = "" } = {},

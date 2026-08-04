@@ -182,7 +182,6 @@ export const snapshotFile = (root: string, from: string, to: string) => {
  * Wipe rather than reuse: a spec left by a previous run was validated against a
  * /workspaces that may since have gained or lost projects, which changes who
  * owns a volume namespace.
- * @param location
  */
 export const initDirectory = (location: string) => {
   rmSync(location, { recursive: true, force: true });

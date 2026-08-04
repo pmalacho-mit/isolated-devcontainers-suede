@@ -1,6 +1,6 @@
-// policy.ts -- the spec policy the broker enforces before starting a project.
+// What a project may ask for in its devcontainer.json, and nothing else.
 //
-// Pure and side-effect free (so it's easy to test)
+// Pure and side-effect free.
 import { posix } from "node:path";
 import type { ResolvedSpec } from "./devcontainer.ts";
 import { volumeNamespace } from "./projects.ts";
@@ -233,9 +233,6 @@ const format = {
    * Only the line breaks and the indentation that follows them are touched, so
    * spacing the author wrote WITHIN a line -- around an interpolation, inside
    * quotes -- survives verbatim.
-   * @param strings
-   * @param values
-   * @returns
    */
   single: Object.assign(
     (strings: TemplateStringsArray, ...values: unknown[]) =>
@@ -253,11 +250,7 @@ const format = {
   ),
 };
 
-/**
- * @throws A PolicyError witht the template strings formatted as a single line.
- * @param strings
- * @param values
- */
+/** @throws PolicyError carrying the template strings reflowed onto one line. */
 const fail = (strings: TemplateStringsArray, ...values: unknown[]): never => {
   throw new PolicyError(format.single(strings, ...values));
 };
@@ -450,12 +443,6 @@ const helpers = {
     return { directory, root };
   },
   runArgs: {
-    /**
-     * Parse the name of an arg, and extract it's inline value (e.g. flag=value)
-     * if it exists
-     * @param arg
-     * @returns
-     */
     parse: (arg: string) => {
       const equals = arg.indexOf("=");
       return {
@@ -464,11 +451,10 @@ const helpers = {
       };
     },
     /**
-     * Read `runArgs` as the (flag, value) pairs it denotes, refusing any flag that
-     * is not on the allowlist and any allowed flag whose value is missing.
-     * @param args
-     * @throws if flag is not on allowlist or was provided incorrectly
-     * (e.g. a value flag with no value, or a boolean flag with a value)
+     * Read `runArgs` as the (flag, value) pairs it denotes.
+     *
+     * @throws PolicyError on a flag that is not on the allowlist, a
+     * value-taking flag with no value, or a boolean flag carrying one.
      */
     *allowedPairs(args: string[]) {
       const { values, bools } = allowlist.runargs;
@@ -689,15 +675,12 @@ const checker = (
 };
 
 /**
- * Throws PolicyError with a specific reason if the project asks for anything
- * outside its own trust domain. Returns silently when the spec is acceptable.
- * @param project // todo
- * @param spec // todo
- * @param workspaces //todo
- * @param projects //todo
+ * Returns silently when the spec is acceptable.
+ *
+ * @param projects every name that could contest a volume namespace, so a
+ * volume can be awarded to the longest project claiming it.
  * @throws PolicyError with a specific reason if the project asks for anything
  * outside its own trust domain.
- * @returns nothing (when the spec is acceptable)
  */
 export function enforcePolicy(
   project: string,

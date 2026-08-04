@@ -53,7 +53,7 @@ fi
 # (uvicorn, gunicorn, node) never sources it, and will still fail with
 # CERTIFICATE_VERIFY_FAILED despite the store above being correct. That is why
 # the derived base images set these same variables as image ENV, which applies
-# to every process: see trust-proxy-in-builds.sh and withCaTrustedBase().
+# to every process: see trust-proxy-in-builds.sh, the sibling of this script.
 if [ -d /etc/profile.d ]; then
   cat > /etc/profile.d/desolate-ca.sh <<'EOF'
 export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/desolate-proxy.crt
