@@ -23,7 +23,7 @@ To see the installable source code along with the full documentation, please che
 
 ## At a glance
 
-Projects run as devcontainers inside an unprivileged Docker-in-Docker daemon in a Colima VM, reached through a browser tab rather than a desktop editor. A compromised project cannot reach your Mac, your credentials, or another project -- and secrets never enter a devcontainer at all: they live in the VM, and an intercepting proxy substitutes them in flight, only toward each secret's allowlisted hosts.
+Projects run as devcontainers inside an unprivileged Docker-in-Docker daemon in a Colima VM, reached through a browser tab rather than a desktop editor. A compromised project cannot reach your Mac, your credentials, or another project -- and secrets are never stored in a devcontainer: they live in the VM, and an intercepting proxy substitutes them in flight, only toward each secret's allowlisted hosts.
 
 ## System Requirements
 

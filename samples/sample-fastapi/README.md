@@ -4,8 +4,9 @@ Proves two things at once:
 
 1. the three-level path works: Mac browser -> dind relay -> devcontainer ->
    level-3 FastAPI container
-2. the secret is never inside any container -- only a placeholder is, and the
-   VM proxy substitutes the real value in-flight toward allowlisted hosts only
+2. the secret is never stored inside any container -- only a placeholder is,
+   and the VM proxy substitutes the real value in-flight, toward that secret's
+   allowlisted hosts and nowhere else
 
 ## Run it
 
@@ -30,9 +31,16 @@ Then, from your Mac browser on the forwarded `:8000` URL:
 | `/live-call` | `200` -- the proxy swapped in the real key on the way out |
 | `/exfil-test` | `403` -- same placeholder toward a non-allowlisted host is blocked |
 
-`/exfil-test` is the interesting one: it is the honeypot case. Even code that
-deliberately tries to leak the credential can only leak the placeholder, and
-the attempt is refused and logged (`./cli.sh proxy logs | grep LEAK`).
+`/exfil-test` is the interesting one: it is the honeypot case. Code that
+deliberately tries to send the credential somewhere else gets the placeholder
+and nothing more, and the attempt is refused and logged
+(`./cli.sh proxy logs | grep LEAK`).
+
+Note what that does and does not show. What is bounded is _where the real value
+can go_ -- only `api.openai.com` here. It is not a promise that the value stays
+unknown to this container: an allowlisted host that will transform what you
+send it can be asked to hand the key back in a form the response scrubber does
+not match. See "What this does not give you" in the main README.
 
 ## Why there is no .env here
 

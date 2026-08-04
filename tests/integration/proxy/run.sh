@@ -66,11 +66,24 @@ cat > "$WORK/settings.json" <<EOF
 EOF
 
 # A server that records exactly what reached it. Serves plain HTTP or TLS.
+#
+# /echo GZIPS BACK whatever Authorization it was handed, which for an
+# allowlisted destination is the REAL secret. That makes it the upstream half
+# of the response-scrub test: the value genuinely reaches the server, so what
+# the client ends up holding is decided by the proxy and nothing else.
 cat > "$WORK/server.py" <<'PY'
-import http.server, ssl, sys
+import gzip, http.server, ssl, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         print("\n".join([f"PATH {self.path}"] + [f"HDR {k}: {v}" for k, v in self.headers.items()]), flush=True)
+        if self.path.startswith("/echo"):
+            body = gzip.compress(f'{{"echo":"{self.headers.get("Authorization", "")}"}}'.encode())
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+            return
         self.send_response(200); self.send_header("Content-Type", "text/plain")
         self.end_headers(); self.wfile.write(b"ok\n")
     def log_message(self, *a): pass
@@ -84,8 +97,9 @@ PY
 # A client that chooses its TCP destination, its SNI and its Host header
 # independently -- which is the whole point.
 cat > "$WORK/client.py" <<'PY'
-import http.client, socket, ssl, sys
+import gzip, http.client, socket, ssl, sys
 ip, scheme, sni, host_hdr, placeholder = sys.argv[1:6]
+path = sys.argv[6] if len(sys.argv) > 6 else "/probe"
 try:
     if scheme == "https":
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); ctx.check_hostname = False
@@ -94,10 +108,17 @@ try:
         c.sock = ctx.wrap_socket(socket.create_connection((ip, 443), timeout=20), server_hostname=sni)
     else:
         c = http.client.HTTPConnection(ip, 80, timeout=20)
-    c.request("GET", "/probe", headers={"Host": host_hdr,
-                                        "Authorization": f"Bearer {placeholder}"})
+    c.request("GET", path, headers={"Host": host_hdr,
+                                    "Authorization": f"Bearer {placeholder}"})
     r = c.getresponse()
     print(f"STATUS {r.status}")
+    body = r.read()
+    # http.client does not decompress, and the body the container actually gets
+    # is whatever the proxy re-encoded -- so decode it the way any HTTP client
+    # would, and print what a caller would really be holding.
+    if (r.getheader("Content-Encoding") or "").lower() == "gzip":
+        body = gzip.decompress(body)
+    print("BODY " + body.decode("utf-8", "replace").replace("\n", " "))
 except Exception as e:
     print(f"STATUS ERR {type(e).__name__}: {e}")
 PY
@@ -161,9 +182,10 @@ start_server() { # start_server <name> <pem|"">
   sleep 2
 }
 
-probe() { # probe <scheme> <sni> <host-header>
+probe() { # probe <scheme> <sni> <host-header> [path]
   docker run --rm --network "$NET" -v "$WORK:/w:ro" "$PY_IMAGE" \
-    python /w/client.py "$SRV_IP" "$1" "$2" "$3" "$PLACEHOLDER" 2>&1 | grep '^STATUS' | head -1
+    python /w/client.py "$SRV_IP" "$1" "$2" "$3" "$PLACEHOLDER" "${4:-/probe}" 2>&1 \
+    | grep -E '^(STATUS|BODY)'
 }
 
 received() { docker logs "$1" 2>&1; }
@@ -200,6 +222,24 @@ S=$(probe https "$ALLOWED_HOST" "$ALLOWED_HOST")
 assert_contains "allowlisted request succeeds" "$S" "STATUS 200"
 assert_contains "the real value was substituted in flight" "$(received "$NET-legit")" "$REAL"
 assert_not_contains "the placeholder did not travel verbatim" "$(received "$NET-legit")" "Bearer $PLACEHOLDER"
+
+# ===========================================================================
+group "a secret echoed back never reaches the client, compressed or not"
+# ===========================================================================
+# The other direction, and the one the unit tests cannot prove: the scrub has
+# to survive a real Content-Encoding round trip. The addon reads the DECODED
+# body, so what it writes back has to be re-encoded and re-framed, and only a
+# real client parsing a real response says whether that happened correctly.
+#
+# Searching the encoded bytes instead -- which is what this did -- found
+# nothing in any gzipped message and handed the real key straight through.
+start_server "$NET-legit" "$ALLOWED_HOST.pem"
+OUT=$(probe https "$ALLOWED_HOST" "$ALLOWED_HOST" /echo)
+assert_contains "the gzipped echo round-trips" "$OUT" "STATUS 200"
+# The upstream genuinely held the real value, so the scrub is doing the work.
+assert_contains "the allowlisted host really did receive it" "$(received "$NET-legit")" "$REAL"
+assert_not_contains "the real value did not re-enter the client" "$OUT" "$REAL"
+assert_contains "it came back as the placeholder" "$OUT" "$PLACEHOLDER"
 
 # ===========================================================================
 group "the proxy log tells the truth about what it did"

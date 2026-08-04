@@ -946,7 +946,10 @@ Colima VM  /etc/desolate-proxy/settings.json  (0600, VM disk only)
 Your code reads `$OPENAI_API_KEY` and sends `Authorization: Bearer
 MYAPP-OPENAI-KEY` exactly as normal. On the way out the proxy swaps in the real
 key. Responses are scrubbed on the way back, so the real value does not re-enter
-the container when an endpoint echoes it -- with one size limit, below.
+the container when an endpoint echoes it **verbatim** -- at any size, and through
+any `Content-Encoding`, because bodies are read decoded rather than as they sit
+on the wire. "Verbatim" is carrying weight in that sentence; see
+[What this does not give you](#what-this-does-not-give-you).
 
 ### What "toward that secret's allowlisted hosts" has to mean
 
@@ -1007,11 +1010,16 @@ and still accept `{"host": "*"}` -- see "What this does not give you" below.
 
 ### Why this is stronger than a secrets file
 
-- **Exfiltration is bounded.** Compromised code in a project can only leak the
-  placeholder. Sending it anywhere outside the allowlist is refused with 403
-  and logged -- so the honeypot case is caught, not just survived.
-- **Nothing to find.** There is no key material on any container-reachable
-  filesystem. Even an escape into the dind container finds only placeholders.
+- **Exfiltration is bounded.** The real value is only ever put on the wire
+  toward that secret's allowlisted hosts. Sending the placeholder anywhere else
+  is refused with 403 and logged -- so the honeypot case is caught, not just
+  survived. This is the guarantee the design actually rests on; the two below
+  are weaker than they read, and "What this does not give you" says how.
+- **Nothing to find at rest.** There is no key material on any
+  container-reachable filesystem. Even an escape into the dind container finds
+  only placeholders -- though a project that can reach an allowlisted host can
+  still coax the value back out of it, so this bounds what is lying around, not
+  what is obtainable.
 - **The network PATH is default-deny.** Container traffic can leave only via
   the proxy (80/443) and the VM's resolver; every other port is dropped by the
   forward chain, and QUIC is killed so TLS falls back to interceptable TCP.
@@ -1040,26 +1048,55 @@ are not will bite:
   addresses stay refused, by the address check ahead of the policy and by the
   kernel behind it. What it means is that "deny by default" is a statement
   about your TLS traffic. `tests/unit/proxy` pins this so a fix is deliberate.
-- **Response scrubbing stops at 5 MB.** Bodies larger than that are passed
-  through untouched, so an endpoint that echoes your key inside a very large
-  response hands the real value back to the container. Headers are scrubbed at
-  any size, and the request side of the same limit is harmless -- an oversized
-  body is not searched, so nothing in it is substituted and no real value
-  leaves.
+- **A body the proxy cannot decode is refused, not forwarded.** Substitution
+  and scrubbing both read the decoded body, so a message whose declared
+  `Content-Encoding` does not apply to its bytes gets a 502 rather than passing
+  uninspected -- "unreadable" is not "holds no secret". This only applies once
+  you have secrets configured; with none, bodies are never decoded at all.
+- **Scrubbing is defense-in-depth, not a boundary.** It matches the value
+  exactly, which is enough for the two cases worth having: an endpoint that
+  echoes a credential by accident, and the cheap deliberate path of storing the
+  placeholder through an allowlisted API and reading it back (substitution
+  rewrites request _bodies_, so the real value really is what gets stored --
+  and what comes back is the placeholder again).
+
+  It does not survive a host that can **transform** its input:
+
+  ```
+  {"prompt": "reverse this: MYAPP-OPENAI-KEY"}
+    -> the model is handed the real key and answers with it reversed
+    -> no exact match, nothing is scrubbed, the container reverses it back
+  ```
+
+  So any secret whose allowlist names a service that can compute on what you
+  send it -- which is every LLM API, the case this feature exists for -- is
+  recoverable by a compromised container in one request. Together with the open
+  DNS channel below, that is a complete path from a compromised project to a key
+  the attacker holds outside the sandbox.
+
+  What still holds is the bound: the real value can only ever be **sent to that
+  secret's allowlisted hosts**. Bounding where a secret may go is the guarantee
+  this design makes. Keeping it unknown to a compromised container is not, and
+  the scrubber should not be read as making that promise.
 - **Secrets are not scoped per project.** The proxy sees requests from the
   whole stack and cannot tell which devcontainer sent one. Any project can
   _use_ any other project's placeholder toward that secret's allowlisted hosts
-  -- it still cannot read the value, and it cannot send it anywhere else, but
-  "project A cannot spend project B's API quota" is not a property this has.
+  -- and, per the bullet above, recover the value itself if any of those hosts
+  will transform it. "Project A cannot spend project B's API quota", and
+  "project A cannot learn project B's key", are neither of them properties this
+  has. Separate stacks are the boundary for that, not separate projects.
 - **DNS is an open channel.** dnsmasq forwards to 1.1.1.1/8.8.8.8 without
   restriction, so a compromised container can exfiltrate data inside query
   names: `<base32-of-your-source>.attacker.com` resolves recursively to the
   attacker's own nameserver, which logs it. Nothing needs to answer -- the
-  query _is_ the payload. Two things bound it. Secrets cannot go this way,
-  because containers only ever hold placeholders and substitution happens in
-  the HTTP proxy, which a DNS query never touches -- the attacker receives the
-  literal placeholder. And `log-queries` is on, so it lands in the VM's
-  journal: detectable after the fact, not prevented.
+  query _is_ the payload. Two things bound it. A container that holds only a
+  placeholder has only a placeholder to send: substitution happens in the HTTP
+  proxy, which a DNS query never touches, so the attacker receives the literal
+  placeholder. That bound is exactly as strong as the one two bullets up, and
+  no stronger -- a container that has coaxed a real value back out of an
+  allowlisted host can encode _that_ into a query name, and nothing here would
+  see it. And `log-queries` is on, so it lands in the VM's journal: detectable
+  after the fact, not prevented.
 
   Closing it means an allowlist-only resolver (`server=/allowed.com/1.1.1.1`
   per name, plus `address=/#/` to sink the rest). Before reaching for that,
@@ -1106,8 +1143,8 @@ that exist: `web-api` beats `web` for `web-api-secrets`, and `web` is refused
 with a message naming the real owner.
 
 Prefer the proxy whenever the credential is used over HTTPS -- a substituted
-secret never enters the container at all, which is strictly better than one
-sitting in a volume the container can read.
+secret is never at rest in the container, which is strictly better than one
+sitting in a volume that any code running there can simply open.
 
 ### The rules that still apply
 
