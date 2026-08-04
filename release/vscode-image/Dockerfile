@@ -1,13 +1,26 @@
-# OpenVSCode Server + docker CLI + devcontainer CLI  (multi-arch: arm64 + amd64)
+# VSCodium Web Host (reh-web) + docker CLI + devcontainer CLI  (multi-arch: arm64 + amd64)
 # The docker CLI here talks ONLY to the inner dockerd (DOCKER_HOST is set in
 # compose). No host socket exists in this container.
+#
+# The editor server is a PINNED, CHECKSUMMED tarball rather than someone else's
+# base image. It was gitpod/openvscode-server:latest, which is the one thing
+# this file did not pin -- and that tag has not moved since VS Code 1.109.5
+# (Feb 2026), so builds were already frozen, just implicitly and by a tag this
+# project does not control. VSCodium's reh-web is the same upstream server
+# component (MIT, Open VSX by default, `--connection-token` and the `?tkn=` URL
+# unchanged), published per-release with sha256 sums.
 
-FROM gitpod/openvscode-server:latest
+FROM debian:bookworm-slim
 
 USER root
 
 # Pin software versions installed by this image (while other images canb 'float').
 # DOCKER_VERSION is the CLI only -- the daemon it drives is docker-compose.yml's `docker:#-dind`
+# VSCODIUM_* pins the editor server; the sums are the ones published beside the
+# release tarballs, and a mismatch must fail the build rather than warn.
+ARG VSCODIUM_VERSION=1.126.04524
+ARG VSCODIUM_SHA256_X64=9964a8b66431dced583a820d60a852a7995c86607c4c983152adc7a5c876d60d
+ARG VSCODIUM_SHA256_ARM64=c6181d32dda122df3bba7ad6e9194ded2dc3dd1204c1f8b142f4440f4e4e2ce4
 ARG DOCKER_VERSION=29.6.2
 ARG COMPOSE_VERSION=5.3.1
 ARG BUILDX_VERSION=0.35.0
@@ -18,9 +31,41 @@ ARG GIT_SUBREPO_VERSION=0.4.9
 ARG DEVCONTAINERS_CLI_NPM_VERSION=0.88.0
 ARG TSX_NPM_VERSION=4.23.1
 
+# libstdc++6 is not implicit on debian-slim and the server's bundled node links
+# against it -- without it the editor dies at exec with a loader error, inside a
+# devcontainer, where nobody is looking.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   git openssh-client curl ca-certificates jq xz-utils \
+  libstdc++6 \
   && rm -rf /var/lib/apt/lists/*
+
+# The user the gitpod base image used to supply. HOME is set explicitly rather
+# than inherited: docker-compose.yml mounts vscode-home at /home/workspace, and
+# an image whose passwd entry disagreed with $HOME is exactly the ambiguity the
+# git-lfs `--system` install below was working around.
+RUN groupadd -g 1000 desolate \
+  && useradd -u 1000 -g 1000 -m -d /home/workspace -s /bin/bash desolate
+ENV HOME=/home/workspace
+
+# The editor server itself. Extracted flat (the tarball has no top-level
+# directory) and stamped with its own version, which volume-init reads to decide
+# whether the shared server-dist volume needs reseeding.
+ENV DESOLATE_SERVER_ROOT=/home/.desolate-server
+RUN set -eux; \
+  case "$(uname -m)" in \
+  aarch64|arm64) REH_ARCH=arm64; REH_SHA="${VSCODIUM_SHA256_ARM64}" ;; \
+  x86_64)        REH_ARCH=x64;   REH_SHA="${VSCODIUM_SHA256_X64}" ;; \
+  *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+  esac; \
+  tarball="vscodium-reh-web-linux-${REH_ARCH}-${VSCODIUM_VERSION}.tar.gz"; \
+  curl -fsSL -o /tmp/reh.tar.gz \
+  "https://github.com/VSCodium/vscodium/releases/download/${VSCODIUM_VERSION}/${tarball}"; \
+  echo "${REH_SHA}  /tmp/reh.tar.gz" | sha256sum -c -; \
+  mkdir -p "${DESOLATE_SERVER_ROOT}"; \
+  tar xz -C "${DESOLATE_SERVER_ROOT}" -f /tmp/reh.tar.gz; \
+  rm /tmp/reh.tar.gz; \
+  printf '%s' "${VSCODIUM_VERSION}" > "${DESOLATE_SERVER_ROOT}/.version"; \
+  test -x "${DESOLATE_SERVER_ROOT}/bin/codium-server"
 
 # Install node
 RUN set -eux; \
@@ -62,8 +107,9 @@ RUN set -eux; \
 
 # Install git-lfs.
 # `--system` writes the clean/smudge filters to /etc/gitconfig instead of
-# ~/.gitconfig. That is to avoid ambiguity between this image's $HOME 
-# (/home/workspace) and its passwd entry (/home/openvscode-server) disagree.
+# ~/.gitconfig, so the filters apply regardless of which user or HOME a given
+# entry point runs under. (The passwd entry and $HOME now agree at
+# /home/workspace, but every `docker exec` still gets the same git config.)
 RUN set -eux; \
   case "$(uname -m)" in \
   aarch64|arm64) LFS_ARCH=arm64 ;; \
@@ -107,7 +153,7 @@ RUN chmod +x /usr/local/bin/with-ca
 # Copy over all supporting scripts; this image is used across two containers
 # with distinct roles:
 #   orchestrator -- runs broker.ts; the ONLY container with the daemon socket
-#   vscode       -- runs openvscode-server; no socket, talks to the broker
+#   vscode       -- runs the editor server; no socket, talks to the broker
 # Every .ts in the directory, rather than a hand-kept list: a module extracted
 # during a refactor and forgotten here does not fail the build, it fails at
 # runtime inside the image with "cannot find module".
@@ -125,7 +171,7 @@ RUN printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/d
 
 # Optional: pre-bake pinned extensions from Open VSX instead of letting the
 # running editor pull them ad hoc. Example:
-# RUN /home/.openvscode-server/bin/openvscode-server \
+# RUN "${DESOLATE_SERVER_ROOT}/bin/codium-server" \
 #       --install-extension ms-python.python@2024.22.0 || true
 
 USER 1000

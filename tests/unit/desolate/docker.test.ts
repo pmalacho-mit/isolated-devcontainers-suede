@@ -314,7 +314,7 @@ describe("relays", () => {
   });
 
   test("any HTTP status counts as an answer, 401 and 403 included", () => {
-    // openvscode-server replies 403 to a tokenless request. Treating that as
+    // the editor server replies 403 to a tokenless request. Treating that as
     // unreachable would fail every start with the editor working perfectly.
     const { docker, calls } = recorder();
     docker.relay.answers("desolate-relay-myapp-8081", 8081);

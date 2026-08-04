@@ -7,6 +7,7 @@
 // already do by other means (generate a key, read a public key, drop a key);
 // nothing it can do yields private key material. Adding a "read"/"export" op
 // here would silently undo the entire point of this file.
+/// <reference types="node" />
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
