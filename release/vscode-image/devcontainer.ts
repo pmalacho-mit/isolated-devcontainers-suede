@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 export interface ResolvedSpec {
   /**
-   * The raw devcontainer.json, parsed by the the devcontainer CLI.
+   * The raw devcontainer.json, parsed by the devcontainer CLI.
    *
    * Effectively what the user authored (so excludes any contributions from features)
    */

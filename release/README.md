@@ -15,30 +15,33 @@ The name is `desolate` = **de**v + i**solate**.
 ## Architecture
 
 ```
-+- macOS ---------------------------------------------------------------+
-|  browser --> 127.0.0.1:3000 (?token)     ./cli.sh observe (no port)   |
-|                                                                       |
-|  +- Colima VM (Ubuntu; sysbox + desolate-proxy) --------------------+   |
-|  |  SECRETS LIVE HERE ONLY: /etc/desolate-proxy/settings.json (0600)  |   |
-|  |  all container egress is force-redirected through the proxy      |   |
-|  |  devnet (br-desolate)          dindnet (br-desolate-in)         |   |
-|  |  +- [vscode] the shell -----+   +- dind -- sysbox-runc -------+  |   |
-|  |  |  NO docker socket        |   |  inner dockerd              |  |   |
-|  |  |  /workspaces rw          |   |   |- devcontainer (project) |  |   |
-|  |  |  agent socket (ro)       |   |   |    \- codium-server     |  |   |
-|  |  +--------------------------+   |   |    \- level-3 container |  |   |
-|  |  +- [orchestrator] ---------+   |   \- relay (socat)          |  |   |
-|  |  |  HOLDS THE SOCKET        |   +-----------------------------+  |   |
-|  |  |  serves the broker       |                                    |   |
-|  |  +--------------------------+   the VM's forward chain DROPS     |   |
-|  |  +- [keyring] --------------+   between these two bridges        |   |
-|  |  |  NO NETWORK AT ALL       |                                    |   |
-|  |  |  the only raw private    |                                    |   |
-|  |  |  keys in the stack       |                                    |   |
-|  |  +--------------------------+                                    |   |
-|  +----------------------------------------------------------------+   |
-|  Host /var/run/docker.sock: mounted NOWHERE                          |
-+-----------------------------------------------------------------------+
++- macOS ------------------------------------------------------------------+
+|  browser --> 127.0.0.1:3000 (?token)      ./cli.sh observe (no port)     |
+|                                                                          |
+|  +- Colima VM (Ubuntu; sysbox + desolate-proxy) ----------------------+  |
+|  |  SECRETS LIVE HERE ONLY: /etc/desolate-proxy/settings.json (0600)  |  |
+|  |  all container egress is force-redirected through the proxy        |  |
+|  |                                                                    |  |
+|  |  devnet (br-desolate)             dindnet (br-desolate-in)         |  |
+|  |                                                                    |  |
+|  |  +- [vscode] the shell -------+   +- dind ----------------------+  |  |
+|  |  |  NO docker socket          |   |  UNPRIVILEGED (sysbox-runc) |  |  |
+|  |  |  broker client only        |   |  inner dockerd              |  |  |
+|  |  |  /workspaces rw            |   |   |- devcontainer (project) |  |  |
+|  |  |  agent socket (ro)         |   |   |    \- codium-server     |  |  |
+|  |  +----------------------------+   |   |    \- level-3 container |  |  |
+|  |  +- [orchestrator] -----------+   |   \- relay (socat)          |  |  |
+|  |  |  HOLDS THE SOCKET          |   +-----------------------------+  |  |
+|  |  |  serves the broker         |                                    |  |
+|  |  +----------------------------+   the VM's forward chain DROPS     |  |
+|  |  +- [keyring] ----------------+   between these two bridges,       |  |
+|  |  |  NO NETWORK AT ALL         |   ahead of any accept              |  |
+|  |  |  the only raw private      |                                    |  |
+|  |  |  keys in the stack         |                                    |  |
+|  |  +----------------------------+                                    |  |
+|  +--------------------------------------------------------------------+  |
+|  Host /var/run/docker.sock: mounted NOWHERE                              |
++--------------------------------------------------------------------------+
 ```
 
 **One** host-reachable surface, loopback-only: `3000` by default (`VSCODE_PORT`),
@@ -146,9 +149,14 @@ repository and audited what was done with them in the meantime. That is the
 whole claim, and it is worth being exact about, because "the keys are safe" is
 not what is being said.
 
-Proxy secrets work the same way and always have: placeholders go into the
-container, real values are substituted at the proxy toward proven destinations,
-and no container ever holds one.
+Proxy secrets work the same way, and want the same exactness. Placeholders go
+into the container, real values are substituted at the proxy toward proven
+destinations, and nothing is ever stored in a container. What is bounded is
+**where a secret can go** -- only that secret's allowlisted hosts. What is not
+bounded is whether a compromised project can learn the value: an allowlisted
+host that will transform what you send it can be asked to hand the key back in
+a form the response scrubber does not match. See
+[What this does not give you](#what-this-does-not-give-you).
 
 ### 4. The VM and your Mac
 
@@ -509,7 +517,7 @@ ask us to start it.
 Getting that check _right_ is harder than it looks, because a devcontainer's
 privilege can arrive from four places, and only one of them is the top-level
 keys of the file you are reading. Every bypass demonstrated against an earlier
-version of this policy has a named regression test in `tests/` (`E1`..`E13`).
+version of this policy has a named regression test in `tests/` (`E1`..`E15`).
 The rules, and what each is actually defending:
 
 - **`initializeCommand` is refused.** It runs on the machine driving the
@@ -929,8 +937,15 @@ needs deriving, and it is closer to what production actually does.
 ### Applying changes to devcontainer.json
 
 ```bash
-desolate --rebuild <project>              # recreate the container from the current spec
-desolate --rebuild --no-cache <project>   # and rebuild the image ignoring layer cache
+desolate --rebuild <project>              # in the editor, or ./cli.sh desolate --rebuild <project>
+```
+
+`--no-cache` (rebuild the image ignoring the layer cache, not just the
+container) is **only available from the Mac**, because the broker's op
+vocabulary has no verb for it:
+
+```bash
+./cli.sh desolate --rebuild --no-cache <project>
 ```
 
 **Starting a project reuses its existing container.** `devcontainer up` finds
@@ -1073,8 +1088,11 @@ Colima VM  /etc/desolate-proxy/settings.json  (0600, VM disk only)
 
 Your code reads `$OPENAI_API_KEY` and sends `Authorization: Bearer
 MYAPP-OPENAI-KEY` exactly as normal. On the way out the proxy swaps in the real
-key. Responses are scrubbed on the way back, so the real value cannot re-enter
-the container even if an endpoint echoes it.
+key. Responses are scrubbed on the way back, so the real value does not re-enter
+the container when an endpoint echoes it **verbatim** -- at any size, and through
+any `Content-Encoding`, because bodies are read decoded rather than as they sit
+on the wire. "Verbatim" is carrying weight in that sentence; see
+[What this does not give you](#what-this-does-not-give-you).
 
 ### What "toward that secret's allowlisted hosts" has to mean
 
@@ -1135,11 +1153,16 @@ and still accept `{"host": "*"}` -- see "What this does not give you" below.
 
 ### Why this is stronger than a secrets file
 
-- **Exfiltration is bounded.** Compromised code in a project can only leak the
-  placeholder. Sending it anywhere outside the allowlist is refused with 403
-  and logged -- so the honeypot case is caught, not just survived.
-- **Nothing to find.** There is no key material on any container-reachable
-  filesystem. Even an escape into the dind container finds only placeholders.
+- **Exfiltration is bounded.** The real value is only ever put on the wire
+  toward that secret's allowlisted hosts. Sending the placeholder anywhere else
+  is refused with 403 and logged -- so the honeypot case is caught, not just
+  survived. This is the guarantee the design actually rests on; the two below
+  are weaker than they read, and "What this does not give you" says how.
+- **Nothing to find at rest.** There is no key material on any
+  container-reachable filesystem. Even an escape into the dind container finds
+  only placeholders -- though a project that can reach an allowlisted host can
+  still coax the value back out of it, so this bounds what is lying around, not
+  what is obtainable.
 - **The network PATH is default-deny.** Container traffic can leave only via
   the proxy (80/443) and the VM's resolver; every other port is dropped by the
   forward chain, and QUIC is killed so TLS falls back to interceptable TCP.
@@ -1153,20 +1176,70 @@ are not will bite:
   so the path is default-deny but the _destination set_ is not. Set
   `default_action: "deny"` and an explicit `network` allowlist in
   `/etc/desolate-proxy/settings.json` if you want that too.
+- **That destination allowlist bounds HTTPS, not plain HTTP.** The `network`
+  rules match on a name, and over plaintext there is no proven one -- so the
+  addon falls back to the `Host` header, which the client picks independently
+  of the IP it connects to. With `default_action: "deny"`, a container still
+  reaches any _public_ address on `:80` by naming an allowlisted host:
+
+  ```bash
+  curl http://<any-public-ip>/ -H 'Host: deb.debian.org'   # allowed
+  ```
+
+  This does **not** move a secret: substitution needs an SNI, so a placeholder
+  over plaintext is refused with 403 whatever the `Host` says. And internal
+  addresses stay refused, by the address check ahead of the policy and by the
+  kernel behind it. What it means is that "deny by default" is a statement
+  about your TLS traffic. `tests/unit/proxy` pins this so a fix is deliberate.
+- **A body the proxy cannot decode is refused, not forwarded.** Substitution
+  and scrubbing both read the decoded body, so a message whose declared
+  `Content-Encoding` does not apply to its bytes gets a 502 rather than passing
+  uninspected -- "unreadable" is not "holds no secret". This only applies once
+  you have secrets configured; with none, bodies are never decoded at all.
+- **Scrubbing is defense-in-depth, not a boundary.** It matches the value
+  exactly, which is enough for the two cases worth having: an endpoint that
+  echoes a credential by accident, and the cheap deliberate path of storing the
+  placeholder through an allowlisted API and reading it back (substitution
+  rewrites request _bodies_, so the real value really is what gets stored --
+  and what comes back is the placeholder again).
+
+  It does not survive a host that can **transform** its input:
+
+  ```
+  {"prompt": "reverse this: MYAPP-OPENAI-KEY"}
+    -> the model is handed the real key and answers with it reversed
+    -> no exact match, nothing is scrubbed, the container reverses it back
+  ```
+
+  So any secret whose allowlist names a service that can compute on what you
+  send it -- which is every LLM API, the case this feature exists for -- is
+  recoverable by a compromised container in one request. Together with the open
+  DNS channel below, that is a complete path from a compromised project to a key
+  the attacker holds outside the sandbox.
+
+  What still holds is the bound: the real value can only ever be **sent to that
+  secret's allowlisted hosts**. Bounding where a secret may go is the guarantee
+  this design makes. Keeping it unknown to a compromised container is not, and
+  the scrubber should not be read as making that promise.
 - **Secrets are not scoped per project.** The proxy sees requests from the
   whole stack and cannot tell which devcontainer sent one. Any project can
   _use_ any other project's placeholder toward that secret's allowlisted hosts
-  -- it still cannot read the value, and it cannot send it anywhere else, but
-  "project A cannot spend project B's API quota" is not a property this has.
+  -- and, per the bullet above, recover the value itself if any of those hosts
+  will transform it. "Project A cannot spend project B's API quota", and
+  "project A cannot learn project B's key", are neither of them properties this
+  has. Separate stacks are the boundary for that, not separate projects.
 - **DNS is an open channel.** dnsmasq forwards to 1.1.1.1/8.8.8.8 without
   restriction, so a compromised container can exfiltrate data inside query
   names: `<base32-of-your-source>.attacker.com` resolves recursively to the
   attacker's own nameserver, which logs it. Nothing needs to answer -- the
-  query _is_ the payload. Two things bound it. Secrets cannot go this way,
-  because containers only ever hold placeholders and substitution happens in
-  the HTTP proxy, which a DNS query never touches -- the attacker receives the
-  literal placeholder. And `log-queries` is on, so it lands in the VM's
-  journal: detectable after the fact, not prevented.
+  query _is_ the payload. Two things bound it. A container that holds only a
+  placeholder has only a placeholder to send: substitution happens in the HTTP
+  proxy, which a DNS query never touches, so the attacker receives the literal
+  placeholder. That bound is exactly as strong as the one two bullets up, and
+  no stronger -- a container that has coaxed a real value back out of an
+  allowlisted host can encode _that_ into a query name, and nothing here would
+  see it. And `log-queries` is on, so it lands in the VM's journal: detectable
+  after the fact, not prevented.
 
   Closing it means an allowlist-only resolver (`server=/allowed.com/1.1.1.1`
   per name, plus `address=/#/` to sink the rest). Before reaching for that,
@@ -1213,8 +1286,8 @@ that exist: `web-api` beats `web` for `web-api-secrets`, and `web` is refused
 with a message naming the real owner.
 
 Prefer the proxy whenever the credential is used over HTTPS -- a substituted
-secret never enters the container at all, which is strictly better than one
-sitting in a volume the container can read.
+secret is never at rest in the container, which is strictly better than one
+sitting in a volume that any code running there can simply open.
 
 ### The rules that still apply
 
@@ -1337,7 +1410,8 @@ VM's -- proof the escape reads nothing of the host.
 ## Components
 
 - `docker-compose.yml` -- the stack: `volume-init` (one-shot), `dind`
-  (sysbox-runc), `vscode` (VSCodium web host), `orchestrator` (the broker), `keyring` (ssh-agent).
+  (sysbox-runc), `vscode` (VSCodium web host), `orchestrator` (the broker),
+  `keyring` (ssh-agent; no network, no `/workspaces`).
 - `cli.sh` -- the one command you run on the Mac (see Daily use).
 - `preflight.sh` -- post-start verification, including the containment proof.
 - `vscode-image/Dockerfile` also installs **git-lfs** and **git-subrepo**, both
@@ -1348,20 +1422,20 @@ VM's -- proof the escape reads nothing of the host.
   set; it is how this repo itself vendors `release/` and `.suede/*`.
 - `observe.sh` -- views of the inner daemon from the Mac, via the orchestrator's
   unix socket. Nothing is published to reach it.
-- `vscode-image/keyring.ts` -- the keyring service. The only container holding
-  raw private keys, with no network and no project content. Keys are stored one
-  directory per alias with fixed filenames inside; the earlier layout encoded
-  the alias into the filename and parsed it back, which let an alias ending in
-  `.pub` have its PRIVATE half served as a public one. `tests/unit/desolate/
-  keyring.test.ts` pins the layout, and `tests/integration/keyring` runs the
-  laundering attempt against a live keyring.
-- `vscode-image/` -- one image, two roles. `broker.ts` (orchestrator: narrow
+- `vscode-image/keyring.ts` -- the keyring service (see "Credentials" above).
+  Keys are stored one directory per alias with fixed filenames inside; the
+  earlier layout encoded the alias into the filename and parsed it back, which
+  let an alias ending in `.pub` have its PRIVATE half served as a public one.
+  `tests/unit/desolate/keyring.test.ts` pins the layout, and
+  `tests/integration/keyring` runs the laundering attempt against a live
+  keyring.
+- `vscode-image/` -- one image, three roles. `broker.ts` (orchestrator: narrow
   request API, snapshotting and ground-truth resolution), `policy.ts` (the spec
   policy itself -- pure and unit-tested), `snapshot.ts` (the copy that freezes a
   spec, refusing any symlink that leaves the project), `desolate-client.ts` (editor:
   `desolate`), `desolate.ts` (the real runner, `desolate-run`, orchestrator
-  only), and `newrepo.ts` (per-repo deploy keys -- it asks the keyring to mint them and
-  never handles a private half itself).
+  only), and `newrepo.ts` (per-repo deploy keys -- it asks the keyring to mint
+  them and never handles a private half itself).
 - `tests/` -- static invariants, unit tests and integration tests, including a
   regression case per demonstrated escape. `./tests/run.sh`.
 - `vm/` -- VM provisioning. `install.sh` is the single entry point behind
@@ -1372,11 +1446,12 @@ VM's -- proof the escape reads nothing of the host.
   dnsmasq resolver, systemd units, and an idempotent `install.sh`.
 - `proxy/container/install-ca.sh` -- trusts the proxy CA inside a container.
   You never call it: `desolate` runs it for you.
-  Two example projects live in `samples/` in the source repo -- `example-project`
-  (a minimal hardened devcontainer) and `sample-fastapi` (the full three-level
-  chain plus secrets). They are fixtures and documentation, deliberately outside
-  this shipped tree, so they are not part of an install. Copy one into
-  `/workspaces/<name>` to try it.
+
+Two example projects live in `samples/` in the source repo -- `example-project`
+(a minimal hardened devcontainer) and `sample-fastapi` (the full three-level
+chain plus secrets). They are fixtures and documentation, deliberately outside
+this shipped tree, so they are not part of an install. Copy one into
+`/workspaces/<name>` to try it.
 
 ## Configuration
 

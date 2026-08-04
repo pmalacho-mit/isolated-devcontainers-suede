@@ -6,7 +6,7 @@ previous version of this addon -- transparent mitmproxy, nftables REDIRECT,
 containers on a bridge -- and each one delivered the real secret to an
 attacker-controlled server. They are regression tests.
 
-Run: tests/unit/proxy/run.sh   (or: pytest tests/unit/proxy)
+Run: ./tests/run.sh unit   (or: pytest tests/unit/proxy)
 Needs: mitmproxy (same version install.sh pins) and pytest.
 """
 
@@ -226,6 +226,55 @@ def test_network_policy_deny(tmp_path):
     denied = make_flow(sni="evil.example.com", host_header="evil.example.com")
     addon.request(denied)
     assert denied.response is not None and denied.response.status_code == 403
+
+
+def test_the_network_allowlist_is_spoofable_over_plaintext(tmp_path):
+    """KNOWN GAP, pinned so it cannot change by accident.
+
+    Leak detection is decided strictly on the PROVEN destination (the TLS SNI),
+    and refuses a placeholder over plaintext outright -- that is E6 above. The
+    NETWORK policy is not: `policy_host = proven or claimed or request.host`
+    falls back to the Host header, which over plain HTTP the client chooses
+    independently of the IP it connects to. So with `default_action: "deny"`,
+    any container reaches any PUBLIC address on :80 by naming an allowlisted
+    host in a header nothing verifies.
+
+    What this is NOT: a way to move a secret. Substitution needs an SNI, so the
+    placeholder travels as itself. Internal addresses are still refused by the
+    destination-address check ahead of this, and by the kernel behind it.
+
+    What it IS: the destination allowlist bounds HTTPS and does not bound
+    plaintext. Anyone turning `default_action: "deny"` on should know that.
+    Making it hold would mean judging plaintext on `request.host` -- the real
+    destination in transparent mode -- rather than on the claimed name.
+    """
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "deny",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]}},
+        "network": [{"action": "allow", "host": "*.debian.org"}],
+        "scrub_responses": True,
+    })
+
+    spoofed = make_flow(sni=None, host_header="deb.debian.org", dest=PUBLIC_ATTACKER)
+    addon.request(spoofed)
+    assert spoofed.response is None, (
+        "plaintext Host spoofing is now refused -- good. Delete this test and "
+        "the matching paragraph in release/README.md."
+    )
+
+    # The two things that DO still hold, asserted here so the gap above is
+    # never mistaken for a wider one.
+    honest = make_flow(sni=None, host_header=None, dest=PUBLIC_ATTACKER)
+    addon.request(honest)
+    assert honest.response is not None and honest.response.status_code == 403, (
+        "with no name claimed, the destination IP is judged and denied"
+    )
+
+    carrying = make_flow(sni=None, host_header="deb.debian.org", dest=PUBLIC_ATTACKER,
+                         headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    addon.request(carrying)
+    assert blocked(carrying), "a secret must never ride the plaintext path"
+    assert SECRET_VALUE not in str(carrying.request.headers)
 
 
 def test_method_scoped_network_rule(tmp_path):
@@ -460,6 +509,248 @@ def test_response_body_and_headers_are_scrubbed(tmp_path):
     assert SECRET_VALUE.encode() not in f.response.content
     assert SECRET_NAME.encode() in f.response.content
     assert f.response.headers["X-Echo"] == SECRET_NAME
+
+
+def test_the_deliberate_verbatim_echo_is_closed(tmp_path):
+    """Scrubbing is not only about accidents, and this is the case that earns it.
+
+    Substitution rewrites request BODIES, so a compromised container does not
+    have to wait for an endpoint to leak by mistake -- it can store the
+    placeholder through an allowlisted API and have the REAL value written down
+    server-side, then read it back:
+
+        POST /v1/files  {"content": "<placeholder>"}   -> the real key is stored
+        GET  /v1/files/{id}/content                    -> it comes back
+
+    Any allowlisted API with a writable-then-readable field is that oracle.
+    What the container gets back is the placeholder again.
+    """
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+
+    stored = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                       method="POST", content=f'{{"content":"{SECRET_NAME}"}}'.encode())
+    addon.request(stored)
+    assert not blocked(stored)
+    assert SECRET_VALUE.encode() in stored.request.content, "the upstream really does store it"
+
+    stored.response = tutils.tresp(content=stored.request.content)
+    addon.response(stored)
+    assert SECRET_VALUE.encode() not in stored.response.content
+    assert SECRET_NAME.encode() in stored.response.content
+
+
+def test_scrubbing_does_not_survive_a_transforming_endpoint(tmp_path):
+    """KNOWN LIMIT, pinned so it is never mistaken for a boundary.
+
+    The scrub is an exact match on the value, so an allowlisted host that can
+    TRANSFORM its input defeats it in a single request. Reversing and spacing
+    are the two cheapest spellings; base64, chunking across JSON fields and
+    "spell it out" all work identically.
+
+    This is a property of substitution itself rather than a defect here: the
+    real value is handed to the host, and what the host chooses to say back is
+    not something this process can bound. The guarantee that survives is the
+    BOUND -- the value only ever travels to that secret's allowlisted hosts --
+    and release/README.md says so under "What this does not give you".
+
+    If this test ever fails, do not simply delete it. Scrubbing having become
+    transform-proof would be a much larger claim than it looks, and it should be
+    read very sceptically before the README is strengthened to match.
+    """
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+
+    def what_the_container_reads(transform):
+        f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                      method="POST", content=f'{{"prompt":"{SECRET_NAME}"}}'.encode())
+        addon.request(f)
+        assert not blocked(f)
+        handed_to_the_host = f.request.content.decode()
+        assert SECRET_VALUE in handed_to_the_host
+        f.response = tutils.tresp(content=transform(SECRET_VALUE).encode())
+        addon.response(f)
+        return f.response.content.decode()
+
+    reversed_reply = what_the_container_reads(lambda v: v[::-1])
+    assert SECRET_VALUE not in reversed_reply, "an exact match would have caught this"
+    assert reversed_reply[::-1] == SECRET_VALUE, "and the container just reverses it back"
+
+    spaced_reply = what_the_container_reads(lambda v: " ".join(v))
+    assert SECRET_VALUE not in spaced_reply
+    assert spaced_reply.replace(" ", "") == SECRET_VALUE
+
+
+# ===========================================================================
+# E16 -- Content-Encoding, and the size cap that hid behind it
+# ===========================================================================
+# Both directions read `raw_content`, which is the body still in its
+# Content-Encoding, and searched it for a PLAINTEXT secret. Against a gzipped
+# message -- what nearly every JSON API returns -- the search matched nothing,
+# so no scrub fired and no leak was detected. Both now read `.content`.
+#
+# The 5 MiB cap that used to sit alongside it is gone for the same reason: it
+# was never a memory guard (mitmproxy has buffered the whole body before these
+# hooks run) and it made the largest bodies the unscrubbed ones.
+
+
+def _gzip(data: bytes) -> bytes:
+    import gzip
+    return gzip.compress(data)
+
+
+def test_E16_a_gzipped_response_echoing_a_secret_is_scrubbed(tmp_path):
+    """VERIFIED BYPASS: an allowlisted endpoint echoes the real key inside a
+    gzipped body. `bvalue in raw_content` is False against compressed bytes, so
+    the scrub never ran and the real value entered the container -- the exact
+    thing response scrubbing exists to prevent."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    f.response = tutils.tresp(content=_gzip(f'{{"echo":"{SECRET_VALUE}"}}'.encode()))
+    f.response.headers["Content-Encoding"] = "gzip"
+
+    addon.response(f)
+
+    assert SECRET_VALUE.encode() not in f.response.content
+    assert SECRET_NAME.encode() in f.response.content
+    # And it leaves still gzipped, so the container can actually read it.
+    assert f.response.raw_content != f.response.content
+    assert SECRET_VALUE.encode() not in f.response.raw_content
+
+
+def test_E16b_a_placeholder_in_a_gzipped_request_body_is_seen(tmp_path):
+    """The mirror of it outbound. A placeholder inside a compressed body was
+    invisible, so leak detection never ran: a request aimed at a host the
+    secret is not allowlisted for went unblocked because the client had set
+    Content-Encoding."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    f = make_flow(sni="evil.example.com", host_header="evil.example.com",
+                  method="POST", content=_gzip(f'{{"key":"{SECRET_NAME}"}}'.encode()))
+    f.request.headers["Content-Encoding"] = "gzip"
+
+    addon.request(f)
+
+    assert blocked(f), "placeholder toward a non-allowlisted host must be refused"
+
+
+def test_E16c_a_gzipped_request_toward_an_allowed_host_is_substituted(tmp_path):
+    """The good path, which the fix must not break: the value goes in, and the
+    body the upstream receives is still validly gzipped."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  method="POST", content=_gzip(f'{{"key":"{SECRET_NAME}"}}'.encode()))
+    f.request.headers["Content-Encoding"] = "gzip"
+
+    addon.request(f)
+
+    assert not blocked(f)
+    assert SECRET_VALUE.encode() in f.request.content
+    # Re-encoded, not smuggled out as plaintext, and Content-Length agrees.
+    assert SECRET_VALUE.encode() not in f.request.raw_content
+    assert f.request.headers["content-length"] == str(len(f.request.raw_content))
+
+
+def test_E16d_a_body_that_cannot_be_decoded_fails_closed(tmp_path):
+    """A body claiming gzip that is not gzip cannot be proven clean, so it must
+    block. 'Unreadable' is not 'holds no secret' -- and the alternative, falling
+    back to the raw bytes, is the bypass this whole section is about."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+
+    inbound = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    inbound.response = tutils.tresp(content=b"this is definitely not gzip")
+    inbound.response.headers["Content-Encoding"] = "gzip"
+    addon.response(inbound)
+    assert blocked(inbound), "an undecodable response must not pass unscrubbed"
+
+    outbound = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                         method="POST", content=b"this is definitely not gzip")
+    outbound.request.headers["Content-Encoding"] = "gzip"
+    addon.request(outbound)
+    assert blocked(outbound), "an undecodable request body must not pass unscanned"
+
+
+def test_E16e_a_body_with_no_secrets_configured_is_never_decoded(tmp_path):
+    """The blast radius of failing closed, bounded deliberately.
+
+    Decoding every body on every request would make a malformed
+    Content-Encoding a 502 for people who have configured no secrets at all and
+    are getting nothing from this addon but a network policy. With no secrets
+    there is nothing to find, so the body is never read and such traffic passes
+    exactly as it did before."""
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {},
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  method="POST", content=b"this is definitely not gzip")
+    f.request.headers["Content-Encoding"] = "gzip"
+    addon.request(f)
+    assert not blocked(f)
+
+    f.response = tutils.tresp(content=b"this is definitely not gzip either")
+    f.response.headers["Content-Encoding"] = "gzip"
+    addon.response(f)
+    assert not blocked(f)
+
+
+def test_E16f_size_is_no_longer_a_way_past_the_scrub(tmp_path):
+    """The 5 MiB cap skipped inspection of anything larger, so a secret echoed
+    past it went straight through. It protected nothing: mitmproxy has already
+    buffered the whole body by the time this hook runs."""
+    _, addon, _ = load_addon(tmp_path)
+    addon._maybe_reload()
+    padding = b"x" * (6 * 1024 * 1024)
+
+    inbound = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    inbound.response = tutils.tresp(content=padding + SECRET_VALUE.encode())
+    addon.response(inbound)
+    assert SECRET_VALUE.encode() not in inbound.response.content
+
+    outbound = make_flow(sni="evil.example.com", host_header="evil.example.com",
+                         method="POST", content=padding + SECRET_NAME.encode())
+    addon.request(outbound)
+    assert blocked(outbound), "a placeholder past the old cap must still be caught"
+
+
+def test_E16g_one_body_rewrite_however_many_secrets_match(tmp_path):
+    """Every assignment to `.content` re-encodes the whole body and rewrites
+    Content-Length, so doing it per secret pays that per name. Asserted through
+    behaviour rather than a call count: all of them land, and the result is
+    still a validly encoded body."""
+    secrets = {f"MYAPP-KEY-{i}-PLACEHOLDER": {"value": f"sk-real-{i}", "hosts": ["api.openai.com"]}
+               for i in range(4)}
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": secrets,
+        "network": [{"action": "allow", "host": "*"}],
+        "scrub_responses": True,
+    })
+    addon._maybe_reload()
+    assert len(addon.secrets) == 4, "the fixture's names must not overlap each other"
+
+    payload = " ".join(secrets).encode()
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  method="POST", content=_gzip(payload))
+    f.request.headers["Content-Encoding"] = "gzip"
+    addon.request(f)
+    for entry in secrets.values():
+        assert entry["value"].encode() in f.request.content
+    assert f.request.headers["content-length"] == str(len(f.request.raw_content))
+
+    f.response = tutils.tresp(content=_gzip(b" ".join(e["value"].encode() for e in secrets.values())))
+    f.response.headers["Content-Encoding"] = "gzip"
+    addon.response(f)
+    for name, entry in secrets.items():
+        assert entry["value"].encode() not in f.response.content
+        assert name.encode() in f.response.content
 
 
 def test_scrubbing_can_be_disabled(tmp_path):

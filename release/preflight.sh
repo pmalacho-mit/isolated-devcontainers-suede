@@ -113,12 +113,10 @@ done
 
 echo
 echo "== 4. the inner daemon is not on the network at all =="
-# This section used to assert that a socket proxy on 127.0.0.1:2375 allowed GET
-# and refused POST. That proxy is gone: its read-only guarantee constrained only
-# this machine -- already the trust root, and able to drive the inner daemon via
-# the orchestrator regardless -- while an unauthenticated HTTP port on loopback
-# is reachable from a browser aimed at a hostile page. So the check inverted.
-# The property now is that NOTHING answers there.
+# The property is that NOTHING answers on 2375. An unauthenticated HTTP port on
+# loopback is reachable from a browser aimed at a hostile page (DNS rebinding),
+# which a unix socket is not -- so re-introducing a socket proxy there should be
+# a deliberate act, and this is where it stops being one.
 if curl -s --max-time 3 -o /dev/null http://127.0.0.1:2375/_ping 2>/dev/null; then
   bad "something is serving the docker API on 127.0.0.1:2375"
   note "the socket proxy was removed deliberately -- see docker-compose.yml"
@@ -157,9 +155,8 @@ VSIPS=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $
 if [ -z "$VSPORT" ]; then
   note "editor container not running -- skipping its port checks"
 else
-  # Check the bind ADDRESS, not the number. The old test grepped every container's
-  # ports for the literal "0.0.0.0:3000", so it silently stopped covering anything
-  # the moment the port moved -- and missed other non-loopback binds entirely.
+  # The bind ADDRESS, not the number: a check keyed on the port stops covering
+  # anything the moment VSCODE_PORT moves it.
   BADIP=""
   for ip in $VSIPS; do
     [ "$ip" = "127.0.0.1" ] || BADIP="$BADIP $ip"
@@ -262,8 +259,6 @@ else
   note "then: docker restart desolate-dind"
 fi
 
-# This check used to discard the error entirely and print "network? disk?",
-# which is a guess, not a diagnosis. Keep the output and classify it.
 RUNOUT=$(docker exec desolate-orchestrator docker run --rm hello-world 2>&1); RC=$?
 if [ "$RC" = 0 ]; then
   ok "inner dockerd can pull and run images"
@@ -296,10 +291,7 @@ else
 fi
 
 echo
-echo "== 7. egress proxy (secrets never enter containers) =="
-# This section used to sit AFTER an `exit`, so it never ran: the one check that
-# tells you whether interception is actually on was dead code. Keep it last,
-# keep it reachable.
+echo "== 7. egress proxy (secrets live in the VM, not in containers) =="
 if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet desolate-proxy 2>/dev/null; then
   ok "desolate-proxy is running in the VM"
   # Two resolvers, two ports, both required: :5353 serves containers via the

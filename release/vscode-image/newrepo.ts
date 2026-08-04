@@ -96,10 +96,8 @@ function die(msg: string): never {
   process.exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// Input validation: aliases become filenames, ssh host aliases, and
-// /workspaces subdirectories -- keep them boring.
-// ---------------------------------------------------------------------------
+/** An alias becomes a filename, an ssh host alias and a /workspaces
+ *  subdirectory, so it has to be boring in all three. */
 function sanitizeAlias(alias: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(alias) || alias === "." || alias === "..") {
     die(`bad alias: '${alias}'`);
@@ -153,9 +151,6 @@ function parseRepo(ownerRepo: string | undefined, aliasArg?: string): Repo {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Key + ssh config (idempotent)
-// ---------------------------------------------------------------------------
 /** Warn when $HOME and the passwd entry disagree.
  *
  *  Everything here writes relative to os.homedir() ($HOME), while ssh, and
@@ -216,9 +211,7 @@ function ensureKey(repo: Repo): void {
   console.log(`PUBKEY ${pubkey}`);
 }
 
-// ---------------------------------------------------------------------------
-// Clone (idempotent) + local git identity from GIT_NAME / GIT_EMAIL env
-// ---------------------------------------------------------------------------
+/** Idempotent, and it carries the Mac's git identity in via GIT_NAME/GIT_EMAIL. */
 function doClone(repo: Repo): void {
   const dest = `${WORKSPACES}/${repo.project}`;
   fs.mkdirSync(`${WORKSPACES}/${repo.owner}`, { recursive: true });
@@ -252,9 +245,8 @@ function doClone(repo: Repo): void {
   console.log(`READY ${dest}`);
 }
 
-// ---------------------------------------------------------------------------
-// Status: derived from key files + workspace state, no bookkeeping to drift.
-// ---------------------------------------------------------------------------
+/** Derived from what the keyring holds and what is on disk -- no bookkeeping
+ *  of its own, so there is nothing here to drift. */
 function showStatus(): void {
   // Ask the keyring, not the filesystem: ~/.ssh here holds config only now.
   const aliases: string[] = keyring({ op: "list" }).aliases ?? [];
@@ -270,9 +262,6 @@ function showStatus(): void {
   if (!found) console.log("  (no repos configured yet)");
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
 function usage(): never {
   console.log([
     "usage: newrepo key   owner/repo [alias]   ensure key + ssh config; print pubkey",

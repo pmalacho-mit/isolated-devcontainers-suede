@@ -3,12 +3,9 @@ Description=desolate container resolver (dnsmasq on :5353)
 Documentation=man:dnsmasq(8)
 After=network-online.target desolate-nft.service
 Wants=network-online.target
-# desolate-nft creates the `inet desolate` table holding ssh_allow_v4/v6, which
-# the nftset= lines in our config write into. Starting first means every name
-# resolved before the table appears fails to populate it -- silently, because
-# the DNS answer is still returned and then CACHED, so the retry never
-# repopulates either. The symptom is `ssh: connect to github.com port 22:
-# Connection timed out` with a correct-looking config.
+# After desolate-nft, which installs the prerouting redirect that sends
+# container DNS to :5353. Starting first leaves a window where that redirect
+# points at a port nothing is listening on.
 # Deliberately NOT Conflicts=dnsmasq.service. The VM's own resolver is a
 # separate dnsmasq on :53 (Colima has no systemd-resolved) and must keep
 # running; this instance serves containers only. Two processes, two ports.
@@ -22,8 +19,6 @@ ExecStart=/usr/sbin/dnsmasq -k -C /etc/desolate-proxy/dnsmasq.conf
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=2
-# Root at start so it can install nft set entries (CAP_NET_ADMIN); dnsmasq
-# drops to its own unprivileged user itself once the sockets are bound.
 
 [Install]
 WantedBy=multi-user.target

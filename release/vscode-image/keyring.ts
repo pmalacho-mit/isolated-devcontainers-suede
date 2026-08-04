@@ -282,13 +282,11 @@ const serveControl = () => {
   });
 };
 
-// ---------------------------------------------------------------------------
-// start the agent, publish what we already hold, then serve
-//
-// Guarded so the path/validation helpers above are importable by tests without
-// spawning an agent -- those helpers are where the disclosure bug lived, so
-// they are the part that most needs to be exercised directly.
-// ---------------------------------------------------------------------------
+/** Start the agent, publish what we already hold, then serve.
+ *
+ *  Everything above this line is importable without any of it happening: the
+ *  path and validation helpers are where the disclosure bug lived, so they are
+ *  the part that most needs to be exercised on its own. */
 const main = () => {
   fs.mkdirSync(KEYS, { recursive: true, mode: mode.privateDir });
   fs.mkdirSync(RUN, { recursive: true, mode: mode.publicDir });

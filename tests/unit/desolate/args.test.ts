@@ -92,10 +92,17 @@ describe("parseArgs", () => {
   });
 });
 
-describe("every flag shape the broker can emit round-trips", () => {
+describe("every flag shape `Flags` declares round-trips", () => {
   // broker.ts builds `Flags[]` and flatMaps it into argv. If this grammar and
   // that type ever disagree, the failure is a devcontainer that does not start
   // with no indication why -- so enumerate the type's members here.
+  //
+  // Not all of them are reachable through the broker: it emits --config,
+  // --rebuild, --stop and --ports, and has no op that carries --no-cache. That
+  // shape is reachable only via `cli.sh desolate` -> desolate-run, and it is
+  // enumerated here because the TYPE permits it, not because the broker sends
+  // it. Which ops the broker really speaks is proven by execution, in
+  // tests/integration/broker.
   const shapes: Array<{ flags: Flags[]; expect: Partial<ReturnType<typeof parseArgs>> }> = [
     { flags: [["--config", "/snap/dc.json"]], expect: { command: "run", config: "/snap/dc.json" } },
     { flags: [["--config", "/snap/dc.json"], "--rebuild"], expect: { rebuild: true } },

@@ -175,8 +175,21 @@ declare -A PROVIDER=(
 # removed from the install line, because the comment explaining why it is needed
 # still mentioned it -- a guard that its own documentation satisfies.
 DOCKERFILE=$(grep -v '^[[:space:]]*#' "$RELEASE/vscode-image/Dockerfile")
-CMDS=$(grep -ohE '(execFileSync|runStatus|spawn)\("[a-z0-9-]+"' "$RELEASE"/vscode-image/*.ts \
+# FLATTENED FIRST. A formatter puts the command on its own line --
+#   execFileSync(
+#     "ssh-keygen",
+# -- and a line-oriented grep then sees no call at all. That is not a
+# hypothetical: ssh-keygen is the exact command this check was written for, and
+# it, `tsx` and `devcontainer` had all drifted out of the match while the table
+# below still listed them, so the guard reported full coverage of three
+# commands it was no longer looking at.
+CMDS=$(cat "$RELEASE"/vscode-image/*.ts | tr '\n' ' ' \
+       | grep -oE '\b(execFileSync|spawn|run|run\.status)\(\s*"[a-z0-9-]+"' \
        | sed -E 's/.*"([a-z0-9-]+)"/\1/' | sort -u)
+# An empty match means the call shape moved again, which must be loud: this
+# whole group silently asserts nothing when the extraction finds no commands.
+[ -n "$CMDS" ] || fail "found the shell-outs in vscode-image/*.ts" \
+  "the extraction matched nothing -- did the call shape change?"
 while IFS= read -r cmd; do
   [ -n "$cmd" ] || continue
   want=${PROVIDER[$cmd]:-}
@@ -192,5 +205,17 @@ while IFS= read -r cmd; do
     esac
   fi
 done <<< "$CMDS"
+
+# And the inverse. A table entry nothing matched means either the command left
+# the code -- fine, delete the row -- or the extraction above stopped seeing it,
+# which is how this guard came to be checking five commands while claiming
+# eight. Either way it is a row that no longer asserts anything.
+for cmd in "${!PROVIDER[@]}"; do
+  case $'\n'"$CMDS"$'\n' in
+    *$'\n'"$cmd"$'\n'*) ;;
+    *) fail "'$cmd' is still shelled out to" \
+            "in the table but found in no call -- remove the row, or fix the extraction" ;;
+  esac
+done
 
 summary

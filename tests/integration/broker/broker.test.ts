@@ -762,6 +762,90 @@ describe("a legitimate project starts, from a frozen copy", () => {
 });
 
 // ===========================================================================
+describe("every op in the vocabulary, not just start", () => {
+  // ===========================================================================
+  // `start` is the op the rest of this file attacks. The other four reach the
+  // same runner and were untested, which matters most for `rebuild`: it is the
+  // op you use immediately after editing devcontainer.json -- precisely when
+  // the spec is newly hostile -- so a shortcut around the check there would
+  // make "edit the spec, then rebuild" the way past the policy.
+  //
+  // Together with the `list` case above, these are also what pins the editor
+  // client and the broker to one vocabulary. desolate-client.ts maps its flags
+  // to exactly {start, rebuild, stop, ports, list}; every one of them is sent
+  // to the real broker here, so a client op the broker does not know shows up
+  // as a refusal in this file rather than as "unknown shape" in a terminal.
+
+  const hostile = () =>
+    project(
+      "rebuild-evil",
+      JSON.stringify({
+        image: "alpine:3",
+        initializeCommand: "touch /tmp/desolate-rebuild-pwned",
+      }),
+    );
+
+  test("rebuild enforces the policy, exactly as start does", async () => {
+    hostile();
+    fs.rmSync("/tmp/desolate-rebuild-pwned", { force: true });
+    resetRunner();
+    const msgs = await ask({ op: "rebuild", project: "rebuild-evil" });
+    assert.equal(
+      result(msgs).ok,
+      false,
+      "a hostile spec was accepted for rebuild",
+    );
+    assert.match(errorOf(msgs), /initializeCommand/);
+    assert.deepEqual(runnerInvocations(), [], "the runner was reached");
+    assert.ok(!fs.existsSync("/tmp/desolate-rebuild-pwned"));
+  });
+
+  test("rebuild reaches the runner from the SNAPSHOT, with --rebuild", async () => {
+    project("rebuild-ok", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
+    const msgs = await ask({ op: "rebuild", project: "rebuild-ok" });
+    assert.equal(result(msgs).ok, true, errorOf(msgs));
+
+    const argv = runnerInvocations()[0] ?? [];
+    assert.ok(argv.includes("--rebuild"), `no --rebuild in ${argv.join(" ")}`);
+    const config = argv[argv.indexOf("--config") + 1];
+    assert.ok(argv.includes("--config"), "rebuild was not pinned to a snapshot");
+    assert.ok(
+      !config.startsWith(workspaces),
+      `rebuild ran from ${config}, inside the editor-writable tree`,
+    );
+  });
+
+  for (const op of ["stop", "ports"] as const) {
+    test(`${op} passes --${op} and no spec at all`, async () => {
+      // These two act on a container that already exists, so there is nothing
+      // to validate and nothing to freeze. Asserting the ABSENCE of --config is
+      // what keeps that deliberate: a snapshot here would be a check nobody
+      // enforces, which reads as coverage and is not.
+      project("op-target", JSON.stringify({ image: "alpine:3" }));
+      resetRunner();
+      const msgs = await ask({ op, project: "op-target" });
+      assert.equal(result(msgs).ok, true, errorOf(msgs));
+
+      const argv = runnerInvocations()[0] ?? [];
+      assert.deepEqual(argv, [`--${op}`, "op-target"]);
+    });
+
+    test(`${op} still validates the project name`, async () => {
+      // The name check runs before the op switch, so it covers these too --
+      // stated as an assertion because a future refactor that moves validation
+      // into the start/rebuild branch would leave a path to any directory.
+      for (const name of ["../etc", "a/b/c", "missing-project"]) {
+        resetRunner();
+        const msgs = await ask({ op, project: name });
+        assert.equal(result(msgs).ok, false, `${op} accepted '${name}'`);
+        assert.deepEqual(runnerInvocations(), [], `${op} '${name}' ran`);
+      }
+    });
+  }
+});
+
+// ===========================================================================
 describe("preconditions", () => {
   // ===========================================================================
   test("the devcontainer CLI is on PATH (the policy's ground truth)", () => {

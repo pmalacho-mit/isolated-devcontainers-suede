@@ -15,11 +15,24 @@ TRACKED=$(git ls-files 2>/dev/null)
 DOTENVS=$(printf '%s\n' "$TRACKED" | grep -E '(^|/)\.env($|\.)' \
           | grep -vE '(^|/)\.env\.example$' || true)
 assert_eq ".env is not committed (it holds VSCODE_TOKEN)" "${DOTENVS:-none}" "none"
-# The exemption above is only safe while the example stays a template. A real
-# 24-byte hex token pasted in here would be committed and pass every other check.
-LEAKED=$(git grep -nE '^[[:space:]]*VSCODE_TOKEN=["'"'"']?[0-9a-fA-F]{16,}' \
-         -- '*.env.example' 2>/dev/null || true)
-assert_eq ".env.example holds no real VSCODE_TOKEN" "${LEAKED:-none}" "none"
+# The exemption above is only safe while the example stays a template, and the
+# rule is stronger than "no real token": the example must carry NO value at all.
+#
+# It shipped `VSCODE_TOKEN="$(openssl rand -hex 24)"`, which reads as a
+# template and is not one -- compose does no command substitution when it
+# parses .env, so `cp .env.example .env` produced a stack whose editor token
+# was the literal string `$(openssl rand -hex 24)`, committed in a public repo.
+# That token is the only thing standing between anything that can reach
+# 127.0.0.1:$VSCODE_PORT and read/write access to every project. A check for a
+# hex-shaped token passed it, because the dangerous value was not hex-shaped.
+#
+# So: any assignment at all fails. `cli.sh up` refuses to start without a
+# token, which makes the absence self-correcting; a placeholder does not.
+SET_TOKEN=$(git grep -nE '^[[:space:]]*VSCODE_TOKEN=.' -- '*.env.example' 2>/dev/null || true)
+assert_eq ".env.example assigns no VSCODE_TOKEN at all" "${SET_TOKEN:-none}" "none"
+# And the same trap for anything else: a `$(...)` in an env file is inert.
+SUBST=$(git grep -nE '^[^#]*=[^#]*\$\(' -- '*.env.example' 2>/dev/null || true)
+assert_eq ".env.example promises no command substitution" "${SUBST:-none}" "none"
 assert_not_contains "no .DS_Store" "$TRACKED" ".DS_Store"
 assert_not_contains "no ssh private keys" "$TRACKED" "id_rsa"
 assert_not_contains "no deploy keys" "$TRACKED" "deploy_"

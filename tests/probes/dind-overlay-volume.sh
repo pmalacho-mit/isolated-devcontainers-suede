@@ -2,7 +2,7 @@
 # PROBE -- not a test. Answers a capability question about the environment so a
 # design decision can be made; it asserts no invariant and gates nothing.
 #
-# QUESTION: can the shared editor server (/server-dist, currently bind-mounted
+# QUESTION: can the shared editor server (/server-dist, then bind-mounted
 # read-only into every devcontainer as /vscode-server) be replaced by a
 # PER-PROJECT overlay volume, giving each project a private copy-on-write view?
 #
@@ -21,8 +21,8 @@
 # ANSWERED 2026-07-28 -- all three YES, and the design now depends on it:
 #   storage driver overlayfs, /var/lib/docker ext4 (so upperdir is viable),
 #   a --privileged write did not reach the lower, upper cost 8K.
-# Kept as a diagnostic: ensureServerVolume() in desolate.ts refuses to start a
-# project when the overlay cannot be built, and this is what tells you why.
+# Kept as a diagnostic: desolate refuses to start a project when the overlay
+# cannot be built, and this is what tells you why.
 #
 # HOW TO RUN -- on your Mac, with the stack up:
 #

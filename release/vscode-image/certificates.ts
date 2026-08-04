@@ -11,9 +11,9 @@ const CA_IMAGE_REPO = "desolate-ca/base";
  * Missing BOTH tools is a hard failure, not a silent skip -- a base image we cannot
  * teach to trust the proxy cannot build anything over HTTPS, and saying so
  * here is far cheaper than an x509 error deep in a Feature install.
- * @param baseUser certificates must be installed using root user (e.g. `USER root`),
- * so we must switch back to `baseUser` after completing the install (e.g. `USER <baseUser>`)
- * @returns
+ * @param baseUser the image's own user, restored after the install: the tools
+ * above need `USER root`, and leaving it there breaks the devcontainer CLI's
+ * assumptions about who the image runs as.
  */
 export const installInstructions = <T extends string>(baseUser: T) =>
   `USER root

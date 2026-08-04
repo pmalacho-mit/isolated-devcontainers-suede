@@ -60,11 +60,8 @@ const environment = {
   },
 };
 
-/**
- * Overridable via environment so tests can drive
- * the REAL broker against a throwaway workspace and a stub runner.
- * Nothing should set these in production.
- */
+/** Every path is overridable, so the whole broker can be pointed at a
+ *  throwaway workspace and a stub runner. Nothing sets these in production. */
 const config = environment.tryOverride({
   workspaces: "/workspaces",
   broker: "/run/broker/desolate.sock",
@@ -106,12 +103,8 @@ const request = {
 
 /**
  * Project must be a plain name (one or two segments) AND resolve to exactly
- * that path under /workspaces.
- *
- * The syntax half lives in projects.ts, because `cli.sh desolate` reaches
- * desolate.ts without passing through here and has to agree about what a name
- * is. The realpath comparison below mitigates the risk that a symlink named
- * legally could still point anywhere.
+ * that path under /workspaces -- the realpath comparison is what stops a
+ * legally-named symlink pointing anywhere it likes.
  */
 const validate = (project: string): string => {
   if (!validName(project)) throw new Error("invalid project name");
