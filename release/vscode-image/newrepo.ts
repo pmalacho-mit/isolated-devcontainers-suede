@@ -14,6 +14,7 @@
 // container. Only the "PUBKEY ..." line is read by cli.sh for registration.
 
 import { execFileSync } from "node:child_process";
+import { exchange } from "./keyring-client.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 
@@ -45,27 +46,22 @@ const identityFile = (alias: string) => `${KEYRING_RUN}/pub/${alias}.pub`;
  *  Synchronous on purpose: every caller here is a step in a sequential CLI, and
  *  execFileSync sits either side of it. */
 function keyring(request: Record<string, unknown>): Record<string, any> {
-  const script = `
-    const net = require("node:net");
-    const c = net.createConnection(${JSON.stringify(KEYRING_CONTROL)});
-    let buf = "";
-    c.on("connect", () => c.write(${JSON.stringify(JSON.stringify(request))} + "\n"));
-    c.on("data", (d) => {
-      buf += d.toString();
-      if (buf.includes("\n")) { process.stdout.write(buf.split("\n")[0]); c.end(); }
-    });
-    c.on("error", (e) => { console.error(String(e.message)); process.exit(1); });
-  `;
   let raw: string;
   try {
-    raw = execFileSync(process.execPath, ["-e", script], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch {
-    return die(`cannot reach the keyring at ${KEYRING_CONTROL}.
+    raw = exchange(KEYRING_CONTROL, request);
+  } catch (err: any) {
+    // Quote what actually failed.
+    //   ENOENT       -- no socket at that path. The editor is looking at a
+    //                   different volume than the keyring is writing to.
+    //   EACCES       -- it is there and this uid may not connect: the socket or
+    //                   the directory above it is not owned by 1000.
+    //   ECONNREFUSED -- nothing is listening; the keyring died after binding.
+    return die(`cannot reach the keyring at ${KEYRING_CONTROL}: ${err.message}
         Is the 'keyring' service running?   ./cli.sh up
-        Check it with:                      docker logs desolate-keyring`);
+        Check it with:                      docker logs desolate-keyring
+        Compare the two sides of the volume:
+          docker exec desolate-keyring ls -ln /run/keyring
+          docker exec desolate-vscode  ls -ln /run/keyring`);
   }
   let parsed: Record<string, any>;
   try {
@@ -89,7 +85,8 @@ function keyring(request: Record<string, unknown>): Record<string, any> {
  *
  *  Naming the file explicitly makes it independent of that disagreement. */
 const gitSshCommand = (strict = true) =>
-  `ssh -F ${SSH_CONFIG}` + (strict ? " -o StrictHostKeyChecking=accept-new" : "");
+  `ssh -F ${SSH_CONFIG}` +
+  (strict ? " -o StrictHostKeyChecking=accept-new" : "");
 
 function die(msg: string): never {
   console.error(`newrepo: ${msg}`);
@@ -99,16 +96,20 @@ function die(msg: string): never {
 /** An alias becomes a filename, an ssh host alias and a /workspaces
  *  subdirectory, so it has to be boring in all three. */
 function sanitizeAlias(alias: string): void {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(alias) || alias === "." || alias === "..") {
+  if (
+    !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(alias) ||
+    alias === "." ||
+    alias === ".."
+  ) {
     die(`bad alias: '${alias}'`);
   }
 }
 
 interface Repo {
-  ownerRepo: string;   // "acme/widgets"
-  owner: string;       // "acme"
-  alias: string;       // "widgets" (or user-chosen)
-  project: string;     // "acme/widgets" -- the path under /workspaces
+  ownerRepo: string; // "acme/widgets"
+  owner: string; // "acme"
+  alias: string; // "widgets" (or user-chosen)
+  project: string; // "acme/widgets" -- the path under /workspaces
   // Deliberately NO keyPath. There is no private key in this container to
   // point at; the identity is the PUBLIC half the keyring exports, and
   // `identityFile(tag)` is the only thing that names it.
@@ -116,13 +117,14 @@ interface Repo {
   // `tag`, NOT `alias`, is what the keyring is keyed on. They differ exactly
   // when two owners have a repo of the same name, which is the case the whole
   // per-repo scheme exists for -- see parseRepo.
-  tag: string;         // acme__widgets
-  hostAlias: string;   // github.com-acme__widgets
+  tag: string; // acme__widgets
+  hostAlias: string; // github.com-acme__widgets
 }
 
 function parseRepo(ownerRepo: string | undefined, aliasArg?: string): Repo {
   if (!ownerRepo) die("need owner/repo");
-  if (!/^[^/]+\/[^/]+$/.test(ownerRepo)) die(`expected owner/repo form, got '${ownerRepo}'`);
+  if (!/^[^/]+\/[^/]+$/.test(ownerRepo))
+    die(`expected owner/repo form, got '${ownerRepo}'`);
   const [owner, repo] = ownerRepo.split("/");
   const alias = aliasArg ?? repo;
   sanitizeAlias(owner);
@@ -163,18 +165,30 @@ function warnIfHomeIsAmbiguous(): void {
   let passwdHome = "";
   try {
     const uid = process.getuid?.() ?? -1;
-    const line = fs.readFileSync("/etc/passwd", "utf8").split("\n")
-      .find(l => l.split(":")[2] === String(uid));
+    const line = fs
+      .readFileSync("/etc/passwd", "utf8")
+      .split("\n")
+      .find((l) => l.split(":")[2] === String(uid));
     // passwd is name:passwd:uid:gid:gecos:HOME:shell -- home is field 5.
     // Field 6 is the shell, which compares unequal to $HOME every time and
     // would make this warn unconditionally.
     passwdHome = line?.split(":")[5] ?? "";
-  } catch { return; }
+  } catch {
+    return;
+  }
   if (!passwdHome || passwdHome === os.homedir()) return;
-  console.error(`newrepo: NOTE -- $HOME is '${os.homedir()}' but this user's passwd entry`);
-  console.error(`         says '${passwdHome}'. Keys and ssh config are written under`);
-  console.error(`         $HOME; git here is configured to read them explicitly, but a`);
-  console.error(`         bare 'ssh'/'git' typed by hand may look in the other place.`);
+  console.error(
+    `newrepo: NOTE -- $HOME is '${os.homedir()}' but this user's passwd entry`,
+  );
+  console.error(
+    `         says '${passwdHome}'. Keys and ssh config are written under`,
+  );
+  console.error(
+    `         $HOME; git here is configured to read them explicitly, but a`,
+  );
+  console.error(
+    `         bare 'ssh'/'git' typed by hand may look in the other place.`,
+  );
 }
 
 function ensureKey(repo: Repo): void {
@@ -187,7 +201,9 @@ function ensureKey(repo: Repo): void {
   console.log(`newrepo: keyring holds the key for '${repo.project}'`);
 
   const configPath = `${SSH_DIR}/config`;
-  const config = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  const config = fs.existsSync(configPath)
+    ? fs.readFileSync(configPath, "utf8")
+    : "";
   if (!config.split("\n").includes(`Host ${repo.hostAlias}`)) {
     const block = [
       `Host ${repo.hostAlias}`,
@@ -220,10 +236,14 @@ function doClone(repo: Repo): void {
     console.log(`newrepo: ${dest} already cloned`);
   } else {
     try {
-      execFileSync("git", ["clone", `git@${repo.hostAlias}:${repo.ownerRepo}.git`, dest], {
-        stdio: ["ignore", "inherit", "inherit"],
-        env: { ...process.env, GIT_SSH_COMMAND: gitSshCommand() },
-      });
+      execFileSync(
+        "git",
+        ["clone", `git@${repo.hostAlias}:${repo.ownerRepo}.git`, dest],
+        {
+          stdio: ["ignore", "inherit", "inherit"],
+          env: { ...process.env, GIT_SSH_COMMAND: gitSshCommand() },
+        },
+      );
     } catch {
       die(`clone failed -- is the deploy key registered on GitHub yet?
         Repo -> Settings -> Deploy keys -> Add, paste the PUBKEY line,
@@ -235,7 +255,13 @@ function doClone(repo: Repo): void {
   // `git push` typed in the editor's terminal invokes ssh itself, with no
   // GIT_SSH_COMMAND set, and would hit exactly the same lookup problem. Set on
   // the already-cloned path as well, to repair clones made before this existed.
-  execFileSync("git", ["-C", dest, "config", "core.sshCommand", gitSshCommand(false)]);
+  execFileSync("git", [
+    "-C",
+    dest,
+    "config",
+    "core.sshCommand",
+    gitSshCommand(false),
+  ]);
 
   const name = process.env.GIT_NAME;
   const email = process.env.GIT_EMAIL;
@@ -256,30 +282,41 @@ function showStatus(): void {
     // <owner>__<repo> -> the project path it clones to.
     const project = alias.replace(/__/g, "/");
     const dest = `${WORKSPACES}/${project}`;
-    const state = fs.existsSync(`${dest}/.git`) ? `cloned at ${dest}` : "key only";
+    const state = fs.existsSync(`${dest}/.git`)
+      ? `cloned at ${dest}`
+      : "key only";
     console.log(`  ${project}: ${state}`);
   }
   if (!found) console.log("  (no repos configured yet)");
 }
 
 function usage(): never {
-  console.log([
-    "usage: newrepo key   owner/repo [alias]   ensure key + ssh config; print pubkey",
-    "       newrepo clone owner/repo [alias]   clone via the alias; set identity",
-    "       newrepo status                     list configured repos",
-    "       newrepo owner/repo [alias]         key, then clone",
-  ].join("\n"));
+  console.log(
+    [
+      "usage: newrepo key   owner/repo [alias]   ensure key + ssh config; print pubkey",
+      "       newrepo clone owner/repo [alias]   clone via the alias; set identity",
+      "       newrepo status                     list configured repos",
+      "       newrepo owner/repo [alias]         key, then clone",
+    ].join("\n"),
+  );
   process.exit(0);
 }
 
 const argv = process.argv.slice(2);
 switch (argv[0]) {
-  case "key":    ensureKey(parseRepo(argv[1], argv[2])); break;
-  case "clone":  doClone(parseRepo(argv[1], argv[2])); break;
-  case "status": showStatus(); break;
+  case "key":
+    ensureKey(parseRepo(argv[1], argv[2]));
+    break;
+  case "clone":
+    doClone(parseRepo(argv[1], argv[2]));
+    break;
+  case "status":
+    showStatus();
+    break;
   case undefined:
   case "-h":
-  case "--help": usage();
+  case "--help":
+    usage();
   default: {
     const repo = parseRepo(argv[0], argv[1]);
     ensureKey(repo);
