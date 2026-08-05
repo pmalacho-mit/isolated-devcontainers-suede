@@ -212,7 +212,7 @@ if printf '%s' "$OUT" | grep -q "is ready:"; then
   pass "desolate example-project succeeded from inside the editor"
   URL=$(printf '%s' "$OUT" | grep -oE 'http://127\.0\.0\.1:[0-9]+/\?tkn=[a-f0-9]+' | head -1)
   INNER_PORT=$(printf '%s' "$URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
-  # The Mac-side hop: the test stack maps 8180-8190 -> dind's 8080-8090.
+  # The Mac-side hop: the test stack maps 8180-8219 -> dind's 8080-8119.
   MAC_PORT=$((INNER_PORT + 100))
   CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1:$MAC_PORT/" || echo none)
   case "$CODE" in 200|302|401|403) pass "the project editor answers through the relay (HTTP $CODE)" ;;
@@ -461,6 +461,164 @@ This is the confused-deputy SSRF: addon.py must refuse private destination ADDRE
   # the container RUNNING, and stopping it before them is what made all three
   # skip silently.
   assert_ok "desolate --stop tears it down" ed desolate --stop example-project
+fi
+
+# =========================================================================
+group "worktrees: parallel branches of one repo"
+# =========================================================================
+# Worktrees are parallelism, not a boundary. Both halves of that sentence are
+# asserted here -- the boundary that HOLDS (another project stays unreachable)
+# and the one that is CONCEDED (a sibling worktree does not), because a
+# limitation nobody tested is a limitation that gets rediscovered as a bug.
+
+WT=wt-demo
+WT_DIR=/workspaces/$WT
+
+wt_devcontainer() { # wt_devcontainer <dir> <workspaceMount source>
+  cat <<EOF
+{
+  "image": "alpine:3",
+  "workspaceFolder": "$1",
+  "workspaceMount": "source=$2,target=$2,type=bind"
+}
+EOF
+}
+
+# devcontainer id for a target, "" if it is not running.
+wt_container() { # wt_container <workspace folder>
+  docker exec "$C_ORCH" docker ps -q \
+    --filter "label=devcontainer.local_folder=$1" 2>/dev/null | head -1
+}
+in_devc() { # in_devc <cid> <sh -c script>
+  docker exec "$C_ORCH" docker exec "$1" sh -c "$2" 2>&1
+}
+
+ed sh -c "rm -rf $WT_DIR && mkdir -p $WT_DIR/.devcontainer" >/dev/null 2>&1
+wt_devcontainer "$WT_DIR" "$WT_DIR" \
+  | ed sh -c "cat > $WT_DIR/.devcontainer/devcontainer.json"
+ed sh -c "cd $WT_DIR && printf 'root\n' > which-tree.txt &&
+  git init -q -b main . &&
+  git config user.email t@example.com && git config user.name tester &&
+  git add -A && git commit -qm init" >/dev/null 2>&1
+
+if ! ed test -d "$WT_DIR/.git"; then
+  skip "worktrees" "could not make $WT_DIR a git repository inside the editor"
+else
+  assert_ok "worktree add creates the first branch" ed worktree add "$WT" alpha
+  assert_ok "worktree add creates a second one"     ed worktree add "$WT" beta
+
+  # Every desolate worktree is LOCKED. Unlocked, a routine `git gc` in a
+  # container that cannot see it prunes it, unrecoverably.
+  for name in alpha beta; do
+    assert_ok "$name is locked against pruning" \
+      ed test -f "$WT_DIR/.git/worktrees/$name/locked"
+  done
+  # ...and .git/info/exclude, never .gitignore, which is tracked and would push
+  # this tool's layout into the user's next commit.
+  assert_contains "the layout is excluded without touching a tracked file" \
+    "$(ed cat "$WT_DIR/.git/info/exclude" 2>&1)" ".worktrees/"
+  assert_fails "no .gitignore was written" ed test -e "$WT_DIR/.gitignore"
+
+  for name in alpha beta; do
+    wt_devcontainer "$WT_DIR/.worktrees/$name" "$WT_DIR/.worktrees/$name" \
+      | ed sh -c "mkdir -p $WT_DIR/.worktrees/$name/.devcontainer &&
+                  cat > $WT_DIR/.worktrees/$name/.devcontainer/devcontainer.json"
+    ed sh -c "printf '%s\n' $name > $WT_DIR/.worktrees/$name/which-tree.txt"
+  done
+
+  # --- both run at once, with editors of their own -----------------------
+  PORTS=""
+  for name in alpha beta; do
+    OUT=$(ed desolate "$WT" --worktree "$name" 2>&1)
+    if printf '%s' "$OUT" | grep -q "is ready:"; then
+      pass "$WT@$name started"
+      PORTS="$PORTS $(printf '%s' "$OUT" | grep -oE 'http://127\.0\.0\.1:[0-9]+/' \
+        | head -1 | sed -E 's|.*:([0-9]+)/|\1|')"
+    else
+      fail "$WT@$name started" "$(printf '%s' "$OUT" | tail -5)"
+    fi
+  done
+  # shellcheck disable=SC2086 # deliberate word splitting of the collected list
+  set -- $PORTS
+  if [ "$#" -eq 2 ] && [ "$1" != "$2" ]; then
+    pass "the two worktrees got distinct editor ports ($1, $2)"
+  else
+    fail "the two worktrees got distinct editor ports" "got '$PORTS'"
+  fi
+
+  ALPHA=$(wt_container "$WT_DIR/.worktrees/alpha")
+  BETA=$(wt_container "$WT_DIR/.worktrees/beta")
+  if [ -z "$ALPHA" ] || [ -z "$BETA" ]; then
+    fail "both worktree containers are running" "alpha='$ALPHA' beta='$BETA'"
+  else
+    pass "both worktree containers are running"
+
+    # --- the mount shape: its own tree, plus .git, and nothing else ------
+    assert_contains "a worktree sees its OWN checkout" \
+      "$(in_devc "$ALPHA" "cat $WT_DIR/.worktrees/alpha/which-tree.txt")" "alpha"
+    assert_fails "and not a sibling's files" \
+      docker exec "$C_ORCH" docker exec "$ALPHA" \
+        test -e "$WT_DIR/.worktrees/beta/which-tree.txt"
+    assert_fails "and not the main tree's files" \
+      docker exec "$C_ORCH" docker exec "$ALPHA" test -e "$WT_DIR/which-tree.txt"
+
+    # The boundary that HOLDS: a different project is as unreachable as ever.
+    assert_fails "and not another project at all" \
+      docker exec "$C_ORCH" docker exec "$ALPHA" test -e /workspaces/example-project
+
+    # --- the CONCEDED boundary, asserted on purpose ----------------------
+    # `.git/config` is shared by git's design and is executable configuration
+    # (core.pager, core.hooksPath). Masking hides files; it does not isolate
+    # them. This is why the README says worktrees are parallelism, not a
+    # boundary -- and why two branches that must not meet need two clones.
+    in_devc "$ALPHA" \
+      "printf '\n[desolate]\n\tsiblingReach = yes\n' >> $WT_DIR/.git/config" >/dev/null
+    assert_contains "a worktree CAN reach its siblings through the shared .git" \
+      "$(in_devc "$BETA" "cat $WT_DIR/.git/config")" "siblingReach"
+  fi
+
+  # --- a hostile worktree spec cannot widen its own mount ----------------
+  ed worktree add "$WT" evil >/dev/null 2>&1
+  wt_devcontainer "$WT_DIR/.worktrees/evil" "$WT_DIR" \
+    | ed sh -c "mkdir -p $WT_DIR/.worktrees/evil/.devcontainer &&
+                cat > $WT_DIR/.worktrees/evil/.devcontainer/devcontainer.json"
+  OUT=$(ed desolate "$WT" --worktree evil 2>&1)
+  assert_contains "a worktree asking for its PROJECT's folder is refused" \
+    "$OUT" "exactly"
+
+  # --- the main tree masks .worktrees, and the lock survives a gc --------
+  OUT=$(ed desolate "$WT" 2>&1)
+  if printf '%s' "$OUT" | grep -q "is ready:"; then
+    pass "the main tree starts alongside its worktrees"
+    ROOT=$(wt_container "$WT_DIR")
+    assert_eq "the main tree's container sees .worktrees as EMPTY" \
+      "$(in_devc "$ROOT" "ls -A $WT_DIR/.worktrees | wc -l" | tr -d ' \r')" "0"
+  else
+    fail "the main tree starts alongside its worktrees" "$(printf '%s' "$OUT" | tail -5)"
+  fi
+
+  # That mask is what makes the worktrees look MISSING to git in that
+  # container, and a missing worktree is prunable. Reproduced here with the
+  # editor's own git -- the same state the mask produces, and the failure it
+  # would cause without the lock is unrecoverable rather than merely noisy.
+  # (tests/integration/worktrees measures the prune itself, both spellings.)
+  ed sh -c "mv $WT_DIR/.worktrees /tmp/hidden-worktrees &&
+            git -C $WT_DIR worktree prune >/dev/null 2>&1;
+            mv /tmp/hidden-worktrees $WT_DIR/.worktrees" >/dev/null 2>&1
+  assert_contains "a gc that cannot see them leaves them registered" \
+    "$(ed git -C "$WT_DIR" worktree list 2>&1)" "alpha"
+  assert_ok "and still usable afterwards" \
+    ed git -C "$WT_DIR/.worktrees/alpha" status --porcelain
+
+  # --- stopping, and removal ---------------------------------------------
+  OUT=$(ed desolate --stop "$WT" 2>&1)
+  assert_contains "stopping the project refuses while worktrees are running" \
+    "$OUT" "still running"
+  for name in alpha beta; do
+    assert_ok "desolate --stop tears down $WT@$name" \
+      ed desolate --stop "$WT" --worktree "$name"
+  done
+  assert_ok "and then the project itself stops" ed desolate --stop "$WT"
 fi
 
 group "host-side visibility into the inner daemon still works"

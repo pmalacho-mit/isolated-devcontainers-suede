@@ -17,7 +17,11 @@ import {
   overlayVolumes,
 } from "../../../release/vscode-image/overlay.ts";
 import { enforcePolicy } from "../../../release/vscode-image/policy.ts";
-import { volumeNamespace } from "../../../release/vscode-image/projects.ts";
+import { target } from "../../../release/vscode-image/projects.ts";
+
+/** The target a name denotes, in the default workspace. */
+const named = (project: string) => target("/workspaces", project);
+
 
 describe("both shared directories get a view", () => {
   test("the editor server is one of them", () => {
@@ -65,8 +69,8 @@ describe("the volumes a view is made of", () => {
     // the policy, so a name outside the namespace would refuse every start.
     for (const project of ["myapp", "owner/repo"])
       for (const { name } of SHARED_DIRECTORIES) {
-        const { view, data } = overlayVolumes(project, name);
-        const namespace = volumeNamespace(project);
+        const { view, data } = overlayVolumes(named(project), name);
+        const namespace = named(project).namespace;
         for (const volume of [view, data])
           assert.ok(
             volume === namespace || volume.startsWith(`${namespace}-`),
@@ -79,23 +83,22 @@ describe("the volumes a view is made of", () => {
     // The real check, rather than a restatement of the naming rule: hand the
     // policy the mounts desolate injects and require that they pass.
     for (const project of ["myapp", "owner/repo"]) {
-      const mounts = SHARED_DIRECTORIES.flatMap(({ name, target }) => {
-        const { view } = overlayVolumes(project, name);
-        return [`source=${view},target=${target},type=volume`];
+      const mounts = SHARED_DIRECTORIES.flatMap(({ name, target: where }) => {
+        const { view } = overlayVolumes(named(project), name);
+        return [`source=${view},target=${where},type=volume`];
       });
       const configuration = { image: "x", mounts };
       enforcePolicy(
-        project,
+        named(project),
         { configuration, mergedConfiguration: { ...configuration } },
-        "/workspaces",
-        [project],
+        [named(project)],
       );
     }
   });
 
   test("a longer sibling project cannot claim them", () => {
     // `web` and `web-vscode-server` would otherwise contest the same volume.
-    const { view } = overlayVolumes("web", "vscode-server");
+    const { view } = overlayVolumes(named("web"), "vscode-server");
     assert.equal(view, "web-vscode-server");
     const configuration = {
       image: "x",
@@ -104,17 +107,16 @@ describe("the volumes a view is made of", () => {
     assert.throws(
       () =>
         enforcePolicy(
-          "web",
+          named("web"),
           { configuration, mergedConfiguration: { ...configuration } },
-          "/workspaces",
-          ["web", "web-vscode-server"],
+          [named("web"), named("web-vscode-server")],
         ),
       /belongs to project 'web-vscode-server'/,
     );
   });
 
   test("view and data are distinct", () => {
-    const { view, data } = overlayVolumes("myapp", "vscode-server");
+    const { view, data } = overlayVolumes(named("myapp"), "vscode-server");
     assert.notEqual(view, data);
     assert.equal(data, `${view}-data`);
   });

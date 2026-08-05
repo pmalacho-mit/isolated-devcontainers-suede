@@ -25,7 +25,7 @@ services:
   dind:
     container_name: desolate-test-dind
     ports: !override
-      - "127.0.0.1:8180-8190:8080-8090"
+      - "127.0.0.1:8180-8219:8080-8119"
   orchestrator:
     container_name: desolate-test-orchestrator
   vscode:

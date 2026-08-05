@@ -3,7 +3,7 @@
 // Pure and side-effect free.
 import { posix } from "node:path";
 import type { ResolvedSpec } from "./devcontainer.ts";
-import { volumeNamespace } from "./projects.ts";
+import type { Target } from "./projects.ts";
 import {
   isWithin,
   type ItemFromSet,
@@ -178,20 +178,22 @@ export const mount = {
   },
   identity: ({ type, source, target }: NormalMount) =>
     `${type}|${source}|${target}`,
-  requiresOwnership: (project: string, { source }: NormalMount) => {
-    const namespace = volumeNamespace(project);
-    return source === namespace || source.startsWith(`${namespace}-`);
-  },
-  /** Which project owns this volume name.
+  requiresOwnership: (namespace: string, { source }: NormalMount) =>
+    source === namespace || source.startsWith(`${namespace}-`),
+  /** Which target owns this volume name.
    *
-   *  A bare prefix test is not enough, because project names can prefix each
+   *  A bare prefix test is not enough, because namespaces can prefix each
    *  other: `web-api-secrets` starts with `web-`, so `web` would otherwise
    *  reach the volume the README tells you to keep `web-api`'s password in.
-   *  The LONGEST matching claim wins, so `web-api` beats `web`. */
-  owner: (projects: string[], mounted: NormalMount) =>
-    projects
-      .filter((project) => mount.requiresOwnership(project, mounted))
-      .sort((a, b) => volumeNamespace(b).length - volumeNamespace(a).length)
+   *  The LONGEST matching claim wins, so `web-api` beats `web`.
+   *
+   *  That same rule is what keeps a worktree out of its project's volumes and
+   *  vice versa: `acme__widgets--wt--feature` is longer than `acme__widgets`,
+   *  so the worktree wins its own names and the project keeps the rest. */
+  owner: (targets: Target[], mounted: NormalMount) =>
+    targets
+      .filter(({ namespace }) => mount.requiresOwnership(namespace, mounted))
+      .sort((a, b) => b.namespace.length - a.namespace.length)
       .at(0),
   /** The public proxy CA, which desolate injects into every project. */
   isPublicCa: ({ type, source }: NormalMount) =>
@@ -316,11 +318,11 @@ const reader = ({ configuration, mergedConfiguration }: ResolvedSpec) => {
 };
 
 type Payload = Readonly<{
-  project: string;
-  workspaces: string;
-  projects: string[];
+  target: Target;
+  /** Every target that could contest a volume namespace, so a volume can be
+   *  awarded to the longest claim rather than the first. */
+  targets: Target[];
   read: ReturnType<typeof reader>;
-  namespace: string;
 }>;
 
 const helpers = {
@@ -330,23 +332,38 @@ const helpers = {
     allowlist.runargs.deny["--security-opt"].some((regex) =>
       regex.test(option),
     ),
-  basename: (payloadOrProject: Pick<Payload, "project"> | string) =>
-    (typeof payloadOrProject === "string"
-      ? payloadOrProject
-      : payloadOrProject.project
-    )
-      .split("/")
-      .pop()!,
+  /** The repository's own directory name -- what `${localWorkspaceFolderBasename}`
+   *  expands to for a project, and the owner-less half of a nested name. */
+  basename: ({ project }: Target) => project.split("/").pop()!,
   /**
-   * Refuse a volume outside the project's namespace, with the two hints that make
+   * Where a target's own folder may appear INSIDE its container.
+   *
+   * A worktree has no choice: its `.git` is a file naming an absolute path, and
+   * that path's `commondir` names another, so anywhere but its own is a
+   * container where git does not work at all. A root target may also take the
+   * CLI's default of `<workspaces>/<basename>`, which is what it got before
+   * nesting existed.
+   */
+  workspaceMountTargets: (target: Target) =>
+    target.worktree
+      ? [target.dir]
+      : [
+          ...new Set([
+            target.dir,
+            posix.join(target.workspaces, helpers.basename(target)),
+          ]),
+        ],
+  /**
+   * Refuse a volume outside the target's namespace, with the two hints that make
    * the refusal actionable.
    */
   refuseForeignVolume: (
-    { project, namespace }: Pick<Payload, "project" | "namespace">,
+    { target }: Pick<Payload, "target">,
     mounted: NormalMount,
     origin: string,
   ): never => {
-    const basename = helpers.basename(project);
+    const { project, namespace } = target;
+    const basename = helpers.basename(target);
 
     const nested = project.includes("/")
       ? format.single.withLeadingSpace`
@@ -378,7 +395,8 @@ const helpers = {
     mounted: NormalMount,
     fromFeature: boolean,
   ) => {
-    const { project, projects, namespace } = payload;
+    const { target, targets } = payload;
+    const { namespace } = target;
     const origin = fromFeature ? "a feature" : "this project";
 
     if (mount.isPublicCa(mounted)) return;
@@ -389,14 +407,14 @@ const helpers = {
         (volumes only -- a bind mount reaches the inner daemon's filesystem,
         where every other project lives): ${mounted.raw}`;
 
-    if (mount.requiresOwnership(project, mounted)) {
-      const owner = mount.owner(projects, mounted);
-      if (owner === undefined || owner === project) return;
+    if (mount.requiresOwnership(namespace, mounted)) {
+      const owner = mount.owner(targets, mounted);
+      if (owner === undefined || owner.namespace === namespace) return;
 
       return fail`
         volume '${mounted.source}' (requested by ${origin}) belongs to project
-        '${owner}', not '${project}' -- '${namespace}-*' also matches names that
-        start with '${namespace}-', and the longer project owns them`;
+        '${owner.name}', not '${target.name}' -- '${namespace}-*' also matches
+        names that start with '${namespace}-', and the longer project owns them`;
     }
 
     if (
@@ -417,10 +435,14 @@ const helpers = {
    * resolves `build.context`. It cannot be spoofed by writing `configFilePath`
    * into devcontainer.json -- the CLI overwrites the key with the path it
    * actually read (measured on @devcontainers/cli 0.88.0) -- and it is checked
-   * against the project anyway, so a future CLI that stopped overwriting it
+   * against the target anyway, so a future CLI that stopped overwriting it
    * would fail closed here rather than open somewhere else.
+   *
+   * The boundary is the TARGET's directory, not its project's: a worktree reads
+   * its own devcontainer.json and builds from its own tree, and a build context
+   * reaching up through `.worktrees/..` would be every sibling branch's source.
    */
-  configDirectory: ({ read, project, workspaces }: Payload) => {
+  configDirectory: ({ read, target }: Payload) => {
     const declared = read<{ fsPath?: string }>("configFilePath") ?? null;
     const file =
       nonNullObject(declared) && typeof declared.fsPath === "string"
@@ -434,7 +456,7 @@ const helpers = {
         "build.context" would resolve to -- refusing to approve it`;
 
     const directory = posix.dirname(file);
-    const root = posix.join(workspaces, project);
+    const root = target.dir;
     if (!isWithin(root, directory))
       return fail`
         internal: the CLI read this project's configuration from '${file}',
@@ -636,35 +658,40 @@ const checks = {
           build inputs inside the project.`;
     }
   },
-  workspaceMountIsOwnFolder: ({ read, project, workspaces }) => {
+  /**
+   * The source is compared for EQUALITY against a path computed from the
+   * target -- never parsed out of the spec, and never prefix-matched. A prefix
+   * rule here would accept `/workspaces/acme/widgets-evil` for `acme/widgets`,
+   * and it would do so for every project at once, worktree or not.
+   *
+   * Resolving first is what makes the equality meaningful rather than textual:
+   * docker resolves the path it is handed, so `.worktrees/feature/../../other`
+   * has to be measured as the directory it denotes.
+   */
+  workspaceMountIsOwnFolder: ({ read, target }) => {
     const declared = read("workspaceMount");
     if (!declared) return;
 
     const mounted = mount.normalize(declared);
-    const full = `${workspaces}/${project}`;
-    const fromWorkspaces = `${workspaces}/${helpers.basename(project)}`;
 
-    if (mounted.source !== full)
+    if (posix.resolve(mounted.source) !== target.dir)
       return fail`
-        workspaceMount must have source=${full} exactly (got
+        workspaceMount must have source=${target.dir} exactly (got
         source='${mounted.source}') -- the source decides which of the inner
         daemon's directories enters your container`;
 
-    if (mounted.target !== full && mounted.target !== fromWorkspaces) {
-      const options =
-        fromWorkspaces === full ? full : `${full} or ${fromWorkspaces}`;
+    const allowed = helpers.workspaceMountTargets(target);
+    if (!allowed.includes(posix.resolve(mounted.target)))
       return fail`
-        workspaceMount target must be ${options} (got target='${mounted.target}')`;
-    }
+        workspaceMount target must be ${allowed.join(" or ")} (got
+        target='${mounted.target}')`;
   },
 } satisfies Record<string, Check>;
 
 const checker = (
-  ...[project, spec, workspaces, projects]: Parameters<typeof enforcePolicy>
+  ...[target, spec, targets]: Parameters<typeof enforcePolicy>
 ) => {
-  const namespace = volumeNamespace(project);
-  const read = reader(spec);
-  const payload: Payload = { project, workspaces, projects, namespace, read };
+  const payload: Payload = { target, targets, read: reader(spec) };
   return Object.entries(checks).reduce(
     (acc, [key, check]) => {
       acc[key as keyof typeof checks] = check.bind(null, payload);
@@ -677,18 +704,17 @@ const checker = (
 /**
  * Returns silently when the spec is acceptable.
  *
- * @param projects every name that could contest a volume namespace, so a
- * volume can be awarded to the longest project claiming it.
+ * @param targets every target that could contest a volume namespace, so a
+ * volume can be awarded to the longest claim rather than the first.
  * @throws PolicyError with a specific reason if the project asks for anything
  * outside its own trust domain.
  */
 export function enforcePolicy(
-  project: string,
+  target: Target,
   spec: ResolvedSpec,
-  workspaces: string,
-  projects: string[],
+  targets: Target[],
 ): void {
-  const checks = checker(project, spec, workspaces, projects);
+  const checks = checker(target, spec, targets);
 
   checks.noCompose();
   checks.noInitializeCommand();

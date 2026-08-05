@@ -27,6 +27,7 @@ import {
   snapshot,
   SNAPSHOT_DIRECTORY_MODE,
 } from "../../../release/vscode-image/snapshot.ts";
+import { target } from "../../../release/vscode-image/projects.ts";
 
 /** A workspaces root with `victim/` (the secret) and `project/` (the attacker). */
 function scratch() {
@@ -265,7 +266,7 @@ describe("the spec snapshot", () => {
     const box = sandbox();
     box.project("myapp", { [NESTED]: '{"image":"alpine:3"}' });
 
-    const frozen = snapshot("myapp", box);
+    const frozen = snapshot(target(box.workspaces, "myapp"), box);
 
     assert.equal(frozen, path.join(box.specs, "myapp", "devcontainer.json"));
     assert.equal(fs.readFileSync(frozen, "utf8"), '{"image":"alpine:3"}');
@@ -277,7 +278,7 @@ describe("the spec snapshot", () => {
     const box = sandbox();
     box.project("myapp", { [NESTED]: '{"image":"alpine:3"}' });
 
-    const frozen = snapshot("myapp", box);
+    const frozen = snapshot(target(box.workspaces, "myapp"), box);
     box.project("myapp", {
       [NESTED]: '{"image":"alpine:3","privileged":true}',
     });
@@ -296,7 +297,7 @@ describe("the spec snapshot", () => {
       ".devcontainer/myfeature/devcontainer-feature.json": '{"id":"mine"}',
     });
 
-    snapshot("myapp", box);
+    snapshot(target(box.workspaces, "myapp"), box);
 
     const copy = path.join(box.specs, "myapp");
     assert.equal(
@@ -325,7 +326,7 @@ describe("the spec snapshot", () => {
       path.join(box.workspaces, "myapp", ".devcontainer", "devcontainer.json"),
     );
 
-    const frozen = snapshot("myapp", box);
+    const frozen = snapshot(target(box.workspaces, "myapp"), box);
 
     fs.writeFileSync(
       path.join(box.workspaces, "myapp", "live", "spec.json"),
@@ -344,7 +345,7 @@ describe("the spec snapshot", () => {
     const dir = path.join(box.workspaces, "myapp", ".devcontainer");
     fs.symlinkSync(dir, path.join(dir, "self"));
 
-    assert.throws(() => snapshot("myapp", box), /symlink cycle|levels deep/);
+    assert.throws(() => snapshot(target(box.workspaces, "myapp"), box), /symlink cycle|levels deep/);
   });
 
   test("a link pointing nowhere is refused, not copied as a dangling link", () => {
@@ -355,7 +356,7 @@ describe("the spec snapshot", () => {
       path.join(box.workspaces, "myapp", ".devcontainer", "dangling"),
     );
 
-    assert.throws(() => snapshot("myapp", box), /refusing to snapshot/);
+    assert.throws(() => snapshot(target(box.workspaces, "myapp"), box), /refusing to snapshot/);
   });
 
   test("a symlink is dereferenced, not carried over as a link", () => {
@@ -372,20 +373,20 @@ describe("the spec snapshot", () => {
       [NESTED]: "{}",
       "live/elsewhere.json": '{"image":"from-elsewhere"}',
     });
-    const target = path.join(box.workspaces, "myapp", "live", "elsewhere.json");
+    const pointee = path.join(box.workspaces, "myapp", "live", "elsewhere.json");
     fs.symlinkSync(
-      target,
+      pointee,
       path.join(box.workspaces, "myapp", ".devcontainer", "linked.json"),
     );
 
-    snapshot("myapp", box);
+    snapshot(target(box.workspaces, "myapp"), box);
 
     const copied = path.join(box.specs, "myapp", "linked.json");
     assert.ok(
       !fs.lstatSync(copied).isSymbolicLink(),
       "the snapshot kept a symlink",
     );
-    fs.writeFileSync(target, '{"image":"swapped"}');
+    fs.writeFileSync(pointee, '{"image":"swapped"}');
     assert.equal(fs.readFileSync(copied, "utf8"), '{"image":"from-elsewhere"}');
   });
 
@@ -393,7 +394,7 @@ describe("the spec snapshot", () => {
     const box = sandbox();
     box.project("myapp", { ".devcontainer.json": '{"image":"alpine:3"}' });
 
-    const frozen = snapshot("myapp", box);
+    const frozen = snapshot(target(box.workspaces, "myapp"), box);
 
     assert.equal(fs.readFileSync(frozen, "utf8"), '{"image":"alpine:3"}');
   });
@@ -407,10 +408,10 @@ describe("the spec snapshot", () => {
       [NESTED]: "{}",
       ".devcontainer/gone.json": "{}",
     });
-    snapshot("myapp", box);
+    snapshot(target(box.workspaces, "myapp"), box);
 
     fs.rmSync(path.join(box.workspaces, "myapp", ".devcontainer", "gone.json"));
-    snapshot("myapp", box);
+    snapshot(target(box.workspaces, "myapp"), box);
 
     assert.ok(!fs.existsSync(path.join(box.specs, "myapp", "gone.json")));
   });
@@ -421,7 +422,7 @@ describe("the spec snapshot", () => {
     const box = sandbox();
     box.project("myapp", { [NESTED]: "{}" });
 
-    snapshot("myapp", box);
+    snapshot(target(box.workspaces, "myapp"), box);
 
     const mode = fs.statSync(path.join(box.specs, "myapp")).mode & 0o777;
     assert.equal(mode, SNAPSHOT_DIRECTORY_MODE);
@@ -431,7 +432,7 @@ describe("the spec snapshot", () => {
     const box = sandbox();
     box.project("myapp", { "README.md": "no devcontainer here" });
 
-    assert.throws(() => snapshot("myapp", box), /no devcontainer\.json/);
+    assert.throws(() => snapshot(target(box.workspaces, "myapp"), box), /no devcontainer\.json/);
   });
 });
 

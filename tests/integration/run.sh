@@ -4,6 +4,8 @@
 #
 #   broker  -- the real broker over its unix socket vs the real devcontainer CLI
 #              (needs: node >= 22.18, `devcontainer` on PATH)
+#   worktrees -- the `worktree` command against a real repository, including the
+#              prune that would destroy an unlocked one (needs: git, node)
 #   proxy   -- the real addon under transparent mitmproxy with nftables REDIRECT
 #              (needs: root, nft, docker, mitmproxy)
 #   stack   -- the whole compose stack, attacked from inside the editor
@@ -28,6 +30,15 @@ elif ! node -e 'const [a,b]=process.versions.node.split(".").map(Number); proces
   printf '  skip: needs node >= 22.18 for native type stripping\n'
 else
   node --test "$ROOT"/tests/integration/keyring/*.test.ts || RC=1
+fi
+
+printf '\n\033[1m-- worktrees (the real `git worktree`, in a throwaway repo) --\033[0m\n'
+if ! command -v git >/dev/null 2>&1; then
+  printf '  skip: needs git\n'
+elif ! node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit((a>22||(a===22&&b>=18))?0:1)' 2>/dev/null; then
+  printf '  skip: needs node >= 22.18 for native type stripping\n'
+else
+  node --test "$ROOT"/tests/integration/worktrees/*.test.ts || RC=1
 fi
 
 printf '\n\033[1m-- proxy (transparent mitmproxy + nftables) --\033[0m\n'

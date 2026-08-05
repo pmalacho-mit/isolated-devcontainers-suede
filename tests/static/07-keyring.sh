@@ -140,4 +140,28 @@ assert_contains "keys live one directory per alias" "$(cat "$KEYRING")" \
 assert_not_contains "no alias is parsed back out of a filename" \
   "$(grep -v '^\s*\*' "$KEYRING" | grep -v '^\s*//')" 'deploy_(.+)'
 
+group "the keyring can write the volumes it is given"
+# A named volume takes its ownership from the IMAGE, once, when it is created.
+# The keyring runs as uid 1000 with cap_drop ALL and no volume-init pass of its
+# own, so a directory the image does not create arrives root-owned and stays
+# that way -- `mkdir -p` on an existing path does not chown it.
+#
+# Nothing else in this suite catches that: compose is wired correctly, the code
+# is correct, and the stack keeps working for as long as the volume created
+# under the old arrangement survives. It fails the first time somebody starts
+# from an empty one, with ssh-agent unable to bind its socket and every
+# `newrepo` reporting only that the keyring is unreachable.
+#
+# The modes are pinned alongside the owner because they are the ones keyring.ts
+# sets on the same directories; the image and the code disagreeing about 0700 is
+# how the private-key directory would end up group-readable.
+DOCKERFILE=$(tr '\n' ' ' < "$RELEASE/vscode-image/Dockerfile" | tr -s ' \\')
+while read -r dir mode; do
+  assert_contains "the image creates $dir as uid 1000, mode $mode" \
+    "$DOCKERFILE" "install -d -o 1000 -g 1000 -m $mode $dir"
+done <<'EOF'
+/run/keyring 0755
+/var/lib/keyring 0700
+EOF
+
 summary

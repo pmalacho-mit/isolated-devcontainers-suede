@@ -3,15 +3,19 @@
 //
 //   desolate myproject           -> starts devcontainer + editor, prints URL map
 //   desolate owner/myrepo        -> same, for a repo cloned under its owner
+//   desolate <p> --worktree wip  -> same, for one of that project's worktrees
 //   desolate --rebuild <project> -> recreate the container from the current spec
 //   desolate --stop <project>    -> stop devcontainer and remove its relays
 //   desolate --ports <project>   -> show current port map
+//   desolate --purge <project>   -> remove its container, relays, volumes, state
 //
 // A project is a directory under /workspaces, either a direct child or ONE
 // level deeper so repositories can be scoped by owner (`cli.sh repo add` clones
-// to /workspaces/<owner>/<repo>). Docker object names cannot contain "/", so
-// volumes, relay containers and state files use `volumeNamespace`'s encoded
-// form: `owner/repo` -> `owner__repo`.
+// to /workspaces/<owner>/<repo>). Each project may also carry worktrees under
+// `<project>/.worktrees/<name>`, which run as targets of their own. Docker
+// object names can contain neither "/" nor "@", so volumes, relay containers
+// and state files use `volumeNamespace`'s encoded form: `owner/repo` ->
+// `owner__repo`, and `owner/repo@wip` -> `owner__repo--wt--wip`.
 //
 // Plain start REUSES an existing container: `devcontainer up` finds it by label
 // and starts it without re-reading devcontainer.json. So editing the spec and
@@ -35,13 +39,20 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { enforcePolicy } from "./policy.ts";
 import {
-  list as listProjects,
+  list as listTargets,
   SLASH_REPLACEMENT,
+  WORKTREE_REPLACEMENT,
+  WORKTREES_DIRECTORY,
   validName,
-  volumeNamespace,
+  validWorktree,
+  worktreesOf,
+  target as resolveTarget,
+  type Target,
 } from "./projects.ts";
+import { directory as stateDirectory, stateFile } from "./state.ts";
+import * as worktrees from "./worktrees.ts";
 import { parse as parseJsonc } from "./jsonc.ts";
-import { isEntryPoint, run } from "./utils.ts";
+import { isEntryPoint, run, type JSONValue } from "./utils.ts";
 import { parseArgs } from "./args.ts";
 import { createDocker, type NetworkAttachment, type Runner } from "./docker.ts";
 import {
@@ -79,7 +90,11 @@ import {
 } from "./devcontainer.ts";
 import { caTrustingImage, installInstructions } from "./certificates.ts";
 
-const WORKSPACES = "/workspaces";
+/** Overridable so this can be pointed at a throwaway workspace, and because the
+ *  broker validates against the same variable and hands us its environment --
+ *  the two disagreeing about where projects live is not a state worth having.
+ *  Nothing sets it in production. */
+const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
 // Piping our output to `head`/`grep -q` closes stdout early; bash tools
 // ignore the resulting SIGPIPE, Node crashes on EPIPE. Exit quietly instead.
@@ -136,6 +151,11 @@ const sha16 = (raw: string) =>
 const desolog = (...[first, ...rest]: string[]) =>
   console.log(`desolate: ${first}`, ...rest);
 
+/** How to name this target back on a command line, so every hint printed below
+ *  can be pasted rather than translated. */
+const invocation = ({ project, worktree }: Target) =>
+  worktree ? `${project} --worktree ${worktree}` : project;
+
 const readOrDie = (path: string, hint: string) => {
   try {
     return fs.readFileSync(path, "utf8");
@@ -144,12 +164,12 @@ const readOrDie = (path: string, hint: string) => {
   }
 };
 
-const resolveOrDie = (project: string, config: string) => {
+const resolveOrDie = (target: Target, config: string) => {
   try {
-    return resolveSpec(project, config);
+    return resolveSpec(target.dir, config);
   } catch (err) {
     return die(
-      `Unable to resolve devcontainer spec for ${project} @ ${config}:\n\n${err}`,
+      `Unable to resolve devcontainer spec for ${target.name} @ ${config}:\n\n${err}`,
     );
   }
 };
@@ -157,34 +177,35 @@ const resolveOrDie = (project: string, config: string) => {
 const overrideConfigFlag = (config?: string) =>
   config ? ["--override-config", config] : [];
 
-const stateDir = `${WORKSPACES}/.desolate`;
+const stateDir = stateDirectory(WORKSPACES);
 
 const ports = {
-  file: (project: string) => `${stateDir}/${volumeNamespace(project)}.ports`,
-  load: (project: string): PortMap => {
+  load: (target: Target): PortMap => {
     try {
-      return portMapFile.parse(fs.readFileSync(ports.file(project), "utf8"));
+      return portMapFile.parse(
+        fs.readFileSync(stateFile(target, "ports"), "utf8"),
+      );
     } catch {
       return new Map(); // no saved map yet -- fine
     }
   },
-  save: (project: string, map: PortMap) => {
+  save: (target: Target, map: PortMap) => {
     fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(ports.file(project), portMapFile.format(map));
+    fs.writeFileSync(stateFile(target, "ports"), portMapFile.format(map));
   },
-  allocate: (project: string, appPorts: number[]): PortMap => {
+  allocate: (target: Target, appPorts: number[]): PortMap => {
     const map = dieOnError(() =>
       allocatePorts(
         {
           range: portRange(process.env),
           published: publishedPorts(docker.container.publishedPortsTable()),
-          ownRelayPorts: ownRelayPorts(ownRelayNames(project)),
-          previous: ports.load(project),
+          ownRelayPorts: ownRelayPorts(ownRelayNames(target)),
+          previous: ports.load(target),
         },
         appPorts,
       ),
     );
-    ports.save(project, map);
+    ports.save(target, map);
     return map;
   },
 };
@@ -216,20 +237,18 @@ const spec = {
     if (config) walk(config, "override");
     return sha16(parts.join("\0"));
   },
-  file: (project: string) =>
-    `${WORKSPACES}/.desolate/${volumeNamespace(project)}.spec`,
 
-  load(project: string) {
+  load(target: Target) {
     try {
-      return fs.readFileSync(spec.file(project), "utf8").trim();
+      return fs.readFileSync(stateFile(target, "spec"), "utf8").trim();
     } catch {
       return;
     }
   },
 
-  save(project: string, fingerprint: string) {
-    fs.mkdirSync(`${WORKSPACES}/.desolate`, { recursive: true });
-    fs.writeFileSync(spec.file(project), fingerprint + "\n");
+  save(target: Target, fingerprint: string) {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(stateFile(target, "spec"), fingerprint + "\n");
   },
 };
 
@@ -249,21 +268,23 @@ const overlay = {
     return docker.volume.options(vol) === overlayOptions(lower, mountpoint);
   },
   /**
-   * Build (or reuse) one project's copy-on-write view of a shared directory.
+   * Build (or reuse) one target's copy-on-write view of a shared directory.
    * @returns the volume name; dies loudly rather than degrading to a shared mount. */
-  ensureVolume: (project: string, mount: SharedDirectory) => {
-    const { view: volume, data } = overlayVolumes(project, mount.name);
+  ensureVolume: (target: Target, mount: SharedDirectory) => {
+    const { view: volume, data } = overlayVolumes(target, mount.name);
     const want = sha16(readOrDie(mount.identityFile, mount.missing));
 
     const have = docker.volume.label(volume, OVERLAY_KEY_LABEL);
     if (have === want) {
       if (overlay.intact(volume, data, mount.lower)) return volume;
       desolog(
-        `${project}'s view of ${mount.lower} is stamped current but its
+        `${target.name}'s view of ${mount.lower} is stamped current but its
           backing volume '${data}' is missing or has moved (pruned?) -- rebuilding`,
       );
     } else if (have)
-      desolog(`${mount.lower} changed -- rebuilding ${project}'s view of it`);
+      desolog(
+        `${mount.lower} changed -- rebuilding ${target.name}'s view of it`,
+      );
 
     const cleanup = () => docker.volume.remove([volume, data]);
 
@@ -272,7 +293,7 @@ const overlay = {
     const fail = (reason: string): never => {
       cleanup();
       return die(
-        `could not build ${project}'s copy-on-write view of ${mount.lower}: ${reason}.
+        `could not build ${target.name}'s copy-on-write view of ${mount.lower}: ${reason}.
 
       ${mount.why}
 
@@ -320,14 +341,14 @@ const overlay = {
     )
       fail("the overlay volume was created but could not be mounted");
 
-    desolog(`built ${project}'s copy-on-write view of ${mount.lower}`);
+    desolog(`built ${target.name}'s copy-on-write view of ${mount.lower}`);
     return volume;
   },
 };
 
-/** Names of this project's relay containers (running or not). */
-const ownRelayNames = (project: string) =>
-  docker.container.namesWithLabel(relay.label(project));
+/** Names of this target's relay containers (running or not). */
+const ownRelayNames = (target: Target) =>
+  docker.container.namesWithLabel(relay.label(target));
 
 /**
  * The container this project's workspace folder belongs to, "" if there is none.
@@ -437,42 +458,74 @@ function caTrustedBaseImage(cfg: ProjectConfig): string {
   return tag;
 }
 
+/** A spec key that holds a list, read the way the CLI reads it -- a lone string
+ *  where a list belongs is coerced rather than dropped. */
+const asList = (value: JSONValue | undefined): JSONValue[] =>
+  value === undefined || value === null
+    ? []
+    : Array.isArray(value)
+      ? value
+      : [value];
+
+/**
+ * Must this target's folder appear inside its container at the same absolute
+ * path it has outside?
+ *
+ * A worktree has no say: its `.git` file and the project's `commondir` record
+ * absolute paths, so anywhere else is a container where git does not work at
+ * all -- which is why a declared workspaceMount is REPLACED rather than
+ * respected. A nested project only needs it when it declared nothing, because
+ * the CLI's default (`/workspaces/<basename>`) would drop its owner and two
+ * owners' repos of one name would collide.
+ */
+const mustMirrorItsOwnPath = (
+  target: Target,
+  spec: ResolvedSpec["configuration"],
+) =>
+  target.worktree !== undefined ||
+  (target.project.includes("/") &&
+    spec.workspaceFolder === undefined &&
+    spec.workspaceMount === undefined);
+
 /**
  * Narrow, derived rewrites of a validated spec. Returns the --config path to
  * use from here on (unchanged when nothing applies).
  */
 function deriveRunConfig(
-  dir: string,
+  target: Target,
   config: string,
   cfg: ProjectConfig,
-  project: string,
 ): string {
+  const { dir, name } = target;
   const tag = caTrustedBaseImage(cfg);
   const src = config ?? tryLocateConfig(dir);
 
-  if (!src) return die(`Unable to locate devcontainer config for ${project}`);
+  if (!src) return die(`Unable to locate devcontainer config for ${name}`);
 
   let spec: ResolvedSpec["configuration"];
   try {
     spec = parseJsonc(fs.readFileSync(src, "utf8"));
   } catch {
-    return die(`Failed to parse devcontainer config for ${project}`);
+    return die(`Failed to parse devcontainer config for ${name}`);
   }
 
   if (typeof spec !== "object" || spec === null)
-    return die(`Parsed devcontainer config was not an object for ${project}`);
+    return die(`Parsed devcontainer config was not an object for ${name}`);
 
   const applied: string[] = [];
 
-  if (
-    project.includes("/") &&
-    spec.workspaceFolder === undefined &&
-    spec.workspaceMount === undefined
-  ) {
-    const own = `${WORKSPACES}/${project}`;
-    spec.workspaceFolder = own;
-    spec.workspaceMount = `source=${own},target=${own},type=bind`;
-    applied.push(`workspace mounted at ${own}, mirroring its path outside`);
+  if (mustMirrorItsOwnPath(target, spec)) {
+    spec.workspaceFolder = dir;
+    spec.workspaceMount = `source=${dir},target=${dir},type=bind`;
+    applied.push(`workspace mounted at ${dir}, mirroring its path outside`);
+  }
+
+  const mask = worktrees.runArgs(target);
+  if (mask.length) {
+    spec.runArgs = [...asList(spec.runArgs), ...mask];
+    applied.push(
+      `${WORKTREES_DIRECTORY} hidden, so one filename means one file`,
+    );
   }
 
   if (tag) {
@@ -484,7 +537,7 @@ function deriveRunConfig(
 
   for (const note of applied) desolog(`${note}`);
 
-  const out = `${RUN_CONFIG_DIR}/${volumeNamespace(project)}`;
+  const out = `${RUN_CONFIG_DIR}/${target.namespace}`;
   fs.rmSync(out, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true, mode: 0o700 });
 
@@ -506,8 +559,8 @@ const containerWorkspaceFolder = (dir: string, cid: string) =>
   docker.container.mounts(cid).find(({ source }) => source === dir)
     ?.destination ?? "";
 
-function connectionToken(project: string): string {
-  const file = `${WORKSPACES}/.desolate/${volumeNamespace(project)}.token`;
+function connectionToken(target: Target): string {
+  const file = stateFile(target, "token");
   try {
     const existing = fs.readFileSync(file, "utf8").trim();
     if (isValidToken(existing)) return existing;
@@ -520,7 +573,7 @@ function connectionToken(project: string): string {
           `replacing it (a previously bookmarked URL will stop working)`,
       );
   } catch /* create below */ {}
-  fs.mkdirSync(`${WORKSPACES}/.desolate`, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true });
   const token = mintToken((length) =>
     crypto.getRandomValues(new Uint8Array(length)),
   );
@@ -528,18 +581,31 @@ function connectionToken(project: string): string {
   return token;
 }
 
-const devcontainerUp = (
-  project: string,
-  dir: string,
-  config: string,
-  noCache = false,
-) => {
-  const args = ["up", "--workspace-folder", dir, ...overrideConfigFlag(config)];
-  for (const mount of SHARED_DIRECTORIES)
-    args.push(
-      "--mount",
-      `type=volume,source=${overlay.ensureVolume(project, mount)},target=${mount.target}`,
-    );
+/**
+ * The mounts desolate adds to every container, over and above the ones the spec
+ * asks for.
+ *
+ * They are passed as `--mount` flags rather than written into the spec, and
+ * that is what keeps them out of a project's reach: policy.ts refuses every
+ * bind a spec declares, so a project cannot name `/workspaces/other/.git` --
+ * or its own -- however it spells it.
+ */
+const injectedMounts = (target: Target) => [
+  ...SHARED_DIRECTORIES.map(
+    (mount) =>
+      `type=volume,source=${overlay.ensureVolume(target, mount)},target=${mount.target}`,
+  ),
+  ...worktrees.mounts(target),
+];
+
+const devcontainerUp = (target: Target, config: string, noCache = false) => {
+  const args = [
+    "up",
+    "--workspace-folder",
+    target.dir,
+    ...overrideConfigFlag(config),
+    ...injectedMounts(target).flatMap((mount) => ["--mount", mount]),
+  ];
 
   if (noCache) args.push("--build-no-cache");
   const code = run.status("devcontainer", args, /* quiet */ true);
@@ -574,12 +640,12 @@ function installProxyCa(dir: string): void {
 }
 
 function startEditor(
-  project: string,
-  dir: string,
+  target: Target,
   cfg: ProjectConfig,
   token: string,
   config: string,
 ): void {
+  const dir = target.dir;
   const script = editorStartScript(SERVER_DST, cfg.extensions, token);
   const code = run.status("devcontainer", [
     "exec",
@@ -590,7 +656,7 @@ function startEditor(
     "-lc",
     script,
   ]);
-  if (code === 0) return;
+  if (code === 0) return console.log("desolate: editor started");
 
   if (code === 126) {
     console.log(
@@ -598,7 +664,7 @@ function startEditor(
     );
     const stale = devcontainerId(dir, true);
     if (stale) docker.container.remove([stale]);
-    devcontainerUp(project, dir, config);
+    devcontainerUp(target, config);
     const retry = run.status("devcontainer", [
       "exec",
       "--workspace-folder",
@@ -619,8 +685,7 @@ function startEditor(
 }
 
 const startRelay = (
-  project: string,
-  dir: string,
+  target: Target,
   { network, ip: targetIp }: NetworkAttachment,
   { hostPort, targetPort }: Record<`${"host" | "target"}Port`, number>,
 ) => {
@@ -629,8 +694,8 @@ const startRelay = (
   // The relay joins the devcontainer's network so `ip` is directly routable.
   const code = docker.relay.start({
     image: relay.IMAGE,
-    name: relay.name(project, hostPort),
-    label: relay.label(project),
+    name: relay.name(target, hostPort),
+    label: relay.label(target),
     network,
     hostPort,
     targetIp,
@@ -644,13 +709,15 @@ const startRelay = (
         `(first run must pull ${relay.IMAGE} -- is your network ok?)`,
       ].join(" "),
     );
+  else console.log(`desolate: relay started for ${hostPort}`);
 
-  const checkSocatRelay = { intervalMs: 400, retries: 5 } as const;
-  const name = relay.name(project, hostPort);
+  const checkSocatRelay = { intervalMs: 100, retries: 20 } as const;
+  const name = relay.name(target, hostPort);
   for (let i = 0; i < checkSocatRelay.retries; i++) {
     const state = docker.container.state(name);
     if (state === "running") return; // relay is up
     if (state === "exited" || state === "restarting") break;
+    console.log(`desolate: waiting for ${hostPort} relay to be running...`);
     sleep(checkSocatRelay.intervalMs);
   }
 
@@ -661,18 +728,19 @@ const startRelay = (
       `      Most common cause: something else already publishes ${hostPort} on the`,
       `      inner daemon -- usually a leftover "appPort" in devcontainer.json.`,
       `      Remove appPort (desolate allocates host ports itself), then:`,
-      `        docker rm -f $(docker ps -aq --filter label=devcontainer.local_folder=${dir})`,
-      `        desolate ${project}`,
+      `        docker rm -f $(docker ps -aq --filter label=devcontainer.local_folder=${target.dir})`,
+      `        desolate ${invocation(target)}`,
     ].join("\n"),
   );
 };
 
-/** One relay per mapped port, replacing whatever this project had before. */
-function recreateRelays(project: string, dir: string, map: PortMap): void {
-  const cid = devcontainerId(dir);
+/** One relay per mapped port, replacing whatever this target had before. */
+function recreateRelays(target: Target, map: PortMap): void {
+  const cid = devcontainerId(target.dir);
   if (!cid) die("devcontainer is not running after up");
 
   const nets = docker.container.networks(cid);
+
   // First network with an actual address. A container can legitimately sit on
   // several; any ONE of them is routable from a relay joined to that same
   // network, so this needs no cleverness -- only consistency.
@@ -696,12 +764,14 @@ function recreateRelays(project: string, dir: string, map: PortMap): void {
       `desolate: devcontainer is on ${nets.length} networks ` +
         `(${nets.map((n) => n.network).join(", ")}); relays will use ${network}`,
     );
+  else
+    console.log(`desolate: devcontainer relays will use network: ${network}`);
 
-  const old = ownRelayNames(project);
+  const old = ownRelayNames(target);
   docker.container.remove(old);
 
   for (const [label, hostPort] of map)
-    startRelay(project, dir, attach, {
+    startRelay(target, attach, {
       hostPort,
       targetPort: label === "editor" ? EDITOR_INTERNAL_PORT : Number(label),
     });
@@ -715,9 +785,9 @@ function recreateRelays(project: string, dir: string, map: PortMap): void {
  * no bridge at all, and lands on the far side of the wall by design. It tests
  * everything except the two pure docker publishes that carry the Mac's traffic in.
  */
-function probeEditor(project: string, port: number): boolean {
+function probeEditor(target: Target, port: number): boolean {
   const config = { retries: 5, gapMs: 1000 } as const;
-  const name = relay.name(project, port);
+  const name = relay.name(target, port);
   for (let attempt = 0; attempt < config.retries; attempt++) {
     if (docker.relay.answers(name, port)) return true;
     if (attempt < config.retries - 1) sleep(config.gapMs);
@@ -725,9 +795,10 @@ function probeEditor(project: string, port: number): boolean {
   return false;
 }
 
-function showPorts(project: string): void {
-  const map = ports.load(project);
-  if (map.size === 0) return console.log(`no ports allocated for ${project}`);
+function showPorts(target: Target): void {
+  const map = ports.load(target);
+  if (map.size === 0)
+    return console.log(`no ports allocated for ${target.name}`);
 
   for (const [label, port] of map) {
     const name = label === "editor" ? "editor       " : `container:${label}`;
@@ -735,37 +806,94 @@ function showPorts(project: string): void {
   }
 }
 
-function stopProject(project: string, dir: string): void {
-  const relays = ownRelayNames(project);
+/** The worktrees of this project whose containers are up right now. */
+const runningWorktrees = (target: Target) =>
+  worktreesOf(target).filter(({ dir }) => devcontainerId(dir));
+
+/**
+ * Refuse to stop a project while its worktrees are running.
+ *
+ * They are separate containers with separate relays, so stopping the project
+ * leaves them up -- and "I stopped it, why is the port still answering?" is a
+ * question with no visible answer. Naming each one is the whole refusal.
+ */
+function refuseIfWorktreesAreRunning(target: Target): void {
+  if (target.worktree) return;
+  const running = runningWorktrees(target);
+  if (running.length === 0) return;
+
+  die(`${target.name} has ${running.length} worktree(s) still running.
+      They are containers of their own, so stopping the project would leave
+      them up. Stop them first:
+${running.map((w) => `        desolate --stop ${invocation(w)}`).join("\n")}`);
+}
+
+function stopTarget(target: Target): void {
+  refuseIfWorktreesAreRunning(target);
+
+  const relays = ownRelayNames(target);
   if (relays.length) {
     docker.container.remove(relays);
     console.log("removed relays");
   }
-  const id = devcontainerId(dir);
+  const id = devcontainerId(target.dir);
   if (id) {
     docker.container.stop(id);
     // Say that the container is KEPT. Stopping and starting again looks like it
     // should pick up an edited devcontainer.json, and it does not -- `up`
     // restarts the existing container rather than rebuilding from the spec.
-    console.log(`stopped ${project} (container kept, so restarting is fast;`);
     console.log(
-      `         use 'desolate --rebuild ${project}' to apply spec changes)`,
+      `stopped ${target.name} (container kept, so restarting is fast;`,
+    );
+    console.log(
+      `         use 'desolate --rebuild ${invocation(target)}' to apply spec changes)`,
     );
   } else console.log("not running");
 }
 
-async function runProject(
-  name: string,
-  dir: string,
+/**
+ * Remove everything desolate created for this target: its container, its
+ * relays, the copy-on-write views it was given, and its saved ports, token and
+ * spec fingerprint.
+ *
+ * Named volumes the PROJECT declared are deliberately left alone -- this is
+ * what `cli.sh worktree remove` calls, and a branch going away is not a reason
+ * to delete a database.
+ */
+function purgeTarget(target: Target): void {
+  refuseIfWorktreesAreRunning(target);
+
+  if (devcontainerId(target.dir))
+    die(`${target.name} is running. Purging would pull its filesystem out from
+      under it, so stop it first:
+        desolate --stop ${invocation(target)}`);
+
+  docker.container.remove(ownRelayNames(target));
+  const id = devcontainerId(target.dir, /* includeStopped */ true);
+  if (id) docker.container.remove([id]);
+
+  docker.volume.remove(
+    SHARED_DIRECTORIES.flatMap((mount) =>
+      Object.values(overlayVolumes(target, mount.name)),
+    ),
+  );
+
+  for (const kind of ["ports", "spec", "token"] as const)
+    fs.rmSync(stateFile(target, kind), { force: true });
+
+  console.log(`purged ${target.name} (container, relays, volumes and state)`);
+}
+
+async function runTarget(
+  target: Target,
   config?: string,
   rebuild = false,
   noCache = false,
 ): Promise<void> {
-  config ??= dieOnError(() =>
-    snapshot(name, { workspaces: WORKSPACES, specs: DIRECT_SPEC_DIR }),
-  );
+  const { name, dir } = target;
+  config ??= dieOnError(() => snapshot(target, { specs: DIRECT_SPEC_DIR }));
 
-  const project = readProjectConfig(resolveOrDie(dir, config));
+  const project = readProjectConfig(resolveOrDie(target, config));
   if (project.hadLegacyAppPort)
     return die(`devcontainer.json still contains "appPort".
       desolate allocates host ports itself, and an appPort publish occupies the
@@ -776,14 +904,13 @@ async function runProject(
   // fingerprint before deriving
   const fingerprint = spec.fingerprint(dir, config);
 
-  config = deriveRunConfig(dir, config, project, name);
+  config = deriveRunConfig(target, config, project);
 
   try {
     enforcePolicy(
-      name,
-      resolveOrDie(dir, config),
-      WORKSPACES,
-      listProjects(WORKSPACES),
+      target,
+      resolveOrDie(target, config),
+      listTargets(WORKSPACES),
     );
   } catch (err: any) {
     die(`the spec desolate derived for ${name} does not pass the policy
@@ -791,7 +918,7 @@ async function runProject(
       your devcontainer.json): ${err?.message ?? err}`);
   }
 
-  const saved = spec.load(name);
+  const saved = spec.load(target);
   const existing = devcontainerId(dir, true);
 
   if (rebuild && existing) {
@@ -803,28 +930,28 @@ async function runProject(
         'devcontainer up' reuses an existing container without re-reading
         devcontainer.json, so THE CHANGE IS NOT IN EFFECT below.
           .devcontainer fingerprint: ${saved} -> ${fingerprint}
-        Apply it:  desolate --rebuild ${name}
+        Apply it:  desolate --rebuild ${invocation(target)}
         Why not automatic: recreating loses anything written inside the
         container outside /workspaces.
         `);
 
   const willCreate = rebuild || !existing;
 
-  const map = ports.allocate(name, project.appPorts);
+  const map = ports.allocate(target, project.appPorts);
   const editorPort = map.get("editor")!;
-  const token = connectionToken(name);
+  const token = connectionToken(target);
 
   desolog(`starting devcontainer for ${name} ...`);
-  devcontainerUp(name, dir, config, noCache);
-  if (willCreate) spec.save(name, fingerprint);
+  devcontainerUp(target, config, noCache);
+  if (willCreate) spec.save(target, fingerprint);
   installProxyCa(dir);
-  startEditor(name, dir, project, token, config);
-  recreateRelays(name, dir, map);
+  startEditor(target, project, token, config);
+  recreateRelays(target, map);
 
-  if (!probeEditor(name, editorPort))
+  if (!probeEditor(target, editorPort))
     return die(`editor did not answer through the relay on :${editorPort} -- check the log:
       devcontainer exec --workspace-folder ${dir} cat ${EDITOR_LOG}
-      and the relay itself:  docker logs ${relay.name(name, editorPort)}`);
+      and the relay itself:  docker logs ${relay.name(target, editorPort)}`);
 
   const id = devcontainerId(dir);
   const folder = (id && containerWorkspaceFolder(dir, id)) || dir;
@@ -848,31 +975,60 @@ async function runProject(
       `  the relay is live now, the URL answers once the server is up.`,
     );
   }
+  const paste = invocation(target);
   console.log(
-    `\n  Port map: desolate --ports ${name}    Stop: desolate --stop ${name}`,
+    `\n  Port map: desolate --ports ${paste}    Stop: desolate --stop ${paste}`,
   );
+}
+
+/** Turn a validated command line into the one directory it denotes.
+ *
+ *  Worktrees are NOT created here. `git worktree add` reads the repository's
+ *  own config and fires its hooks, and this process holds the inner Docker
+ *  socket; the editor container is where git already runs against project
+ *  content, so that is where creating one belongs. */
+function targetFromArguments(project: string, worktree?: string): Target {
+  if (!validName(project))
+    die(`'${project}' is not a usable project name.
+      A project is one path segment under /workspaces, or two for an
+      owner-scoped repo ('owner/repo'). Each segment must start with a letter
+      or digit and hold only [A-Za-z0-9._-], and the name cannot contain
+      '${SLASH_REPLACEMENT}' or '${WORKTREE_REPLACEMENT}' (that is how '/' and
+      a worktree are encoded into docker object names).`);
+
+  if (worktree !== undefined && !validWorktree(worktree))
+    die(`'${worktree}' is not a usable worktree name.
+      A worktree is ONE path segment under <project>/.worktrees, starting with a
+      letter or digit. It names a DIRECTORY, not a branch -- a branch with a '/'
+      in it is fine, it just gets a single-segment directory to live in.`);
+
+  const target = dieOnError(() => resolveTarget(WORKSPACES, project, worktree));
+
+  if (!fs.existsSync(target.projectDir))
+    die(`no such project: ${target.projectDir}`);
+
+  if (!fs.existsSync(target.dir))
+    die(`no such worktree: ${target.dir}
+      Create it from the editor, where git already runs against this project:
+        ./cli.sh worktree add ${project} ${worktree}
+      (or, in the editor's terminal: worktree add ${project} ${worktree})`);
+
+  return target;
 }
 
 async function main(): Promise<void> {
   initDirectory(DIRECT_SPEC_DIR);
 
-  const { command, project, config, rebuild, noCache } = dieOnError(() =>
-    parseArgs(process.argv.slice(2), WORKSPACES),
+  const { command, project, worktree, config, rebuild, noCache } = dieOnError(
+    () => parseArgs(process.argv.slice(2), WORKSPACES),
   );
 
-  if (!validName(project))
-    die(`'${project}' is not a usable project name.
-      A project is one path segment under /workspaces, or two for an
-      owner-scoped repo ('owner/repo'). Each segment must start with a letter
-      or digit and hold only [A-Za-z0-9._-], and the name cannot contain 
-      '${SLASH_REPLACEMENT}' (that is how '/' is encoded into docker object names).`);
+  const target = targetFromArguments(project, worktree);
 
-  const dir = `${WORKSPACES}/${project}`;
-  if (!fs.existsSync(dir)) die(`no such project: ${dir}`);
-
-  if (command === "ports") showPorts(project);
-  else if (command === "stop") stopProject(project, dir);
-  else await runProject(project, dir, config, rebuild, noCache);
+  if (command === "ports") showPorts(target);
+  else if (command === "stop") stopTarget(target);
+  else if (command === "purge") purgeTarget(target);
+  else await runTarget(target, config, rebuild, noCache);
 }
 
 if (isEntryPoint(import.meta.url))

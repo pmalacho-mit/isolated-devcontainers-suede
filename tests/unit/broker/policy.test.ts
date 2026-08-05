@@ -17,13 +17,24 @@ import {
   mount,
 } from "../../../release/vscode-image/policy.ts";
 import type { ResolvedSpec } from "../../../release/vscode-image/devcontainer.ts";
-import { list as listProjects, volumeNamespace } from "../../../release/vscode-image/projects.ts";
+import {
+  list as listTargets,
+  target,
+  volumeNamespace,
+  type Target,
+} from "../../../release/vscode-image/projects.ts";
 import { parse as parseJsonc, strip as stripJsonc } from "../../../release/vscode-image/jsonc.ts";
 
 const PROJECT = "myapp";
 
-/** The trailing (workspaces, projects) arguments of enforcePolicy. */
-type EnforceArgs = [workspaces: string, projects: string[]];
+const WORKSPACES = "/workspaces";
+
+/** The target a name denotes in the default workspace. */
+const named = (project: string, worktree?: string) =>
+  target(WORKSPACES, project, worktree);
+
+/** The trailing (targets) argument of enforcePolicy. */
+type EnforceArgs = [targets: Target[]];
 
 /** enforcePolicy options for a workspace holding exactly one project.
  *
@@ -32,7 +43,7 @@ type EnforceArgs = [workspaces: string, projects: string[]];
  *  and a test that let it would depend on whatever directories the machine
  *  running it happens to have. Cases that ARE about the rule name their own
  *  siblings instead. */
-const alone = (project: string): EnforceArgs => ["/workspaces", [project]];
+const alone = (project: string): EnforceArgs => [[named(project)]];
 
 /** Build a ResolvedSpec the way `devcontainer read-configuration
  *  --include-merged-configuration` reports one.
@@ -108,7 +119,7 @@ function spec(
 
 function refuses(cfg: ResolvedSpec, match: RegExp | string) {
   assert.throws(
-    () => enforcePolicy(PROJECT, cfg, ...alone(PROJECT)),
+    () => enforcePolicy(named(PROJECT), cfg, ...alone(PROJECT)),
     (err: Error) => {
       const m =
         typeof match === "string"
@@ -124,7 +135,7 @@ function refuses(cfg: ResolvedSpec, match: RegExp | string) {
 }
 
 function allows(cfg: ResolvedSpec) {
-  enforcePolicy(PROJECT, cfg, ...alone(PROJECT));
+  enforcePolicy(named(PROJECT), cfg, ...alone(PROJECT));
 }
 
 // ===========================================================================
@@ -285,7 +296,7 @@ describe("demonstrated escapes (regression)", () => {
     ];
     for (const runArgs of escapes) {
       assert.throws(
-        () => enforcePolicy(PROJECT, spec({ image: "x", runArgs }), ...alone(PROJECT)),
+        () => enforcePolicy(named(PROJECT), spec({ image: "x", runArgs }), ...alone(PROJECT)),
         (err: Error) => err.name === "PolicyError" || err instanceof Error,
         `runArgs ${JSON.stringify(runArgs)} was ACCEPTED -- namespace escape is live`,
       );
@@ -353,7 +364,7 @@ describe("demonstrated escapes (regression)", () => {
       assert.throws(
         () =>
           enforcePolicy(
-            PROJECT,
+            named(PROJECT),
             { configuration: { image: "x" }, mergedConfiguration: missing } as ResolvedSpec,
             ...alone(PROJECT),
           ),
@@ -406,7 +417,7 @@ describe("demonstrated escapes (regression)", () => {
       assert.throws(
         () =>
           enforcePolicy(
-            PROJECT,
+            named(PROJECT),
             { configuration: { image: "x", [key]: value }, mergedConfiguration: { image: "x" } },
             ...alone(PROJECT),
           ),
@@ -670,12 +681,12 @@ describe("workspaceMount", () => {
     // 'pmalacho-mit/suede' it mounts at /workspaces/suede. Demanding the
     // mirrored path refused a project for writing out the CLI's own default,
     // while the very same mount created implicitly was never checked.
-    const nested = "pmalacho-mit/suede";
+    const nested = named("pmalacho-mit/suede");
     const src = "/workspaces/pmalacho-mit/suede";
-    for (const target of [src, "/workspaces/suede"]) {
+    for (const where of [src, "/workspaces/suede"]) {
       enforcePolicy(
         nested,
-        spec({ image: "x", workspaceMount: `source=${src},target=${target},type=bind` }),
+        spec({ image: "x", workspaceMount: `source=${src},target=${where},type=bind` }),
         ...alone(PROJECT),
       );
     }
@@ -704,6 +715,128 @@ describe("workspaceMount", () => {
         ),
       /workspaceMount target must be/,
     );
+  });
+});
+
+// ===========================================================================
+describe("a worktree target", () => {
+  // ===========================================================================
+  // The only step of this feature that WIDENS what a spec may ask for. What
+  // widened is which directory `target.dir` is -- the comparison itself is
+  // still equality against a value computed here, never one parsed out of the
+  // spec, and never a prefix test.
+
+  const project = named("acme/widgets");
+  const feature = named("acme/widgets", "feature123");
+  const sibling = named("acme/widgets", "other");
+  const family: EnforceArgs = [[project, feature, sibling]];
+
+  const bind = (source: string, target = source) =>
+    spec({
+      image: "x",
+      workspaceMount: `source=${source},target=${target},type=bind`,
+    });
+
+  const refusedFor = (target: Target, cfg: ResolvedSpec, match: RegExp) =>
+    assert.throws(() => enforcePolicy(target, cfg, ...family), match);
+
+  test("binds its own directory, mirrored inside and out", () => {
+    // Not a preference: its `.git` file and the project's `commondir` record
+    // absolute paths, so any other destination is a container where git is dead.
+    const dir = "/workspaces/acme/widgets/.worktrees/feature123";
+    assert.equal(feature.dir, dir);
+    enforcePolicy(feature, bind(dir), ...family);
+  });
+
+  test("may not bind its own PROJECT's folder", () => {
+    // The project root is the root target's mount, and mounting it here would
+    // put a second copy of every filename in this container -- which is the
+    // ergonomic problem worktrees exist to solve.
+    refusedFor(feature, bind("/workspaces/acme/widgets"), /exactly/);
+  });
+
+  test("may not bind a SIBLING worktree", () => {
+    refusedFor(
+      feature,
+      bind("/workspaces/acme/widgets/.worktrees/other"),
+      /exactly/,
+    );
+  });
+
+  test("may not traverse out of .worktrees, however it is spelled", () => {
+    // Each of these RESOLVES somewhere else, which is why the comparison
+    // resolves before it compares rather than matching the text.
+    for (const source of [
+      "/workspaces/acme/widgets/.worktrees/feature123/../other",
+      "/workspaces/acme/widgets/.worktrees/feature123/../../../other/repo",
+      "/workspaces/acme/widgets/.worktrees/feature123/..",
+      "/workspaces/acme/widgets/.worktrees",
+    ])
+      refusedFor(feature, bind(source), /exactly/);
+  });
+
+  test("a project may not bind a worktree's folder either", () => {
+    refusedFor(
+      project,
+      bind("/workspaces/acme/widgets/.worktrees/feature123"),
+      /exactly/,
+    );
+  });
+
+  test("does not take the CLI's basename default as a mount target", () => {
+    // `/workspaces/widgets` is a legitimate alternative for the PROJECT, and it
+    // would break git here. A worktree gets exactly one accepted destination.
+    refusedFor(feature, bind(feature.dir, "/workspaces/widgets"), /target must be/);
+    refusedFor(feature, bind(feature.dir, "/workspaces/acme/widgets"), /target must be/);
+  });
+
+  test("owns its own volumes, and neither its project nor a sibling", () => {
+    const vol = (source: string) =>
+      spec({ image: "x" }, { mounts: [{ source, target: "/x", type: "volume" }] });
+
+    enforcePolicy(feature, vol("acme__widgets--wt--feature123"), ...family);
+    enforcePolicy(feature, vol("acme__widgets--wt--feature123-vscode-server"), ...family);
+
+    // The editor server is EXECUTED in every container. A worktree reaching the
+    // main tree's overlay would be running code there on the next start.
+    refusedFor(feature, vol("acme__widgets-vscode-server"), /outside this project's namespace/);
+    refusedFor(feature, vol("acme__widgets--wt--other-vscode-server"), /outside this project's namespace/);
+
+    // ...and the project cannot reach into a worktree's, which is the same rule
+    // read the other way: the longer namespace owns the name.
+    refusedFor(project, vol("acme__widgets--wt--feature123-vscode-server"), /belongs to project/);
+  });
+
+  test("the mask desolate adds to the PROJECT passes the re-check", () => {
+    // desolate derives the spec and then hands it back to this policy, so a
+    // rewrite the policy would refuse is a project that can never start. The
+    // mask is a runArg because the CLI refuses a tmpfs as a `--mount`.
+    enforcePolicy(
+      project,
+      spec({
+        image: "x",
+        runArgs: ["--tmpfs", "/workspaces/acme/widgets/.worktrees"],
+      }, {}, "acme/widgets"),
+      ...family,
+    );
+  });
+
+  test("builds from its own tree only", () => {
+    // `../..` out of a worktree is every sibling branch's source, shipped into
+    // an image this target owns.
+    const build = (context: string) =>
+      spec(
+        { image: "x", build: { context } },
+        {},
+        "acme/widgets/.worktrees/feature123",
+      );
+
+    // Relative paths resolve against the .devcontainer directory, so one `..`
+    // is still inside the worktree.
+    enforcePolicy(feature, build("."), ...family);
+    enforcePolicy(feature, build(".."), ...family);
+    refusedFor(feature, build("../../other"), /outside/);
+    refusedFor(feature, build("../../.."), /outside/);
   });
 });
 
@@ -1064,7 +1197,7 @@ describe("the repo's own example projects satisfy the policy", () => {
   test("example-project", async (t) => {
     const cfg = await readExample(t, "example-project");
     if (!cfg) return;
-    enforcePolicy("example-project", spec(cfg), ...alone("example-project"));
+    enforcePolicy(named("example-project"), spec(cfg), ...alone("example-project"));
   });
 
   test("sample-fastapi (docker-in-docker, privilege opted in)", async (t) => {
@@ -1087,7 +1220,7 @@ describe("the repo's own example projects satisfy the policy", () => {
         },
       ],
     };
-    enforcePolicy("sample-fastapi", spec(cfg, merged), ...alone("sample-fastapi"));
+    enforcePolicy(named("sample-fastapi"), spec(cfg, merged), ...alone("sample-fastapi"));
   });
 
   test("sample-fastapi WITHOUT the opt-in is refused", async (t) => {
@@ -1096,7 +1229,7 @@ describe("the repo's own example projects satisfy the policy", () => {
     delete cfg.customizations.desolate.allowPrivileged;
     assert.throws(() =>
       enforcePolicy(
-        "sample-fastapi",
+        named("sample-fastapi"),
         spec(cfg, { privileged: true }),
         ...alone("sample-fastapi"),
       ),
@@ -1110,36 +1243,36 @@ test("a project cannot reach a sibling whose name it prefixes", () => {
   // rule let `web` mount it -- and that is exactly where the README tells you
   // to keep a local-only database password. `web`/`web-api` is an ordinary way
   // to name two services, not a contrived collision.
-  const siblings: EnforceArgs = ["/workspaces", ["web", "web-api"]];
+  const siblings: EnforceArgs = [[named("web"), named("web-api")]];
   const vol = (source: string) => ({
     mounts: [{ source, target: "/x", type: "volume" }],
   });
 
   // the longer project owns them
   assert.throws(
-    () => enforcePolicy("web", spec({ image: "x" }, vol("web-api")), ...siblings),
+    () => enforcePolicy(named("web"), spec({ image: "x" }, vol("web-api")), ...siblings),
     /belongs to project 'web-api'/,
   );
   assert.throws(
-    () => enforcePolicy("web", spec({ image: "x" }, vol("web-api-secrets")), ...siblings),
+    () => enforcePolicy(named("web"), spec({ image: "x" }, vol("web-api-secrets")), ...siblings),
     /belongs to project 'web-api'/,
   );
 
   // ...and still owns its own
-  enforcePolicy("web-api", spec({ image: "x" }, vol("web-api-secrets")), ...siblings);
-  enforcePolicy("web-api", spec({ image: "x" }, vol("web-api")), ...siblings);
+  enforcePolicy(named("web-api"), spec({ image: "x" }, vol("web-api-secrets")), ...siblings);
+  enforcePolicy(named("web-api"), spec({ image: "x" }, vol("web-api")), ...siblings);
 
   // the shorter project keeps everything genuinely its own
-  enforcePolicy("web", spec({ image: "x" }, vol("web")), ...siblings);
-  enforcePolicy("web", spec({ image: "x" }, vol("web-assets")), ...siblings);
+  enforcePolicy(named("web"), spec({ image: "x" }, vol("web")), ...siblings);
+  enforcePolicy(named("web"), spec({ image: "x" }, vol("web-assets")), ...siblings);
 });
 
 test("volumes desolate injects for a project are still its own", () => {
   // The overlay views are named <project>-vscode-server / -desolate-ca, and
   // must not be mistaken for a sibling's just because siblings exist.
-  const siblings: EnforceArgs = ["/workspaces", ["web", "web-api"]];
+  const siblings: EnforceArgs = [[named("web"), named("web-api")]];
   for (const v of ["web-vscode-server", "web-vscode-server-data", "web-desolate-ca"]) {
-    enforcePolicy("web", spec({ image: "x" }, { mounts: [{ source: v, target: "/x", type: "volume" }] }), ...siblings);
+    enforcePolicy(named("web"), spec({ image: "x" }, { mounts: [{ source: v, target: "/x", type: "volume" }] }), ...siblings);
   }
 });
 
@@ -1147,22 +1280,22 @@ test("nested projects own a volume namespace with '/' encoded", () => {
   // Docker volume names cannot contain '/', so `acme/widgets` owns the
   // `acme__widgets` namespace. policy.ts and desolate.ts must agree on that
   // encoding or a project could not mount its own volumes.
-  const siblings: EnforceArgs = ["/workspaces", ["acme/widgets", "other/widgets"]];
+  const siblings: EnforceArgs = [[named("acme/widgets"), named("other/widgets")]];
   const vol = (source: string) => ({ mounts: [{ source, target: "/x", type: "volume" }] });
 
-  enforcePolicy("acme/widgets", spec({ image: "x" }, vol("acme__widgets")), ...siblings);
-  enforcePolicy("acme/widgets", spec({ image: "x" }, vol("acme__widgets-secrets")), ...siblings);
+  enforcePolicy(named("acme/widgets"), spec({ image: "x" }, vol("acme__widgets")), ...siblings);
+  enforcePolicy(named("acme/widgets"), spec({ image: "x" }, vol("acme__widgets-secrets")), ...siblings);
   // desolate's own injected volumes for a nested project
-  enforcePolicy("acme/widgets", spec({ image: "x" }, vol("acme__widgets-vscode-server")), ...siblings);
+  enforcePolicy(named("acme/widgets"), spec({ image: "x" }, vol("acme__widgets-vscode-server")), ...siblings);
 
   // the same repo name under a DIFFERENT owner is a different namespace
   assert.throws(
-    () => enforcePolicy("acme/widgets", spec({ image: "x" }, vol("other__widgets-secrets")), ...siblings),
+    () => enforcePolicy(named("acme/widgets"), spec({ image: "x" }, vol("other__widgets-secrets")), ...siblings),
     /outside this project's namespace|belongs to project/,
   );
   // and the un-encoded form is not this project's either
   assert.throws(
-    () => enforcePolicy("acme/widgets", spec({ image: "x" }, vol("widgets-secrets")), ...siblings),
+    () => enforcePolicy(named("acme/widgets"), spec({ image: "x" }, vol("widgets-secrets")), ...siblings),
     /outside this project's namespace/,
   );
 });
@@ -1194,17 +1327,17 @@ test("a name volumeNamespace cannot encode is excluded from the project list", a
   }
   fs.mkdirSync(join(ws, "owner-with-kids", "re__po"), { recursive: true });
 
-  const names = listProjects(ws).sort();
+  const targets = listTargets(ws);
+  const names = targets.map(({ name }) => name).sort();
   assert.ok(!names.includes("evil__dir"), `list leaked an unencodable name: ${names}`);
   assert.ok(!names.includes("owner-with-kids/re__po"), `list leaked a nested unencodable name: ${names}`);
   assert.ok(names.includes("myapp"));
 
   // and the innocent neighbour still starts, which is the whole point
   enforcePolicy(
-    "myapp",
+    target(ws, "myapp"),
     spec({ image: "x", mounts: ["source=myapp-data,target=/d,type=volume"] }),
-    ws,
-    names,
+    targets,
   );
 });
 
@@ -1219,13 +1352,13 @@ test("the privilege opt-in must be exactly true, not merely truthy", () => {
       customizations: { desolate: { allowPrivileged: value } },
     });
     assert.throws(
-      () => enforcePolicy(PROJECT, cfg, ...alone(PROJECT)),
+      () => enforcePolicy(named(PROJECT), cfg, ...alone(PROJECT)),
       /PRIVILEGED/,
       `allowPrivileged: ${JSON.stringify(value)} was accepted as an opt-in`,
     );
   }
   enforcePolicy(
-    PROJECT,
+    named(PROJECT),
     spec({
       image: "x",
       privileged: true,
@@ -1243,7 +1376,7 @@ test("keys that are refused outright are refused by PRESENCE, not truthiness", (
   for (const key of ["dockerComposeFile", "initializeCommand"])
     for (const value of ["", 0, false, null])
       assert.throws(
-        () => enforcePolicy(PROJECT, spec({ image: "x", [key]: value }), ...alone(PROJECT)),
+        () => enforcePolicy(named(PROJECT), spec({ image: "x", [key]: value }), ...alone(PROJECT)),
         new RegExp(key),
         `${key}: ${JSON.stringify(value)} was accepted`,
       );

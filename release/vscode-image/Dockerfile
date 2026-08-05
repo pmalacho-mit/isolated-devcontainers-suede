@@ -15,12 +15,14 @@ FROM debian:bookworm-slim
 USER root
 
 # Pin software versions installed by this image (while other images can 'float').
-# DOCKER_VERSION is the CLI only -- the daemon it drives is docker-compose.yml's `docker:#-dind`
 # VSCODIUM_* pins the editor server; the sums are the ones published beside the
 # release tarballs, and a mismatch must fail the build rather than warn.
-ARG VSCODIUM_VERSION=1.126.04524
-ARG VSCODIUM_SHA256_X64=9964a8b66431dced583a820d60a852a7995c86607c4c983152adc7a5c876d60d
-ARG VSCODIUM_SHA256_ARM64=c6181d32dda122df3bba7ad6e9194ded2dc3dd1204c1f8b142f4440f4e4e2ce4
+# Can upgrade once the following bug is resolved: https://github.com/VSCodium/vscodium/issues/2927
+ARG VSCODIUM_VERSION=1.116.02821
+ARG VSCODIUM_SHA256_X64=72e59e9946e48278e4b407ca0ee6a21cbb13d6f04855e0989f6d879953d93c07
+ARG VSCODIUM_SHA256_ARM64=691ca7cf7df94ac1f9cb249af34e125db932aba162a2cd2a8e337be8c3d3dbd1
+ARG VSCODE_WEBVIEW_SW_VERSION=4
+# DOCKER_VERSION is the CLI only -- the daemon it drives is docker-compose.yml's `docker:#-dind`
 ARG DOCKER_VERSION=29.6.2
 ARG COMPOSE_VERSION=5.3.1
 ARG BUILDX_VERSION=0.35.0
@@ -64,7 +66,13 @@ RUN set -eux; \
   tar xz -C "${DESOLATE_SERVER_ROOT}" -f /tmp/reh.tar.gz; \
   rm /tmp/reh.tar.gz; \
   printf '%s' "${VSCODIUM_VERSION}" > "${DESOLATE_SERVER_ROOT}/.version"; \
-  test -x "${DESOLATE_SERVER_ROOT}/bin/codium-server"
+  test -x "${DESOLATE_SERVER_ROOT}/bin/codium-server"; \
+  # The reason VSCODIUM_VERSION is held back, in a form that fails the build.
+  # Needs no network: the workbench states what it requires, and a release whose
+  # requirement has moved past the pin in its own product.json is one where
+  # every webview pane renders blank with nothing in any log.
+  grep -q "_expectedServiceWorkerVersion=${VSCODE_WEBVIEW_SW_VERSION}" \
+  "${DESOLATE_SERVER_ROOT}/out/vs/code/browser/workbench/workbench.js"
 
 # A SECOND tree for the OUTER editor, with the git extensions removed.
 #
@@ -85,6 +93,7 @@ RUN set -eux; \
 # copy, and DESOLATE_SERVER_ROOT stays complete -- devcontainers are seeded from
 # it and DO want git in their own editor, where there is no agent socket to
 # reach and the project is already trusted with its own source.
+
 ENV DESOLATE_SHELL_ROOT=/home/.desolate-shell
 RUN set -eux; \
   cp -al "${DESOLATE_SERVER_ROOT}" "${DESOLATE_SHELL_ROOT}"; \
@@ -165,9 +174,24 @@ RUN npm install -g \
   "@devcontainers/cli@${DEVCONTAINERS_CLI_NPM_VERSION}" \
   "tsx@${TSX_NPM_VERSION}"
 
-# /workspaces must be writable by uid 1000; 
+# /workspaces must be writable by uid 1000;
 # the volume-init service enforces this on the volume too.
 RUN mkdir -p /workspaces && chown 1000:1000 /workspaces
+
+# The keyring's two volume mountpoints, owned by the uid that mounts them.
+#
+# A named volume takes its ownership FROM THE IMAGE, and only when it is first
+# created. Absent here, docker makes the directory root-owned, and the keyring
+# -- uid 1000, cap_drop ALL, no volume-init pass of its own -- can do nothing
+# about it: `mkdir -p` on a path that already exists does not chown it. The
+# symptom is the container crash-looping on
+#   unix_listener: cannot bind to path /run/keyring/agent.sock: Permission denied
+# and every `newrepo` failing with "cannot reach the keyring".
+#
+# The modes match the ones keyring.ts sets: 0755 for the published public half,
+# 0700 for the directory holding private keys.
+RUN install -d -o 1000 -g 1000 -m 0755 /run/keyring \
+  && install -d -o 1000 -g 1000 -m 0700 /var/lib/keyring
 
 # Create executable wrapper for certificate authority (ca) usage.
 # with-ca grants proxy-CA trust by EXPORTING env vars (NODE_EXTRA_CA_CERTS,
@@ -192,10 +216,14 @@ COPY --chown=1000:1000 *.ts /usr/local/lib/desolate/
 #   desolate      (vscode)       -> broker client over the unix socket
 #   desolate-run  (orchestrator) -> the real thing; useless without the socket
 #   newrepo       (vscode)       -> git only, no daemon access needed
+#   worktree      (vscode)       -> git only, and git ONLY belongs here: it obeys
+#                                   the project's own config and hooks, which the
+#                                   orchestrator must never execute
 RUN printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/desolate-client.ts "$@"\n' > /usr/local/bin/desolate \
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/desolate.ts "$@"\n' > /usr/local/bin/desolate-run \
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/newrepo.ts "$@"\n' > /usr/local/bin/newrepo \
-  && chmod +x /usr/local/bin/desolate /usr/local/bin/desolate-run /usr/local/bin/newrepo
+  && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/worktrees.ts "$@"\n' > /usr/local/bin/worktree \
+  && chmod +x /usr/local/bin/desolate /usr/local/bin/desolate-run /usr/local/bin/newrepo /usr/local/bin/worktree
 
 # Optional: pre-bake pinned extensions from Open VSX instead of letting the
 # running editor pull them ad hoc. Example:
