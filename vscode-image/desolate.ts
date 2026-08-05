@@ -282,7 +282,9 @@ const overlay = {
           backing volume '${data}' is missing or has moved (pruned?) -- rebuilding`,
       );
     } else if (have)
-      desolog(`${mount.lower} changed -- rebuilding ${target.name}'s view of it`);
+      desolog(
+        `${mount.lower} changed -- rebuilding ${target.name}'s view of it`,
+      );
 
     const cleanup = () => docker.volume.remove([volume, data]);
 
@@ -521,7 +523,9 @@ function deriveRunConfig(
   const mask = worktrees.runArgs(target);
   if (mask.length) {
     spec.runArgs = [...asList(spec.runArgs), ...mask];
-    applied.push(`${WORKTREES_DIRECTORY} hidden, so one filename means one file`);
+    applied.push(
+      `${WORKTREES_DIRECTORY} hidden, so one filename means one file`,
+    );
   }
 
   if (tag) {
@@ -652,7 +656,7 @@ function startEditor(
     "-lc",
     script,
   ]);
-  if (code === 0) return;
+  if (code === 0) return console.log("desolate: editor started");
 
   if (code === 126) {
     console.log(
@@ -705,13 +709,15 @@ const startRelay = (
         `(first run must pull ${relay.IMAGE} -- is your network ok?)`,
       ].join(" "),
     );
+  else console.log(`desolate: relay started for ${hostPort}`);
 
-  const checkSocatRelay = { intervalMs: 400, retries: 5 } as const;
+  const checkSocatRelay = { intervalMs: 100, retries: 20 } as const;
   const name = relay.name(target, hostPort);
   for (let i = 0; i < checkSocatRelay.retries; i++) {
     const state = docker.container.state(name);
     if (state === "running") return; // relay is up
     if (state === "exited" || state === "restarting") break;
+    console.log(`desolate: waiting for ${hostPort} relay to be running...`);
     sleep(checkSocatRelay.intervalMs);
   }
 
@@ -734,6 +740,7 @@ function recreateRelays(target: Target, map: PortMap): void {
   if (!cid) die("devcontainer is not running after up");
 
   const nets = docker.container.networks(cid);
+
   // First network with an actual address. A container can legitimately sit on
   // several; any ONE of them is routable from a relay joined to that same
   // network, so this needs no cleverness -- only consistency.
@@ -757,6 +764,8 @@ function recreateRelays(target: Target, map: PortMap): void {
       `desolate: devcontainer is on ${nets.length} networks ` +
         `(${nets.map((n) => n.network).join(", ")}); relays will use ${network}`,
     );
+  else
+    console.log(`desolate: devcontainer relays will use network: ${network}`);
 
   const old = ownRelayNames(target);
   docker.container.remove(old);
@@ -788,7 +797,8 @@ function probeEditor(target: Target, port: number): boolean {
 
 function showPorts(target: Target): void {
   const map = ports.load(target);
-  if (map.size === 0) return console.log(`no ports allocated for ${target.name}`);
+  if (map.size === 0)
+    return console.log(`no ports allocated for ${target.name}`);
 
   for (const [label, port] of map) {
     const name = label === "editor" ? "editor       " : `container:${label}`;
@@ -832,7 +842,9 @@ function stopTarget(target: Target): void {
     // Say that the container is KEPT. Stopping and starting again looks like it
     // should pick up an edited devcontainer.json, and it does not -- `up`
     // restarts the existing container rather than rebuilding from the spec.
-    console.log(`stopped ${target.name} (container kept, so restarting is fast;`);
+    console.log(
+      `stopped ${target.name} (container kept, so restarting is fast;`,
+    );
     console.log(
       `         use 'desolate --rebuild ${invocation(target)}' to apply spec changes)`,
     );
@@ -895,7 +907,11 @@ async function runTarget(
   config = deriveRunConfig(target, config, project);
 
   try {
-    enforcePolicy(target, resolveOrDie(target, config), listTargets(WORKSPACES));
+    enforcePolicy(
+      target,
+      resolveOrDie(target, config),
+      listTargets(WORKSPACES),
+    );
   } catch (err: any) {
     die(`the spec desolate derived for ${name} does not pass the policy
       (refusing to start -- this is a desolate bug, not a problem with
