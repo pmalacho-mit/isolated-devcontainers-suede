@@ -924,6 +924,78 @@ describe("other refused keys", () => {
 });
 
 // ===========================================================================
+describe("shadowImages", () => {
+  // ===========================================================================
+  // Base images whose tag desolate points at a CA-trusting derivative, inside
+  // the project's OWN inner daemon, so that builds which cannot be handed a
+  // build context (an SDK posting to the Engine API) still reach the internet.
+  //
+  // Nothing here is an isolation rule and it should not be read as one: that
+  // daemon is per-project and disposable, so a bad entry costs the project that
+  // wrote it and nobody else. These cases are about failing where the message
+  // can quote the key, instead of in a background log inside a container.
+
+  const shadowing = (shadowImages: any) =>
+    spec({ image: "x", customizations: { desolate: { shadowImages } } });
+
+  test("image references are accepted, in the spellings docker accepts", () => {
+    allows(shadowing(["node:22-bookworm-slim"]));
+    allows(shadowing(["alpine"]));
+    allows(shadowing(["ghcr.io/owner/base:1.2.3"]));
+    allows(shadowing(["localhost:5000/team/base:dev"]));
+    allows(
+      shadowing([
+        "node@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      ]),
+    );
+    allows(shadowing([])); // declared and empty is a no-op, not an error
+    allows(spec({ image: "x" })); // and absent is the normal case
+  });
+
+  test("a path or a URL is the category error worth naming", () => {
+    // Both are what somebody reaches for when they think this key names a
+    // Dockerfile or a registry endpoint. Either would reach `docker pull` as a
+    // reference it cannot resolve, minutes later and out of sight.
+    refuses(shadowing(["./base"]), /not an image reference/);
+    refuses(shadowing(["../images/base"]), /not an image reference/);
+    refuses(shadowing(["/opt/base:latest"]), /not an image reference/);
+    refuses(shadowing(["https://example.com/base"]), /not an image reference/);
+    refuses(shadowing(["docker-image://node:22"]), /not an image reference/);
+    refuses(shadowing(["node:22:22"]), /not an image reference/);
+  });
+
+  test("the key is a list of non-empty strings", () => {
+    refuses(shadowing("node:22-bookworm-slim"), /must be an array/);
+    refuses(shadowing({ image: "node:22" }), /must be an array/);
+    refuses(shadowing([""]), /non-empty image reference/);
+    refuses(shadowing(["   "]), /non-empty image reference/);
+    refuses(shadowing([42]), /non-empty image reference/);
+    refuses(shadowing([null]), /non-empty image reference/);
+  });
+
+  test("a list long enough to be a mistake is refused as one", () => {
+    // Each entry is a pull and a rebuild at container start, run one after the
+    // other before the project's own builds work.
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => `base${i}:latest`);
+    allows(shadowing(many(32)));
+    refuses(shadowing(many(33)), /33 images/);
+  });
+
+  test("a feature cannot declare it -- it is read from the project's own file", () => {
+    // Same rule as allowPrivileged, and for the same reason: desolate
+    // customizations are read RAW. A key a third-party feature could set is a
+    // key that runs `docker pull` on a name the project never wrote.
+    allows(
+      spec(
+        { image: "x" },
+        { customizations: { desolate: { shadowImages: ["./not-an-image"] } } },
+      ),
+    );
+  });
+});
+
+// ===========================================================================
 describe("features must be fetched, not read from the project", () => {
   // ===========================================================================
   // E15, demonstrated against @devcontainers/cli 0.88.0. A local feature's

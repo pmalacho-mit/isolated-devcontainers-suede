@@ -341,6 +341,16 @@ describe("exec and helper containers", () => {
     assert.deepEqual(calls[0], ["exec", "-u", "0", "cid", "/desolate-ca/install-ca.sh"]);
   });
 
+  test("execDetachedAsRoot returns before the work does", () => {
+    // The shadowImages job pulls and rebuilds images; a container start that
+    // waited for it would hold the editor for minutes. `-d` is what makes it a
+    // background job, and it has to sit with the other flags, before the
+    // container id -- after it, docker reads it as part of the command.
+    const { docker, calls } = recorder();
+    docker.container.execDetachedAsRoot("cid", ["sh", "-c", "work"]);
+    assert.deepEqual(calls[0], ["exec", "-d", "-u", "0", "cid", "sh", "-c", "work"]);
+  });
+
   test("a helper mounts exactly one volume and is removed", () => {
     const { docker, calls } = recorder();
     docker.inVolume("alpine:3", "myapp-ca-data", "/d", ["sh", "-c", "mkdir -p /d/upper /d/work"]);

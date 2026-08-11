@@ -578,6 +578,11 @@ The rules, and what each is actually defending:
   docker-in-docker feature needs it; the point is that it can no longer be
   inherited _silently_ from a third-party feature, and that `git log` shows
   which projects are in the escalated tier.
+- **`shadowImages` entries must parse as image references** -- not a path, not a
+  URL, and at most 32 of them. Unlike mounts and ports this one carries no
+  cross-project risk (the tags land in the project's own disposable daemon), so
+  the rule is there to name a typo where the message can quote the key, rather
+  than three minutes later in a log inside the container.
 
 The validated spec is then **snapshotted** to a directory only the orchestrator
 can write, and the container is started from that copy (`--override-config`).
@@ -870,6 +875,7 @@ adds an entry. Useful flags:
 | ------------------------------- | ----------------------------------------------------------------- |
 | `--compose <file>`              | point at a compose file elsewhere; the override is named to match |
 | `--image` alone, no `--service` | just derive the image and print the YAML to add                   |
+| `--shadow` / `--unshadow`       | deliver by retagging instead of by compose (see below)            |
 | `--print-recipe`                | show the Dockerfile it _would_ build, then stop                   |
 | `--force`                       | rebuild even if the derived image is current                      |
 | `--no-gitignore`                | leave `.gitignore` alone                                          |
@@ -887,6 +893,9 @@ trust-proxy: deriving desolate-ca/python:3.12-slim
     | COPY ca.pem /usr/local/share/ca-certificates/desolate-proxy.crt
     | COPY ca.pem /etc/pki/ca-trust/source/anchors/desolate-proxy.crt
     | RUN set -eu; \
+    |     if ! command -v update-ca-certificates ... && ! command -v update-ca-trust ...; then \
+    |         ... install ca-certificates with apt-get / apk / dnf, or fail loudly ... \
+    |     fi; \
     |     if command -v update-ca-certificates >/dev/null 2>&1; then update-ca-certificates; \
     |     elif command -v update-ca-trust >/dev/null 2>&1; then update-ca-trust extract; \
     |     else echo '... has neither ...' >&2; exit 1; fi
@@ -903,6 +912,71 @@ trust-proxy: deriving desolate-ca/python:3.12-slim
 
 Use `--print-recipe` to read it _before_ anything is built. The recipe is shown
 only when it actually derives; a cached rebuild stays quiet.
+
+A base image with **no** CA tooling at all -- every Debian `-slim`, bare Alpine
+-- is derived anyway: the recipe installs `ca-certificates` first, which works
+before any trust exists because Debian's package sources are plain HTTP and
+Alpine ships the CA bundle (just not the tool that maintains it). An image with
+no package manager -- distroless, scratch -- still fails loudly, because there
+is nothing there that could be taught to trust anything.
+
+### Builds that do not go through compose
+
+The override file above needs two things the build must support: compose, to
+merge it, and buildx, to honour `additional_contexts`. A build driven by an
+**SDK** -- `dockerode`, `docker-py`, `testcontainers`, the Go client -- has
+neither. It posts to the Engine API's `/build` endpoint, which has no concept of
+a named build context, and such a project often has no compose file at all.
+
+For those, deliver the same derivative by pointing the base image's own tag at
+it, in this devcontainer's daemon:
+
+```bash
+/desolate-ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
+```
+
+Every `FROM node:22-bookworm-slim` in that daemon now resolves to the
+CA-trusting image, whoever is building. The `Dockerfile` is still untouched and
+still production-clean, which matters most for a library whose consumers will
+never run under desolate.
+
+Read the blast radius as a warning as much as a feature: that is _every_ build
+in the daemon, not just yours. In a devcontainer's own disposable daemon that is
+the point. Three consequences:
+
+- **`docker pull` undoes it, silently.** Pulling the tag restores the untrusting
+  upstream image, and the next build fails with a certificate error that points
+  at nothing. So does a `docker image prune` that collects the tag. (The
+  `--pull` warning from the compose flow inverts here: under `--shadow`, `--pull`
+  _succeeds_ and quietly puts you back where you started.)
+- **It is lost on rebuild.** The tag lives in the container's inner image store.
+- **`--unshadow`** puts the upstream image back, from a pristine copy kept
+  locally or from the registry digest recorded on the derivative.
+
+To stop doing this by hand, a project can declare the images once:
+
+```jsonc
+// devcontainer.json
+"customizations": {
+  "desolate": {
+    "shadowImages": ["node:22-bookworm-slim"]
+  }
+}
+```
+
+`desolate` applies them at every container start -- in the background, since the
+first run pulls and rebuilds each image, with progress in
+`/tmp/desolate-shadow-images.log` inside the container. It needs the
+`docker-in-docker` feature (the tag has to land in a daemon of the project's
+own); without one, the start says so and carries on. A bare tag is enough here
+and a digest is not accepted: this is a development trust store, not a
+reproducible build input, and the derivative is rebuilt from the pinned digest
+of whatever the tag resolved to anyway.
+
+**What does not work:** putting the CA in the daemon's `buildkitd.toml`. That
+configures BuildKit's *registry* client -- how it pulls images -- and has no
+effect on the HTTPS traffic inside a `RUN` step. It is the obvious thing to
+reach for and it silently does nothing.
 
 ### What this means for production
 
@@ -1534,6 +1608,12 @@ VM's -- proof the escape reads nothing of the host.
   dnsmasq resolver, systemd units, and an idempotent `install.sh`.
 - `proxy/container/install-ca.sh` -- trusts the proxy CA inside a container.
   You never call it: `desolate` runs it for you.
+- `proxy/container/trust-proxy-in-builds.sh` -- trusts the proxy CA in the
+  containers your BUILDS run in, by deriving a base image and delivering it
+  either through compose (`--service`) or by retagging (`--shadow`). You DO call
+  this one, from inside a devcontainer -- unless the project declares
+  `customizations.desolate.shadowImages`, in which case `desolate` calls it for
+  you at every start.
 
 Two example projects live in `samples/` in the source repo -- `example-project`
 (a minimal hardened devcontainer) and `sample-fastapi` (the full three-level

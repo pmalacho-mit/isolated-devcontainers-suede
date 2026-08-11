@@ -178,6 +178,13 @@ export const createDocker = (run: Runner) => {
     stop: (cid: string) => effect("stop", cid),
     execAsRoot: (cid: string, argv: string[], { quiet = true } = {}) =>
       run.status(["exec", "-u", "0", cid, ...argv], quiet),
+    /** Start it and walk away (`-d`). The status is the daemon's answer to
+     *  "did this start", not the command's own -- there is nothing left to wait
+     *  for, which is the point: the caller is a container start, and the work is
+     *  slow enough (image pulls) that blocking the editor on it is the wrong
+     *  trade. Whatever it has to say, it has to say in a file. */
+    execDetachedAsRoot: (cid: string, argv: string[]) =>
+      run.status(["exec", "-d", "-u", "0", cid, ...argv], true),
   };
 
   const volume = {

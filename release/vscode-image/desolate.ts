@@ -88,7 +88,12 @@ import {
   tryLocateConfig,
   type ResolvedSpec,
 } from "./devcontainer.ts";
-import { caTrustingImage, installInstructions } from "./certificates.ts";
+import {
+  caTrustingImage,
+  installInstructions,
+  SHADOW_LOG,
+  shadowImagesCommand,
+} from "./certificates.ts";
 
 /** Overridable so this can be pointed at a throwaway workspace, and because the
  *  broker validates against the same variable and hands us its environment --
@@ -374,6 +379,9 @@ interface ProjectConfig {
   image: string;
   /** True when the project builds from its own Dockerfile rather than an image. */
   usesDockerfile: boolean;
+  /** Base images whose tag should point at a CA-trusting derivative inside this
+   *  project's own daemon. */
+  shadowImages: string[];
 }
 
 /** Project the CLI's own parse down to the handful of fields this file acts on.
@@ -405,12 +413,25 @@ function readProjectConfig(spec: ResolvedSpec): ProjectConfig {
     }
   }
 
+  // Shape is enforced by policy.ts, which runs before any of these reach a
+  // container; this is the same defensive projection the two keys above get,
+  // and it keeps a malformed entry from reaching an argv either way.
+  const shadowImages: string[] = Array.isArray(
+    config.customizations?.desolate?.shadowImages,
+  )
+    ? config.customizations.desolate.shadowImages.filter(
+        (entry: unknown): entry is string =>
+          typeof entry === "string" && entry.trim() !== "",
+      )
+    : [];
+
   return {
     appPorts,
     extensions: [...extensions],
     hadLegacyAppPort: config.appPort !== undefined,
     image: typeof config.image === "string" ? config.image : "",
     usesDockerfile: Boolean(config.build?.dockerfile ?? config.dockerFile),
+    shadowImages,
   };
 }
 
@@ -636,6 +657,61 @@ function installProxyCa(dir: string): void {
     console.log(
       "desolate: warning -- could not install proxy CA (TLS may fail);\n" +
         "          check that the image has update-ca-certificates",
+    );
+}
+
+/**
+ * Apply `customizations.desolate.shadowImages`, if the project declared any.
+ *
+ * Trust for the container is installProxyCa's job; this is trust for the
+ * containers the project's own BUILDS run in, for the builders that cannot be
+ * handed a build context -- an SDK talking to the Engine API has no way to
+ * express one. Pointing the base image's own tag at a CA-trusting derivative is
+ * the only lever left, and the tag has to be set in the project's inner daemon,
+ * which only exists inside the container.
+ *
+ * Detached, and deliberately: it pulls and rebuilds every image named, which on
+ * a first start is minutes. Nothing here is allowed to keep the editor waiting,
+ * and nothing here is allowed to fail the start.
+ */
+function shadowBaseImages(dir: string, images: string[]): void {
+  if (!images.length) return;
+
+  const id = devcontainerId(dir);
+  if (!id) return;
+
+  // The one failure worth naming out here rather than in a log file nobody has
+  // been told about yet: no docker CLI means no docker-in-docker feature, so
+  // there is no daemon for a tag to live in and there never will be. The
+  // background job's own timeout would say the same thing 2 minutes later, in
+  // the container.
+  if (
+    docker.container.execAsRoot(id, [
+      "sh",
+      "-c",
+      "command -v docker >/dev/null 2>&1",
+    ]) !== 0
+  )
+    return console.log(
+      `desolate: warning -- this project declares shadowImages but has no docker\n` +
+        `          CLI, so it has no daemon of its own to shadow them in. Add the\n` +
+        `          docker-in-docker feature to devcontainer.json, or drop the key.`,
+    );
+
+  const started = docker.container.execDetachedAsRoot(
+    id,
+    shadowImagesCommand(images),
+  );
+
+  if (started === 0)
+    console.log(
+      `desolate: shadowing ${images.join(", ")} in the background\n` +
+        `          (first run pulls and rebuilds them; progress: ${SHADOW_LOG})`,
+    );
+  else
+    console.log(
+      `desolate: warning -- could not start the shadowImages job;\n` +
+        `          builds FROM ${images.join(", ")} will not trust the proxy CA`,
     );
 }
 
@@ -945,6 +1021,7 @@ async function runTarget(
   devcontainerUp(target, config, noCache);
   if (willCreate) spec.save(target, fingerprint);
   installProxyCa(dir);
+  shadowBaseImages(dir, project.shadowImages);
   startEditor(target, project, token, config);
   recreateRelays(target, map);
 

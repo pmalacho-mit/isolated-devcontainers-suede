@@ -14,7 +14,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { installInstructions } from "../../../release/vscode-image/certificates.ts";
+import {
+  installInstructions,
+  SHADOW_LOG,
+  shadowImagesCommand,
+} from "../../../release/vscode-image/certificates.ts";
 
 const RELEASE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -138,5 +142,168 @@ describe("the two derivations agree", () => {
     assert.match(script, /update-ca-certificates/);
     assert.match(script, /update-ca-trust extract/);
     assert.match(script, /exit 1; fi/);
+  });
+
+  test("the script goes further, and that divergence is deliberate", () => {
+    // The script derives bases the DEVELOPER chose -- node:*-slim, alpine,
+    // python:*-slim -- most of which ship no ca-certificates at all, so it
+    // installs the package rather than telling them to. This recipe derives the
+    // base a DEVCONTAINER image was built from, which has the tooling already.
+    // They agree on everything above; this is the one asymmetry, and it is here
+    // so the next person to compare them does not read it as drift.
+    assert.match(script, /apt-get install .*ca-certificates/);
+    assert.match(script, /apk add --no-cache ca-certificates/);
+    assert.doesNotMatch(recipe, /apt-get/);
+  });
+});
+
+describe("deriving a base with no CA tooling at all", () => {
+  const script = fs.readFileSync(
+    path.join(RELEASE, "proxy/container/trust-proxy-in-builds.sh"),
+    "utf8",
+  );
+
+  test("the package is installed over transport that works before trust does", () => {
+    // The whole branch rests on being able to fetch a package with no CA
+    // installed yet. Debian's default sources are plain HTTP, which the proxy
+    // passes through untouched; Alpine's are HTTPS and ARE intercepted, so the
+    // proxy CA is appended to the bundle alpine ships (without the tool that
+    // maintains it) before apk runs. Changing either of those to something that
+    // needs trust first is a chicken-and-egg that only shows up on a base image
+    // nobody tested with.
+    assert.match(
+      script,
+      /cat \/usr\/local\/share\/ca-certificates\/desolate-proxy\.crt >> \/etc\/ssl\/certs\/ca-certificates\.crt/,
+    );
+    // Conditional on the bundle already existing: creating one where the base
+    // has none leaves a half-built trust store for update-ca-certificates to
+    // trip over, and buys nothing (apt does not need it).
+    assert.match(script, /if \[ -f \/etc\/ssl\/certs\/ca-certificates\.crt \]/);
+  });
+
+  test("every package manager worth covering is covered", () => {
+    for (const manager of ["apt-get", "apk", "microdnf", "dnf", "yum"])
+      assert.match(
+        script,
+        new RegExp(`command -v ${manager}\\b`),
+        `no branch for ${manager}`,
+      );
+  });
+
+  test("an image with no package manager still fails, in the old words", () => {
+    // distroless and scratch cannot be taught to trust anything, and a loud
+    // failure here is far cheaper than an x509 error deep inside a package
+    // install. This is the message that case has always printed.
+    assert.match(
+      script,
+      /has neither update-ca-certificates nor update-ca-trust/,
+    );
+    assert.match(script, /install the ca-certificates package in it first/);
+  });
+});
+
+describe("--shadow, for builds that take no build context", () => {
+  const script = fs.readFileSync(
+    path.join(RELEASE, "proxy/container/trust-proxy-in-builds.sh"),
+    "utf8",
+  );
+  // usage() prints line 2 through this marker, so the header IS `--help`.
+  const help = script.slice(0, script.indexOf("# WHY THIS IS NEEDED"));
+
+  test("--help documents both halves of it", () => {
+    // A flag missing from the header is a flag with no documentation anywhere:
+    // there is no second place `--help` reads from.
+    assert.match(help, /--shadow/);
+    assert.match(help, /--unshadow/);
+  });
+
+  test("--shadow and --service are refused together, not silently combined", () => {
+    // Two delivery mechanisms for one derivative. Doing both leaves an override
+    // file claiming the build is redirected and a tag saying it need not be, so
+    // removing either one leaves a build that still works for a reason nobody
+    // can see.
+    assert.match(script, /--shadow and --service are alternatives/);
+  });
+
+  test("the pristine base is pinned, so re-deriving cannot eat itself", () => {
+    // Once the tag names our derivative, `FROM $IMAGE` would derive from the
+    // derived: --force would stack a second CA layer, and a CA rotation would
+    // bake both the old certificate and the new one into the result.
+    assert.match(script, /PRISTINE_ALIAS=/);
+    assert.match(script, /desolate\.ca\.shadowed-from/);
+  });
+
+  test("it can be undone", () => {
+    // The one thing this script does that escapes both the desolate-ca/*
+    // namespace and the gitignored override file is mutating a tag the user did
+    // not opt into per build. An undo is what makes that honest.
+    assert.match(script, /^\s*--unshadow\)\s+UNSHADOW=1/m);
+  });
+
+  test("the --pull warning is not reused, because it inverts", () => {
+    // For the compose flow, --pull fails loudly ("pull access denied"). Under
+    // --shadow it SUCCEEDS and quietly restores the untrusting upstream image,
+    // turning a clear error into a certificate failure two builds later.
+    assert.match(script, /silently puts the untrusting upstream image back/);
+  });
+});
+
+describe("the shadowImages job", () => {
+  const argv = shadowImagesCommand(["node:22-bookworm-slim", "alpine:3.20"]);
+  const [command, flag, body, argv0, ...images] = argv;
+
+  test("images are ARGUMENTS, never text spliced into the script", () => {
+    // It runs as root, and the values come from devcontainer.json. A value that
+    // closed a quote would otherwise be a shell of its own.
+    const hostile = shadowImagesCommand(['x"; touch /pwned; :"']);
+    assert.equal(hostile[2], body, "the script body varies with its input");
+    assert.equal(hostile.at(-1), 'x"; touch /pwned; :"');
+  });
+
+  test("$0 is a job name, so the first image is $1", () => {
+    assert.deepEqual([command, flag], ["sh", "-c"]);
+    assert.equal(argv0, "desolate-shadow-images");
+    assert.deepEqual(images, ["node:22-bookworm-slim", "alpine:3.20"]);
+    assert.match(body, /for image in "\$@"/);
+  });
+
+  test("it waits for the inner daemon instead of assuming one is up", () => {
+    // It runs at container start and the docker-in-docker feature's daemon
+    // starts WITH the container -- and install-ca.sh has just restarted it, so
+    // one successful `docker info` can be a daemon on its way down.
+    assert.match(body, /docker info/);
+    assert.match(body, /-lt 2/);
+    assert.match(body, /-ge 120/);
+  });
+
+  test("no daemon is a named config error, not a crash", () => {
+    // A project declaring shadowImages without docker-in-docker has nowhere for
+    // a tag to live, and never will.
+    assert.match(body, /docker-in-docker/);
+    assert.match(body, /exit 0/);
+  });
+
+  test("one image failing does not take the others with it", () => {
+    // Nor the container start. Losing build-time HTTPS for one base image is
+    // not a reason to have no editor.
+    assert.match(body, /--shadow \|\|\s*\n\s*echo "!!! could not shadow/);
+  });
+
+  test("everything it says goes to the file the start line names", () => {
+    // It outlives the command that launched it, so there is nowhere else for
+    // its errors to go.
+    assert.match(body, new RegExp(`^exec >>${SHADOW_LOG} 2>&1$`, "m"));
+  });
+
+  test("it calls the script that is actually shipped", () => {
+    assert.match(
+      body,
+      /\/desolate-ca\/trust-proxy-in-builds\.sh --image "\$image" --shadow/,
+    );
+    assert.ok(
+      fs.existsSync(
+        path.join(RELEASE, "proxy/container/trust-proxy-in-builds.sh"),
+      ),
+    );
   });
 });

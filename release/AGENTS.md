@@ -65,6 +65,8 @@ fatal: unable to access 'https://...': SSL certificate problem:
 
 Plain-HTTP `apt` is unaffected, which is why this often doesn't surface until the first `pip install`.
 
+**It usually doesn't look like a TLS error. It looks like a hang.** `npm install` and `pip install` retry with backoff before they surface anything, so the symptom is a build step that sits there for 60–90 seconds and only then fails. If a package install seems to stall, this is the first thing to suspect — not a slow registry, not a network problem. Search your build log for `certificate`, not for `hang`.
+
 - **This project's own image** is already handled if it uses `"image"` + Features — `desolate` pre-derives a CA-trusting base. Features that download over HTTPS work normally.
 - **Builds you run yourself** (your own `compose.yml`, `docker build` inside the devcontainer) are not, and need this script, published into every devcontainer:
 
@@ -79,6 +81,24 @@ Note the path is `/desolate-ca/`, not `/desolate/`. It derives `desolate-ca/<bas
 - `--print-recipe` shows the Dockerfile it would build without building. `--image` alone derives without wiring up compose.
 - It needs a Docker daemon in this container — i.e. the `docker-in-docker` feature. If `docker info` fails, that's why, and adding the feature requires a rebuild from the host.
 - `compose.override.yml` is a development artifact. Leave it gitignored; it breaks builds if it reaches production.
+
+- **Builds that go through neither compose nor buildx** — anything driven by an SDK (`dockerode`, `docker-py`, `testcontainers`, the Go client) posting to the Engine API, or plain `docker build` with no buildx — cannot be handed a named build context at all. There is nothing to override. Point the base image's own tag at the derivative instead:
+
+```bash
+/desolate-ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
+```
+
+Every `FROM node:22-bookworm-slim` in this daemon then resolves to the CA-trusting image, whoever is doing the building. The Dockerfile stays unmodified and production-clean. `--unshadow` puts the upstream image back. Two things to know: a later `docker pull node:22-bookworm-slim` silently restores the untrusting image (re-run the script), and the tag is lost when the container is rebuilt.
+
+- **The declare-once form** of that, so it survives rebuilds and needs no manual step — this is a `devcontainer.json` change, so it needs the human and a rebuild:
+
+```jsonc
+"customizations": { "desolate": { "shadowImages": ["node:22-bookworm-slim"] } }
+```
+
+Applied automatically at container start (in the background; progress in `/tmp/desolate-shadow-images.log`). Needs the `docker-in-docker` feature.
+
+- **What does not work, and looks like it should:** configuring the CA in the daemon's `buildkitd.toml`. That is BuildKit's *registry* client — how it pulls images — and has no effect on the HTTPS your `RUN` steps make. Don't spend time on it.
 
 If a project builds from **its own `Dockerfile`** at the devcontainer level (rather than `"image"` + Features), build-time HTTPS will fail and cannot be fixed from in here — report it rather than working around it.
 

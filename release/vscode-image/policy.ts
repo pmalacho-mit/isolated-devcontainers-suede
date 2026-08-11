@@ -226,6 +226,47 @@ export const feature = {
   },
 };
 
+export const image = (() => {
+  // Docker's own reference grammar, transcribed:
+  //   [<host>[:<port>]/]<path>[/<path>...][:<tag>][@<algo>:<hex>]
+  // The host is only a host when a `/` follows it, which is what tells
+  // `localhost:5000/base` (a registry and a port) from `node:22` (an image and
+  // a tag) -- the one ambiguity in the grammar, and the one a looser rule gets
+  // wrong in the direction of accepting `node:22:22`.
+  const host = String.raw`[a-zA-Z0-9][a-zA-Z0-9.-]*(?::[0-9]+)?`;
+  const path = String.raw`[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*`;
+  const tag = String.raw`[\w][\w.-]{0,127}`;
+  const digest = String.raw`[a-z0-9]+:[a-fA-F0-9]{32,}`;
+
+  const reference = new RegExp(
+    `^(?:${host}/)?${path}(?:/${path})*(?::${tag})?(?:@${digest})?$`,
+  );
+
+  return {
+    /**
+     * Does this parse as an image reference?
+     *
+     * Shape only. What a registry actually serves cannot be known here, and the
+     * job of this rule is not isolation -- unlike mounts and ports, a shadowed
+     * tag lives in the project's OWN inner daemon, which is per-project and
+     * disposable, so a bad entry can only cost the project that wrote it. The
+     * job is to name the typo here, where the message can quote the key, rather
+     * than three minutes later in a log file inside a container.
+     *
+     * A path (`./base`, `/opt/img`) and a URL are the two category errors worth
+     * refusing by name, and the grammar above refuses both on its own: a
+     * leading `.` or `/` is not a host, and `//` is not a separator docker
+     * accepts anywhere.
+     */
+    isReference: (candidate: string) => reference.test(candidate),
+  };
+})();
+
+/** Each one is a pull and a build at container start, run one after another
+ *  before the project's own builds can work. A list this long is a mistake
+ *  worth catching; the number itself is not sacred. */
+const MAX_SHADOW_IMAGES = 32;
+
 export class PolicyError extends Error {}
 
 const format = {
@@ -659,6 +700,43 @@ const checks = {
     }
   },
   /**
+   * `customizations.desolate.shadowImages` -- base images whose tag desolate
+   * points at a CA-trusting derivative inside this project's own daemon, so
+   * that builds which cannot take a build context (an SDK posting to the Engine
+   * API: dockerode, docker-py, testcontainers) still reach the internet.
+   *
+   * Read raw, like every other desolate customization: it is ours, not the
+   * CLI's, so it never appears in the merged configuration.
+   */
+  shadowImagesAreImages: ({ read }) => {
+    const declared = read.desolate("shadowImages");
+    if (declared === undefined || declared === null) return;
+
+    if (!Array.isArray(declared))
+      return fail`
+        "customizations.desolate.shadowImages" must be an array of image
+        references (got ${typeof declared}), e.g. ["node:22-bookworm-slim"]`;
+
+    if (declared.length > MAX_SHADOW_IMAGES)
+      return fail`
+        "customizations.desolate.shadowImages" lists ${declared.length} images;
+        ${MAX_SHADOW_IMAGES} is the most this will apply. Each one is pulled and
+        rebuilt inside the container at start.`;
+
+    for (const entry of declared) {
+      if (typeof entry !== "string" || entry.trim() === "")
+        return fail`
+          every "customizations.desolate.shadowImages" entry must be a non-empty
+          image reference (got ${JSON.stringify(entry)})`;
+
+      if (!image.isReference(entry))
+        return fail`
+          "${entry}" is not an image reference. shadowImages names the images a
+          build says \`FROM\` -- "node:22-bookworm-slim",
+          "ghcr.io/owner/base:1.2" -- not a path, a URL or a Dockerfile.`;
+    }
+  },
+  /**
    * The source is compared for EQUALITY against a path computed from the
    * target -- never parsed out of the spec, and never prefix-matched. A prefix
    * rule here would accept `/workspaces/acme/widgets-evil` for `acme/widgets`,
@@ -727,5 +805,6 @@ export function enforcePolicy(
   checks.mountsStayInOwnNamespace();
   checks.runArgsOnAllowlist();
   checks.buildPathsStayInOwnProject();
+  checks.shadowImagesAreImages();
   checks.workspaceMountIsOwnFolder();
 }
