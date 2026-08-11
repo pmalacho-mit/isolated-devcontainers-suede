@@ -176,15 +176,23 @@ export const createDocker = (run: Runner) => {
     remove: (names: string[]) =>
       names.length ? effect("rm", "-f", ...names) : 0,
     stop: (cid: string) => effect("stop", cid),
+    /** Run something as root in the container and WAIT for it.
+     *
+     *  There is deliberately no detached (`exec -d`) sibling: work slow enough
+     *  to want backgrounding is work that can still hold mounts when the
+     *  container is stopped, and a container stopped that way cannot be stopped
+     *  at all. */
     execAsRoot: (cid: string, argv: string[], { quiet = true } = {}) =>
       run.status(["exec", "-u", "0", cid, ...argv], quiet),
-    /** Start it and walk away (`-d`). The status is the daemon's answer to
-     *  "did this start", not the command's own -- there is nothing left to wait
-     *  for, which is the point: the caller is a container start, and the work is
-     *  slow enough (image pulls) that blocking the editor on it is the wrong
-     *  trade. Whatever it has to say, it has to say in a file. */
-    execDetachedAsRoot: (cid: string, argv: string[]) =>
-      run.status(["exec", "-d", "-u", "0", cid, ...argv], true),
+
+    /** Whether the container has a docker CLI, and so a daemon of its own --
+     *  which is what the docker-in-docker feature installs. */
+    hasDockerCli: (cid: string) =>
+      container.execAsRoot(cid, [
+        "sh",
+        "-c",
+        "command -v docker >/dev/null 2>&1",
+      ]) === 0,
   };
 
   const volume = {

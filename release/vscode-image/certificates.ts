@@ -33,71 +33,115 @@ ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/desolate-proxy.crt
 USER ${baseUser}
 ` as const;
 
-/** Where the background shadow job leaves its output, INSIDE the devcontainer.
- *  Named in the line desolate prints at start, because that job outlives the
- *  command that launched it and this is the only place its errors go. */
-export const SHADOW_LOG = "/tmp/desolate-shadow-images.log";
+/** Both waits below are for a daemon somebody has already been told to start,
+ *  not open-ended polling for one that may never exist -- so the budget is
+ *  small, and running it out is a failure worth printing. */
+const DAEMON_WAIT_SECONDS = 60;
+
+/** A shell function that waits for `until` to hold, or gives up. Both scripts
+ *  need one, and neither should be spelling out the counting: what a reader
+ *  wants from a wait is what it is waiting FOR. */
+const boundedWait = (name: string, until: string) => `
+${name}() {
+    waited=0
+    until ${until}; do
+        [ "$waited" -lt ${DAEMON_WAIT_SECONDS} ] || return 1
+        sleep 1
+        waited=$((waited + 1))
+    done
+}`;
 
 /**
- * `customizations.desolate.shadowImages`, applied.
+ * The restart is not optional: install-ca.sh writes the CA into the system
+ * trust store, and a dockerd already running read that store at startup. A
+ * dockerd that starts later reads it on the way up and needs nothing.
  *
- * The declare-once form of `trust-proxy-in-builds.sh --shadow`: a project names
- * the base images its own builds start from, and each one's tag is pointed at a
- * CA-trusting derivative before anybody builds anything.
- *
- * Three constraints decide the shape of this, and all three are about WHERE it
- * runs. The tag has to land in the devcontainer's INNER daemon -- the one the
- * docker-in-docker feature starts with the container -- which the orchestrator
- * cannot reach from outside, so this is a script executed in there rather than
- * a docker call out here. That daemon starts *with* the container and is not up
- * when we are, hence the wait. And it PULLS images, so it is slow enough that
- * blocking the editor on it would be the wrong trade -- it runs detached, and
- * this log is where it says what happened.
- *
- * Nothing in it is fatal. A project whose base image cannot be shadowed still
- * gets a working container; what it does not get is build-time HTTPS, and the
- * log says so in those words.
+ * A daemon answering under a pid other than the one we stopped is the only
+ * unambiguous signal that the restart has finished. `docker info` alone cannot
+ * say: it fails identically for a daemon coming up, one going down, and a
+ * container being torn down. The outgoing pid is knowable only here, which is
+ * why the wait cannot be left to whoever needs the daemon next.
  */
+const INSTALL_CA_SCRIPT = `
+dockerd_pid() { pgrep dockerd | head -n1; }
+
+this_container_runs_a_daemon() { [ -n "$(dockerd_pid)" ]; }
+
+a_new_daemon_answers() {
+    [ "$(dockerd_pid)" != "$outgoing" ] && docker info >/dev/null 2>&1
+}
+${boundedWait("wait_for_the_replacement_daemon", "a_new_daemon_answers")}
+
+reload_in_place() { pkill -HUP dockerd || true; }
+
+restart_and_wait() {
+    outgoing=$(dockerd_pid)
+    service docker restart >/dev/null 2>&1 || { reload_in_place; return 0; }
+    wait_for_the_replacement_daemon
+}
+
+report_daemon_never_came_back() {
+    echo "desolate-ca: this container's docker daemon did not come back" >&2
+    echo "             ${DAEMON_WAIT_SECONDS}s after being restarted to pick up the proxy CA." >&2
+}
+
+${CA_DIR}/install-ca.sh >/dev/null 2>&1 || exit 1
+this_container_runs_a_daemon || exit 0
+restart_and_wait || { report_daemon_never_came_back; exit 1; }
+`;
+
+/** The docker-in-docker daemon starts WITH the container, so on a cold start it
+ *  can still be coming up. One success is enough: whoever restarts this daemon
+ *  waits for it, so an answer here is not one on its way down. */
 const SHADOW_SCRIPT = `
-exec >>${SHADOW_LOG} 2>&1
+daemon_answers() { docker info >/dev/null 2>&1; }
+${boundedWait("wait_for_the_booting_daemon", "daemon_answers")}
+
+report_no_daemon() {
+    echo "!!! no docker daemon answered in ${DAEMON_WAIT_SECONDS}s -- nothing was shadowed."
+    echo "    shadowImages needs a daemon of this project's own. Add it:"
+    echo '      "features": { "ghcr.io/devcontainers/features/docker-in-docker:2": {} }'
+}
+
+shadow_one_image() {
+    echo "=== $1"
+    ${CA_DIR}/trust-proxy-in-builds.sh --image "$1" --shadow ||
+        echo "!!! could not shadow $1 -- builds FROM it will NOT trust the proxy CA"
+}
+
 echo "=== shadowing $# base image(s) so that builds FROM them trust the proxy CA"
-
-# Two answers, not one: install-ca.sh has just restarted this daemon, so the
-# first 'docker info' that succeeds can be one on its way down.
-ready=0
-waited=0
-while [ "$ready" -lt 2 ]; do
-    if [ "$waited" -ge 120 ]; then
-        echo "!!! no docker daemon answered in 120s -- nothing was shadowed."
-        echo "    shadowImages needs a daemon of this project's own. Add it:"
-        echo '      "features": { "ghcr.io/devcontainers/features/docker-in-docker:2": {} }'
-        exit 0
-    fi
-    if docker info >/dev/null 2>&1; then ready=$((ready + 1)); else ready=0; fi
-    sleep 2
-    waited=$((waited + 2))
-done
-
-for image in "$@"; do
-    echo "=== $image"
-    ${CA_DIR}/trust-proxy-in-builds.sh --image "$image" --shadow ||
-        echo "!!! could not shadow $image -- builds FROM it will NOT trust the proxy CA"
-done
+wait_for_the_booting_daemon || { report_no_daemon; exit 0; }
+for image in "$@"; do shadow_one_image "$image"; done
 echo "=== done"
 `;
 
-/** The argv to run detached, as root, inside the devcontainer.
+/**
+ * The two halves of proxy-CA trust, as argv to run AS ROOT in a devcontainer.
  *
- *  The images are ARGUMENTS, never text spliced into the script: they come from
- *  devcontainer.json, this runs as root, and a value that closes a quote would
- *  otherwise be a shell of its own. `$0` is a name for the job, not an image. */
-export const shadowImagesCommand = (images: string[]) => [
-  "sh",
-  "-c",
-  SHADOW_SCRIPT,
-  "desolate-shadow-images",
-  ...images,
-];
+ * They are scripts executed in there rather than docker calls out here because
+ * of where their effects have to land: a trust store, and a tag in the
+ * devcontainer's INNER daemon, neither of which the orchestrator has a path to.
+ *
+ * The split is the one the shipped scripts already draw. `inContainer` trusts
+ * the proxy in the container you are standing in; `inBuilds` trusts it in the
+ * containers that container's own BUILDS run in, which is the only lever left
+ * for a builder that cannot be handed a build context (an SDK posting to the
+ * Engine API cannot express one).
+ */
+export const trust = {
+  inContainer: () => ["sh", "-c", INSTALL_CA_SCRIPT],
+
+  /** The images are ARGUMENTS, never text spliced into the script: they come
+   *  from devcontainer.json, this runs as root, and a value that closes a quote
+   *  would otherwise be a shell of its own. `$0` names the job, not an image. */
+  inBuilds: (images: string[]) => [
+    "sh",
+    "-c",
+    SHADOW_SCRIPT,
+    "desolate-shadow-images",
+    ...images,
+  ],
+};
 
 /** Build (once) an image identical to `baseImage` but trusting the proxy CA.
  *  Returns its tag, or "" if it could not be produced. */

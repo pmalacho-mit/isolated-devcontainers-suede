@@ -96,7 +96,7 @@ Every `FROM node:22-bookworm-slim` in this daemon then resolves to the CA-trusti
 "customizations": { "desolate": { "shadowImages": ["node:22-bookworm-slim"] } }
 ```
 
-Applied automatically at container start (in the background; progress in `/tmp/desolate-shadow-images.log`). Needs the `docker-in-docker` feature.
+Applied automatically at container start, in the foreground — a first start pulls and rebuilds each image, so it is minutes, printed as it goes. It does not detach: the work is a nested image build holding mounts inside the container, and a container stopped with one in flight cannot be stopped at all. Needs the `docker-in-docker` feature.
 
 - **What does not work, and looks like it should:** configuring the CA in the daemon's `buildkitd.toml`. That is BuildKit's *registry* client — how it pulls images — and has no effect on the HTTPS your `RUN` steps make. Don't spend time on it.
 

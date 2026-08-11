@@ -7,6 +7,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 
 import {
   createDocker,
@@ -341,14 +342,35 @@ describe("exec and helper containers", () => {
     assert.deepEqual(calls[0], ["exec", "-u", "0", "cid", "/desolate-ca/install-ca.sh"]);
   });
 
-  test("execDetachedAsRoot returns before the work does", () => {
-    // The shadowImages job pulls and rebuilds images; a container start that
-    // waited for it would hold the editor for minutes. `-d` is what makes it a
-    // background job, and it has to sit with the other flags, before the
-    // container id -- after it, docker reads it as part of the command.
+  test("the docker-in-docker probe is one exec, spelled once", () => {
+    // "does this container have a daemon of its own" is asked wherever a tag or
+    // a build has to land inside it. Spelled at each call site it would drift.
     const { docker, calls } = recorder();
-    docker.container.execDetachedAsRoot("cid", ["sh", "-c", "work"]);
-    assert.deepEqual(calls[0], ["exec", "-d", "-u", "0", "cid", "sh", "-c", "work"]);
+    docker.container.hasDockerCli("cid");
+    assert.deepEqual(calls[0], [
+      "exec",
+      "-u",
+      "0",
+      "cid",
+      "sh",
+      "-c",
+      "command -v docker >/dev/null 2>&1",
+    ]);
+  });
+
+  test("nothing execs detached", () => {
+    // There is no `docker exec -d` in desolate, and that is load-bearing. A
+    // detached exec has no lifecycle relationship to anything, so work that
+    // holds mounts -- the shadowImages job runs a nested image build, which
+    // does -- can still be in flight when the container is stopped. The kernel
+    // then cannot tear the mount namespace down, the container's init never
+    // reports an exit, and the daemon supervising it waits for that exit
+    // forever: the whole stack becomes unstoppable, including `docker stop`.
+    const source = fs.readFileSync(
+      new URL("../../../release/vscode-image/docker.ts", import.meta.url),
+      "utf8",
+    );
+    assert.doesNotMatch(source, /"exec",\s*"-d"/);
   });
 
   test("a helper mounts exactly one volume and is removed", () => {

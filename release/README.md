@@ -964,9 +964,16 @@ To stop doing this by hand, a project can declare the images once:
 }
 ```
 
-`desolate` applies them at every container start -- in the background, since the
-first run pulls and rebuilds each image, with progress in
-`/tmp/desolate-shadow-images.log` inside the container. It needs the
+`desolate` applies them at every container start, in the foreground, printing
+progress as it goes. A first start pulls and rebuilds each image, so it is
+minutes; every start after that is a few seconds, because a derivative that
+already trusts the current CA is not rebuilt. It deliberately does not run in
+the background: what it does inside the container is a nested image build, and a
+container stopped while one is in flight cannot tear its mount namespace down --
+its init never reports an exit, and the daemon supervising it waits for that
+exit forever. That made `desolate --stop` shortly after a start enough to wedge
+the whole stack. In the foreground the work is bound to a command you can see
+and interrupt. It needs the
 `docker-in-docker` feature (the tag has to land in a daemon of the project's
 own); without one, the start says so and carries on. A bare tag is enough here
 and a digest is not accepted: this is a development trust store, not a
