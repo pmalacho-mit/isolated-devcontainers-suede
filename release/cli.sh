@@ -372,6 +372,81 @@ EOF
   fi
 }
 
+# Tab completion is a per-shell registration -- `complete -F` binds a function
+# in the shell that runs it and nowhere else -- so it has to be re-established
+# in every new terminal, which means a line in the user's rc file. cli.sh adds
+# that line itself, once, rather than leaving it to a README step nobody
+# performs.
+#
+# The guards below are what make writing to someone else's rc file defensible:
+#
+#   - a marker, so re-running is a grep and not a second copy
+#   - `[ -t 1 ]`, so a script or CI job driving cli.sh never edits a dotfile
+#   - `[ -r ]` around the emitted source line, so moving or deleting this repo
+#     makes completion go quiet instead of printing an error at the top of
+#     every shell, forever, from a file the user did not write
+#   - an env var to decline, and a printed line saying what changed and how to
+#     undo it. A tool that silently edits your shell config is a tool you stop
+#     trusting the first time you find out.
+COMPLETION_MARKER='# added by desolate cli.sh -- tab completion'
+ 
+# Which rc file the LOGIN shell reads. Keyed off $SHELL, not the shell cli.sh
+# is running under: that one is bash from the shebang no matter what the user
+# actually uses, and on a Mac they almost certainly use zsh.
+completion_rc() {
+  case "${SHELL##*/}" in
+    zsh)
+      printf '%s' "${ZDOTDIR:-$HOME}/.zshrc" ;;
+    bash)
+      # Terminal.app and iTerm open LOGIN shells. Login bash reads
+      # ~/.bash_profile and NOT ~/.bashrc, so on a Mac with a .bash_profile
+      # already present, ~/.bashrc is the file where the line would sit and
+      # never be read -- the failure mode being "I installed it and nothing
+      # happened".
+      if [ "$(uname -s)" = Darwin ] && [ -f "$HOME/.bash_profile" ]; then
+        printf '%s' "$HOME/.bash_profile"
+      else
+        printf '%s' "$HOME/.bashrc"
+      fi ;;
+    *)
+      return 1 ;;   # fish, nushell, something else: not ours to edit
+  esac
+}
+ 
+ensure_completion() {
+  if [ "${DESOLATE_NO_COMPLETION_INSTALL:-0}" = 1 ]; then return 0; fi
+  # STDERR, not stdout: this is the fd the announcement below goes to, so
+  # testing it is the same question as "can we tell them what we changed?".
+  # Testing stdout instead would skip the install for `./cli.sh up > log.txt`
+  # -- a human at a terminal who merely redirected output -- while still
+  # firing for a CI job that happened to leave stdout attached.
+  if [ ! -t 2 ]; then return 0; fi
+ 
+  local script="$SCRIPT_DIR/completion.sh" rc
+  if [ ! -r "$script" ]; then return 0; fi
+  if ! rc=$(completion_rc); then return 0; fi
+ 
+  if [ -f "$rc" ] && grep -Fq "$COMPLETION_MARKER" "$rc"; then return 0; fi
+ 
+  {
+    printf '\n%s\n' "$COMPLETION_MARKER"
+    printf '[ -r "%s" ] && . "%s"\n' "$script" "$script"
+  } >> "$rc" || {
+    echo "cli.sh: could not write $rc -- add this line yourself for completion:" >&2
+    echo "        . \"$script\"" >&2
+    return 0
+  }
+ 
+  echo "cli.sh: tab completion installed in $rc." >&2
+  echo "        Active in NEW shells; for this one:  . \"$script\"" >&2
+  echo "        Undo by deleting those two lines. Skip with" >&2
+  echo "        DESOLATE_NO_COMPLETION_INSTALL=1." >&2
+}
+ 
+# Checked on EVERY invocation, not just the first: the check is one grep, and
+# an rc file the user has since edited or replaced should get the line back.
+ensure_completion
+
 TTY=(-i); [ -t 0 ] && [ -t 1 ] && TTY=(-it)
 
 CMD="${1:-help}"; shift || true
