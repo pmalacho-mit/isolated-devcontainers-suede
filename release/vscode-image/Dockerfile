@@ -235,6 +235,27 @@ RUN printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/d
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/worktrees.ts "$@"\n' > /usr/local/bin/worktree \
   && chmod +x /usr/local/bin/desolate /usr/local/bin/desolate-run /usr/local/bin/newrepo /usr/local/bin/worktree
 
+# Tab completion for the four wrappers above.
+#
+# /etc/bash.bashrc, not ~/.bashrc: $HOME is the vscode-home VOLUME, so a file
+# baked there is shadowed the moment the volume mounts -- present in build
+# output and absent in every actual run, which is the same trap shell-entry.sh
+# documents for the editor settings.
+#
+# Debian's bash reads /etc/bash.bashrc for interactive non-login shells (a
+# VS Code terminal, `cli.sh shell`), and /etc/profile sources it for login
+# shells, so both arrive here. No bash-completion package needed: `complete`
+# and `compgen` are builtins, and only helpers like _init_completion are not.
+COPY completion.bash /etc/bash_completion.d/desolate
+RUN set -eux; \
+    test -f /etc/bash.bashrc; \
+    printf '\ncase $- in *i*)\n  for f in /etc/bash_completion.d/*; do [ -r "$f" ] && . "$f"; done; unset f ;;\nesac\n' \
+      >> /etc/bash.bashrc; \
+    # Assert that an interactive bash ACTUALLY reaches it. A completion that
+    # silently never registers is indistinguishable from never adding one, and
+    # this is the only step in the chain that cannot be checked by reading.
+    bash -ic 'complete -p desolate >/dev/null'
+
 # Optional: pre-bake pinned extensions from Open VSX instead of letting the
 # running editor pull them ad hoc. Example:
 # RUN "${DESOLATE_SERVER_ROOT}/bin/codium-server" \
