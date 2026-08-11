@@ -103,6 +103,10 @@ RUN set -eux; \
 # copy, and DESOLATE_SERVER_ROOT stays complete -- devcontainers are seeded from
 # it and DO want git in their own editor, where there is no agent socket to
 # reach and the project is already trusted with its own source.
+#
+# What the outer editor gets back instead is the git-codium block further down:
+# the same diff editor, opened because the user asked for it rather than
+# because an extension host walked a repository on its own.
 
 ENV DESOLATE_SHELL_ROOT=/home/.desolate-shell
 RUN set -eux; \
@@ -211,6 +215,48 @@ RUN install -d -o 1000 -g 1000 -m 0755 /run/keyring \
 COPY with-ca.sh /usr/local/bin/with-ca
 COPY shell-entry.sh /usr/local/bin/shell-entry
 RUN chmod +x /usr/local/bin/with-ca /usr/local/bin/shell-entry
+
+# The compensating control for the git extensions pruned out of the shell root.
+#
+# Removing that extension removed the Source Control view, the gutter marks and
+# the diff editor along with it -- in the one container where the user actually
+# runs git, since `worktree` and `newrepo` live here precisely because the
+# orchestrator must never execute a project's config or hooks. Left at that,
+# reviewing a change means a pager, and `git commit` means whatever vi the base
+# image happens to ship.
+#
+# So point git at the editor it is already running inside. This does NOT walk
+# back the pruning: `codium --diff a b` renders two files and stops. No
+# extension host consults .git/config on the editor's behalf, nothing selects a
+# clean/smudge filter or an fsmonitor, and the git that does obey the project's
+# own config is the one the user typed. Automatic execution was the thing being
+# removed; opening a diff on request was only ever collateral.
+#
+# --system, not --global BY NECESSITY: $HOME is the vscode-home VOLUME, so a
+# ~/.gitconfig baked here is shadowed the moment that volume mounts -- present
+# in build output and absent in every actual run, the same trap the completion
+# block below documents. /etc/gitconfig is where `git lfs install --system`
+# already writes, and it reaches every `docker exec` regardless of user or HOME.
+COPY git-codium.sh /usr/local/bin/git-codium
+RUN set -eux; \
+  chmod +x /usr/local/bin/git-codium; \
+  git config --system core.editor "/usr/local/bin/git-codium edit"; \
+  git config --system diff.tool codium; \
+  git config --system difftool.codium.cmd '/usr/local/bin/git-codium diff "$LOCAL" "$REMOTE"'; \
+  git config --system difftool.prompt false; \
+  # $REMOTE $LOCAL $BASE $MERGED is the order codium's --merge takes its two
+  # sides, common ancestor and output file in; git names them, codium positions
+  # them, and swapping the first two silently shows the merge backwards.
+  git config --system merge.tool codium; \
+  git config --system mergetool.codium.cmd '/usr/local/bin/git-codium merge "$REMOTE" "$LOCAL" "$BASE" "$MERGED"'; \
+  git config --system mergetool.prompt false; \
+  # A .orig left beside a resolved conflict gets committed by accident more
+  # often than it gets read.
+  git config --system mergetool.keepBackup false; \
+  # /etc/gitconfig is the file that a later `git config --global` in a HOME
+  # volume can shadow but not delete. Assert it took, so a build that silently
+  # wrote nowhere fails here instead of at the first `git commit`.
+  test "$(git config --system core.editor)" = "/usr/local/bin/git-codium edit"
 
 # Copy over all supporting scripts; this image is used across two containers
 # with distinct roles:

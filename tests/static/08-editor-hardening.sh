@@ -36,6 +36,29 @@ assert_contains "the build asserts git is gone from the shell root" "$DF" \
 assert_contains "and asserts it SURVIVES in the server root" "$DF" \
   'test -e "${DESOLATE_SERVER_ROOT}/extensions/git"'
 
+group "and gets a diff editor back without getting the extension back"
+SHIM="$RELEASE/vscode-image/git-codium.sh"
+assert_contains "the shim is installed onto PATH" "$DF" \
+  "COPY git-codium.sh /usr/local/bin/git-codium"
+# --system or nothing: $HOME is a volume, so a --global written at build time is
+# shadowed at run time and the wiring is silently absent in every real session.
+assert_contains "git is pointed at it for editing" "$DF" \
+  'git config --system core.editor "/usr/local/bin/git-codium edit"'
+assert_contains "for diffing" "$DF" "git config --system diff.tool codium"
+assert_contains "and for merging" "$DF" "git config --system merge.tool codium"
+assert_not_contains "never via a HOME the volume will shadow" "$DF" \
+  "git config --global core.editor"
+# The point of the shim: it hands two files to a CLI. If it ever grew a way to
+# put the extension back, this whole group would be asserting the opposite of
+# what it claims.
+SH=$(grep -v '^[[:space:]]*#' "$SHIM")
+assert_not_contains "the shim never installs an extension" "$SH" "--install-extension"
+assert_not_contains "and never re-enables one" "$SH" "--enable-proposed-api"
+# git deletes its temp copies as soon as the tool returns, so a diff opened
+# without --wait is a tab pointing at files that no longer exist.
+assert_contains "diffs are opened with --wait" "$SH" '--wait --diff'
+assert_contains "merges too" "$SH" '--wait --merge'
+
 group "compose actually runs that tree"
 CFG=$(grep -v '^[[:space:]]*#' "$COMPOSE")
 assert_contains "the editor entrypoint uses the shell root" "$CFG" \
