@@ -56,7 +56,6 @@ import { isEntryPoint, run, type JSONValue } from "./utils.ts";
 import { parseArgs } from "./args.ts";
 import { createDocker, type NetworkAttachment, type Runner } from "./docker.ts";
 import {
-  CA_DIR,
   OVERLAY_KEY_LABEL,
   SERVER_DST,
   SHARED_DIRECTORIES,
@@ -91,8 +90,7 @@ import {
 import {
   caTrustingImage,
   installInstructions,
-  SHADOW_LOG,
-  shadowImagesCommand,
+  trust,
 } from "./certificates.ts";
 
 /** Overridable so this can be pointed at a throwaway workspace, and because the
@@ -633,46 +631,64 @@ const devcontainerUp = (target: Target, config: string, noCache = false) => {
   if (code !== 0) die(`devcontainer up failed (exit ${code})`);
 };
 
-/** Trust the proxy CA inside the devcontainer. Runs as container-root via the
- *  daemon (the orchestrator has that authority; the project never needs sudo,
- *  and no postCreateCommand is required). */
+const trustMessage = {
+  caInstalled: "desolate: proxy CA installed in devcontainer",
+
+  caFailed:
+    "desolate: warning -- could not install proxy CA (TLS may fail);\n" +
+    "          check that the image has update-ca-certificates, and the\n" +
+    "          line above for a daemon that did not come back",
+
+  noDaemonToShadowIn:
+    "desolate: warning -- this project declares shadowImages but has no docker\n" +
+    "          CLI, so it has no daemon of its own to shadow them in. Add the\n" +
+    "          docker-in-docker feature to devcontainer.json, or drop the key.",
+
+  shadowing: (images: string[]) =>
+    `desolate: shadowing ${images.join(", ")}\n` +
+    `          (a first run pulls and rebuilds each one -- minutes, once)`,
+
+  shadowingUnfinished: (images: string[]) =>
+    `desolate: warning -- the shadowImages job did not finish cleanly;\n` +
+    `          builds FROM ${images.join(", ")} may not trust the proxy CA`,
+} as const;
+
+/** Container-root is the orchestrator's to take via the daemon, so the project
+ *  never needs sudo and no postCreateCommand is required. Both trust steps are
+ *  slow enough that silence would read as a hang, so both show their progress
+ *  rather than swallowing it. */
+const trustStepSucceeds = (id: string, argv: string[]) =>
+  docker.container.execAsRoot(id, argv, { quiet: false }) === 0;
+
+/** Returns with the container's own docker daemon, if it has one, restarted AND
+ *  answering -- which is what lets everything downstream stop guessing at
+ *  readiness. */
 function installProxyCa(dir: string): void {
   const id = devcontainerId(dir);
   if (!id) return;
-  if (
-    docker.container.execAsRoot(
-      id,
-      [
-        "sh",
-        "-c",
-        `${CA_DIR}/install-ca.sh >/dev/null 2>&1 && ` +
-          `{ pgrep dockerd >/dev/null 2>&1 && ` +
-          `  { service docker restart >/dev/null 2>&1 || pkill -HUP dockerd || true; } ; true; }`,
-      ],
-      { quiet: false },
-    ) === 0
-  )
-    console.log("desolate: proxy CA installed in devcontainer");
-  else
-    console.log(
-      "desolate: warning -- could not install proxy CA (TLS may fail);\n" +
-        "          check that the image has update-ca-certificates",
-    );
+
+  const installed = trustStepSucceeds(id, trust.inContainer());
+  console.log(installed ? trustMessage.caInstalled : trustMessage.caFailed);
 }
 
 /**
  * Apply `customizations.desolate.shadowImages`, if the project declared any.
  *
- * Trust for the container is installProxyCa's job; this is trust for the
- * containers the project's own BUILDS run in, for the builders that cannot be
- * handed a build context -- an SDK talking to the Engine API has no way to
- * express one. Pointing the base image's own tag at a CA-trusting derivative is
- * the only lever left, and the tag has to be set in the project's inner daemon,
- * which only exists inside the container.
+ * In the FOREGROUND, and deliberately: on a first start this pulls and rebuilds
+ * every image named, which is minutes of nested image build inside a container
+ * whose lifetime desolate itself hands to the user. Detached, that work could
+ * still be holding overlayfs mounts when `desolate --stop` arrives a minute
+ * later -- and a container stopped mid-build cannot tear its mount namespace
+ * down, so its init never reports an exit and the daemon supervising it hangs
+ * waiting for one. Blocking binds the work to a command the user can see and
+ * interrupt; its progress goes to the terminal for the same reason. Nothing
+ * here is allowed to FAIL the start.
  *
- * Detached, and deliberately: it pulls and rebuilds every image named, which on
- * a first start is minutes. Nothing here is allowed to keep the editor waiting,
- * and nothing here is allowed to fail the start.
+ * Run on every start rather than only on create, because it is the cheap thing
+ * to do: a derivative that already trusts the current CA is a handful of local
+ * inspects and a retag, so only a container that was recreated (or a project
+ * that just added an image) pays the pull. Gating on `willCreate` would instead
+ * silently ignore a newly declared image until the next --rebuild.
  */
 function shadowBaseImages(dir: string, images: string[]): void {
   if (!images.length) return;
@@ -680,39 +696,13 @@ function shadowBaseImages(dir: string, images: string[]): void {
   const id = devcontainerId(dir);
   if (!id) return;
 
-  // The one failure worth naming out here rather than in a log file nobody has
-  // been told about yet: no docker CLI means no docker-in-docker feature, so
-  // there is no daemon for a tag to live in and there never will be. The
-  // background job's own timeout would say the same thing 2 minutes later, in
-  // the container.
-  if (
-    docker.container.execAsRoot(id, [
-      "sh",
-      "-c",
-      "command -v docker >/dev/null 2>&1",
-    ]) !== 0
-  )
-    return console.log(
-      `desolate: warning -- this project declares shadowImages but has no docker\n` +
-        `          CLI, so it has no daemon of its own to shadow them in. Add the\n` +
-        `          docker-in-docker feature to devcontainer.json, or drop the key.`,
-    );
+  if (!docker.container.hasDockerCli(id))
+    return console.log(trustMessage.noDaemonToShadowIn);
 
-  const started = docker.container.execDetachedAsRoot(
-    id,
-    shadowImagesCommand(images),
-  );
+  console.log(trustMessage.shadowing(images));
 
-  if (started === 0)
-    console.log(
-      `desolate: shadowing ${images.join(", ")} in the background\n` +
-        `          (first run pulls and rebuilds them; progress: ${SHADOW_LOG})`,
-    );
-  else
-    console.log(
-      `desolate: warning -- could not start the shadowImages job;\n` +
-        `          builds FROM ${images.join(", ")} will not trust the proxy CA`,
-    );
+  if (!trustStepSucceeds(id, trust.inBuilds(images)))
+    console.log(trustMessage.shadowingUnfinished(images));
 }
 
 function startEditor(
