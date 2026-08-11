@@ -36,8 +36,18 @@ ARG TSX_NPM_VERSION=4.23.1
 # libstdc++6 is not implicit on debian-slim and the server's bundled node links
 # against it -- without it the editor dies at exec with a loader error, inside a
 # devcontainer, where nobody is looking.
+#
+# python3 is bookworm's own 3.11, floating with the base image rather than
+# pinned: it is here for interactive use and for tooling that shells out to a
+# `python3`, not as a runtime this project builds against. python3-venv comes
+# along because bookworm marks its system site-packages externally-managed (PEP
+# 668), so `pip install` outside a venv refuses -- without it the first
+# `pip install` someone tries fails with an error about the environment rather
+# than about the package.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   git openssh-client curl ca-certificates jq xz-utils \
+  vim \
+  python3 python3-pip python3-venv \
   libstdc++6 \
   && rm -rf /var/lib/apt/lists/*
 
