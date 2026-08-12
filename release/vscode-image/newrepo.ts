@@ -1,6 +1,6 @@
 // newrepo -- per-repo deploy-key identity, idempotent.
 //
-//   newrepo key   owner/repo [alias]   ensure key + ssh config; print pubkey
+//   newrepo key   owner/repo [alias]   ensure key + ssh/git config; print pubkey
 //   newrepo clone owner/repo [alias]   clone via the alias; set identity
 //   newrepo status                     list configured repos
 //   newrepo owner/repo [alias]         key, then clone
@@ -223,8 +223,54 @@ function ensureKey(repo: Repo): void {
     fs.chmodSync(configPath, 0o600);
   }
 
+  ensureUrlRewrites(repo);
+
   // Machine-readable line, parsed by cli.sh for GitHub registration.
   console.log(`PUBKEY ${pubkey}`);
+}
+
+/** Route this repo's CANONICAL url through its host alias.
+ *
+ *  The block above only pins an identity for `git@github.com-<tag>:`. Anything
+ *  naming plain `git@github.com:` matches no Host block, so `IdentitiesOnly`
+ *  never applies and the agent is back to offering every deploy key it holds --
+ *  the exact failure that block exists to prevent, reached by a different url.
+ *
+ *  Which matters because the canonical form is not ours to change.
+ *
+ *  In git config rather than ssh config because ssh cannot do this: it is
+ *  handed a host, not a repository path, so it has nothing to select on. git is
+ *  the only layer that sees which repo the url points at.
+ *
+ *  insteadOf matches by prefix and the longest match wins, so sibling repos
+ *  sharing a prefix (`acme/widgets`, `acme/widgets-ui`) resolve correctly once
+ *  each has been through here -- the more specific rule always wins over the
+ *  shorter one. */
+function ensureUrlRewrites(repo: Repo): void {
+  const rewrites: Array<[canonical: string, aliased: string]> = [
+    // scp-like: what .gitrepo carries, and what GitHub offers for copying.
+    [`git@github.com:${repo.ownerRepo}`, `git@${repo.hostAlias}:${repo.ownerRepo}`],
+    // The same remote spelled as a url. Rewriting only the first would leave
+    // this one silently authenticating as some other repo's key.
+    [
+      `ssh://git@github.com/${repo.ownerRepo}`,
+      `ssh://git@${repo.hostAlias}/${repo.ownerRepo}`,
+    ],
+  ];
+  // https is deliberately left alone: it cannot use a deploy key at all
+  for (const [canonical, aliased] of rewrites) {
+    // --replace-all, not plain set: insteadOf is multi-valued, so re-running
+    // would either stack duplicates or fail on the second key. The rewritten
+    // url embeds this repo, so replacing this key's value in full is exactly
+    // the intent.
+    execFileSync("git", [
+      "config",
+      "--global",
+      "--replace-all",
+      `url.${aliased}.insteadOf`,
+      canonical,
+    ]);
+  }
 }
 
 /** Idempotent, and it carries the Mac's git identity in via GIT_NAME/GIT_EMAIL. */
@@ -293,7 +339,7 @@ function showStatus(): void {
 function usage(): never {
   console.log(
     [
-      "usage: newrepo key   owner/repo [alias]   ensure key + ssh config; print pubkey",
+      "usage: newrepo key   owner/repo [alias]   ensure key + ssh/git config; print pubkey",
       "       newrepo clone owner/repo [alias]   clone via the alias; set identity",
       "       newrepo status                     list configured repos",
       "       newrepo owner/repo [alias]         key, then clone",
