@@ -365,7 +365,9 @@ describe("demonstrated escapes (regression)", () => {
         () =>
           enforcePolicy(
             named(PROJECT),
-            { configuration: { image: "x" }, mergedConfiguration: missing } as ResolvedSpec,
+            // `as unknown as` deliberately: the whole point of the case is a
+            // value the type says cannot arrive, and does, from the CLI.
+            { configuration: { image: "x" }, mergedConfiguration: missing } as unknown as ResolvedSpec,
             ...alone(PROJECT),
           ),
         /no mergedConfiguration/,

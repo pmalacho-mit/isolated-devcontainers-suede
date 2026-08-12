@@ -1,0 +1,36 @@
+{
+  // Dev-only, like the package.json beside it: NOTHING is emitted from here and
+  // release/ ships without it. It exists so that one description of "what these
+  // files mean" is read by the editor's language service AND by
+  // tests/static/09-typecheck.sh, rather than each carrying its own flags and
+  // disagreeing about which errors are real.
+  //
+  // node runs these .ts files by STRIPPING types, never by compiling them, so
+  // nothing here can change runtime behaviour -- it can only decide what counts
+  // as an error. That is also why `verbatimModuleSyntax` matters: type-only
+  // imports must be spelled `import type`, because stripping is all that
+  // happens to them and an unspelled one becomes a runtime import of a type.
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": ["node"],
+
+    "strict": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    // The imports really are written `./thing.ts`, because that is what node
+    // resolves at runtime. Without this, every import in the tree is an error.
+    "allowImportingTsExtensions": true,
+    // @types/node and friends are not ours to fix, and a break in one of them
+    // is not a break in this stack.
+    "skipLibCheck": true
+  },
+  "include": ["release/**/*.ts", "tests/**/*.ts"],
+  // docs/typescript2mermaid-suede is a vendored tool with its own dependency
+  // (ts-morph, uninstalled here), and .worktrees holds whole other checkouts of
+  // this same repo -- type-checking either would report failures that say
+  // nothing about the change in front of you.
+  "exclude": ["node_modules", ".worktrees", "docs"]
+}

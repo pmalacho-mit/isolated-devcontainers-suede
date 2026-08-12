@@ -146,6 +146,25 @@ export const createDocker = (run: Runner) => {
         ),
         configFile,
       ),
+    /** The workspace folder of every RUNNING devcontainer, in ONE call.
+     *
+     *  For finding which of many targets are up, where asking per target would
+     *  be a `docker ps` per directory on disk. It is a listing and not an
+     *  identity -- `forWorkspace` pairs this label with the config-file one
+     *  because either alone could once be claimed by a sibling -- so anything
+     *  that ACTS on what this finds looks it up there first. */
+    runningWorkspaceFolders: () =>
+      new Set(
+        nonEmptyLines(
+          query(
+            "ps",
+            "--filter",
+            `label=${IDENTITY_LABELS.workspace}`,
+            "--format",
+            `{{.Label "${IDENTITY_LABELS.workspace}"}}`,
+          ),
+        ),
+      ),
     namesWithLabel: (label: string) =>
       nonEmptyLines(
         query(

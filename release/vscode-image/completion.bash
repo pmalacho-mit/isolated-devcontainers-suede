@@ -48,6 +48,17 @@ _desolate_worktrees() {
       for d in */; do [ -d "$d" ] && printf '%s\n' "${d%/}"; done )
 }
 
+# `all` is offerable as a project word only where --stop is on the line, which
+# is the one command that reads it as "every running target". A real project of
+# that name completes from _desolate_projects either way, and takes precedence
+# at the runner -- see meansEveryTarget in projects.ts.
+_desolate_all_word() {
+    local w
+    for w in "${COMP_WORDS[@]}"; do
+        [ "$w" = --stop ] && { printf 'all\n'; return 0; }
+    done
+}
+
 # Branch names, for `worktree add <project> <name> [<branch>]`. Local refs only:
 # asking git for remotes can touch the network, and a completion callback must
 # never do that.
@@ -84,9 +95,9 @@ _desolate_complete_desolate() {
     esac
 
     if [[ $cur == -* ]]; then
-        COMPREPLY=( $(compgen -W "--list --stop --ports --rebuild --worktree --branch" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--list --stop --all --ports --rebuild --worktree --branch" -- "$cur") )
     else
-        COMPREPLY=( $(compgen -W "$(_desolate_projects)" -- "$cur") )
+        COMPREPLY=( $(compgen -W "$(_desolate_projects) $(_desolate_all_word)" -- "$cur") )
     fi
 }
 
@@ -109,9 +120,9 @@ _desolate_complete_desolate_run() {
     esac
 
     if [[ $cur == -* ]]; then
-        COMPREPLY=( $(compgen -W "--config --worktree --stop --ports --purge --rebuild --no-cache" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--config --worktree --list --stop --all --ports --purge --rebuild --no-cache" -- "$cur") )
     else
-        COMPREPLY=( $(compgen -W "$(_desolate_projects)" -- "$cur") )
+        COMPREPLY=( $(compgen -W "$(_desolate_projects) $(_desolate_all_word)" -- "$cur") )
     fi
 }
 

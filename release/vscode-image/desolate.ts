@@ -39,7 +39,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { enforcePolicy } from "./policy.ts";
 import {
+  EVERY_TARGET,
   list as listTargets,
+  meansEveryTarget,
   SLASH_REPLACEMENT,
   WORKTREE_REPLACEMENT,
   WORKTREES_DIRECTORY,
@@ -53,7 +55,7 @@ import { directory as stateDirectory, stateFile } from "./state.ts";
 import * as worktrees from "./worktrees.ts";
 import { parse as parseJsonc } from "./jsonc.ts";
 import { isEntryPoint, run, type JSONValue } from "./utils.ts";
-import { parseArgs } from "./args.ts";
+import { parseArgs, USAGE, type Args } from "./args.ts";
 import { createDocker, type NetworkAttachment, type Runner } from "./docker.ts";
 import {
   OVERLAY_KEY_LABEL,
@@ -578,20 +580,35 @@ const containerWorkspaceFolder = (dir: string, cid: string) =>
   docker.container.mounts(cid).find(({ source }) => source === dir)
     ?.destination ?? "";
 
+const readToken = (target: Target) => {
+  try {
+    return fs.readFileSync(stateFile(target, "token"), "utf8").trim();
+  } catch {
+    return "";
+  }
+};
+
+/** The token this target's URLs already carry, or "" when there is none worth
+ *  reusing. Separate from `connectionToken` because reading is not minting: a
+ *  listing that invented a token would invalidate the URL already in a
+ *  browser tab. */
+const savedToken = (target: Target) => {
+  const existing = readToken(target);
+  return isValidToken(existing) ? existing : "";
+};
+
 function connectionToken(target: Target): string {
   const file = stateFile(target, "token");
-  try {
-    const existing = fs.readFileSync(file, "utf8").trim();
-    if (isValidToken(existing)) return existing;
-    if (existing)
-      // Do not reuse it and do not try to repair it -- mint a fresh one. The URL
-      // printed at the end carries the new token, so the only visible effect is
-      // that an older bookmarked link stops working.
-      console.error(
-        `desolate: warning -- ${file} does not hold a valid token; ` +
-          `replacing it (a previously bookmarked URL will stop working)`,
-      );
-  } catch /* create below */ {}
+  const existing = readToken(target);
+  if (isValidToken(existing)) return existing;
+  if (existing)
+    // Do not reuse it and do not try to repair it -- mint a fresh one. The URL
+    // printed at the end carries the new token, so the only visible effect is
+    // that an older bookmarked link stops working.
+    console.error(
+      `desolate: warning -- ${file} does not hold a valid token; ` +
+        `replacing it (a previously bookmarked URL will stop working)`,
+    );
   fs.mkdirSync(stateDir, { recursive: true });
   const token = mintToken((length) =>
     crypto.getRandomValues(new Uint8Array(length)),
@@ -872,6 +889,81 @@ function showPorts(target: Target): void {
   }
 }
 
+/**
+ * Every target that is UP, project or worktree, across all of /workspaces.
+ *
+ * One `docker ps` decides it, rather than one per directory on disk: the
+ * question scales with how many projects EXIST, and the answer is usually a
+ * handful. What comes back is display-grade, which is why `stopTarget` below
+ * still resolves each container by its full identity before touching it.
+ */
+const runningTargets = (): Target[] => {
+  const up = docker.container.runningWorkspaceFolders();
+  return listTargets(WORKSPACES).filter(({ dir }) => up.has(dir));
+};
+
+/** The URL that opens this target's editor, or "" when nothing is saved to
+ *  build one from. Same shape `runTarget` prints, so a listed row is as usable
+ *  as the line printed at start. */
+const editorUrl = (target: Target): string => {
+  const port = ports.load(target).get("editor");
+  const token = savedToken(target);
+  if (!port || !token) return "";
+
+  const id = devcontainerId(target.dir);
+  const folder = (id && containerWorkspaceFolder(target.dir, id)) || target.dir;
+  return `http://127.0.0.1:${port}/?tkn=${token}&folder=${folder}`;
+};
+
+/**
+ * What is running right now, and how to open it.
+ *
+ * Deliberately NOT the list of directories that could be started: that question
+ * is answered by tab-completion the moment it is asked, whereas "what did I
+ * leave up, and where is it" has no other answer at all.
+ */
+function showRunning(): void {
+  const running = runningTargets();
+  if (!running.length)
+    return console.log(
+      "nothing is running.  Start something:  desolate <project>",
+    );
+
+  const width = Math.max(...running.map(({ name }) => name.length));
+  for (const target of running)
+    console.log(
+      `  ${target.name.padEnd(width)}  ` +
+        `${target.worktree ? "worktree" : "project "}  ${editorUrl(target)}`,
+    );
+
+  console.log(
+    `\n  Ports: desolate --ports <project>    ` +
+      `Stop: desolate --stop <project> | --stop all`,
+  );
+}
+
+/**
+ * Stop every running target.
+ *
+ * Worktrees first, and that ordering is the whole reason this is not a plain
+ * loop in list order: stopping a project while its own worktrees are up is
+ * REFUSED, and that refusal exits the process. Taking them down first means the
+ * refusal never has cause to fire, so `--stop all` cannot stop half the stack
+ * and then die on the arrangement it was asked to take apart.
+ */
+function stopAll(): void {
+  const running = runningTargets();
+  if (!running.length) return console.log("nothing is running");
+
+  for (const target of [...running].sort(worktreesFirst)) {
+    console.log(`stopping ${target.name} ...`);
+    stopTarget(target);
+  }
+}
+
+const worktreesFirst = (a: Target, b: Target) =>
+  Number(Boolean(b.worktree)) - Number(Boolean(a.worktree));
+
 /** The worktrees of this project whose containers are up right now. */
 const runningWorktrees = (target: Target) =>
   worktreesOf(target).filter(({ dir }) => devcontainerId(dir));
@@ -1083,19 +1175,39 @@ function targetFromArguments(project: string, worktree?: string): Target {
   return target;
 }
 
+/** @throws when a command that needs a target was parsed without one. The
+ *  grammar allows that only for `list` and `--all`, both handled before this. */
+const targetOf = ({ project, worktree }: Args): Target =>
+  project === undefined
+    ? die(`that command needs a project.\n${USAGE}`)
+    : targetFromArguments(project, worktree);
+
+const ALL_IS_ALSO_A_PROJECT =
+  `desolate: '${EVERY_TARGET}' is a project in ${WORKSPACES}, so this stops ` +
+  `THAT project.\n          To stop every running target: desolate --stop --all`;
+
+/** `--all`, the word `all`, or one named target -- in that order, because only
+ *  the first two can be widened by accident. */
+function stopFromArguments(args: Args): void {
+  if (args.all) return stopAll();
+  if (meansEveryTarget(WORKSPACES, args.project)) return stopAll();
+
+  if (args.project === EVERY_TARGET) console.log(ALL_IS_ALSO_A_PROJECT);
+  stopTarget(targetOf(args));
+}
+
 async function main(): Promise<void> {
   initDirectory(DIRECT_SPEC_DIR);
 
-  const { command, project, worktree, config, rebuild, noCache } = dieOnError(
-    () => parseArgs(process.argv.slice(2), WORKSPACES),
-  );
+  const args = dieOnError(() => parseArgs(process.argv.slice(2), WORKSPACES));
 
-  const target = targetFromArguments(project, worktree);
+  if (args.command === "list") return showRunning();
+  if (args.command === "stop") return stopFromArguments(args);
 
-  if (command === "ports") showPorts(target);
-  else if (command === "stop") stopTarget(target);
-  else if (command === "purge") purgeTarget(target);
-  else await runTarget(target, config, rebuild, noCache);
+  const target = targetOf(args);
+  if (args.command === "ports") showPorts(target);
+  else if (args.command === "purge") purgeTarget(target);
+  else await runTarget(target, args.config, args.rebuild, args.noCache);
 }
 
 if (isEntryPoint(import.meta.url))

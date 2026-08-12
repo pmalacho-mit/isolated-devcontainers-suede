@@ -15,7 +15,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  EVERY_TARGET,
   list,
+  meansEveryTarget,
   target,
   validName,
   validWorktree,
@@ -136,6 +138,37 @@ describe("the '--wt--' reservation", () => {
     const worktree = target("/workspaces", "acme/widgets", "feature");
     assert.notEqual(project.namespace, worktree.namespace);
     assert.equal(worktree.namespace, "acme__widgets--wt--feature");
+  });
+});
+
+describe("the word that means every target", () => {
+  test("'all' widens when no project is there to be meant instead", () => {
+    const box = sandbox();
+    box.startable("myapp");
+    assert.equal(meansEveryTarget(box.workspaces, EVERY_TARGET), true);
+  });
+
+  test("a project really called 'all' takes the word back", () => {
+    // Widening here would stop the whole stack for someone who named ONE
+    // project, which is the expensive direction to be wrong in. `--all` is the
+    // spelling that cannot be shadowed, and the runner points at it.
+    const box = sandbox();
+    box.startable(EVERY_TARGET);
+    assert.equal(meansEveryTarget(box.workspaces, EVERY_TARGET), false);
+  });
+
+  test("a directory called 'all' counts even without a spec", () => {
+    // The question is "did the user mean a thing on disk", not "could it
+    // start". A half-set-up project is still the likelier referent.
+    const box = sandbox();
+    box.directory(EVERY_TARGET);
+    assert.equal(meansEveryTarget(box.workspaces, EVERY_TARGET), false);
+  });
+
+  test("no other name widens, including an absent project", () => {
+    const box = sandbox();
+    for (const name of ["myapp", "ALL", "all/", "", undefined])
+      assert.equal(meansEveryTarget(box.workspaces, name), false, `${name}`);
   });
 });
 

@@ -7,8 +7,9 @@
 //   desolate myproject          start it, print URLs
 //   desolate myproject --worktree wip [--branch feature/123]
 //   desolate --stop myproject
+//   desolate --stop all             (or --stop --all)
 //   desolate --ports myproject
-//   desolate --list
+//   desolate --list                 what is running right now
 //
 // The broker validates both the project name and the project's
 // devcontainer.json spec before acting -- see broker.ts.
@@ -20,8 +21,10 @@
 
 import * as net from "node:net";
 import { ensure as ensureWorktree } from "./worktrees.ts";
+import { EVERY_TARGET, meansEveryTarget } from "./projects.ts";
 
 const SOCKET = process.env.DESOLATE_BROKER ?? "/run/broker/desolate.sock";
+const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
 process.stdout.on("error", (err: NodeJS.ErrnoException) => {
   if (err.code === "EPIPE") process.exit(0);
@@ -34,11 +37,16 @@ process.stdout.on("error", (err: NodeJS.ErrnoException) => {
 function usage(code = 0): never {
   const out = code === 0 ? console.log : console.error;
   out("usage: desolate [--stop|--ports|--rebuild] [--worktree <name>] <project>");
-  out("       desolate --list");
+  out("       desolate --list                    what is running right now");
+  out("       desolate --stop all|--stop --all   stop every running target");
   out("");
   out("  --rebuild  recreate the container from the current devcontainer.json.");
   out("             Plain start REUSES an existing container and does not");
   out("             re-read the spec, so edits need this to take effect.");
+  out("");
+  out("  --all      with --stop, every running target rather than one. The");
+  out(`             bare word '${EVERY_TARGET}' means the same, unless a project of`);
+  out("             that name is really there -- then it names that project.");
   out("");
   out("  --worktree open one of <project>/.worktrees/<name> instead of the");
   out("             branch checked out at the project root. Created on first");
@@ -49,6 +57,13 @@ function usage(code = 0): never {
   out("");
   out("  Flags may come before or after <project>; unknown flags are refused.");
   process.exit(code);
+}
+
+/** Every line prefixed, and the exit status the shell reads. Nothing here is
+ *  recoverable: a command line we cannot read is one we must not guess at. */
+function refuse(...lines: string[]): never {
+  for (const line of lines) console.error(`desolate: ${line}`);
+  process.exit(1);
 }
 
 const argv = process.argv.slice(2);
@@ -65,48 +80,61 @@ const OPS: Record<string, string> = {
 };
 /** Flags that consume the next argument. */
 const VALUES = ["--worktree", "--branch"] as const;
+/** Flags that qualify an op rather than being one. */
+const MODIFIERS = ["--all"] as const;
 
 let op = "start";
 const value: Record<string, string | undefined> = {};
+const modifier = new Set<string>();
 const rest: string[] = [];
 const queue = [...argv];
 while (queue.length) {
   const a = queue.shift()!;
   if (a in OPS) {
     // Two ops in one command line is a mistake, not a precedence question.
-    if (op !== "start") {
-      console.error(`desolate: '${a}' conflicts with the operation already given`);
-      process.exit(1);
-    }
+    if (op !== "start") refuse(`'${a}' conflicts with the operation already given`);
     op = OPS[a];
+  } else if ((MODIFIERS as readonly string[]).includes(a)) {
+    modifier.add(a);
   } else if ((VALUES as readonly string[]).includes(a)) {
     const given = queue.shift();
-    if (given === undefined || given.startsWith("-")) {
-      console.error(`desolate: '${a}' expects a value`);
-      process.exit(1);
-    }
+    if (given === undefined || given.startsWith("-")) refuse(`'${a}' expects a value`);
     value[a] = given;
   } else if (a.startsWith("-")) {
-    console.error(`desolate: unknown option '${a}'`);
-    console.error(`         known: ${[...Object.keys(OPS), ...VALUES].sort().join(" ")}`);
-    console.error("         (to rebuild from an edited devcontainer.json: --rebuild)");
-    process.exit(1);
+    refuse(
+      `unknown option '${a}'`,
+      `        known: ${[...Object.keys(OPS), ...MODIFIERS, ...VALUES].sort().join(" ")}`,
+      "        (to rebuild from an edited devcontainer.json: --rebuild)",
+    );
   } else {
     rest.push(a);
   }
 }
 
 const worktree = value["--worktree"];
-if (value["--branch"] !== undefined && worktree === undefined) {
-  console.error("desolate: --branch only means something with --worktree");
-  process.exit(1);
-}
+if (value["--branch"] !== undefined && worktree === undefined)
+  refuse("--branch only means something with --worktree");
+
+if (modifier.has("--all") && op !== "stop") refuse("--all only means something with --stop");
+
+// The two spellings of "everything". `--all` says so outright; the bare word
+// only widens when no project of that name is there to be meant instead, which
+// projects.ts decides for both this client and the runner behind the broker --
+// two processes disagreeing about what `--stop all` did is not a thing to risk.
+const stopsEverything =
+  op === "stop" && (modifier.has("--all") || meansEveryTarget(WORKSPACES, rest[0]));
+/** The op as it was spelled, for saying what refused a project. */
+const spelling = op === "list" ? "--list" : `--stop ${modifier.has("--all") ? "--all" : EVERY_TARGET}`;
+/** Positionals the global op did not account for. The bare word IS the op. */
+const unaccountedFor = stopsEverything ? rest.filter((word) => word !== EVERY_TARGET) : rest;
 
 let request: Record<string, unknown>;
-if (op === "list") {
-  if (rest.length) { console.error("desolate: --list takes no project"); process.exit(1); }
-  if (worktree !== undefined) { console.error("desolate: --list takes no worktree"); process.exit(1); }
-  request = { op };
+if (op === "list" || stopsEverything) {
+  if (unaccountedFor.length)
+    refuse(`${spelling} acts on every target, so it takes no project`,
+           `got '${unaccountedFor.join(" ")}'`);
+  if (worktree !== undefined) refuse(`${spelling} takes no worktree`);
+  request = { op: op === "list" ? "list" : "stop-all" };
 } else {
   if (rest.length !== 1) {
     console.error(rest.length === 0
@@ -138,7 +166,6 @@ conn.on("data", chunk => {
     let msg: any;
     try { msg = JSON.parse(line); } catch { console.log(line); continue; }
     if (msg.log !== undefined) { console.log(msg.log); continue; }
-    if (msg.projects !== undefined) { for (const p of msg.projects) console.log(`  ${p}`); }
     if (msg.error) { console.error(`desolate: ${msg.error}`); }
     if (msg.ok === false) exitCode = typeof msg.exit === "number" ? msg.exit : 1;
   }

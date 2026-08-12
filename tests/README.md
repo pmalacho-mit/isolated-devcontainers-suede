@@ -37,6 +37,7 @@ snapshot that said `harmless`). Both were measured, not deduced.
 | layer | needs | what it proves |
 |---|---|---|
 | `static/` | bash, jq, docker compose (config only) | the invariants decided by config alone: no daemon in the editor, loopback-only ports, sysbox runtime, nftables default-deny, and that the compose bridge name and `DESOLATE_IF` cannot drift apart |
+| `static/09-typecheck.sh` | `typescript` (skips without it) | that the TypeScript parts still AGREE. node runs these files by *stripping* types, so a type error is neither a syntax error nor a runtime one -- `node --check` and every unit test pass straight through it. This is the only thing watching the four processes that share one grammar (`args.ts`, `broker.ts`, `desolate.ts`, `desolate-client.ts`) |
 | `unit/broker/` | node >= 22.18 | the spec policy, in isolation: every refused key, the runArgs allowlist, the mount-field allowlist and its alias rule, the JSONC scanner, the spec snapshot's copying, and that the repo's own example projects still pass |
 | `unit/desolate/` | node >= 22.18 | the runner's pure parts: the command line, port allocation, the docker argv, the overlay volume names, the editor script's interpolation guards, the keyring's path layout |
 | `unit/proxy/` | python + mitmproxy + pytest | the addon's decisions: proven-destination vs claimed Host, allowlists, fail-closed on internal error, response scrubbing |
@@ -46,7 +47,11 @@ snapshot that said `harmless`). Both were measured, not deduced.
 | `integration/proxy/` | root, nft, docker, mitmproxy | the addon under a real transparent proxy with real nftables REDIRECT, checking what an attacker-controlled server actually received |
 | `integration/stack/` | docker daemon with `sysbox-runc` | the whole stack, attacked from inside the editor container |
 
-`static` and `unit` are the CI set: no daemon, no VM, no network.
+`static` and `unit` are the CI set: no daemon, no VM, no network. The type check
+holds to that too -- it uses the `typescript` pinned in `package.json` (or a
+`tsc` already on PATH) and never downloads one, so it SKIPS rather than
+weakening the promise. `npm install` is what turns it on; CI should run that
+first, or the check is green because it never ran.
 
 ## Where each suite can actually run
 

@@ -12,10 +12,12 @@
     "test:unit": "./tests/run.sh unit",
     "test:integration": "./tests/run.sh integration",
     "test:all": "./tests/run.sh all",
-    "lint:sh": "shellcheck -S warning release/*.sh release/vm/*.sh release/proxy/vm/install.sh release/proxy/container/*.sh release/vscode-image/*.sh tests/*.sh tests/**/*.sh .devcontainer/*.sh"
+    "lint:sh": "shellcheck -S warning release/*.sh release/vm/*.sh release/proxy/vm/install.sh release/proxy/container/*.sh release/vscode-image/*.sh tests/*.sh tests/**/*.sh .devcontainer/*.sh",
+    "lint:types": "tsc --noEmit -p ."
   },
   "devDependencies": {
     "@devcontainers/cli": "^0.88.0",
-    "@types/node": "^26.1.2"
+    "@types/node": "^26.1.2",
+    "typescript": "^5.7.2"
   }
 }

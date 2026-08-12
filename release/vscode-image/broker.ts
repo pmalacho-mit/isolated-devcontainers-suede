@@ -72,14 +72,44 @@ const config = environment.tryOverride({
   specs: "/tmp/desolate-specs",
 });
 
-const operations = ["start", "rebuild", "stop", "ports", "list"] as const;
+/** Ops that act on the whole stack, so there is no project for them to carry
+ *  and none for `validate` to check. Named once: the request TYPE and the
+ *  runtime guard below both read it, and a shape either of them alone accepted
+ *  would be a shape the other rejects. */
+const globalOperations = ["list", "stop-all"] as const;
+type GlobalOperation = (typeof globalOperations)[number];
+
+const operations = [
+  "start",
+  "rebuild",
+  "stop",
+  "ports",
+  ...globalOperations,
+] as const;
 type Operation = (typeof operations)[number];
 
+const isGlobalOperation = (op: string) =>
+  (globalOperations as readonly string[]).includes(op);
+
+/** The argv each global op runs, since they name no target to derive one. */
+const globalArgv: Record<GlobalOperation, string[]> = {
+  list: ["--list"],
+  "stop-all": ["--stop", "--all"],
+};
+
 type Request = {
-  [op in Operation]: op extends "list"
+  [op in Operation]: op extends GlobalOperation
     ? { op: op }
     : { op: op; project: string; worktree?: string };
 }[Operation];
+
+type GlobalRequest = Extract<Request, { op: GlobalOperation }>;
+
+/** Asked OVER THE REQUEST rather than over its op, so that "names no target"
+ *  and "carries no project" are the same fact to the reader and to the type
+ *  system -- narrowing on the op alone leaves `req.project` still spellable. */
+const namesNoTarget = (req: Request): req is GlobalRequest =>
+  isGlobalOperation(req.op);
 
 const request = {
   max: {
@@ -100,7 +130,7 @@ const request = {
     "op" in query &&
     typeof query.op === "string" &&
     operations.includes(query["op"] as Operation) &&
-    (query.op === "list" ||
+    (isGlobalOperation(query.op) ||
       ("project" in query &&
         typeof query.project === "string" &&
         (!("worktree" in query) ||
@@ -157,21 +187,13 @@ const validate = (project: string, worktree?: string): Target => {
 
 type Send = (payload: string | Record<string, any>) => void;
 
-const desolate = (target: Target, flags: Flags[], send: Send) =>
+const spawnDesolate = (argv: string[], send: Send) =>
   new Promise<number>((resolve) => {
     const { env } = process;
-    const worktree: Flags[] = target.worktree
-      ? [["--worktree", target.worktree]]
-      : [];
-    const child = spawn(
-      "tsx",
-      [
-        config.runner,
-        ...[...flags, ...worktree].flatMap(identity),
-        target.project,
-      ],
-      { env, stdio: ["ignore", "pipe", "pipe"] },
-    );
+    const child = spawn("tsx", [config.runner, ...argv], {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const relay = (buf: Buffer) => {
       for (const line of buf.toString().split("\n")) {
         if (line.trim()) send(JSON.stringify({ log: line }));
@@ -181,6 +203,14 @@ const desolate = (target: Target, flags: Flags[], send: Send) =>
     child.stderr.on("data", relay);
     child.on("close", (code) => resolve(code ?? 1));
   });
+
+/** One target's argv: the flags built for it, then the names that select it. */
+const targetArgv = (target: Target, flags: Flags[]): string[] => {
+  const worktree: Flags[] = target.worktree
+    ? [["--worktree", target.worktree]]
+    : [];
+  return [...[...flags, ...worktree].flatMap(identity), target.project];
+};
 
 async function handle(req: unknown, send: Send) {
   if (!request.is(req))
@@ -193,11 +223,13 @@ async function handle(req: unknown, send: Send) {
 
   request.inflight++;
   try {
-    if (req.op === "list")
-      return send({
-        ok: true,
-        projects: listTargets(config.workspaces).map(({ name }) => name),
-      });
+    // A global op names no target, so there is nothing for `validate` to check
+    // and nothing it could widen: the runner reads /workspaces itself, under
+    // the same rules it applies to a named one.
+    if (namesNoTarget(req)) {
+      const code = await spawnDesolate(globalArgv[req.op], send);
+      return send({ ok: code === 0, exit: code });
+    }
 
     const target = validate(req.project, req.worktree);
     let flags: Flags[];
@@ -217,7 +249,7 @@ async function handle(req: unknown, send: Send) {
         break;
     }
 
-    const code = await desolate(target, flags, send);
+    const code = await spawnDesolate(targetArgv(target, flags), send);
     send({ ok: code === 0, exit: code });
   } finally {
     request.inflight--;

@@ -15,7 +15,7 @@
  *   how `/` and `@` are encoded, so `parent/child` vs `parent__child` (and
  *   `repo@wt` vs `repo--wt--wt`) would claim the same volume namespace.
  */
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { hasConfig as hasDevcontainerConfig } from "./devcontainer.ts";
 import type { ReplaceAll } from "./utils.ts";
@@ -217,6 +217,24 @@ export const list = Object.assign(
       list(workspaces).filter(({ dir }) => hasDevcontainerConfig(dir)),
   },
 );
+
+/** The word that stands for every target where one target is normally named. */
+export const EVERY_TARGET = "all";
+
+/**
+ * Does this project argument mean "all of them"?
+ *
+ * `all` is a legal project name, and a directory really called that is the
+ * thing the user is far more likely to have meant -- so the word only widens to
+ * everything when there is no such project to be meant instead. The reading is
+ * decided HERE, once, because the editor's client and the orchestrator's runner
+ * are separate processes that must not disagree about what `--stop all` did.
+ *
+ * `--all` remains the unambiguous spelling, and is what the reading below tells
+ * a user to reach for when their project is the one shadowing the word.
+ */
+export const meansEveryTarget = (workspaces: string, project?: string) =>
+  project === EVERY_TARGET && !existsSync(join(workspaces, EVERY_TARGET));
 
 /** Longest single path segment of a name, in characters. Two of them plus a
  *  slash is the ceiling for a whole project name. */

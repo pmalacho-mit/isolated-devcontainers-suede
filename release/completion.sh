@@ -183,7 +183,7 @@ _desolate_cli() {
       # `cli.sh desolate <project> [flags]` -- desolate-run's grammar, which
       # lives in args.ts. Kept in sync by tests/unit/desolate/args.test.ts.
       [ "$verb" = desolate ] && \
-        COMPREPLY=( $(compgen -W "--stop --ports --purge --rebuild --no-cache --worktree --config" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--list --stop --all --ports --purge --rebuild --no-cache --worktree --config" -- "$cur") )
       ;;
   esac
   return 0

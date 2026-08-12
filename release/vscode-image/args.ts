@@ -23,14 +23,20 @@ export type Command =
    *  and its saved ports, token and spec fingerprint. Volumes the PROJECT
    *  declared are left alone -- a target going away is not a reason to delete
    *  a database. */
-  | "purge";
+  | "purge"
+  /** What is UP right now, across every project and worktree. Names no target:
+   *  the question is about all of them. Reads state; changes none. */
+  | "list";
 
 export type Args = {
   command: Command;
   /** `name` or `owner/name`, relative to /workspaces. Reduced to that form
    *  here, so the absolute path tab-completion produces denotes the same
-   *  project as the bare name. */
-  project: string;
+   *  project as the bare name.
+   *
+   *  Absent exactly when the command names no target -- `list`, and `stop`
+   *  widened by `--all`. */
+  project?: string;
   /** One of that project's worktrees, rather than the branch checked out at its
    *  root. Names a DIRECTORY under `.worktrees`, never a branch: branches may
    *  contain `/`, and this ends up inside docker object names. Absent is the
@@ -48,6 +54,9 @@ export type Args = {
   /** Rebuild the IMAGE as well as the container. For when the Dockerfile is
    *  unchanged but its inputs are not (apt/npm indexes). Implies `rebuild`. */
   noCache: boolean;
+  /** `--all`: widen `stop` from one target to every running one. The spelling
+   *  that cannot be mistaken for a project called `all`. */
+  all: boolean;
 };
 
 /** The wire form the broker spawns desolate with. */
@@ -67,6 +76,8 @@ export type Flags =
 export const USAGE =
   `usage: desolate [--config <path>] [--worktree <name>] [--rebuild [--no-cache]]
                 [--stop|--ports|--purge] <project>
+       desolate --list                    what is running right now
+       desolate --stop all|--stop --all   stop every running target
        <project> is 'name' or 'owner/name', relative to /workspaces
        <name> is a directory under <project>/.worktrees` as const;
 
@@ -82,9 +93,26 @@ export class UsageError extends Error {
 const projectName = (raw: string, workspaces: string) =>
   raw.replace(/\/+$/, "").replace(new RegExp(`^${workspaces}/`), "");
 
+/** Commands that act on the whole stack, so a project argument has nothing to
+ *  mean. `--all` puts `stop` in the same class. */
+const namesNoTarget = (command: Command, all: boolean) =>
+  command === "list" || all;
+
+/** @throws UsageError unless exactly one project was given. */
+const theOneProject = (positional: string[], workspaces: string) => {
+  if (positional.length > 1)
+    throw new UsageError(
+      `Only one positional argument expected, received ${positional.length}`,
+    );
+  const raw = positional[0];
+  if (!raw) throw new UsageError();
+  return projectName(raw, workspaces);
+};
+
 /** Order-independent; unknown `--flags` are refused rather than ignored.
  *
- *  @throws UsageError on an unknown flag, a missing project, or more than one.
+ *  @throws UsageError on an unknown flag, a missing project, one too many, or a
+ *  project given to a command that acts on all of them.
  */
 export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let command: Command = "run";
@@ -92,6 +120,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let worktree: string | undefined;
   let rebuild = false;
   let noCache = false;
+  let all = false;
   const positional: string[] = [];
   const queue = [...argv];
 
@@ -113,6 +142,12 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--purge":
         command = "purge";
         break;
+      case "--list":
+        command = "list";
+        break;
+      case "--all":
+        all = true;
+        break;
       case "--rebuild":
         rebuild = true;
         break;
@@ -126,20 +161,25 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     }
   }
 
-  if (positional.length > 1)
-    throw new UsageError(
-      `Only one positional argument expected, received ${positional.length}`,
-    );
+  if (all && command !== "stop")
+    throw new UsageError("--all only means something with --stop");
 
-  const raw = positional[0];
-  if (!raw) throw new UsageError();
+  if (namesNoTarget(command, all)) {
+    if (positional.length)
+      throw new UsageError(
+        `'${all ? "--all" : "--list"}' acts on every target, so it takes no ` +
+          `project (got '${positional.join(" ")}')`,
+      );
+    return { command, worktree, config, rebuild, noCache, all };
+  }
 
   return {
     command,
-    project: projectName(raw, workspaces),
+    project: theOneProject(positional, workspaces),
     worktree,
     config,
     rebuild,
     noCache,
+    all,
   };
 };

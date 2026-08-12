@@ -54,6 +54,29 @@ describe("container queries", () => {
     ]);
   });
 
+  test("every running devcontainer's folder comes back in ONE call", () => {
+    // `--list` and `--stop all` ask about every target there is, and asking per
+    // directory would be a `docker ps` per project on disk.
+    const { docker, calls } = recorder(["/workspaces/a\n/workspaces/b\n"]);
+    const folders = docker.container.runningWorkspaceFolders();
+    assert.deepEqual(calls[0], [
+      "ps",
+      "--filter",
+      "label=devcontainer.local_folder",
+      "--format",
+      '{{.Label "devcontainer.local_folder"}}',
+    ]);
+    assert.deepEqual([...folders], ["/workspaces/a", "/workspaces/b"]);
+  });
+
+  test("...running only: a stopped container is not something that is up", () => {
+    // No -a. `--stop all` acting on exited containers would "stop" what is
+    // already stopped and report it as work.
+    const { docker, calls } = recorder();
+    docker.container.runningWorkspaceFolders();
+    assert.ok(!calls[0].includes("-a"), `${calls[0]}`);
+  });
+
   test("-q is never passed: it would drop the config-file column", () => {
     // `docker ps -q` is shorthand for `--format {{.ID}}` and overrides an
     // explicit --format, which would leave every container looking like one

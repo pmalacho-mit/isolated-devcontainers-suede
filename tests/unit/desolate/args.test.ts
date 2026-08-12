@@ -31,6 +31,7 @@ describe("parseArgs", () => {
       config: undefined,
       rebuild: false,
       noCache: false,
+      all: false,
     });
   });
 
@@ -81,6 +82,48 @@ describe("parseArgs", () => {
     refuses(["--rebuild"], /usage:/);
     refuses(["a", "b"], /received 2/);
   });
+});
+
+describe("the commands that act on every target", () => {
+  test("--list names no target, and so has no project slot", () => {
+    const args = parse("--list");
+    assert.equal(args.command, "list");
+    assert.equal(args.project, undefined);
+  });
+
+  test("--stop --all is stop, widened", () => {
+    const args = parse("--stop", "--all");
+    assert.equal(args.command, "stop");
+    assert.equal(args.all, true);
+    assert.equal(args.project, undefined);
+  });
+
+  test("a project given to either is refused, not ignored", () => {
+    // Ignoring it would act on EVERY target while naming one, which is the
+    // difference between stopping a project and stopping the stack.
+    refuses(["--list", "myapp"], /takes no project/);
+    refuses(["--stop", "--all", "myapp"], /takes no project/);
+  });
+
+  test("--all is meaningless without --stop, and says so", () => {
+    // There is no --list --all or --rebuild --all to fall back to, so a silent
+    // ignore would leave the user believing they had asked for something.
+    refuses(["--all", "myapp"], /--all only means something with --stop/);
+    refuses(["--rebuild", "--all", "myapp"], /--all only means something/);
+  });
+
+  test("the bare word 'all' stays a project HERE", () => {
+    // Grammar cannot answer it: whether `all` means everything depends on
+    // whether /workspaces/all exists, which is a question about the disk.
+    // parseArgs stays free of the filesystem so it can be exercised without
+    // one -- projects.ts:meansEveryTarget decides, for every caller.
+    const args = parse("--stop", "all");
+    assert.equal(args.project, "all");
+    assert.equal(args.all, false);
+  });
+});
+
+describe("parseArgs", () => {
 
   test("a lone '-' is a project name, not a flag", () => {
     // Only `--` prefixes are treated as options, so this must not be refused as

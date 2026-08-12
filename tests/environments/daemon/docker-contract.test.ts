@@ -17,8 +17,13 @@ import { randomBytes } from "node:crypto";
 import { createDocker, type Runner } from "../../../release/vscode-image/docker.ts";
 import { overlayOptions } from "../../../release/vscode-image/overlay.ts";
 
-/** The real thing: the same two shapes the production runner has. */
+/** The real thing, for the shapes this suite exercises. `build` throws rather
+ *  than being stubbed silently: nothing here derives an image, and a test that
+ *  starts to would otherwise get a no-op that looks like a successful build. */
 const realRunner: Runner = {
+  build: (argv) => {
+    throw new Error(`no image is built in this suite (asked for: ${argv.join(" ")})`);
+  },
   output: (argv) => {
     try {
       return execFileSync("docker", argv, { encoding: "utf8" }).trim();

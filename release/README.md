@@ -462,6 +462,8 @@ the rules would go stale again each time.
 ./cli.sh up                     # start (idempotent); prints the editor URL
 ./cli.sh url                    # reprint + copy the editor URL to clipboard
 ./cli.sh desolate <project>     # open a workspace project as an isolated IDE
+./cli.sh desolate --list        # what is running right now, and its URL
+./cli.sh desolate --stop all    # stop every running project and worktree
 ./cli.sh secret add NAME --hosts a.com   # store a real value in the VM only
 ./cli.sh secret list | rm NAME
 ./cli.sh proxy status | logs | test      # egress proxy health + self-test
@@ -500,7 +502,20 @@ desolate --rebuild <project>  ->  {"op":"rebuild", ...}
 desolate --stop <project>     ->  {"op":"stop", ...}
 desolate --ports <project>    ->  {"op":"ports", ...}
 desolate --list               ->  {"op":"list"}
+desolate --stop all           ->  {"op":"stop-all"}
+desolate --stop --all         ->  {"op":"stop-all"}
 ```
+
+`list` and `stop-all` carry no project, and that is the whole of what makes them
+a separate shape: there is nothing for the broker's `validate` to check, and
+nothing it could be tricked into widening. Both are answered by the same runner
+reading `/workspaces` under the same rules it applies to a named target.
+
+`--stop all` and `--stop --all` are the same op because the word is resolved
+before the request is built -- `all` widens only when no project of that name
+exists, and one that does takes the word back (`meansEveryTarget`, projects.ts).
+The editor's client and the orchestrator's runner read that one function, so
+they cannot disagree about what `--stop all` just did.
 
 `rebuild` runs the _same_ snapshot-resolve-enforce sequence as `start`, never a
 shortcut around it. It is the op most likely to be used immediately after
@@ -1546,10 +1561,19 @@ beyond them.
 ## Verifying containment
 
 ```bash
+npm install                    # once: the pinned type checker (see below)
 ./tests/run.sh                 # static + unit: fast, no daemon needed
 ./tests/run.sh integration     # runs the attacks for real
 ./cli.sh preflight             # checks a LIVE stack
 ```
+
+The static suite includes `tsc --noEmit` over `release/` and `tests/`. It is not
+a formality: node runs these `.ts` files by STRIPPING types rather than
+compiling them, so a type error raises nothing at parse time and nothing at run
+time -- and the command line, the broker, the runner and the editor's client are
+four separate processes agreeing on one grammar by type alone. Without a checker
+installed the step skips loudly rather than downloading one, because `static` and
+`unit` are the suites promised to need no network.
 
 `tests/` carries a named regression case for every escape that has been
 demonstrated against this design -- policy bypasses via `initializeCommand`,
