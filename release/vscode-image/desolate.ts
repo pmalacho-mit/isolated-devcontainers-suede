@@ -68,8 +68,9 @@ import {
 import {
   EDITOR_INTERNAL_PORT,
   EDITOR_LOG,
+  editorCustomizations,
   editorStartScript,
-  isValidExtensionId,
+  type EditorCustomizations,
   isValidToken,
   mintToken,
 } from "./editor.ts";
@@ -371,9 +372,8 @@ const devcontainerId = (dir: string, includeStopped = false) =>
     configFile: labelledConfig(dir),
   });
 
-interface ProjectConfig {
+interface ProjectConfig extends EditorCustomizations {
   appPorts: number[];
-  extensions: string[];
   hadLegacyAppPort: boolean;
   /** Resolved `image`, "" for Dockerfile/compose-based projects. */
   image: string;
@@ -400,18 +400,7 @@ function readProjectConfig(spec: ResolvedSpec): ProjectConfig {
       )
     : [];
 
-  // Collect extension ids from any customizations.*.extensions array.
-  // Ids are interpolated into a shell script that runs inside the devcontainer,
-  // so anything that is not a plain marketplace id is dropped rather than
-  // quoted-and-hoped-for.
-  const extensions = new Set<string>();
-  for (const c of Object.values<any>(config.customizations ?? {})) {
-    for (const e of c?.extensions ?? []) {
-      if (typeof e !== "string") continue;
-      if (isValidExtensionId(e)) extensions.add(e);
-      else console.error(`desolate: ignoring malformed extension id '${e}'`);
-    }
-  }
+  const customizations = config.customizations ?? {};
 
   // Shape is enforced by policy.ts, which runs before any of these reach a
   // container; this is the same defensive projection the two keys above get,
@@ -427,7 +416,7 @@ function readProjectConfig(spec: ResolvedSpec): ProjectConfig {
 
   return {
     appPorts,
-    extensions: [...extensions],
+    ...editorCustomizations(customizations),
     hadLegacyAppPort: config.appPort !== undefined,
     image: typeof config.image === "string" ? config.image : "",
     usesDockerfile: Boolean(config.build?.dockerfile ?? config.dockerFile),
@@ -729,7 +718,7 @@ function startEditor(
   config: string,
 ): void {
   const dir = target.dir;
-  const script = editorStartScript(SERVER_DST, cfg.extensions, token);
+  const script = editorStartScript(SERVER_DST, cfg, token);
   const code = run.status("devcontainer", [
     "exec",
     "--workspace-folder",

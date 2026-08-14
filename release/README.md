@@ -790,6 +790,39 @@ the relay's port bind.
 Each project spends one port on its editor plus one per declared port, so the
 default range holds roughly five or six projects at once.
 
+## Editor extensions and settings
+
+Both halves of `customizations.*` are applied, from **every** namespace a
+project declares (`vscode`, `codespaces`, ...) rather than only `vscode`:
+
+```json
+"customizations": {
+  "vscode": {
+    "extensions": ["esbenp.prettier-vscode"],
+    "settings": { "editor.formatOnSave": true, "editor.tabSize": 2 }
+  }
+}
+```
+
+Extensions are installed from **Open VSX**, not the Microsoft marketplace --
+this is VSCodium, and an extension published only to the latter is reported as
+unavailable rather than silently skipped.
+
+Settings are written at **Machine** scope inside the container
+(`~/.desolate-editor/data/Machine/settings.json`), which is the scope VS Code's
+own Dev Containers extension uses. The precedence is therefore the familiar one:
+your own User settings lose to the project's, and the project's lose to a
+`.vscode/settings.json` committed in the repo. The file is rewritten on every
+start and carries a `Managed by desolate` header, so edit it and your changes go
+away -- put personal preferences in User settings instead. Removing the key from
+`devcontainer.json` removes the file, so turning a setting off works too.
+
+Two limits worth knowing. Settings whose scope VS Code defines as
+`application` (a small set, e.g. `update.mode`) cannot be set at Machine scope
+by anything, including real Dev Containers -- those belong in User settings.
+And a folder left in **Restricted Mode** by Workspace Trust ignores some
+settings from workspace scope; the Machine-scope ones here are unaffected.
+
 ### Features and build-time downloads
 
 Devcontainer Features work normally, including ones that fetch over HTTPS during

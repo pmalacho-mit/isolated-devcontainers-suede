@@ -7,6 +7,7 @@ You are running inside a **devcontainer managed by `desolate`** (isolated-devcon
 - Sibling projects' devcontainers are reachable over the network; the editor/orchestrator containers are not.
 - Dev servers: bind to `0.0.0.0`, not `127.0.0.1`. Ports declared in `customizations.desolate.ports` get forwarded to a host port in 8080–8119. Never add `appPort` to `devcontainer.json` — `desolate` hard-fails on it.
 - Changes to `devcontainer.json` need a rebuild from the host (`desolate --rebuild <project>`); you cannot apply them from in here.
+- Editor settings: `customizations.vscode.settings` IS applied, at Machine scope (`~/.desolate-editor/data/Machine/settings.json`, rewritten every start — do not edit it). A `.vscode/settings.json` in the repo overrides it, which is the right place for anything you want committed. Extensions come from Open VSX, not the Microsoft marketplace, so a marketplace-only extension will not install.
 
 ## Network: everything goes through an intercepting proxy
 
