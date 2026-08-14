@@ -122,3 +122,23 @@ Environment variables may contain **placeholders** (e.g. `MYAPP-OPENAI-KEY`) rat
 ## When to stop and ask
 
 Escalate to the human rather than working around it: anything needing `git push`/`pull`, a new secret or allowlist entry, a `devcontainer.json` change, a new forwarded port, SSH access, or reaching a host the proxy refuses. These are all outside-the-container operations by design.
+
+## Filing GitHub issues from inside this devcontainer
+
+You have no GitHub write credentials and no route to get any. gh isn't installed, there's no token in the environment, and POST https://api.github.com/repos/.../issues returns 401. Anonymous reads work fine — you can fetch public repo files and API metadata, so research is unaffected. Only publishing is blocked, and it's by design: credentials live outside the container. Don't install gh, don't run gh auth login, don't go looking for a token. It's wasted time and it won't work.
+
+Instead, write the issue and hand it off:
+
+Write the body to a markdown file in the project root — e.g. <topic>-issue.md. Root, not /tmp or a scratch dir: the human has to reach it from outside the container.
+Don't put a title in the body. No H1 line — it duplicates the issue title GitHub renders above it. The title goes in the command.
+Give them the exact command, filled in, ready to paste:
+
+gh issue create --repo <owner>/<repo> \
+  --title "<title>" \
+  --body-file <file>.md
+They'll download the file and run this from wherever it landed (~/Downloads works — --body-file takes a relative path).
+
+Say the file is disposable, and delete it once they confirm it's filed.
+Same pattern for PRs, review comments, and anything else that writes to a remote: produce the artifact, hand over the command, let the human execute.
+
+One habit worth keeping: verify, don't assume. Run the 401 probe before telling someone you can't do something — the answer could differ if a token placeholder has been provisioned for a given host.
