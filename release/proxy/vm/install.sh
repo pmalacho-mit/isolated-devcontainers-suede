@@ -257,6 +257,14 @@ echo "==> systemd units"
 install -m 0644 desolate-proxy.service /etc/systemd/system/
 install -m 0644 desolate-proxy-ca.service /etc/systemd/system/
 systemctl daemon-reload
+# mitmproxy loads addon.py ONCE, at startup. `enable --now` starts a stopped
+# unit but does not restart a running one, so on an upgrade the new addon.py
+# would sit on disk unused -- while the new settings.json IS adopted live, by
+# mtime. That pairing runs the OLD policy against the NEW config, which is
+# exactly how a fixture carrying "selftest" gets judged as a real secret and
+# 403s every request that names it. try-restart is a no-op when the unit is
+# stopped, so a fresh install still starts exactly once, below.
+systemctl try-restart desolate-proxy
 systemctl enable -q --now desolate-nft desolate-proxy desolate-proxy-ca
 
 echo "==> done"

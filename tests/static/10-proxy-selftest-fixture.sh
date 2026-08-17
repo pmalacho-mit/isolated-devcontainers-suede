@@ -92,6 +92,28 @@ else
   fi
 fi
 
+group "an upgraded addon.py actually takes effect"
+# mitmproxy loads addon.py once, at startup, but settings.json is adopted live
+# by mtime. An install that refreshes both without restarting the service
+# therefore runs the OLD policy against the NEW config -- the state in which a
+# fixture carrying "selftest" is judged as a real secret and 403s every request
+# naming it. `enable --now` does not restart a unit that is already running.
+addon_install_line() { grep -n 'install -m 0644 addon.py' "$INSTALL" | head -1 | cut -d: -f1; }
+proxy_restart_line() { grep -n 'systemctl try-restart desolate-proxy' "$INSTALL" | head -1 | cut -d: -f1; }
+INSTALLED_AT=$(addon_install_line); RESTARTED_AT=$(proxy_restart_line)
+if [ -z "$RESTARTED_AT" ]; then
+  fail "install.sh restarts desolate-proxy after replacing addon.py" \
+       "no 'systemctl try-restart desolate-proxy' -- a running proxy keeps the old addon"
+elif [ -z "$INSTALLED_AT" ]; then
+  fail "install.sh restarts desolate-proxy after replacing addon.py" \
+       "could not find where addon.py is installed"
+elif [ "$RESTARTED_AT" -gt "$INSTALLED_AT" ]; then
+  pass "install.sh restarts desolate-proxy after replacing addon.py"
+else
+  fail "install.sh restarts desolate-proxy after replacing addon.py" \
+       "restart at line $RESTARTED_AT precedes the addon.py install at line $INSTALLED_AT"
+fi
+
 group "the fixture cannot be removed by accident"
 CLI_SRC=$(cat "$CLI")
 assert_contains "cli.sh knows the fixture name" "$CLI_SRC" "SELFTEST_FIXTURE=$FIXTURE"
