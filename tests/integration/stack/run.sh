@@ -621,6 +621,46 @@ else
   assert_ok "and then the project itself stops" ed desolate --stop "$WT"
 fi
 
+group "the inner daemon says WHICH state it is in"
+# The healthcheck asserted at the top of this file now runs the classifier, so
+# "dind reports healthy" already covers the healthy path end to end. What is
+# left is the state that used to be indistinguishable from a wedge for two
+# minutes -- asked here of the same file, in the same container, live.
+#
+# The recovery ladder itself is deliberately NOT exercised: rung 2 restarts the
+# daemon and rung 3 deletes its data root, and a wedge worth recovering from is
+# not something this suite is willing to fake.
+CLASSIFIER=/desolate-health/inner-health.sh
+assert_contains "the classifier calls a live daemon healthy" \
+  "$(docker exec "$C_DIND" sh "$CLASSIFIER" 2>&1)" "healthy"
+BOOTING=0
+docker exec -e DESOLATE_INNER_SOCKET=/run/inner/not-bound-yet "$C_DIND" \
+  sh "$CLASSIFIER" >/dev/null 2>&1 || BOOTING=$?
+assert_eq "a socket that is not bound yet is 'booting', not 'wedged'" "$BOOTING" "1"
+
+group "reset-inner's sweep asks the daemon something it understands"
+# Rung 2's filter grammar is a contract with a CLI this repo does not control:
+# a status name it rejects fails the sweep, and one it silently ignores sweeps
+# the wrong containers. Extracted from cli.sh and run against the real daemon,
+# rather than retyped here where the two could drift apart.
+eval "$(sed -n '/^inner_docker()/,/^}/p' "$RELEASE/cli.sh")"
+eval "$(sed -n '/^inner_ids()/,/^}/p' "$RELEASE/cli.sh")"
+RELAY_STATES=$(grep -oE 'inner_ids desolate\.relay [a-z ]+' "$RELEASE/cli.sh" \
+               | sed 's/inner_ids desolate\.relay //')
+if [ -z "$RELAY_STATES" ]; then
+  fail "found the sweep's relay states in cli.sh" "grep matched nothing -- did the call change shape?"
+else
+  # What those two functions read, pointed at THIS suite's stack rather than the
+  # one cli.sh names.
+  # shellcheck disable=SC2034  # all three are read by the functions eval'd above
+  DIND=$C_DIND \
+    INNER_SOCKET=unix:///run/inner/docker.sock \
+    INNER_PATIENCE=10
+  # shellcheck disable=SC2086  # a list of states, deliberately word-split
+  assert_ok "stale relays can be listed with the states the sweep names" \
+    inner_ids desolate.relay $RELAY_STATES
+fi
+
 group "host-side visibility into the inner daemon still works"
 # observe.sh is now the only view, so it has to keep working -- otherwise the
 # next person reaches for a published port again. It goes through the

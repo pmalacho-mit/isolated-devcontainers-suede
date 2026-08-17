@@ -23,7 +23,15 @@ for c in desolate-dind desolate-orchestrator desolate-vscode; do
   else bad "$c status=$st restarts=$rc"; note "docker compose logs --tail=40 ${c#desolate-}"; fi
 done
 h=$(docker inspect -f '{{.State.Health.Status}}' desolate-dind 2>/dev/null)
-[ "$h" = healthy ] && ok "dind healthcheck: healthy" || bad "dind health=$h (wait, or check logs)"
+if [ "$h" = healthy ]; then
+  ok "dind healthcheck: healthy"
+else
+  bad "dind health=$h"
+  # Which of the two it is decides what to do about it, and "starting" alone
+  # cannot say. Asked of the same file the healthcheck runs.
+  note "$(docker exec desolate-dind sh /desolate-health/inner-health.sh 2>&1)"
+  note "booting is normal and passes; wedged is: ./cli.sh reset-inner"
+fi
 
 echo
 echo "== 1b. sysbox runtime (the core guarantee) =="

@@ -162,7 +162,7 @@ const branchExists = ({ projectDir }: Target, branch: string) =>
   run.status.ok(
     "git",
     ["-C", projectDir, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
-    true,
+    { quiet: true },
   );
 
 /** Check out an existing branch, or start a new one -- the two spellings git
