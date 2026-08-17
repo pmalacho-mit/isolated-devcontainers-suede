@@ -138,9 +138,15 @@ check_scale() {
     return
   }
 
+  # A project is at /workspaces/<p> or /workspaces/<owner>/<repo>, and its spec
+  # is one of two filenames one level further down -- so the deepest a project's
+  # spec sits is four. An earlier maxdepth of 3 could not see a NESTED project's
+  # spec at all and reported 0 while one was running.
   PROJECTS=$(docker exec "$ORCH" sh -c '
-    find /workspaces -mindepth 1 -maxdepth 3 -name devcontainer.json 2>/dev/null |
-      sed "s#/workspaces/##; s#/\.devcontainer/devcontainer\.json##; s#/devcontainer\.json##" |
+    find /workspaces -mindepth 2 -maxdepth 4 \
+         \( -name devcontainer.json -o -name .devcontainer.json \) \
+         -not -path "*/.worktrees/*" 2>/dev/null |
+      sed "s#/workspaces/##; s#/\.devcontainer/devcontainer\.json$##; s#/\.devcontainer\.json$##" |
       sort -u | grep -c .' 2>/dev/null | tr -d '\r')
 
   local worktrees

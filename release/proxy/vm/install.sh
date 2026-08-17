@@ -151,9 +151,16 @@ if [ "$BRIDGE" = "$DIND_BRIDGE" ]; then
 EOF
     exit 1
 fi
+# Per-project dind bridges are created after this runs and cannot be detected
+# here, so they are covered by shape instead of by name. The header of
+# nftables-desolate.conf is where this is explained, including why the hyphen
+# matters; this line exists because the sed below REPLACES that file's own
+# definition, so a wildcard written only there would be silently dropped.
+PROJECT_IF_GLOB='br-d-*'
+
 sed -e "s|define DESOLATE_IF = \".*\"|define DESOLATE_IF = \"$BRIDGE\"|" \
     -e "s|define DESOLATE_DIND_IF = \".*\"|define DESOLATE_DIND_IF = \"$DIND_BRIDGE\"|" \
-    -e "s|define DESOLATE_IFS = .*|define DESOLATE_IFS = { \"$BRIDGE\", \"$DIND_BRIDGE\" }|" \
+    -e "s|define DESOLATE_IFS = .*|define DESOLATE_IFS = { \"$BRIDGE\", \"$DIND_BRIDGE\", \"$PROJECT_IF_GLOB\" }|" \
     nftables-desolate.conf > /etc/desolate-proxy/nftables-desolate.conf
 
 echo "==> container resolver (dedicated dnsmasq on :5353)"
