@@ -124,9 +124,16 @@ echo "=== done"
  *
  * The split is the one the shipped scripts already draw. `inContainer` trusts
  * the proxy in the container you are standing in; `inBuilds` trusts it in the
- * containers that container's own BUILDS run in, which is the only lever left
- * for a builder that cannot be handed a build context (an SDK posting to the
- * Engine API cannot express one).
+ * containers that container's own BUILDS run in, which is the lever left for a
+ * builder that cannot be handed a build context (an SDK posting to the Engine
+ * API cannot express one).
+ *
+ * A retag binds only where the builder asks the local image store first, which
+ * is `docker build`, `docker compose build` and the classic builder -- not a
+ * build posted to the Engine API asking for BuildKit (`/build?version=2`),
+ * which resolves the tag at the registry and pins the digest it gets back.
+ * trust-proxy-in-builds.sh prints what to do for that case; the README's
+ * "Builds that do not go through compose" says it at length.
  */
 export const trust = {
   inContainer: () => ["sh", "-c", INSTALL_CA_SCRIPT],

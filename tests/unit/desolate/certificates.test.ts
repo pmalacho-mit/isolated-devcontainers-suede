@@ -245,6 +245,37 @@ describe("--shadow, for builds that take no build context", () => {
     // turning a clear error into a certificate failure two builds later.
     assert.match(script, /silently puts the untrusting upstream image back/);
   });
+
+  test("the one builder it does NOT bind is named, in --help and in the run", () => {
+    // A retag binds where the builder asks the local image store first:
+    // `docker build`, `docker compose build`, and the classic builder. A build
+    // POSTed to the Engine API asking for BuildKit (`/build?version=2`, which
+    // is dockerode's version: "2" and anything wrapping it) resolves the tag at
+    // the REGISTRY and pins the upstream digest, so the tag written here is
+    // never read. That failure is silent -- the pristine base builds, then
+    // hangs on its first HTTPS fetch -- so the promise has to carry its own
+    // exception or the next reader re-learns this from a ten-minute hang.
+    assert.match(help, /version=2/);
+    assert.match(script, /It does NOT cover/);
+    assert.match(script, /\/build\?version=2/);
+  });
+
+  test("the two things that DO work for that build are printed with it", () => {
+    // Naming the hole without naming the way out just relocates the dead end.
+    // The derivative's own tag exists in no registry, so BuildKit's lookup
+    // fails and it falls back to this image store; the classic builder reads
+    // that store and nothing else.
+    assert.match(script, /FROM \$TAG/);
+    assert.match(script, /classic builder/);
+  });
+
+  test("registry-mirrors are named as the fix that is not one", () => {
+    // The obvious next reach after a bypassed tag is to serve the derivative
+    // from a mirror. `docker pull` honours the daemon's mirrors and the
+    // BuildKit inside that same daemon ignores them, so the build resolves
+    // upstream exactly as before -- silently, again.
+    assert.match(script, /registry-mirrors/);
+  });
 });
 
 describe("the shadowImages job", () => {
