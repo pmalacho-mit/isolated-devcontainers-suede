@@ -16,7 +16,8 @@ Behavior per request:
      name WHERE THERE IS ONE. Plaintext has none, so that path falls back to
      the Host header and the policy is only as good as a name the client chose
      -- see "WHAT THE NETWORK POLICY DOES NOT DECIDE" below.
-  3. Scan URL + headers + body for any configured placeholder.
+  3. Scan URL + headers + body for any configured placeholder. One kind of
+     entry is scanned for more narrowly -- see "THE SELF-TEST FIXTURE" below.
   4. If a placeholder is found but the proven destination is NOT in that
      secret's allowlist -> block 403 (leak detection / honeypot defense).
      Unlike step 2 this NEVER falls back: no SNI means no substitution.
@@ -167,6 +168,51 @@ nowhere, so it travels as itself and no value can leave.
     MY_KEY's allowlist and receives MY_KEY's value with a stray "2" left
     glued to it. A minimum name LENGTH used to stand in for this check; it
     never prevented the thing it was named for.
+
+---------------------------------------------------------------------------
+THE SELF-TEST FIXTURE, AND WHY IT IS MATCHED DIFFERENTLY
+---------------------------------------------------------------------------
+`preflight.sh` proves leak detection is actually running by tripping it: it
+sends a placeholder toward a host that placeholder is not allowlisted for and
+demands a 403. That needs a placeholder to exist, so one ships in
+settings.example.json -- DESOLATE-SELFTEST-PLACEHOLDER, fake value, pinned to
+httpbin.org.
+
+An entry marked `"selftest": true` is matched ONLY as the complete value of a
+request header. Not in the URL, not in the body, not as a substring of a
+longer header. It is also never scrubbed out of responses.
+
+That narrowing exists because this placeholder is the one whose NAME is a
+published string. It appears in settings.example.json, in install.sh, in
+preflight.sh, in this file, in the test suite and in the README -- so it turns
+up in ordinary traffic that has nothing to do with secrets, and under the
+normal substring rule every one of those is a 403 toward any host but
+httpbin.org:
+
+    git push          # the repo's own blobs carry the name
+    an agent editing this repo, sending a diff to its model API
+    pasting preflight output into an issue tracker
+
+Each of those got refused with "secret DESOLATE-SELFTEST-PLACEHOLDER is not
+permitted for host ...", which is true, useless, and indistinguishable from a
+real exfiltration attempt. The escape was to delete the fixture -- which is
+what made preflight start reporting `secrets can be exfiltrated` against a
+perfectly healthy addon, because the probes only match CONFIGURED placeholders.
+The fixture being deletable and the fixture being poisonous were the same bug
+wearing two faces.
+
+A whole header value is the discriminator because that is exactly what the
+probes send (`-H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"`) and it is not a
+shape that prose, a diff or a git object ever takes. Both probes still trip,
+for the same reasons they always did.
+
+This narrows detection, so it is worth being explicit about what it does NOT
+cost. `selftest` is opt-in per entry and nothing sets it but the shipped
+fixture. The value it guards is fake, so there is no secret whose bound is
+loosened -- the guarantee this file exists to keep ("a real value reaches only
+its allowlisted hosts") is untouched, because a real secret carries no such
+flag and is matched everywhere it can appear, as before. Do not set it on
+anything real: it would mean a secret in a body or a URL travels unnoticed.
 """
 
 import fnmatch
@@ -267,7 +313,8 @@ class DesolateProxy:
                     log.error(f"secret {name!r}: host {host!r} {problem}")
                 log.warning(f"secret {name!r} skipping (its allowlist does not pin a destination)")
                 continue
-            secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts]}
+            secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts],
+                             "selftest": bool(entry.get("selftest", False))}
 
         for name in self._overlapping(secrets):
             del secrets[name]
@@ -455,16 +502,37 @@ class DesolateProxy:
         return message.content or b""
 
     def _placeholders_in_request(self, flow):
-        """Return the set of configured placeholder names present anywhere in the request."""
+        """Return the set of configured placeholder names present in the request.
+
+        "Present" means anywhere -- URL, headers or body -- for every real
+        secret. A `selftest` entry is matched only as the complete value of a
+        header; see "THE SELF-TEST FIXTURE" in the module header for why one
+        entry gets a narrower rule and what that does not cost.
+        """
         if not self.secrets:
             return set()
+        # .get, not [] -- an entry reaching here is normally one _maybe_reload
+        # built, but nothing enforces that and a missing flag must read as
+        # "an ordinary secret", which is the conservative direction: matched
+        # everywhere rather than only in a header.
+        header_values = [v.strip() for _, v in flow.request.headers.items(multi=True)]
+        found = {name for name, entry in self.secrets.items()
+                 if entry.get("selftest") and name in header_values}
+
+        real = [name for name, entry in self.secrets.items() if not entry.get("selftest")]
+        if not real:
+            return found
         url = flow.request.url
         header_blob = "\n".join(f"{k}: {v}" for k, v in flow.request.headers.items(multi=True))
+        # Decoded, and decoded HERE rather than above: a body that cannot be
+        # read must fail closed (decoded_body raises, request() blocks), and
+        # that is a promise about real secrets. Reaching it for a store holding
+        # nothing but the fake fixture would refuse requests to protect a value
+        # that does not exist.
         body = self.decoded_body(flow.request)
-        return {
-            name for name in self.secrets
-            if name in url or name in header_blob or name.encode() in body
-        }
+        found.update(name for name in real
+                     if name in url or name in header_blob or name.encode() in body)
+        return found
 
     # ---------- mitmproxy hooks ----------
 
@@ -616,6 +684,12 @@ class DesolateProxy:
         body = self.decoded_body(flow.response)
         scrubbed = body
         for name, entry in self.secrets.items():
+            # The fixture's value is fake and published, so there is nothing to
+            # scrub -- and rewriting it to the placeholder NAME would plant that
+            # name in a body the container then sends back, which is a 403 on
+            # the next request. See "THE SELF-TEST FIXTURE" in the header.
+            if entry.get("selftest"):
+                continue
             value, bvalue = entry["value"], entry["value"].encode()
             for k, v in list(flow.response.headers.items(multi=True)):
                 if value in v:

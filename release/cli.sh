@@ -591,13 +591,29 @@ case "$CMD" in
                  fi
                  ;;
                rm)
-                 NAME="${1:?usage: cli.sh secret rm NAME}"
+                 NAME="${1:?usage: cli.sh secret rm NAME}"; shift
                  case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
+                 FORCE=0; [ "${1:-}" = "--force" ] && FORCE=1
+                 if [ "$NAME" = "DESOLATE-SELFTEST-PLACEHOLDER" ] && [ "$FORCE" = 0 ]; then
+                   echo "cli.sh: DESOLATE-SELFTEST-PLACEHOLDER is preflight's self-test fixture," >&2
+                   echo "        not a secret -- its value is fake and its allowlist pins" >&2
+                   echo "        httpbin.org. Removing it does not remove a secret; it removes" >&2
+                   echo "        preflight's ability to prove leak detection is live, and the" >&2
+                   echo "        probes then fail claiming the addon is broken." >&2
+                   echo "        Restore it with: ./cli.sh vm install --proxy-only" >&2
+                   # The escape hatch stays, because removing it used to be the
+                   # only cure for the fixture 403ing ordinary traffic that
+                   # named it. "selftest": true is the real fix (see addon.py),
+                   # but if that ever regresses, being unable to delete the
+                   # fixture would mean being unable to use the stack at all.
+                   echo "        If you really mean it: ./cli.sh secret rm $NAME --force" >&2
+                   exit 1
+                 fi
                  vm sudo sh -c 'umask 077; F=/etc/desolate-proxy/settings.json; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
                    jq --arg n "$1" "del(.secrets[\$n])" "$F" > "$T" \
                    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" && echo removed' _ "$NAME"
                  ;;
-               *) echo "usage: cli.sh secret {add NAME --hosts a,b | list | rm NAME}" >&2; exit 1 ;;
+               *) echo "usage: cli.sh secret {add NAME --hosts a,b | list | rm NAME [--force]}" >&2; exit 1 ;;
              esac ;;
 
   vm)        SUB="${1:-status}"; shift || true
