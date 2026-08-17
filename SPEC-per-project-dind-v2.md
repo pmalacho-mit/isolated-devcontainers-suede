@@ -107,6 +107,31 @@ with `-v /workspaces/<project>:/x` reads what the devcontainer just wrote there
 the *client's* working directory — resolves its relative binds the same way
 (Q5).
 
+### Where the workspace is mounted stops being cosmetic
+
+`desolate.ts`'s `mustMirrorItsOwnPath` forces the workspace to be mounted at the
+path it has outside — but only for a worktree, or for a nested project that
+declared **neither** `workspaceFolder` nor `workspaceMount`. A nested project
+that declares either one is taken at its word and gets no rewrite.
+
+That deference was harmless while the daemon lived inside the devcontainer,
+because `$(pwd)` meant the same thing on both sides by construction. It is not
+harmless now. A project at `/workspaces/acme/widgets` that declares
+`"workspaceFolder": "/workspaces/widgets"` — which is what
+`${localWorkspaceFolderBasename}` expands to, so it is the natural thing to
+write — gets a devcontainer whose source is at `/workspaces/widgets` while its
+dind holds the project at `/workspaces/acme/widgets`. Then `docker run -v
+$(pwd):/app` hands the daemon a path it does not have, and docker **creates it
+as an empty directory** rather than failing. The build runs. It just builds
+nothing.
+
+So for any target with a daemon of its own, mirroring stops being conditional:
+the daemon's filesystem decides where the source is, and the project does not
+get a say. Either make `mustMirrorItsOwnPath` unconditional for those targets,
+or refuse a declared `workspaceFolder`/`workspaceMount` that does not already
+equal the target's own path — `workspaceMountIsOwnFolder` already knows how to
+ask that question, and already answers it by equality rather than by prefix.
+
 ### One daemon per project, shared by its worktrees
 
 Every other docker object a worktree touches is keyed on its own namespace —
