@@ -216,6 +216,12 @@ COPY with-ca.sh /usr/local/bin/with-ca
 COPY shell-entry.sh /usr/local/bin/shell-entry
 RUN chmod +x /usr/local/bin/with-ca /usr/local/bin/shell-entry
 
+# Not for THIS image to run: volume-init seeds it into the inner-health volume,
+# where dind's healthcheck and `cli.sh reset-inner` both execute it. It ships
+# here because this is the only image the stack builds, and a copy that lived in
+# dind's image instead would be a copy this repo does not control.
+COPY inner-health.sh /usr/local/lib/desolate/inner-health.sh
+
 # The compensating control for the git extensions pruned out of the shell root.
 #
 # Removing that extension removed the Source Control view, the gutter marks and

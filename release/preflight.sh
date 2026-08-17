@@ -3,10 +3,16 @@
 # Empirically checks every layer of the stack and the security invariants.
 set -uo pipefail
 
-pass=0; fail=0
+pass=0; fail=0; skip=0
 ok()   { echo "  ok    $*"; pass=$((pass+1)); }
 bad()  { echo "  FAIL  $*"; fail=$((fail+1)); }
 note() { echo "        $*"; }
+# A check whose PRECONDITION is absent is neither a pass nor a failure, and
+# reporting it as either is a lie -- without this state a missing test fixture
+# had to come out as "secrets can be exfiltrated". Skips never fail the run.
+skipped() { echo "  skip  $*"; skip=$((skip+1)); }
+
+vm_ssh() { colima ssh -p "${COLIMA_PROFILE:-desolate}" -- "$@"; }
 
 echo
 echo "== 1. containers =="
@@ -17,7 +23,15 @@ for c in desolate-dind desolate-orchestrator desolate-vscode; do
   else bad "$c status=$st restarts=$rc"; note "docker compose logs --tail=40 ${c#desolate-}"; fi
 done
 h=$(docker inspect -f '{{.State.Health.Status}}' desolate-dind 2>/dev/null)
-[ "$h" = healthy ] && ok "dind healthcheck: healthy" || bad "dind health=$h (wait, or check logs)"
+if [ "$h" = healthy ]; then
+  ok "dind healthcheck: healthy"
+else
+  bad "dind health=$h"
+  # Which of the two it is decides what to do about it, and "starting" alone
+  # cannot say. Asked of the same file the healthcheck runs.
+  note "$(docker exec desolate-dind sh /desolate-health/inner-health.sh 2>&1)"
+  note "booting is normal and passes; wedged is: ./cli.sh reset-inner"
+fi
 
 echo
 echo "== 1b. sysbox runtime (the core guarantee) =="
@@ -290,21 +304,101 @@ else
   note "docker says: $(printf '%s\n' "$RUNOUT" | grep -v '^[[:space:]]*$' | tail -2 | tr '\n' ' ')"
 fi
 
+addon_config_load_line() {
+  vm_ssh sudo journalctl -u desolate-proxy --no-pager 2>/dev/null \
+    | grep -oE 'loaded [0-9]+ secret\(s\), [0-9]+ network rule\(s\), default_action=[a-z]+' \
+    | tail -1
+}
+
+# Zero secrets is not itself a fault -- a fresh install has none -- but zero
+# secrets WITH an allow-everything policy is the state where egress is
+# intercepted and ungoverned, and nothing in this script used to say so.
+report_addon_config_load() {
+  local loaded; loaded=$(addon_config_load_line)
+  case "$loaded" in
+    "")  bad "addon.py never logged a config load -- it is running with empty defaults"
+         note "every request is unfiltered and no secret is substituted."
+         note "./cli.sh proxy logs | grep -E 'failed to load|settings file missing'" ;;
+    "loaded 0 secret(s), "*"default_action=allow")
+         note "$loaded"
+         note "no secrets configured and the default action is allow: egress is"
+         note "intercepted but UNGOVERNED. Expected on a fresh install; add"
+         note "secrets and network rules with ./cli.sh secret add / settings.json." ;;
+    *)   ok "addon.py config is live ($loaded)" ;;
+  esac
+}
+
+selftest_fixture_hosts() {
+  vm_ssh sudo jq -r '.secrets["DESOLATE-SELFTEST-PLACEHOLDER"].hosts // empty | join(",")' \
+    /etc/desolate-proxy/settings.json 2>/dev/null
+}
+
+have_selftest_fixture() {
+  case "$(selftest_fixture_hosts)" in *httpbin.org*) return 0 ;; *) return 1 ;; esac
+}
+
+# Interception being ON is not the same as the POLICY being on: an addon that
+# fails to load leaves a working transparent proxy that substitutes nothing.
+# with-ca is required -- `docker exec` inherits none of the entrypoint's exports,
+# so a bare curl fails cert verification, returns 000, and reads as a dead addon.
+probe_leak_detection() {
+  local code
+  code=$(docker exec desolate-orchestrator with-ca sh -c \
+         'curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.com \
+            -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
+  case "$code" in
+    403) ok "leak detection is live (placeholder toward a non-allowlisted host -> 403)" ;;
+    000) bad "leak detection got no response at all (000) -- TLS to the proxy failed"
+         note "not necessarily the addon: check the interception line above first" ;;
+    *)   bad "leak detection returned '$code', expected 403 -- the addon may have failed to load" ;;
+  esac
+}
+
+# Whether :80 reached addon.py at all. The internal-destination probe below
+# needs that as its precondition, and "we never asked" must stay distinguishable
+# from "we asked and it did not" -- so it is one named verdict, not two flags.
+PLAINTEXT_PROBE=skipped
+
+probe_plaintext_spoof() {
+  local code
+  code=$(docker exec desolate-orchestrator sh -c \
+         'curl -s -o /dev/null -w "%{http_code}" --max-time 8 http://example.com \
+            -H "Host: httpbin.org" -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
+  if [ "$code" = 403 ]; then
+    PLAINTEXT_PROBE=reached-addon
+    ok "plaintext secret egress refused (Host header cannot vouch for a destination)"
+  else
+    PLAINTEXT_PROBE=answered-otherwise
+    bad "plaintext spoof returned '$code', expected 403 -- secrets can be exfiltrated"
+  fi
+}
+
+# Both probes send the fixture as X-Exfil, and addon.py matches only CONFIGURED
+# placeholders -- so without it they cannot fail closed. They complete, report
+# '200'/'409', and blame the addon for a missing test fixture.
+skip_fixture_dependent_probes() {
+  skipped "leak detection: the self-test fixture is not in the secret store"
+  note "DESOLATE-SELFTEST-PLACEHOLDER is missing, so these probes cannot prove"
+  note "anything -- the addon only recognises CONFIGURED placeholders."
+  note "Restore it:  ./cli.sh vm install --proxy-only"
+  skipped "plaintext spoof: same fixture"
+}
+
 echo
 echo "== 7. egress proxy (secrets live in the VM, not in containers) =="
-if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet desolate-proxy 2>/dev/null; then
+if vm_ssh systemctl is-active --quiet desolate-proxy 2>/dev/null; then
   ok "desolate-proxy is running in the VM"
   # Two resolvers, two ports, both required: :5353 serves containers via the
   # nftables redirect, :53 serves the VM itself (Colima has no systemd-resolved).
   # Conflating them is what once moved the system resolver off :53 and broke
   # every image pull the VM made.
-  colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet desolate-dnsmasq 2>/dev/null \
+  vm_ssh systemctl is-active --quiet desolate-dnsmasq 2>/dev/null \
     && ok "desolate-dnsmasq is serving container DNS on :5353" \
     || bad "desolate-dnsmasq is not running -- containers cannot resolve anything"
-  colima ssh -p "${COLIMA_PROFILE:-desolate}" -- getent hosts registry-1.docker.io >/dev/null 2>&1 \
+  vm_ssh getent hosts registry-1.docker.io >/dev/null 2>&1 \
     && ok "the VM itself still resolves (:53 intact)" \
     || bad "the VM cannot resolve hostnames -- check for a stray dnsmasq drop-in setting 'port='"
-  PERM=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- sudo stat -c '%a' /etc/desolate-proxy/settings.json 2>/dev/null)
+  PERM=$(vm_ssh sudo stat -c '%a' /etc/desolate-proxy/settings.json 2>/dev/null)
   [ "$PERM" = "600" ] && ok "settings.json is 0600" \
     || bad "settings.json mode is '$PERM' (want 600) -- secret values may be readable"
   if docker exec desolate-orchestrator test -f /desolate-ca/ca.pem 2>/dev/null; then
@@ -337,28 +431,13 @@ if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet de
                  note "issuer was: $ISS"
                  note "check DESOLATE_IF in the VM matches the compose bridge (re-run install.sh)" ;;
   esac
-  # Interception being ON is not the same as the POLICY being on: an addon that
-  # fails to load leaves a working transparent proxy that substitutes nothing.
-  # Prove the policy runs by tripping it -- a placeholder toward a host it is
-  # not allowlisted for must come back 403.
-  # with-ca for the same reason as above; without it this returns 000 (curl could
-  # not verify the cert) and reads as "the addon failed to load".
-  LEAK=$(docker exec desolate-orchestrator with-ca sh -c \
-         'curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.com \
-            -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
-  case "$LEAK" in
-    403) ok "leak detection is live (placeholder toward a non-allowlisted host -> 403)" ;;
-    000) bad "leak detection got no response at all (000) -- TLS to the proxy failed"
-         note "not necessarily the addon: check the interception line above first" ;;
-    *)   bad "leak detection returned '$LEAK', expected 403 -- the addon may have failed to load" ;;
-  esac
-  # And that a secret cannot be coaxed out over plaintext, where the destination
-  # cannot be proven (the Host-header spoofing path).
-  SPOOF=$(docker exec desolate-orchestrator sh -c \
-          'curl -s -o /dev/null -w "%{http_code}" --max-time 8 http://example.com \
-             -H "Host: httpbin.org" -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
-  [ "$SPOOF" = "403" ] && ok "plaintext secret egress refused (Host header cannot vouch for a destination)" \
-    || bad "plaintext spoof returned '$SPOOF', expected 403 -- secrets can be exfiltrated"
+  report_addon_config_load
+  if have_selftest_fixture; then
+    probe_leak_detection
+    probe_plaintext_spoof
+  else
+    skip_fixture_dependent_probes
+  fi
   # The proxy is the one process standing on both sides of the wall: nftables
   # redirects every :80/:443 here whatever the destination, and this then dials
   # it from the VM, where the container-bridge drops no longer apply. Without an
@@ -392,14 +471,14 @@ if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet de
     403)   ok "the proxy refuses internal destinations (403 from addon.py)" ;;
     502)   ok "internal destination unreachable (502: the proxy dialled it and could not connect)" ;;
     000|"")
-           if [ "$SPOOF" = "403" ]; then
-             ok "internal destination unreachable (no reply: the dial went nowhere)"
-           else
-             bad "no answer for the internal-destination probe, and :80 did not reach"
-             note "the addon either (the spoof probe above returned '$SPOOF'), so this"
-             note "says nothing about containment -- fix the redirect first."
-             note "./cli.sh proxy status ; ./cli.sh proxy logs"
-           fi ;;
+           case "$PLAINTEXT_PROBE" in
+             reached-addon) ok "internal destination unreachable (no reply: the dial went nowhere)" ;;
+             skipped)       skipped "internal destination: no reply, and the :80 precondition was skipped" ;;
+             *)             bad "no answer for the internal-destination probe, and :80 did not reach"
+                            note "the addon either (the spoof probe above was not a 403), so this"
+                            note "says nothing about containment -- fix the redirect first."
+                            note "./cli.sh proxy status ; ./cli.sh proxy logs" ;;
+           esac ;;
     # Anything else is an ANSWER, and an answer means the stack reached
     # 192.168.5.2. Not just 2xx: a 401 from a router's admin page or a 404 from
     # a service on the Mac is the same reach wearing a different number, so the
@@ -414,7 +493,7 @@ if colima ssh -p "${COLIMA_PROFILE:-desolate}" -- systemctl is-active --quiet de
   # (eager dials first, tls_passthrough skips the hook, a broken addon enforces
   # nothing); the kernel has none of them. So assert the chain is actually
   # loaded rather than inferring it from a timeout.
-  NFT_OUT=$(colima ssh -p "${COLIMA_PROFILE:-desolate}" -- \
+  NFT_OUT=$(vm_ssh \
             sudo nft list chain inet desolate output 2>/dev/null || true)
   case "$NFT_OUT" in
     *DESOLATE_INTERNAL4*|*"daddr { 0.0.0.0/8"*|*"10.0.0.0/8"*)
@@ -439,7 +518,7 @@ else
 fi
 
 echo
-echo "-- $pass passed, $fail failed --"
+echo "-- $pass passed, $fail failed, $skip skipped --"
 [ "$fail" -eq 0 ] && echo "Stack looks good. Next: ./cli.sh desolate example-project" || \
   echo "Fix the FAIL lines above; see Troubleshooting in README.md"
 exit $((fail > 0))

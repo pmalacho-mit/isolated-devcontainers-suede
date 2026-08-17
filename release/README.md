@@ -477,6 +477,7 @@ the rules would go stale again each time.
 ./cli.sh worktree remove owner/repo wip
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
+./cli.sh reset-inner            # the inner daemon is wedged: report, then recover
 ./cli.sh down                   # stop (down -v also deletes volumes; confirms)
 ```
 
@@ -1021,7 +1022,11 @@ container stopped while one is in flight cannot tear its mount namespace down --
 its init never reports an exit, and the daemon supervising it waits for that
 exit forever. That made `desolate --stop` shortly after a start enough to wedge
 the whole stack. In the foreground the work is bound to a command you can see
-and interrupt. It needs the
+and interrupt. Your _own_ builds inside the devcontainer have no such
+protection, which is why `desolate --stop` now asks a project's daemon to stop
+its containers and then itself before stopping the container that holds them --
+best-effort and bounded, so a project whose daemon is already hung cannot hang
+the stop as well. It needs the
 `docker-in-docker` feature (the tag has to land in a daemon of the project's
 own); without one, the start says so and carries on. A bare tag is enough here
 and a digest is not accepted: this is a development trust store, not a
@@ -1130,11 +1135,23 @@ Allocation happens before `devcontainer up`, so a refusal leaves nothing
 half-started and does not disturb the port maps of projects already running.
 
 The usual cause is simply too many projects at once -- `desolate --stop <other>`
-frees a port immediately. The other cause is worth knowing: relay containers run
-with `restart: unless-stopped`, so if a project's devcontainer is deleted by
-hand rather than through `desolate --stop`, its relays survive and keep holding
-their ports. `./cli.sh observe ps` lists them as `desolate-relay-<project>-<port>`,
-or `desolate-relay-<project>--wt--<worktree>-<port>` for a worktree.
+frees a port immediately. The other cause is worth knowing: a devcontainer
+deleted by hand rather than through `desolate --stop` leaves its relays behind,
+still holding their ports. `./cli.sh observe ps` lists them as
+`desolate-relay-<project>-<port>`, or `desolate-relay-<project>--wt--<worktree>-<port>`
+for a worktree; `./cli.sh reset-inner` sweeps the ones that are no longer
+running.
+
+Relays carry **no restart policy**, and that is deliberate. A relay is socat
+pointed at an _address_, read once when the relay was created, and that address
+means something only while the devcontainer it came from is up on that network.
+`restart: unless-stopped` outlived both halves of that: docker brought every
+relay back on a daemon restart, before and independently of the devcontainers
+they dial, so each one failed and restarted into the startup reconciliation --
+and a devcontainer recreated on a different address left its old relay
+forwarding a host port to whatever now held the old one, which is worse than a
+dead port. Nothing needs the policy: `--stop` removes a target's relays and
+every start replaces them.
 
 ## How projects are laid out
 
@@ -1367,6 +1384,27 @@ breaks either is refused rather than stored, or dropped rather than loaded:
 
 The `network` rules in `settings.json` are a separate list with a separate job
 and still accept `{"host": "*"}` -- see "What this does not give you" below.
+
+### The one entry that is not a secret
+
+`./cli.sh secret list` shows `DESOLATE-SELFTEST-PLACEHOLDER -> httpbin.org`.
+That is a **test fixture**, not a credential. Its value is fake and published,
+and it exists so `./cli.sh preflight` can prove leak detection is actually
+running -- by sending it toward a host it is not allowlisted for and demanding
+a 403. Without it those probes cannot fail closed, so they report
+`secrets can be exfiltrated` against a perfectly healthy addon. `vm install`
+re-asserts it on every run and `secret rm` refuses it
+(`--force` if you really mean to).
+
+It carries `"selftest": true` in `settings.json`, which is why it is the one
+placeholder matched **only as a complete request header value** rather than
+anywhere in a request. Its name is a string this project publishes -- in these
+docs, in `addon.py`, in the test suite -- so under the ordinary substring rule
+every request that merely *mentioned* it was a 403 toward anything but
+`httpbin.org`: `git push` of this repo, an agent sending a diff to a model API,
+pasting preflight output into a ticket. The flag separates the probe from prose
+about the probe. Do not set it on a real secret; it would mean that secret
+travels unnoticed in a body or a URL.
 
 ### Why this is stronger than a secrets file
 
@@ -1648,6 +1686,12 @@ VM's -- proof the escape reads nothing of the host.
   set; it is how this repo itself vendors `release/` and `.suede/*`.
 - `observe.sh` -- views of the inner daemon from the Mac, via the orchestrator's
   unix socket. Nothing is published to reach it.
+- `vscode-image/inner-health.sh` -- the one answer to "what is the inner daemon
+  doing": booting, wedged, or healthy. dind's healthcheck runs it and so does
+  `cli.sh reset-inner`, out of the same file in the same volume, because two
+  copies would eventually hold two opinions about what wedged means. It is
+  seeded there by `volume-init`, since dind runs a stock `docker:*-dind` image
+  this repo does not build.
 - `vscode-image/keyring.ts` -- the keyring service (see "Credentials" above).
   Keys are stored one directory per alias with fixed filenames inside; the
   earlier layout encoded the alias into the filename and parsed it back, which
@@ -1704,6 +1748,37 @@ Changing any of the `DESOLATE_*` values takes effect on the next `./cli.sh up`,
 which recreates the affected containers.
 
 ## Troubleshooting
+
+- **Nothing starts, and dind sits at `starting` or lands on `unhealthy`** -- ask
+  which of the two it is, because they want opposite things from you:
+
+  ```bash
+  ./cli.sh reset-inner
+  ```
+
+  Its first rung only reports. The daemon's healthcheck and this command run the
+  same classifier, out of the same file, so they cannot disagree:
+
+  | it says   | what that means                                                 |
+  | --------- | --------------------------------------------------------------- |
+  | `booting` | no socket yet. Normal for the first seconds of a start -- wait.  |
+  | `wedged`  | the socket is bound and `docker info` does not come back. The daemon is up and not answering, which is what startup reconciliation over poisoned on-disk state looks like. |
+  | `healthy` | `info` answers. Whatever is wrong is not this.                     |
+
+  If it is wedged, `reset-inner` climbs a ladder and stops at the first rung that
+  leaves a daemon answering: report, then sweep the stale objects reconciliation
+  is choking on (relays that are no longer running, devcontainers docker could
+  not finish removing) and restart dind alone, and only then -- and only when
+  asked, by name -- delete the daemon's data root:
+
+  ```bash
+  ./cli.sh reset-inner --reset-data-root
+  ```
+
+  That last one is the folklore cure, and it is expensive: it is the image store
+  for **every** project, so every base image is pulled again and every build
+  cache is gone. It confirms before doing it. `/workspaces` is a separate volume
+  and is never touched by any rung.
 
 - **`cli.sh up` says sysbox is missing** -- you're either not on the Colima
   context (`docker context use colima-desolate`) or sysbox isn't installed/

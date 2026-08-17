@@ -311,10 +311,20 @@ describe("relays", () => {
     assert.equal(calls[0][calls[0].indexOf("--label") + 1], "desolate.relay=myapp");
   });
 
-  test("restarts unless stopped, so a reboot does not strand the URL", () => {
+  test("carries no restart policy at all", () => {
+    // A relay is socat pointed at an ADDRESS, captured when the relay was
+    // created. `unless-stopped` outlives what makes that address true: docker
+    // brings every relay back on a daemon restart, BEFORE and independently of
+    // the devcontainers they dial, so each one fails, restarts, and adds its
+    // own churn to the startup reconciliation. Worse, a devcontainer recreated
+    // on a different address leaves the old relay forwarding a host port to
+    // whatever now holds the old one -- a live port pointing somewhere nobody
+    // chose. `--stop` removes relays explicitly and every start replaces them,
+    // so nothing needs the policy.
     const { docker, calls } = recorder();
     docker.relay.start(spec);
-    assert.equal(calls[0][calls[0].indexOf("--restart") + 1], "unless-stopped");
+    assert.ok(!calls[0].includes("--restart"), `${calls[0]}`);
+    assert.ok(!calls[0].includes("unless-stopped"), `${calls[0]}`);
   });
 
   test("the readiness probe runs INSIDE the relay, not across a bridge", () => {

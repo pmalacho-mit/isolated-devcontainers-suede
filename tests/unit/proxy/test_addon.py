@@ -1008,3 +1008,124 @@ def test_E12c_every_verdict_reaches_the_audit(tmp_path, caplog):
     verdicts = " ".join(_audit_lines(caplog))
     assert "verdict=ALLOW" in verdicts, f"no ALLOW verdict in: {verdicts}"
     assert "verdict=DENY-INTERNAL" in verdicts, f"no DENY verdict in: {verdicts}"
+
+
+# ===========================================================================
+# the self-test fixture
+#
+# It has failed in both directions: deleted, so preflight's probes stopped
+# failing closed and reported `secrets can be exfiltrated` against a healthy
+# addon; and present, where its published NAME made every request merely
+# mentioning it a 403. `"selftest": true` separates the probe from prose.
+# ===========================================================================
+
+FIXTURE_NAME = "DESOLATE-SELFTEST-PLACEHOLDER"
+FIXTURE_VALUE = "injected-selftest-value-93f2"
+
+
+def _fixture_settings(extra_secrets=None):
+    secrets = {FIXTURE_NAME: {"value": FIXTURE_VALUE, "hosts": ["httpbin.org"],
+                              "selftest": True}}
+    secrets.update(extra_secrets or {})
+    return {"default_action": "allow", "secrets": secrets,
+            "network": [{"action": "allow", "host": "*"}], "scrub_responses": True}
+
+
+def test_the_selftest_probe_still_trips_leak_detection(tmp_path):
+    """preflight's HTTPS probe: the fixture toward a host it is not
+    allowlisted for must still be a 403, or the check proves nothing."""
+    _, addon, _ = load_addon(tmp_path, _fixture_settings())
+    f = make_flow(sni="example.com", host_header="example.com",
+                  headers={"X-Exfil": FIXTURE_NAME})
+    addon.request(f)
+    assert blocked(f)
+    assert f.request.headers["X-Exfil"] == FIXTURE_NAME
+
+
+def test_the_selftest_plaintext_spoof_probe_still_trips(tmp_path):
+    """preflight's :80 probe: no SNI means no provable destination, so a
+    placeholder over plaintext is refused whatever the Host header claims."""
+    _, addon, _ = load_addon(tmp_path, _fixture_settings())
+    f = make_flow(sni=None, host_header="httpbin.org", dest="93.184.216.34",
+                  headers={"X-Exfil": FIXTURE_NAME})
+    addon.request(f)
+    assert blocked(f)
+
+
+def test_the_fixture_name_in_a_body_is_not_a_leak(tmp_path):
+    """THE regression this flag exists for.
+
+    An agent editing this repo sends a diff naming the fixture to its model
+    API; `git push` sends blobs containing it. Under the substring rule both
+    were 403 "secret ... is not permitted for host ...", which is true, useless
+    and indistinguishable from real exfiltration.
+    """
+    _, addon, _ = load_addon(tmp_path, _fixture_settings())
+    body = f'{{"diff": "+  X-Exfil: {FIXTURE_NAME}\\n"}}'.encode()
+    f = make_flow(sni="api.anthropic.com", host_header="api.anthropic.com",
+                  content=body, method="POST", dest="104.18.7.1")
+    addon.request(f)
+    assert f.response is None, "a body that merely names the fixture was refused"
+    assert f.request.content == body, "and it must travel unmodified"
+
+
+def test_the_fixture_name_in_a_url_is_not_a_leak(tmp_path):
+    _, addon, _ = load_addon(tmp_path, _fixture_settings())
+    f = make_flow(sni="github.com", host_header="github.com", dest="104.18.7.1")
+    f.request.path = f"/search?q={FIXTURE_NAME}"
+    addon.request(f)
+    assert f.response is None
+    assert FIXTURE_NAME in f.request.path, "nothing was substituted, so nothing changed"
+
+
+def test_the_fixture_is_not_matched_as_part_of_a_longer_header(tmp_path):
+    """A whole header VALUE is the discriminator, not a substring of one --
+    otherwise a User-Agent or a JSON header quoting the name is a 403 again."""
+    _, addon, _ = load_addon(tmp_path, _fixture_settings())
+    f = make_flow(sni="example.com", host_header="example.com",
+                  headers={"X-Note": f"about {FIXTURE_NAME} and why it exists"})
+    addon.request(f)
+    assert f.response is None
+
+
+def test_the_fixture_value_is_never_scrubbed_from_a_response(tmp_path):
+    """Scrubbing it would plant the fixture's NAME in a body the container
+    then echoes back, which is a 403 on the next request. The value is fake and
+    published; there is nothing to protect."""
+    _, addon, _ = load_addon(tmp_path, _fixture_settings())
+    f = make_flow(sni="httpbin.org", host_header="httpbin.org")
+    f.response = tutils.tresp(content=f"the value is {FIXTURE_VALUE}".encode())
+    addon.response(f)
+    assert FIXTURE_VALUE.encode() in f.response.content
+    assert FIXTURE_NAME.encode() not in f.response.content
+
+
+def test_the_flag_is_opt_in_and_changes_nothing_else(tmp_path):
+    """A real secret sharing the store with the fixture keeps the ordinary
+    substring rule in every position. The narrowing is per-entry, so it cannot
+    loosen the bound on anything real."""
+    _, addon, _ = load_addon(tmp_path, _fixture_settings({
+        SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]},
+    }))
+    body = f'{{"key": "{SECRET_NAME}"}}'.encode()
+    f = make_flow(sni="example.com", host_header="example.com",
+                  content=body, method="POST", dest="104.18.7.1")
+    addon.request(f)
+    assert blocked(f), "a REAL secret in a body must still be caught"
+    assert SECRET_VALUE.encode() not in f.request.content
+
+
+def test_a_secret_without_the_flag_keeps_the_substring_rule(tmp_path):
+    """The default is unchanged: absent `selftest`, a placeholder is matched
+    anywhere it appears. Pins that the flag defaults to False rather than to
+    whatever the last entry set."""
+    _, addon, _ = load_addon(tmp_path, {
+        "default_action": "allow",
+        "secrets": {FIXTURE_NAME: {"value": FIXTURE_VALUE, "hosts": ["httpbin.org"]}},
+        "network": [{"action": "allow", "host": "*"}],
+    })
+    f = make_flow(sni="example.com", host_header="example.com",
+                  content=f"mentions {FIXTURE_NAME}".encode(), method="POST",
+                  dest="104.18.7.1")
+    addon.request(f)
+    assert blocked(f)

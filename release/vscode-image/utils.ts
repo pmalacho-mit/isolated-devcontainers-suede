@@ -83,6 +83,14 @@ export const nonNullObject = <T extends {}>(
   Array<any>
 > => item !== null && !Array.isArray(item) && typeof item === "object";
 
+export interface RunOptions {
+  /** Suppress the command's own stdout. */
+  quiet?: boolean;
+  /** Kill the command after this long. Absent means "wait as long as it takes",
+   *  which is only safe where the command cannot outlive its own reason. */
+  timeoutMs?: number;
+}
+
 export const run = Object.assign(
   /** Run a command; return stdout. Throws on failure unless `allowFail`. */
   (
@@ -100,13 +108,21 @@ export const run = Object.assign(
   },
   {
     status: Object.assign(
-      (cmd: string, args: string[], quiet = false): number => {
+      (
+        cmd: string,
+        args: string[],
+        { quiet = false, timeoutMs }: RunOptions = {},
+      ): number => {
         try {
           execFileSync(cmd, args, {
             stdio: ["ignore", quiet ? "ignore" : "inherit", "inherit"],
+            timeout: timeoutMs,
           });
           return 0;
         } catch (err: any) {
+          // A killed child reports a signal and no status; every caller of this
+          // asks the same question of both, so a bound that fires reads as the
+          // failure it is rather than as success.
           return err?.status ?? 1;
         }
       },

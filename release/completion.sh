@@ -156,6 +156,9 @@ _desolate_cli() {
     case "$verb" in
       desolate) COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
       logs)     COMPREPLY=( $(compgen -W "$(_desolate_cli_services)" -- "$cur") ) ;;
+      # A flag rather than a subcommand, so the grammar extraction above does
+      # not see it -- and it is the one flag in this CLI that deletes something.
+      reset-inner) COMPREPLY=( $(compgen -W "--reset-data-root" -- "$cur") ) ;;
       *)
         local subs; subs=$(_desolate_cli_subs "$verb")
         [ -n "$subs" ] && COMPREPLY=( $(compgen -W "$subs" -- "$cur") )

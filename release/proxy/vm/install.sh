@@ -51,9 +51,47 @@ install -m 0755 ../container/install-ca.sh /opt/desolate-proxy/install-ca.sh
 
 echo "==> config (0600, proxy-owned, VM disk only -- never under a Colima mount)"
 install -d -m 0750 -o desolate-proxy -g desolate-proxy /etc/desolate-proxy
-if [ ! -f /etc/desolate-proxy/settings.json ]; then
-    install -m 0600 -o desolate-proxy -g desolate-proxy settings.example.json /etc/desolate-proxy/settings.json
+SETTINGS_JSON=/etc/desolate-proxy/settings.json
+
+# The fixture preflight trips to prove leak detection is live. Re-asserted on
+# every run because this installer is documented idempotent and seeding was the
+# one part of it that was not: `cli.sh secret rm` could delete the fixture, and
+# addon.py matches only CONFIGURED placeholders, so its absence made the probes
+# report "secrets can be exfiltrated" against a healthy addon.
+SELFTEST_FIXTURE_JQ='.secrets["DESOLATE-SELFTEST-PLACEHOLDER"] = {value: "injected-selftest-value-93f2", hosts: ["httpbin.org"], selftest: true}'
+# Not mere presence: a fixture from an older install carries no "selftest" flag
+# and therefore still 403s every request that merely names it (see addon.py).
+SELFTEST_FIXTURE_CURRENT_JQ='.secrets["DESOLATE-SELFTEST-PLACEHOLDER"].selftest == true'
+
+selftest_fixture_is_current() { jq -e "$SELFTEST_FIXTURE_CURRENT_JQ" "$1" >/dev/null 2>&1; }
+
+# A subshell body, so umask and the temp-file trap cannot outlive the rewrite.
+# 077 keeps the temp file from existing 0644 while it holds the whole store.
+write_selftest_fixture() (
+  umask 077
+  T=$(mktemp)
+  trap 'rm -f "$T"' EXIT INT TERM
+  jq "$SELFTEST_FIXTURE_JQ" "$1" > "$T" \
+    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$1"
+)
+
+warn_selftest_fixture_unrestorable() {
+  echo "    WARNING: could not restore the self-test fixture into $1" >&2
+  echo "             preflight's leak/spoof probes will report a false alarm." >&2
+}
+
+restore_selftest_fixture() {
+  if   selftest_fixture_is_current "$1"; then echo "    self-test fixture present"
+  elif write_selftest_fixture "$1";      then echo "    restored the self-test fixture (preflight's probes need it)"
+  else warn_selftest_fixture_unrestorable "$1"
+  fi
+}
+
+if [ ! -f "$SETTINGS_JSON" ]; then
+    install -m 0600 -o desolate-proxy -g desolate-proxy settings.example.json "$SETTINGS_JSON"
     echo "    wrote example settings -- add real values with: ./cli.sh secret add ..."
+else
+    restore_selftest_fixture "$SETTINGS_JSON"
 fi
 install -d -m 0750 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy
 # Public dir must exist before compose starts (dind bind-mounts it read-only).
@@ -219,6 +257,14 @@ echo "==> systemd units"
 install -m 0644 desolate-proxy.service /etc/systemd/system/
 install -m 0644 desolate-proxy-ca.service /etc/systemd/system/
 systemctl daemon-reload
+# mitmproxy loads addon.py ONCE, at startup. `enable --now` starts a stopped
+# unit but does not restart a running one, so on an upgrade the new addon.py
+# would sit on disk unused -- while the new settings.json IS adopted live, by
+# mtime. That pairing runs the OLD policy against the NEW config, which is
+# exactly how a fixture carrying "selftest" gets judged as a real secret and
+# 403s every request that names it. try-restart is a no-op when the unit is
+# stopped, so a fresh install still starts exactly once, below.
+systemctl try-restart desolate-proxy
 systemctl enable -q --now desolate-nft desolate-proxy desolate-proxy-ca
 
 echo "==> done"

@@ -16,7 +16,8 @@ Behavior per request:
      name WHERE THERE IS ONE. Plaintext has none, so that path falls back to
      the Host header and the policy is only as good as a name the client chose
      -- see "WHAT THE NETWORK POLICY DOES NOT DECIDE" below.
-  3. Scan URL + headers + body for any configured placeholder.
+  3. Scan URL + headers + body for any configured placeholder. One kind of
+     entry is scanned for more narrowly -- see "THE SELF-TEST FIXTURE" below.
   4. If a placeholder is found but the proven destination is NOT in that
      secret's allowlist -> block 403 (leak detection / honeypot defense).
      Unlike step 2 this NEVER falls back: no SNI means no substitution.
@@ -167,6 +168,33 @@ nowhere, so it travels as itself and no value can leave.
     MY_KEY's allowlist and receives MY_KEY's value with a stray "2" left
     glued to it. A minimum name LENGTH used to stand in for this check; it
     never prevented the thing it was named for.
+
+---------------------------------------------------------------------------
+THE SELF-TEST FIXTURE, AND WHY IT IS MATCHED DIFFERENTLY
+---------------------------------------------------------------------------
+`preflight.sh` proves leak detection is running by tripping it: it sends a
+placeholder toward a host that placeholder is not allowlisted for and demands a
+403. That needs a placeholder to exist, so one ships in settings.example.json
+-- DESOLATE-SELFTEST-PLACEHOLDER, fake value, pinned to httpbin.org.
+
+Its NAME is a published string: it appears in this file, in install.sh, in
+preflight.sh, in the test suite and in the README. Under the ordinary substring
+rule that made every request merely MENTIONING it a 403 toward any host but
+httpbin.org -- `git push` of this repo, an agent sending a diff to a model API
+-- with a message indistinguishable from real exfiltration. The escape was to
+delete the fixture, which is what made preflight start reporting `secrets can
+be exfiltrated` against a healthy addon. Deletable and poisonous were the same
+bug wearing two faces, so both are fixed here or neither is.
+
+A complete header value is the discriminator because that is exactly what the
+probes send (`-H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"`) and it is not a
+shape prose, a diff or a git object takes.
+
+What this does NOT cost: `selftest` is opt-in per entry, so a real secret is
+still matched everywhere it can appear and the guarantee this file exists to
+keep -- a real value reaches only its allowlisted hosts -- is untouched. Do not
+set it on anything real; it would mean a secret in a body or a URL travels
+unnoticed.
 """
 
 import fnmatch
@@ -216,6 +244,16 @@ def host_pattern_problem(pattern):
     return ("puts a wildcard somewhere it cannot be trusted: only "
             "'*.<name>.<tld>' is accepted, because '*' does not stop at a dot "
             "('*foo.com' also matches 'evilfoo.com', and '*.com' is a whole TLD)")
+
+
+def is_selftest_fixture(entry):
+    """Whether this entry exists to be TRIPPED rather than to guard a value.
+
+    A fixture is matched only as a complete request header value, and is never
+    scrubbed out of a response. Both follow from its value being fake and its
+    name being published: see "THE SELF-TEST FIXTURE" in the module header.
+    """
+    return bool(entry.get("selftest"))
 
 # stdlib logging, not ctx.log: ctx.log is deprecated and its removal would raise
 # inside the request hook -- and mitmproxy answers an addon exception by letting
@@ -267,7 +305,8 @@ class DesolateProxy:
                     log.error(f"secret {name!r}: host {host!r} {problem}")
                 log.warning(f"secret {name!r} skipping (its allowlist does not pin a destination)")
                 continue
-            secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts]}
+            secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts],
+                             "selftest": is_selftest_fixture(entry)}
 
         for name in self._overlapping(secrets):
             del secrets[name]
@@ -454,17 +493,27 @@ class DesolateProxy:
         """
         return message.content or b""
 
+    def _real_secrets(self):
+        return {n: e for n, e in self.secrets.items() if not is_selftest_fixture(e)}
+
+    def _selftest_fixtures(self):
+        return {n: e for n, e in self.secrets.items() if is_selftest_fixture(e)}
+
     def _placeholders_in_request(self, flow):
-        """Return the set of configured placeholder names present anywhere in the request."""
-        if not self.secrets:
+        return self._fixtures_in_request(flow) | self._secrets_in_request(flow)
+
+    def _fixtures_in_request(self, flow):
+        carriers = {v.strip() for _, v in flow.request.headers.items(multi=True)}
+        return {name for name in self._selftest_fixtures() if name in carriers}
+
+    def _secrets_in_request(self, flow):
+        names = self._real_secrets()
+        if not names:
             return set()
         url = flow.request.url
-        header_blob = "\n".join(f"{k}: {v}" for k, v in flow.request.headers.items(multi=True))
+        headers = "\n".join(f"{k}: {v}" for k, v in flow.request.headers.items(multi=True))
         body = self.decoded_body(flow.request)
-        return {
-            name for name in self.secrets
-            if name in url or name in header_blob or name.encode() in body
-        }
+        return {n for n in names if n in url or n in headers or n.encode() in body}
 
     # ---------- mitmproxy hooks ----------
 
@@ -615,7 +664,7 @@ class DesolateProxy:
         # confirms a hit by comparing the whole encoded body.
         body = self.decoded_body(flow.response)
         scrubbed = body
-        for name, entry in self.secrets.items():
+        for name, entry in self._real_secrets().items():
             value, bvalue = entry["value"], entry["value"].encode()
             for k, v in list(flow.response.headers.items(multi=True)):
                 if value in v:

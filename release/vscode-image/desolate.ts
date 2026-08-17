@@ -74,6 +74,7 @@ import {
   mintToken,
 } from "./editor.ts";
 import * as relay from "./relays.ts";
+import * as shutdown from "./shutdown.ts";
 import { snapshotDirectory, snapshot, initDirectory } from "./snapshot.ts";
 import {
   allocatePorts,
@@ -130,7 +131,7 @@ const dieOnError = <T>(produce: () => T): T => {
  *  asks for. Kept here rather than in docker.ts so the module stays injectable. */
 const dockerRunner: Runner = {
   output: (argv) => run("docker", argv, { encoding: "utf8" }, true),
-  status: (argv, quiet = false) => run.status("docker", argv, quiet),
+  status: (argv, options) => run.status("docker", argv, options),
   build: (argv, input) => {
     try {
       execFileSync("docker", argv, {
@@ -629,7 +630,7 @@ const devcontainerUp = (target: Target, config: string, noCache = false) => {
   ];
 
   if (noCache) args.push("--build-no-cache");
-  const code = run.status("devcontainer", args, /* quiet */ true);
+  const code = run.status("devcontainer", args, { quiet: true });
   if (code !== 0) die(`devcontainer up failed (exit ${code})`);
 };
 
@@ -981,7 +982,7 @@ function stopTarget(target: Target): void {
   }
   const id = devcontainerId(target.dir);
   if (id) {
-    docker.container.stop(id);
+    shutdown.devcontainer(docker, id, desolog);
     // Say that the container is KEPT. Stopping and starting again looks like it
     // should pick up an edited devcontainer.json, and it does not -- `up`
     // restarts the existing container rather than rebuilding from the spec.

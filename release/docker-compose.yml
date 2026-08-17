@@ -46,6 +46,10 @@ services:
         # Binding needs write permission on the directory.
         # (This differs from /run/inner as the orchestrator only CONNECTS to it.)
         chown 1000:1000 /run/broker
+        # dind's healthcheck and `cli.sh reset-inner` both execute this file,
+        # out of this volume. dind runs a stock docker:*-dind image, so a volume
+        # is how a script this repo owns reaches it at all.
+        install -m 0555 /usr/local/lib/desolate/inner-health.sh /desolate-health/
         VER=$$(cat /home/.desolate-server/.version 2>/dev/null || true)
         # Fail closed: an image without a version stamp cannot be compared
         # against what is already seeded, and seeding anyway would leave the
@@ -65,6 +69,7 @@ services:
       - server-dist:/server-dist
       - inner-run:/run/inner
       - broker-run:/run/broker
+      - inner-health:/desolate-health
     restart: "no"
 
   # ── Inner Docker daemon (docker-in-docker) ────────────────────────────
@@ -130,10 +135,21 @@ services:
       # copied up, never down -- and `:ro` is the second lock, covering anything
       # inside dind that touches the path directly.
       - server-dist:/server-dist:ro
+      # Read-only: the file mounted here decides whether this container is
+      # healthy, and the container it judges is not the one that should be able
+      # to rewrite it. volume-init seeds it (see above).
+      - inner-health:/desolate-health:ro
     healthcheck:
-      # Healthy only once dockerd is up and the socket exists -- dependents
-      # wait on this, which fixes the startup race on first boot.
-      test: ["CMD", "docker", "-H", "unix:///run/inner/docker.sock", "info"]
+      # Healthy only once dockerd is up and answering -- the orchestrator and
+      # the editor wait on this, which fixes the startup race on first boot.
+      #
+      # `info` is still the definition of healthy: the script only adds WHICH
+      # not-healthy state this is. A daemon that is booting normally and one
+      # that will never finish reconciling are the same `unhealthy` two minutes
+      # later, and two minutes of a stack that might be fine is exactly long
+      # enough to start pulling on things. `cli.sh reset-inner` runs this same
+      # file, so the two cannot come to disagree about "wedged".
+      test: ["CMD", "sh", "/desolate-health/inner-health.sh"]
       interval: 5s
       timeout: 3s
       retries: 24
@@ -310,6 +326,7 @@ volumes:
   keyring-keys:   # private keys -- keyring only
   keyring-run:    # agent socket + public keys -- keyring + editor
   inner-run:
+  inner-health:  # the daemon classifier dind and cli.sh both run
   broker-run:
   dind-sysbox-data:
   workspaces:

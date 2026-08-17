@@ -5,14 +5,15 @@
  * The commands are built here rather than at the call sites for
  * readability and testability.
  */
+import type { RunOptions } from "./utils.ts";
 
 /** How a command reaches the world. The two shapes differ in what they return,
  *  not in what they run: `output` is for queries, `status` for effects. */
 export interface Runner {
   /** stdout, trimmed. "" when the command failed. */
   output: (argv: string[]) => string;
-  /** Exit status. `quiet` suppresses the command's stdout. */
-  status: (argv: string[], quiet?: boolean) => number;
+  /** Exit status; a bound that fires reports as a non-zero one. */
+  status: (argv: string[], options?: RunOptions) => number;
   /** Feed `input` on stdin. Returns the failure's own output when it fails, so
    *  a build error can be quoted back rather than reduced to a status. */
   build: (argv: string[], input: string) => { ok: boolean; output: string };
@@ -115,6 +116,45 @@ export const parseMounts = (text: string): Mount[] => {
   return mounts;
 };
 
+/** What each of the project's own containers gets before it is killed. */
+const GRACE_SECONDS = 10;
+/** How long the project's daemon gets to exit after its SIGTERM. */
+const DAEMON_EXIT_SECONDS = 10;
+/** The cap on a whole quiesce program, applied where that program runs. */
+const QUIESCE_SECONDS = 30;
+
+/**
+ * What a devcontainer with a daemon of its own is asked to do before it is
+ * stopped, as two shell programs. Programs rather than argv because both are
+ * loops over what they find inside the container.
+ */
+const QUIESCE = {
+  /** Empty is not a failure: `docker stop` with no arguments is an error, and
+   *  a project that is simply running nothing must not report as one. */
+  containers: `ids=$(docker ps -q); [ -z "$ids" ] || docker stop --time ${GRACE_SECONDS} $ids`,
+  /** SIGTERM, then wait for the process to actually be gone -- an exit is the
+   *  only evidence that its overlay mounts came down with it. */
+  daemon: [
+    "pkill -TERM dockerd 2>/dev/null",
+    `i=0; while pgrep -x dockerd >/dev/null 2>&1; do` +
+      ` [ "$i" -lt ${DAEMON_EXIT_SECONDS} ] || exit 1; sleep 1; i=$((i+1)); done`,
+  ].join("; "),
+} as const;
+
+/** Every exec into a devcontainer that is on its way down is bounded TWICE:
+ *  `timeout` caps the program where it runs, and this caps an exec that never
+ *  gets that far. A devcontainer whose daemon is already hung can hang the exec
+ *  itself, and `desolate --stop` must not inherit that. */
+const EXEC_MS = { quiesce: 45_000, probe: 10_000 } as const;
+
+const capped = (program: string) => [
+  "timeout",
+  String(QUIESCE_SECONDS),
+  "sh",
+  "-c",
+  program,
+];
+
 export const createDocker = (run: Runner) => {
   const query = (...argv: string[]) => run.output(argv);
   const effect = (...argv: string[]) => run.status(argv);
@@ -201,17 +241,37 @@ export const createDocker = (run: Runner) => {
      *  to want backgrounding is work that can still hold mounts when the
      *  container is stopped, and a container stopped that way cannot be stopped
      *  at all. */
-    execAsRoot: (cid: string, argv: string[], { quiet = true } = {}) =>
-      run.status(["exec", "-u", "0", cid, ...argv], quiet),
+    execAsRoot: (
+      cid: string,
+      argv: string[],
+      { quiet = true, timeoutMs }: RunOptions = {},
+    ) => run.status(["exec", "-u", "0", cid, ...argv], { quiet, timeoutMs }),
 
     /** Whether the container has a docker CLI, and so a daemon of its own --
-     *  which is what the docker-in-docker feature installs. */
+     *  which is what the docker-in-docker feature installs.
+     *
+     *  Bounded, because one of the two questions this answers is asked of a
+     *  container that is being stopped, and a container that cannot answer at
+     *  all is one there is no daemon to talk to either way. */
     hasDockerCli: (cid: string) =>
-      container.execAsRoot(cid, [
-        "sh",
-        "-c",
-        "command -v docker >/dev/null 2>&1",
-      ]) === 0,
+      container.execAsRoot(
+        cid,
+        ["sh", "-c", "command -v docker >/dev/null 2>&1"],
+        { timeoutMs: EXEC_MS.probe },
+      ) === 0,
+
+    /** Ask the container's own daemon to put its containers away, so their
+     *  mount namespaces are gone before the container holding them is stopped. */
+    stopInnerContainers: (cid: string) =>
+      container.execAsRoot(cid, capped(QUIESCE.containers), {
+        timeoutMs: EXEC_MS.quiesce,
+      }),
+
+    /** ...and then to stop itself, so the mounts IT holds come down too. */
+    stopInnerDaemon: (cid: string) =>
+      container.execAsRoot(cid, capped(QUIESCE.daemon), {
+        timeoutMs: EXEC_MS.quiesce,
+      }),
   };
 
   const volume = {
@@ -256,7 +316,7 @@ export const createDocker = (run: Runner) => {
   const image = {
     /** "" when the image is not present locally. */
     id: (tag: string) => query("image", "inspect", "-f", "{{.Id}}", tag),
-    pull: (tag: string) => run.status(["pull", tag], true),
+    pull: (tag: string) => run.status(["pull", tag], { quiet: true }),
     /** The image's declared USER, or "root" when it declares none.
      *
      *  A derived image has to restore it: building as root and leaving it there
@@ -281,12 +341,24 @@ export const createDocker = (run: Runner) => {
     ) =>
       run.status(
         ["run", "--rm", "-v", `${volumeName}:${target}`, helperImage, ...argv],
-        true,
+        { quiet: true },
       ),
     relay: {
       /** Mac:hostPort -> (daemon #0 range publish) -> dind ns:hostPort ->
        *  (this relay's publish on daemon #1) -> socat -> devcontainer IP.
-       *  The relay joins the devcontainer's own network so `ip` is routable. */
+       *  The relay joins the devcontainer's own network so `ip` is routable.
+       *
+       *  NO RESTART POLICY, deliberately. What this starts is socat pointed at
+       *  an ADDRESS, read once when the relay was created, and that address
+       *  means something only while the devcontainer it came from is up on that
+       *  network. `unless-stopped` outlived both: on a daemon restart docker
+       *  brought every relay back BEFORE -- and independently of -- the
+       *  devcontainers they dial, so each one failed, restarted and added its
+       *  own churn to the startup reconciliation; and a devcontainer recreated
+       *  on a different address left the old relay forwarding a host port to
+       *  whatever now holds the old one, which is worse than a dead port.
+       *  Nothing needs the policy: `--stop` removes a target's relays and every
+       *  start replaces them. */
       start: (spec: {
         image: string;
         name: string;
@@ -299,8 +371,6 @@ export const createDocker = (run: Runner) => {
         effect(
           "run",
           "-d",
-          "--restart",
-          "unless-stopped",
           "--name",
           spec.name,
           "--label",
@@ -337,7 +407,7 @@ export const createDocker = (run: Runner) => {
               `wget -S -O /dev/null -T 2 http://127.0.0.1:${port}/ 2>&1 | grep -q 'HTTP/'; ` +
               `else socat -T 2 /dev/null TCP:127.0.0.1:${port}; fi`,
           ],
-          true,
+          { quiet: true },
         ) === 0,
     },
   };

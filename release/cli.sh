@@ -13,6 +13,7 @@
 #   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
+#   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
 #   ./isolated-devcontainers-suede/cli.sh <any command...>          # runs in the editor container
 #
 # Requires Colima + sysbox (see README "Setup"). `up` refuses to start if the
@@ -25,7 +26,7 @@ COLIMA_PROFILE="${COLIMA_PROFILE:-desolate}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 usage() {
-  sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -112,6 +113,18 @@ SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
 # instead, so nothing is rebound. (And `[a,b]|any` rather than `a or b`, because
 # `or` needs spaces around it.)
 SECRET_COLLISION_JQ='(.secrets//{})|keys[]|select(.!=$n)|select([contains($n),inside($n)]|any)'
+
+SELFTEST_FIXTURE=DESOLATE-SELFTEST-PLACEHOLDER
+
+explain_selftest_fixture_is_not_a_secret() {
+  echo "cli.sh: $SELFTEST_FIXTURE is preflight's self-test fixture," >&2
+  echo "        not a secret -- its value is fake and its allowlist pins" >&2
+  echo "        httpbin.org. Removing it does not remove a secret; it removes" >&2
+  echo "        preflight's ability to prove leak detection is live, and the" >&2
+  echo "        probes then fail claiming the addon is broken." >&2
+  echo "        Restore it with: $0 vm install --proxy-only" >&2
+  echo "        If you really mean it: $0 secret rm $SELFTEST_FIXTURE --force" >&2
+}
 
 # Whether a --hosts entry PINS a destination. "*" is not an allowlist, it is the
 # absence of one spelled so it looks deliberate: the secret becomes a bearer
@@ -296,6 +309,202 @@ EOF
   fi
 }
 
+# ── reset-inner: recovering a wedged inner daemon ──────────────────────────
+#
+# The recovery used to be folklore -- "delete desolate_dind-sysbox-data" -- which
+# is the image store for every project, and lived in the memory of whoever hit it
+# last. Here it is a ladder instead, climbed one rung at a time and stopped at
+# the first rung that leaves a daemon answering. The cheap rung is usually
+# enough, and a single hammer teaches people to reach for the hammer.
+DIND_SERVICE=dind
+DIND=desolate-dind
+# The image store for EVERY project. Written out rather than derived, the way
+# observe.sh names desolate_inner-run; tests/static/11 asserts it against what
+# compose actually renders, so the two cannot drift.
+DIND_DATA_VOLUME=desolate_dind-sysbox-data
+# The classifier dind's healthcheck runs, in the volume both can reach. Running
+# the same file is the point: "wedged" must not mean two things.
+INNER_HEALTH=/desolate-health/inner-health.sh
+INNER_SOCKET=unix:///run/inner/docker.sock
+# What a query gets inside dind before it is abandoned. A wedged daemon answers
+# nothing, and this command must not inherit that.
+INNER_PATIENCE=20
+# How long a restarted daemon gets to answer before the next rung is offered.
+SETTLE_SECONDS=60
+RESET_DATA_ROOT_FLAG=--reset-data-root
+
+dind_running() {
+  docker inspect -f '{{.State.Status}}' "$DIND" 2>/dev/null | grep -qx running
+}
+
+require_dind() {
+  docker inspect "$DIND" >/dev/null 2>&1 && return 0
+  echo "cli.sh: $DIND does not exist -- there is no inner daemon to recover." >&2
+  echo "        Start the stack first:  $0 up" >&2
+  exit 1
+}
+
+# A stack older than the classifier would report every state as "not answering",
+# and recommending a data-root reset because a FILE is missing is exactly the
+# superstition this command exists to replace.
+require_classifier() {
+  dind_running || return 0   # nothing to ask; rung 1 will say it is down
+  docker exec "$DIND" test -e "$INNER_HEALTH" 2>/dev/null && return 0
+  echo "cli.sh: $DIND does not carry $INNER_HEALTH." >&2
+  echo "        It is seeded into a volume at start, so this stack predates it." >&2
+  echo "        Recreate the daemon first -- nothing is lost:  $0 up" >&2
+  exit 1
+}
+
+# One line, and the classifier's verdict as this function's status.
+inner_health() {
+  dind_running || { echo "inner daemon: down -- $DIND is not running"; return 1; }
+  docker exec "$DIND" sh "$INNER_HEALTH"
+}
+
+# Inner-daemon queries go through dind and NOT through the orchestrator that
+# observe.sh uses: the orchestrator depends_on dind being healthy, so on the
+# boot this command exists for, it never started at all.
+inner_docker() {
+  docker exec "$DIND" timeout "$INNER_PATIENCE" docker -H "$INNER_SOCKET" "$@"
+}
+
+# Container ids carrying a label, in any of the given states.
+inner_ids() {
+  local label=$1 state
+  local filters=()
+  shift
+  for state in "$@"; do filters+=(--filter "status=$state"); done
+  # Same guard as vm_install's `envs`: `set -u` and an EMPTY array is an
+  # "unbound variable" on the bash a Mac ships (3.2), not an empty expansion.
+  inner_docker ps -aq --filter "label=$label" ${filters[@]+"${filters[@]}"} 2>/dev/null
+}
+
+# "3 running, 2 exited, 1 dead", from one column of container states.
+count_by_state() {
+  printf '%s\n' "$1" | sed '/^$/d' | sort | uniq -c \
+    | awk '{ printf "%s%s %s", sep, $1, $2; sep=", " }
+           END { if (!sep) printf "none"; printf "\n" }'
+}
+
+# What a restart would have to reconcile. A daemon that cannot answer `ps` says
+# so: reporting "no containers" would be a lie in the one state that matters.
+inner_container_states() {
+  local states
+  states=$(inner_docker ps -a --format '{{.State}}' 2>/dev/null) \
+    || { echo "cannot say -- the daemon did not answer 'ps' either"; return 0; }
+  count_by_state "$states"
+}
+
+# Rung 1. Printed always, before anything is touched, so the next choice is
+# informed rather than superstitious.
+report_inner_daemon() {
+  local verdict=0
+  echo "-- rung 1: what the inner daemon is doing --"
+  inner_health || verdict=$?
+  echo "  containers: $(inner_container_states)"
+  return "$verdict"
+}
+
+sweep_inner() {
+  local what=$1 ids=$2
+  if [ -z "${ids//[[:space:]]/}" ]; then
+    echo "  no stale $what"
+    return 0
+  fi
+  echo "  removing $(printf '%s\n' "$ids" | wc -l | tr -d ' ') stale $what"
+  # shellcheck disable=SC2086  # several ids, deliberately word-split
+  inner_docker rm -f $ids >/dev/null 2>&1 || echo "  ...some of them would not go"
+}
+
+# Rung 2. Remove what reconciliation is choking on, then restart the daemon
+# alone -- the editor, the keyring and every other project stay up.
+sweep_and_restart_dind() {
+  echo "-- rung 2: sweeping stale objects, then restarting $DIND_SERVICE --"
+  sweep_inner "relays that are no longer running" \
+    "$(inner_ids desolate.relay created exited dead restarting)"
+  # `dead` only. A STOPPED devcontainer is one `desolate --stop` deliberately
+  # kept so the next start is fast; `dead` is what docker leaves behind when it
+  # could not finish removing one, and that is the object reconciliation trips on.
+  sweep_inner "devcontainers the daemon could not finish removing" \
+    "$(inner_ids devcontainer.local_folder dead)"
+  echo "  restarting $DIND_SERVICE (nothing else in the stack is touched)"
+  compose restart "$DIND_SERVICE" || echo "cli.sh: the restart itself failed" >&2
+}
+
+data_root_reset_requested() { [ "${1:-}" = "$RESET_DATA_ROOT_FLAG" ]; }
+
+explain_data_root_reset() {
+  cat >&2 <<EOF
+cli.sh: the sweep did not bring the inner daemon back.
+
+What is left is deleting its data root, $DIND_DATA_VOLUME -- the image store
+shared by every project. That is not something to arrive at by falling through,
+so ask for it:
+  $0 reset-inner $RESET_DATA_ROOT_FLAG
+EOF
+}
+
+confirm_data_root_reset() {
+  cat <<EOF
+This DELETES $DIND_DATA_VOLUME. Every base image is pulled again and every build
+cache is gone, for every project; every devcontainer inside it is recreated from
+its spec on the next start, so anything written in one outside /workspaces goes
+with it. /workspaces is a separate volume and is NOT touched.
+EOF
+  local answer
+  read -r -p "Type 'yes' to confirm: " answer
+  [ "$answer" = yes ]
+}
+
+# Rung 3, and the only rung that destroys anything. It refuses ITSELF without
+# the flag rather than trusting the ladder above to have checked, which is what
+# tests/static/11 executes it to prove.
+reset_data_root() {
+  data_root_reset_requested "${1:-}" || { explain_data_root_reset; return 1; }
+  confirm_data_root_reset || return 1
+  echo "-- rung 3: resetting the inner daemon's data root --"
+  # Removed, not stopped: a volume with a container still referencing it cannot
+  # be deleted, and a half-done rung 3 is the worst state of all.
+  compose rm -sf "$DIND_SERVICE" || return 1
+  docker volume rm "$DIND_DATA_VOLUME" || return 1
+  compose up -d "$DIND_SERVICE"
+}
+
+# Poll quietly, then print the verdict once -- a line per probe would bury it.
+inner_daemon_settles() {
+  local remaining=$SETTLE_SECONDS
+  while [ "$remaining" -gt 0 ]; do
+    inner_health >/dev/null 2>&1 && break
+    sleep 2
+    remaining=$((remaining - 2))
+  done
+  inner_health
+}
+
+reset_inner() {
+  if report_inner_daemon; then
+    echo "cli.sh: the inner daemon is answering -- nothing to recover."
+    return 0
+  fi
+
+  sweep_and_restart_dind
+  if inner_daemon_settles; then
+    echo "cli.sh: recovered without touching the data root."
+    return 0
+  fi
+
+  reset_data_root "${1:-}" || return 1
+  if inner_daemon_settles; then
+    echo "cli.sh: recovered. Base images pull again on demand."
+    return 0
+  fi
+
+  echo "cli.sh: the inner daemon is still not answering after a full reset." >&2
+  echo "        Its own log is the next thing to read:  $0 logs $DIND_SERVICE" >&2
+  return 1
+}
+
 # Read one key out of .env the way compose's env_file does -- so what we print
 # matches what the stack is actually running with.
 #
@@ -475,6 +684,20 @@ case "$CMD" in
              compose down "$@" ;;
 
   build)     compose build "$@" ;;
+
+  reset-inner)
+             # Deliberately NOT ensure_running: the editor is not what this
+             # recovers, and on the boot where dind never came up it is not
+             # running either.
+             require_dind
+             require_classifier
+             FLAG="${1:-}"
+             if [ -n "$FLAG" ] && ! data_root_reset_requested "$FLAG"; then
+               echo "usage: cli.sh reset-inner [$RESET_DATA_ROOT_FLAG]" >&2
+               exit 1
+             fi
+             reset_inner "$FLAG" ;;
+
   logs)      compose logs "${@:--f --tail=100}" ;;
   ps)        compose ps ;;
   preflight) exec "$SCRIPT_DIR/preflight.sh" ;;
@@ -591,13 +814,21 @@ case "$CMD" in
                  fi
                  ;;
                rm)
-                 NAME="${1:?usage: cli.sh secret rm NAME}"
+                 NAME="${1:?usage: cli.sh secret rm NAME}"; shift
                  case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
+                 # --force stays reachable: deleting the fixture used to be the
+                 # only cure for it 403ing traffic that merely named it, and if
+                 # addon.py's narrowed match ever regresses, an undeletable
+                 # fixture means an unusable stack.
+                 if [ "$NAME" = "$SELFTEST_FIXTURE" ] && [ "${1:-}" != "--force" ]; then
+                   explain_selftest_fixture_is_not_a_secret
+                   exit 1
+                 fi
                  vm sudo sh -c 'umask 077; F=/etc/desolate-proxy/settings.json; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
                    jq --arg n "$1" "del(.secrets[\$n])" "$F" > "$T" \
                    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" && echo removed' _ "$NAME"
                  ;;
-               *) echo "usage: cli.sh secret {add NAME --hosts a,b | list | rm NAME}" >&2; exit 1 ;;
+               *) echo "usage: cli.sh secret {add NAME --hosts a,b | list | rm NAME [--force]}" >&2; exit 1 ;;
              esac ;;
 
   vm)        SUB="${1:-status}"; shift || true
