@@ -1,0 +1,39 @@
+{
+  "name": "sample-siblings",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  // The v2 shape, and the whole point of this fixture: the CLI and NOTHING
+  // else. No daemon inside this container, so no `--privileged` below and no
+  // `allowPrivileged` opt-in anywhere in this file.
+  //
+  // Compare samples/sample-fastapi, which is the same application shape built
+  // the way this stack supports TODAY: docker-in-docker, privileged, and an
+  // explicit acknowledgement that it holds root over every other project.
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+
+  // NOTE the absence of "workspaceFolder" and "workspaceMount". Declaring them
+  // would hardcode this fixture to one location, and both of the things that
+  // would set them get it right on their own: the CLI's default puts a
+  // top-level project at /workspaces/<basename>, and desolate REPLACES the
+  // mount with one mirroring the real path for a worktree or a nested project.
+  //
+  // Where the source is mounted stopped being cosmetic under the sibling
+  // design. A bind source is resolved by the DAEMON, so `docker run -v $(pwd)`
+  // only works while this container's path and the daemon's path are the same
+  // string. Under docker-in-docker they were the same trivially -- the daemon
+  // was in here.
+
+  "customizations": {
+    "desolate": {
+      // 8000 = the web service in compose.yml, published by a SIBLING
+      // container rather than by this one. Whether that still reaches your
+      // browser is one of the things diagnose.sh reports on.
+      "ports": [8000]
+    },
+    "vscode": { "extensions": [] }
+  },
+
+  "remoteEnv": { "SSH_AUTH_SOCK": "", "GPG_AGENT_INFO": "", "GIT_ASKPASS": "" }
+}

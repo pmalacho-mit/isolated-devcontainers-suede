@@ -19,6 +19,7 @@ import {
   volumeNamespace,
 } from "../../../release/vscode-image/projects.ts";
 import * as relay from "../../../release/vscode-image/relays.ts";
+import * as dind from "../../../release/vscode-image/dind.ts";
 import {
   SHARED_DIRECTORIES,
   overlayVolumes,
@@ -61,6 +62,17 @@ describe("a target with no worktree is named exactly as it was", () => {
     );
     assert.equal(relay.label(flat), "desolate.relay=myapp");
     assert.equal(relay.label(nested), "desolate.relay=acme/widgets");
+  });
+
+  test("the project dind, and the label that finds it", () => {
+    assert.equal(dind.name(flat), "desolate-dind-myapp");
+    assert.equal(dind.name(nested), "desolate-dind-acme__widgets");
+    assert.equal(dind.label(flat), "desolate.dind=myapp");
+    assert.equal(dind.label(nested), "desolate.dind=acme/widgets");
+    assert.deepEqual(dind.volumes(nested), {
+      data: "dind-data-acme__widgets",
+      socket: "dind-sock-acme__widgets",
+    });
   });
 
   test("the state files under /workspaces/.desolate", () => {
@@ -107,5 +119,17 @@ describe("a worktree target is named apart from its project", () => {
     const name = relay.name(worktree, 8082);
     assert.equal(name, "desolate-relay-acme__widgets--wt--feature123-8082");
     assert.equal(relay.hostPort(name), 8082);
+  });
+
+  // The one thing it does NOT get apart: the docker daemon. Everything else a
+  // worktree owns is keyed on its own namespace, so a dind keyed the same way
+  // reads as consistent and is wrong -- it would be a daemon that cannot run
+  // git, because a worktree's .git points into the project's tree.
+  test("but it SHARES its project's dind, down to the bridge", () => {
+    assert.equal(dind.name(worktree), "desolate-dind-acme__widgets");
+    assert.equal(dind.name(worktree), dind.name(nested));
+    assert.equal(dind.label(worktree), "desolate.dind=acme/widgets");
+    assert.deepEqual(dind.volumes(worktree), dind.volumes(nested));
+    assert.equal(dind.bridge(worktree), dind.bridge(nested));
   });
 });

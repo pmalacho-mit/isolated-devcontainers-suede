@@ -34,7 +34,6 @@
 //   Mac 127.0.0.1:8081 -> dind:8081 (relay) -> <devcontainer-ip>:5173
 /// <reference types="node" />
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { enforcePolicy } from "./policy.ts";
@@ -54,7 +53,7 @@ import {
 import { directory as stateDirectory, stateFile } from "./state.ts";
 import * as worktrees from "./worktrees.ts";
 import { parse as parseJsonc } from "./jsonc.ts";
-import { isEntryPoint, run, type JSONValue } from "./utils.ts";
+import { isEntryPoint, run, sha16, type JSONValue } from "./utils.ts";
 import { parseArgs, USAGE, type Args } from "./args.ts";
 import { createDocker, type NetworkAttachment, type Runner } from "./docker.ts";
 import {
@@ -151,9 +150,6 @@ const docker = createDocker(dockerRunner);
 
 /** Blocking sleep (we are in a sequential CLI, not an event loop hot path). */
 const sleep = (ms: number) => execFileSync("sleep", [String(ms / 1000)]);
-
-const sha16 = (raw: string) =>
-  createHash("sha256").update(raw).digest("hex").slice(0, 16);
 
 const desolog = (...[first, ...rest]: string[]) =>
   console.log(`desolate: ${first}`, ...rest);
