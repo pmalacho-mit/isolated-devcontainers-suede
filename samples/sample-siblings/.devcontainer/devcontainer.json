@@ -13,8 +13,17 @@
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
 
-  "workspaceFolder": "/workspaces/sample-siblings",
-  "workspaceMount": "source=/workspaces/sample-siblings,target=/workspaces/sample-siblings,type=bind",
+  // NOTE the absence of "workspaceFolder" and "workspaceMount". Declaring them
+  // would hardcode this fixture to one location, and both of the things that
+  // would set them get it right on their own: the CLI's default puts a
+  // top-level project at /workspaces/<basename>, and desolate REPLACES the
+  // mount with one mirroring the real path for a worktree or a nested project.
+  //
+  // Where the source is mounted stopped being cosmetic under the sibling
+  // design. A bind source is resolved by the DAEMON, so `docker run -v $(pwd)`
+  // only works while this container's path and the daemon's path are the same
+  // string. Under docker-in-docker they were the same trivially -- the daemon
+  // was in here.
 
   "customizations": {
     "desolate": {

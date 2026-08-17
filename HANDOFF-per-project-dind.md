@@ -112,9 +112,18 @@ Its `dockerRunner` is currently hardwired to the inner socket. A target that
 **refuse to start at all** if that daemon is not up. This is the fail-closed
 step that makes step 4 safe.
 
-Also here: the `docker network connect` for compose networks (Q5b), and the
-relay retarget — under v2 the app publishes on the *dind*, not on the
-devcontainer, so what a relay dials changes. `sample-siblings` exposes both.
+Also here:
+
+- the `docker network connect` for compose networks (Q5b), and the relay
+  retarget — under v2 the app publishes on the *dind*, not on the devcontainer,
+  so what a relay dials changes. `sample-siblings` exposes both.
+- **`mustMirrorItsOwnPath` has to stop being conditional** for a target with its
+  own daemon. It currently defers to a nested project that declared
+  `workspaceFolder` or `workspaceMount`, which was harmless when the daemon was
+  inside the devcontainer and is not now: a mismatch makes `docker run -v
+  $(pwd)` hand the daemon a path it does not have, and docker creates it as an
+  empty directory rather than failing. The build runs and builds nothing. See
+  the spec section of the same name.
 
 ### 4. The policy exception
 
