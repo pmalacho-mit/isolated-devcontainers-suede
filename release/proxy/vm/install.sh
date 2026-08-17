@@ -51,54 +51,47 @@ install -m 0755 ../container/install-ca.sh /opt/desolate-proxy/install-ca.sh
 
 echo "==> config (0600, proxy-owned, VM disk only -- never under a Colima mount)"
 install -d -m 0750 -o desolate-proxy -g desolate-proxy /etc/desolate-proxy
-if [ ! -f /etc/desolate-proxy/settings.json ]; then
-    install -m 0600 -o desolate-proxy -g desolate-proxy settings.example.json /etc/desolate-proxy/settings.json
+SETTINGS_JSON=/etc/desolate-proxy/settings.json
+
+# The fixture preflight trips to prove leak detection is live. Re-asserted on
+# every run because this installer is documented idempotent and seeding was the
+# one part of it that was not: `cli.sh secret rm` could delete the fixture, and
+# addon.py matches only CONFIGURED placeholders, so its absence made the probes
+# report "secrets can be exfiltrated" against a healthy addon.
+SELFTEST_FIXTURE_JQ='.secrets["DESOLATE-SELFTEST-PLACEHOLDER"] = {value: "injected-selftest-value-93f2", hosts: ["httpbin.org"], selftest: true}'
+# Not mere presence: a fixture from an older install carries no "selftest" flag
+# and therefore still 403s every request that merely names it (see addon.py).
+SELFTEST_FIXTURE_CURRENT_JQ='.secrets["DESOLATE-SELFTEST-PLACEHOLDER"].selftest == true'
+
+selftest_fixture_is_current() { jq -e "$SELFTEST_FIXTURE_CURRENT_JQ" "$1" >/dev/null 2>&1; }
+
+# A subshell body, so umask and the temp-file trap cannot outlive the rewrite.
+# 077 keeps the temp file from existing 0644 while it holds the whole store.
+write_selftest_fixture() (
+  umask 077
+  T=$(mktemp)
+  trap 'rm -f "$T"' EXIT INT TERM
+  jq "$SELFTEST_FIXTURE_JQ" "$1" > "$T" \
+    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$1"
+)
+
+warn_selftest_fixture_unrestorable() {
+  echo "    WARNING: could not restore the self-test fixture into $1" >&2
+  echo "             preflight's leak/spoof probes will report a false alarm." >&2
+}
+
+restore_selftest_fixture() {
+  if   selftest_fixture_is_current "$1"; then echo "    self-test fixture present"
+  elif write_selftest_fixture "$1";      then echo "    restored the self-test fixture (preflight's probes need it)"
+  else warn_selftest_fixture_unrestorable "$1"
+  fi
+}
+
+if [ ! -f "$SETTINGS_JSON" ]; then
+    install -m 0600 -o desolate-proxy -g desolate-proxy settings.example.json "$SETTINGS_JSON"
     echo "    wrote example settings -- add real values with: ./cli.sh secret add ..."
 else
-    # Re-assert the SELF-TEST FIXTURE, and nothing else.
-    #
-    # preflight's leak-detection and plaintext-spoof probes both send
-    # X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER, and addon.py only recognises
-    # CONFIGURED placeholder names -- so with the fixture absent the probes
-    # cannot fail closed. They report "the addon may have failed to load" and
-    # "secrets can be exfiltrated" while the addon is healthy, which is a
-    # false alarm loud enough to teach you to ignore the check.
-    #
-    # The fixture is safe to re-assert unconditionally: the value is fake and
-    # its allowlist pins httpbin.org, so substituting it toward anywhere else
-    # is exactly the 403 the probes are asserting. This installer is
-    # documented idempotent; the seed above was the one part of it that was
-    # not.
-    #
-    # "selftest": true is not decoration -- it is what stops the fixture from
-    # 403ing ordinary traffic that merely MENTIONS its name (this repo's own
-    # source does, so `git push` did). Without it, re-asserting on every run
-    # would make the poison permanent instead of fixing it. addon.py's header
-    # section has the whole argument.
-    #
-    # jq's output is installed with the same mode/owner as every other write
-    # to this file (cli.sh secret add|rm do the same), under umask 077 so the
-    # temp file never exists 0644 while it holds the whole store.
-    (
-      umask 077
-      F=/etc/desolate-proxy/settings.json
-      T=$(mktemp)
-      trap 'rm -f "$T"' EXIT INT TERM
-      # -e alone is not enough: it is also satisfied by a fixture left behind
-      # by an older install, which has no "selftest" flag and therefore still
-      # blocks any request naming it. Assert the shape, not the presence.
-      if jq -e '.secrets["DESOLATE-SELFTEST-PLACEHOLDER"].selftest == true' "$F" >/dev/null 2>&1; then
-        echo "    self-test fixture present"
-      elif jq '.secrets["DESOLATE-SELFTEST-PLACEHOLDER"] =
-                 {value: "injected-selftest-value-93f2", hosts: ["httpbin.org"], selftest: true}' \
-             "$F" > "$T" \
-           && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F"; then
-        echo "    restored the self-test fixture (preflight's probes need it)"
-      else
-        echo "    WARNING: could not restore the self-test fixture into $F" >&2
-        echo "             preflight's leak/spoof probes will report a false alarm." >&2
-      fi
-    )
+    restore_selftest_fixture "$SETTINGS_JSON"
 fi
 install -d -m 0750 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy
 # Public dir must exist before compose starts (dind bind-mounts it read-only).

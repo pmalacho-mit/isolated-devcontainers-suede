@@ -1013,17 +1013,10 @@ def test_E12c_every_verdict_reaches_the_audit(tmp_path, caplog):
 # ===========================================================================
 # the self-test fixture
 #
-# preflight proves leak detection is running by tripping it, which needs a
-# placeholder that exists. The one that ships is DESOLATE-SELFTEST-PLACEHOLDER,
-# and it has failed in BOTH directions -- deleted, so the probes stopped
+# It has failed in both directions: deleted, so preflight's probes stopped
 # failing closed and reported `secrets can be exfiltrated` against a healthy
-# addon; and present, where its name (a string this repo publishes in its own
-# source and docs) made every request that merely MENTIONED it a 403 toward any
-# host but httpbin.org, so `git push` was refused.
-#
-# `"selftest": true` is what separates the probe from prose: matched only as a
-# complete header value, never scrubbed out of a response. These pin that it
-# still catches the probes and no longer catches anything else.
+# addon; and present, where its published NAME made every request merely
+# mentioning it a 403. `"selftest": true` separates the probe from prose.
 # ===========================================================================
 
 FIXTURE_NAME = "DESOLATE-SELFTEST-PLACEHOLDER"

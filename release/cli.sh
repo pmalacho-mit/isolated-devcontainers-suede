@@ -113,6 +113,18 @@ SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
 # `or` needs spaces around it.)
 SECRET_COLLISION_JQ='(.secrets//{})|keys[]|select(.!=$n)|select([contains($n),inside($n)]|any)'
 
+SELFTEST_FIXTURE=DESOLATE-SELFTEST-PLACEHOLDER
+
+explain_selftest_fixture_is_not_a_secret() {
+  echo "cli.sh: $SELFTEST_FIXTURE is preflight's self-test fixture," >&2
+  echo "        not a secret -- its value is fake and its allowlist pins" >&2
+  echo "        httpbin.org. Removing it does not remove a secret; it removes" >&2
+  echo "        preflight's ability to prove leak detection is live, and the" >&2
+  echo "        probes then fail claiming the addon is broken." >&2
+  echo "        Restore it with: $0 vm install --proxy-only" >&2
+  echo "        If you really mean it: $0 secret rm $SELFTEST_FIXTURE --force" >&2
+}
+
 # Whether a --hosts entry PINS a destination. "*" is not an allowlist, it is the
 # absence of one spelled so it looks deliberate: the secret becomes a bearer
 # token any container may post anywhere, and the proxy's leak detection has
@@ -593,20 +605,12 @@ case "$CMD" in
                rm)
                  NAME="${1:?usage: cli.sh secret rm NAME}"; shift
                  case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
-                 FORCE=0; [ "${1:-}" = "--force" ] && FORCE=1
-                 if [ "$NAME" = "DESOLATE-SELFTEST-PLACEHOLDER" ] && [ "$FORCE" = 0 ]; then
-                   echo "cli.sh: DESOLATE-SELFTEST-PLACEHOLDER is preflight's self-test fixture," >&2
-                   echo "        not a secret -- its value is fake and its allowlist pins" >&2
-                   echo "        httpbin.org. Removing it does not remove a secret; it removes" >&2
-                   echo "        preflight's ability to prove leak detection is live, and the" >&2
-                   echo "        probes then fail claiming the addon is broken." >&2
-                   echo "        Restore it with: ./cli.sh vm install --proxy-only" >&2
-                   # The escape hatch stays, because removing it used to be the
-                   # only cure for the fixture 403ing ordinary traffic that
-                   # named it. "selftest": true is the real fix (see addon.py),
-                   # but if that ever regresses, being unable to delete the
-                   # fixture would mean being unable to use the stack at all.
-                   echo "        If you really mean it: ./cli.sh secret rm $NAME --force" >&2
+                 # --force stays reachable: deleting the fixture used to be the
+                 # only cure for it 403ing traffic that merely named it, and if
+                 # addon.py's narrowed match ever regresses, an undeletable
+                 # fixture means an unusable stack.
+                 if [ "$NAME" = "$SELFTEST_FIXTURE" ] && [ "${1:-}" != "--force" ]; then
+                   explain_selftest_fixture_is_not_a_secret
                    exit 1
                  fi
                  vm sudo sh -c 'umask 077; F=/etc/desolate-proxy/settings.json; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
