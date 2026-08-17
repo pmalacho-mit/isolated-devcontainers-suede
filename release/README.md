@@ -1368,6 +1368,27 @@ breaks either is refused rather than stored, or dropped rather than loaded:
 The `network` rules in `settings.json` are a separate list with a separate job
 and still accept `{"host": "*"}` -- see "What this does not give you" below.
 
+### The one entry that is not a secret
+
+`./cli.sh secret list` shows `DESOLATE-SELFTEST-PLACEHOLDER -> httpbin.org`.
+That is a **test fixture**, not a credential. Its value is fake and published,
+and it exists so `./cli.sh preflight` can prove leak detection is actually
+running -- by sending it toward a host it is not allowlisted for and demanding
+a 403. Without it those probes cannot fail closed, so they report
+`secrets can be exfiltrated` against a perfectly healthy addon. `vm install`
+re-asserts it on every run and `secret rm` refuses it
+(`--force` if you really mean to).
+
+It carries `"selftest": true` in `settings.json`, which is why it is the one
+placeholder matched **only as a complete request header value** rather than
+anywhere in a request. Its name is a string this project publishes -- in these
+docs, in `addon.py`, in the test suite -- so under the ordinary substring rule
+every request that merely *mentioned* it was a 403 toward anything but
+`httpbin.org`: `git push` of this repo, an agent sending a diff to a model API,
+pasting preflight output into a ticket. The flag separates the probe from prose
+about the probe. Do not set it on a real secret; it would mean that secret
+travels unnoticed in a body or a URL.
+
 ### Why this is stronger than a secrets file
 
 - **Exfiltration is bounded.** The real value is only ever put on the wire

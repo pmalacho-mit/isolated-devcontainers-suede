@@ -113,6 +113,18 @@ SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
 # `or` needs spaces around it.)
 SECRET_COLLISION_JQ='(.secrets//{})|keys[]|select(.!=$n)|select([contains($n),inside($n)]|any)'
 
+SELFTEST_FIXTURE=DESOLATE-SELFTEST-PLACEHOLDER
+
+explain_selftest_fixture_is_not_a_secret() {
+  echo "cli.sh: $SELFTEST_FIXTURE is preflight's self-test fixture," >&2
+  echo "        not a secret -- its value is fake and its allowlist pins" >&2
+  echo "        httpbin.org. Removing it does not remove a secret; it removes" >&2
+  echo "        preflight's ability to prove leak detection is live, and the" >&2
+  echo "        probes then fail claiming the addon is broken." >&2
+  echo "        Restore it with: $0 vm install --proxy-only" >&2
+  echo "        If you really mean it: $0 secret rm $SELFTEST_FIXTURE --force" >&2
+}
+
 # Whether a --hosts entry PINS a destination. "*" is not an allowlist, it is the
 # absence of one spelled so it looks deliberate: the secret becomes a bearer
 # token any container may post anywhere, and the proxy's leak detection has
@@ -591,13 +603,21 @@ case "$CMD" in
                  fi
                  ;;
                rm)
-                 NAME="${1:?usage: cli.sh secret rm NAME}"
+                 NAME="${1:?usage: cli.sh secret rm NAME}"; shift
                  case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
+                 # --force stays reachable: deleting the fixture used to be the
+                 # only cure for it 403ing traffic that merely named it, and if
+                 # addon.py's narrowed match ever regresses, an undeletable
+                 # fixture means an unusable stack.
+                 if [ "$NAME" = "$SELFTEST_FIXTURE" ] && [ "${1:-}" != "--force" ]; then
+                   explain_selftest_fixture_is_not_a_secret
+                   exit 1
+                 fi
                  vm sudo sh -c 'umask 077; F=/etc/desolate-proxy/settings.json; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
                    jq --arg n "$1" "del(.secrets[\$n])" "$F" > "$T" \
                    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" && echo removed' _ "$NAME"
                  ;;
-               *) echo "usage: cli.sh secret {add NAME --hosts a,b | list | rm NAME}" >&2; exit 1 ;;
+               *) echo "usage: cli.sh secret {add NAME --hosts a,b | list | rm NAME [--force]}" >&2; exit 1 ;;
              esac ;;
 
   vm)        SUB="${1:-status}"; shift || true

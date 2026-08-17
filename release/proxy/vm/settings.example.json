@@ -6,7 +6,8 @@
   "secrets": {
     "DESOLATE-SELFTEST-PLACEHOLDER": {
       "value": "injected-selftest-value-93f2",
-      "hosts": ["httpbin.org"]
+      "hosts": ["httpbin.org"],
+      "selftest": true
     }
   },
 
