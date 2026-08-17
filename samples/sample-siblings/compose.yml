@@ -1,0 +1,15 @@
+# The application, containerised the way a real project here would do it: a
+# build with a context, a bind mount of the project directory, and a published
+# port.
+#
+# Under docker-in-docker these containers are CHILDREN of the devcontainer.
+# Under the per-project-dind design they are its SIBLINGS, which is what changes
+# where the bind resolves and which network the service is on.
+services:
+  web:
+    build: .
+    command: ["python", "-m", "http.server", "8000", "--directory", "/srv"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/srv
