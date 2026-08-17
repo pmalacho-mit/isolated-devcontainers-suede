@@ -1,0 +1,30 @@
+{
+  "name": "sample-siblings",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  // The v2 shape, and the whole point of this fixture: the CLI and NOTHING
+  // else. No daemon inside this container, so no `--privileged` below and no
+  // `allowPrivileged` opt-in anywhere in this file.
+  //
+  // Compare samples/sample-fastapi, which is the same application shape built
+  // the way this stack supports TODAY: docker-in-docker, privileged, and an
+  // explicit acknowledgement that it holds root over every other project.
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+
+  "workspaceFolder": "/workspaces/sample-siblings",
+  "workspaceMount": "source=/workspaces/sample-siblings,target=/workspaces/sample-siblings,type=bind",
+
+  "customizations": {
+    "desolate": {
+      // 8000 = the web service in compose.yml, published by a SIBLING
+      // container rather than by this one. Whether that still reaches your
+      // browser is one of the things diagnose.sh reports on.
+      "ports": [8000]
+    },
+    "vscode": { "extensions": [] }
+  },
+
+  "remoteEnv": { "SSH_AUTH_SOCK": "", "GPG_AGENT_INFO": "", "GIT_ASKPASS": "" }
+}
