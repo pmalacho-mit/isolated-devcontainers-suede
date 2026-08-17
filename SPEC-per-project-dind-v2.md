@@ -191,9 +191,31 @@ configured ones. Two agents working means two dinds, whatever the repo count.
 
 ### Bounded concurrency
 
-`DESOLATE_MAX_DINDS` (suggest 4), LRU-stop the oldest idle one when a new
-`ensure` would exceed it. This is the difference between a bounded system and one
-where a busy week silently consumes the VM.
+`DESOLATE_MAX_DINDS` (**8**, measured rather than suggested — see below),
+LRU-stop the oldest idle one when a new `ensure` would exceed it. This is the
+difference between a bounded system and one where a busy week silently consumes
+the VM. A daemon whose devcontainer is UP is never the one evicted:
+`capacity.admit` refuses and names what is in the way, because stopping it would
+kill a running build to start another.
+
+### Measured on the VM, 2026-08-17
+
+`tests/probes/v2-baseline.sh`:
+
+| | measured | the spec had guessed |
+| --- | --- | --- |
+| `volume-subpath` | works, engine 29.2.1 | needs ≥ 26 — confirmed available |
+| one dind | **~490 MiB** with 15 images | 150–250 MB |
+| the editor | 657 MiB | not costed |
+| concurrent projects | 5–8 | unknown; `MAX_DINDS` guessed at 4 |
+
+The daemon figure is `docker stats`, which counts active page cache, so it is an
+upper bound rather than an RSS — but it is the number to budget with, and it is
+roughly double what this document assumed. It does not change the conclusion:
+against a 200 GB machine (40 GB being the low band for other users), eight dinds
+is ~4 GB, which is 2% of the former and 10% of the latter. **Memory was never
+the constraint.** The 8-core CPU count is tighter, which is what the per-dind
+`--cpus` ceiling is for.
 
 ### Per-dind ceilings
 
@@ -360,11 +382,18 @@ give you is a smaller blast radius per incident, not fewer incidents.
 
 The cheap fixes remain the high-value ones, and none of them need this spec:
 relays with `restart: no`, quiesce-before-stop, `cli.sh reset-inner`, a
-healthcheck that distinguishes booting from wedged. They are now written up
-separately as `SPEC-dind-reliability.md` so they can be built without waiting on
-any of this. Note that this spec eventually *retires* one of them — with no
-daemon inside the devcontainer there is no nested mount namespace to quiesce —
-which is a reason to sequence them first, not a reason to skip them.
+healthcheck that distinguishes booting from wedged. They were written up
+separately as `SPEC-dind-reliability.md`, built without waiting on any of this,
+and merged on 2026-08-17.
+
+An earlier draft of this paragraph said v2 *retires* the quiesce among them,
+since a devcontainer with no daemon has no nested mount namespace to tear down.
+That is half right, and the wrong half matters: reaping stops whole **dinds**,
+and a dind stopped mid-build has precisely the problem `shutdown.ts` was written
+for, one level further out. The fix is relocated by this spec, not retired by
+it — and `shutdown.ts`'s own gate (`hasDockerCli`, a sound proxy for "has its
+own daemon" only while docker-in-docker is what installs a CLI) is one this spec
+deliberately invalidates. See `HANDOFF.md`.
 
 ### What survives, and it is the stronger argument
 

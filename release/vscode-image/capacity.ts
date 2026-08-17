@@ -9,6 +9,12 @@
  * a daemon of its own, an unreaped dind per project IS the resource problem.
  */
 
+/** Measured on the VM rather than guessed: one dind is ~490 MiB with 15 images,
+ *  so eight of them is ~4 GB. Memory is not what this bounds -- the machine has
+ *  far more of it than that -- it bounds the number of daemons competing for 8
+ *  cores, and the blast area when one of them misbehaves. */
+export const DEFAULT_MAX_DINDS = 8;
+
 /** One project daemon, as the supervisor currently sees it. */
 export interface ProjectDaemon {
   name: string;
