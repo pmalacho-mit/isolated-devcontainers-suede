@@ -2,7 +2,16 @@ import {
   execFileSync,
   type ExecFileSyncOptionsWithStringEncoding,
 } from "node:child_process";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
+
+/** A short, stable digest for naming things after their content.
+ *
+ *  Shared rather than spelled twice: a spec fingerprint and a bridge name are
+ *  different uses, but two implementations of "hash it to 16" drift, and the
+ *  drift renames existing objects silently. */
+export const sha16 = (raw: string) =>
+  createHash("sha256").update(raw).digest("hex").slice(0, 16);
 
 /** Was this module run as the program, rather than imported by another one?
  *

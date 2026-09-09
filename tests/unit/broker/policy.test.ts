@@ -1297,6 +1297,52 @@ describe("the repo's own example projects satisfy the policy", () => {
     enforcePolicy(named("sample-fastapi"), spec(cfg, merged), ...alone("sample-fastapi"));
   });
 
+  // The v2 fixture, and it is REFUSED today on purpose -- this is the marker
+  // for the change, not a bug in the sample.
+  //
+  // docker-outside-of-docker declares a bind of the docker socket, and the
+  // policy refuses binds categorically because a bind reaches the daemon's own
+  // filesystem, where every other project lives. Under one shared dind that
+  // refusal is exactly right: the socket it names is the daemon running every
+  // project. It stops being right only once the project has a daemon of its
+  // OWN, so the exception cannot land before provisioning does -- until then,
+  // granting it would hand this project every other one.
+  //
+  // When the supervisor exists, this test inverts: same fixture, same feature
+  // metadata, and the enforcement passes because the target's daemon is its own.
+  test("sample-siblings is refused until a project daemon exists", async (t) => {
+    const cfg = await readExample(t, "sample-siblings");
+    if (!cfg) return;
+    // What docker-outside-of-docker contributes, per its published metadata.
+    const merged = {
+      mounts: [
+        {
+          source: "/var/run/docker.sock",
+          target: "/var/run/docker-host.sock",
+          type: "bind",
+        },
+      ],
+    };
+    assert.throws(
+      () =>
+        enforcePolicy(
+          named("sample-siblings"),
+          spec(cfg, merged, "sample-siblings"),
+          ...alone("sample-siblings"),
+        ),
+      /volumes only/,
+    );
+  });
+
+  test("sample-siblings asks for no privilege of any kind", async (t) => {
+    const cfg = await readExample(t, "sample-siblings");
+    if (!cfg) return;
+    assert.equal(cfg.customizations?.desolate?.allowPrivileged, undefined);
+    assert.equal(cfg.privileged, undefined);
+    assert.equal(cfg.capAdd, undefined);
+    assert.equal(cfg.runArgs, undefined);
+  });
+
   test("sample-fastapi WITHOUT the opt-in is refused", async (t) => {
     const cfg = await readExample(t, "sample-fastapi");
     if (!cfg) return;

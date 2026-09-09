@@ -144,6 +144,16 @@ const subdirectories = Object.assign(
   },
 );
 
+/** The namespace of the PROJECT a target belongs to: its own if it is one, and
+ *  its project's if it is a worktree.
+ *
+ *  For the things a worktree SHARES with its project rather than owns, which is
+ *  why it is spelled apart from `target.namespace` -- the two differ only for a
+ *  worktree, so a caller reaching for the wrong one is right until somebody
+ *  opens a branch. */
+export const projectNamespace = ({ project }: Target) =>
+  volumeNamespace(project);
+
 /** This project's worktrees, whether or not they carry a devcontainer spec. */
 export const worktreesOf = ({ workspaces, project }: Target): Target[] =>
   subdirectories
