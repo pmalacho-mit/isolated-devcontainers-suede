@@ -13,9 +13,9 @@ executing code has never been more dangerous.
 In essence, `desolate` allows the developer to sandbox themselves along with their agent(s),
 all without giving up the ergonomics key to their workflow.
 
-[^1] The `desolate` architecture should be applicable to both Windows (with WSL2) + Linux, and could be even simpler without the need for a Linux VM (i.e., [colima](https://colima.run/)). [@pmalacho-mit](https://github.com/pmalacho-mit) is on a mac, so contributions to support other operating systems are welcome.
+[^1]: The `desolate` architecture should be applicable to both Windows (with WSL2) + Linux, and could be even simpler without the need for a Linux VM (i.e., [colima](https://colima.run/)). [@pmalacho-mit](https://github.com/pmalacho-mit) is on a mac, so contributions to support other operating systems are welcome.
 
-[^2] As the Red Guild's ["Leveraging VSCode internals to escape containers."](https://blog.theredguild.org/leveraging-vscode-internals-to-escape-containers/) explains, VS Code is a ripe <ins>local</ins> attack surface even when connecting to remote development environments.
+[^2]: As the Red Guild's ["Leveraging VSCode internals to escape containers."](https://blog.theredguild.org/leveraging-vscode-internals-to-escape-containers/) explains, VS Code is a ripe <ins>local</ins> attack surface even when connecting to remote development environments.
 
 This repo is a [suede dependency](https://github.com/pmalacho-mit/suede).
 
