@@ -984,14 +984,14 @@ it, in this devcontainer's daemon:
 /desolate-ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
 ```
 
-Every `FROM node:22-bookworm-slim` in that daemon now resolves to the
-CA-trusting image, whoever is building. The `Dockerfile` is still untouched and
-still production-clean, which matters most for a library whose consumers will
-never run under desolate.
+`FROM node:22-bookworm-slim` in that daemon now resolves to the CA-trusting
+image, for every builder that reads the local image store. The `Dockerfile` is
+still untouched and still production-clean, which matters most for a library
+whose consumers will never run under desolate.
 
 Read the blast radius as a warning as much as a feature: that is _every_ build
-in the daemon, not just yours. In a devcontainer's own disposable daemon that is
-the point. Three consequences:
+in the daemon that resolves locally, not just yours. In a devcontainer's own
+disposable daemon that is the point. Three consequences:
 
 - **`docker pull` undoes it, silently.** Pulling the tag restores the untrusting
   upstream image, and the next build fails with a certificate error that points
@@ -1001,6 +1001,47 @@ the point. Three consequences:
 - **It is lost on rebuild.** The tag lives in the container's inner image store.
 - **`--unshadow`** puts the upstream image back, from a pristine copy kept
   locally or from the registry digest recorded on the derivative.
+
+#### Which builders a shadow actually binds
+
+A retag binds where the builder asks the local image store first, and that is
+not all of them:
+
+| The build                                      | Shadow | Why                                                                 |
+| ---------------------------------------------- | ------ | ------------------------------------------------------------------- |
+| `docker build`, `docker compose build`         | binds  | the CLI asks BuildKit to prefer a local image                       |
+| `POST /build?version=1` (classic builder)      | binds  | the classic builder reads the local store and nothing else          |
+| `POST /build?version=2` (BuildKit, Engine API) | **no** | resolves the tag at the registry, pins `FROM ...@sha256:<upstream>` |
+
+That last row is the one that bites, because it is what part of the SDK world
+posts by default -- `dockerode` with `version: "2"`, and tools built on it.
+BuildKit is handed a tag, asks the registry what it points to, and builds from
+the digest it gets back. The local tag is never consulted, so the build gets the
+pristine base: it downloads an image you already have a derivative of, then
+fails its first HTTPS fetch. Under the proxy that is the 60-90 second hang
+first, and often no error at all -- the reason this is worth a table.
+
+Nothing in the build output announces the skip. What it looks like: the same
+project builds in seconds through `docker build` and stalls for minutes through
+its own test harness.
+
+Two things work there. Either build **from the derivative's own tag**, which
+exists in no registry, so BuildKit's registry lookup fails and it falls back to
+this image store:
+
+```dockerfile
+FROM desolate-ca/node:22-bookworm-slim   # development only -- keep it out of what you deploy
+```
+
+Or ask that build for the **classic builder** -- `version: "1"` in `dockerode`,
+`DOCKER_BUILDKIT=0` for anything shelling out to the CLI -- which reads the
+local store and nothing else.
+
+Two fixes that look right and are not: a CA in `buildkitd.toml` (that is
+BuildKit's registry client, not your `RUN` steps' HTTPS), and pointing the
+daemon's `registry-mirrors` at a registry serving the derivatives. `docker pull`
+honours those mirrors; the BuildKit inside the same daemon ignores them, so the
+build resolves upstream exactly as before.
 
 To stop doing this by hand, a project can declare the images once:
 
@@ -1033,10 +1074,9 @@ and a digest is not accepted: this is a development trust store, not a
 reproducible build input, and the derivative is rebuilt from the pinned digest
 of whatever the tag resolved to anyway.
 
-**What does not work:** putting the CA in the daemon's `buildkitd.toml`. That
-configures BuildKit's *registry* client -- how it pulls images -- and has no
-effect on the HTTPS traffic inside a `RUN` step. It is the obvious thing to
-reach for and it silently does nothing.
+Declaring the images changes _when_ the shadow is applied, not _which_ builders
+it binds: the table above holds for `shadowImages` exactly as it does for a
+hand-run `--shadow`.
 
 ### What this means for production
 

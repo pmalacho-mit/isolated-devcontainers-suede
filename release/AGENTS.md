@@ -89,7 +89,9 @@ Note the path is `/desolate-ca/`, not `/desolate/`. It derives `desolate-ca/<bas
 /desolate-ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
 ```
 
-Every `FROM node:22-bookworm-slim` in this daemon then resolves to the CA-trusting image, whoever is doing the building. The Dockerfile stays unmodified and production-clean. `--unshadow` puts the upstream image back. Two things to know: a later `docker pull node:22-bookworm-slim` silently restores the untrusting image (re-run the script), and the tag is lost when the container is rebuilt.
+`FROM node:22-bookworm-slim` in this daemon then resolves to the CA-trusting image for every builder that reads the local image store. The Dockerfile stays unmodified and production-clean. `--unshadow` puts the upstream image back. Two things to know: a later `docker pull node:22-bookworm-slim` silently restores the untrusting image (re-run the script), and the tag is lost when the container is rebuilt.
+
+- **A shadow does not bind a BuildKit build posted to the Engine API** (`POST /build?version=2` — `dockerode` with `version: "2"` and tools built on it). That path resolves the tag at the registry and pins `FROM ...@sha256:<upstream>`, so the retag is never consulted and the build silently gets the pristine, non-CA-trusting base: a long download, then a hang on its first HTTPS fetch. `docker build`, `docker compose build` and the classic builder (`version: "1"`, `DOCKER_BUILDKIT=0`) all honour the shadow. For a build stuck on the BuildKit path, either point it at the derivative directly (`FROM desolate-ca/node:22-bookworm-slim`, which exists in no registry so BuildKit falls back to the local store) or ask it for the classic builder. Do not reach for `registry-mirrors` in the daemon: `docker pull` honours them, the BuildKit inside the same daemon does not.
 
 - **The declare-once form** of that, so it survives rebuilds and needs no manual step — this is a `devcontainer.json` change, so it needs the human and a rebuild:
 

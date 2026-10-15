@@ -15,10 +15,12 @@
 #       --compose ./deploy/compose.yml
 #
 #   --shadow        also point the base image's OWN tag at the derivative, so
-#                   every `FROM <image>` in this daemon resolves to it. For
-#                   builds that go through neither compose nor buildx -- an SDK
-#                   (dockerode, docker-py, testcontainers) posting to the Engine
-#                   API cannot pass a named build context. Not with --service.
+#                   `FROM <image>` in this daemon resolves to it. Covers the
+#                   classic builder and `docker build`/`docker compose build`;
+#                   does NOT cover a build posted to the Engine API asking for
+#                   BuildKit (version=2), which resolves the tag at the registry
+#                   and never looks here -- the run itself says so, and says
+#                   what to do instead. Not with --service.
 #   --unshadow      undo that: put the upstream image back under its own tag.
 #   --force         rebuild even if the derived image already trusts this CA
 #   --print-recipe  show the Dockerfile that WOULD be used, then stop
@@ -44,12 +46,41 @@
 # override the image an existing `FROM` resolves to: your Dockerfile is never
 # modified, and the override file is a development artifact that must not reach
 # production -- it is gitignored by default. With --shadow, by retagging the
-# base in this daemon, which is the only lever that works for a builder that
-# cannot take a build context at all.
+# base in this daemon, for a builder that cannot take a build context at all.
+#
+# WHAT --shadow DOES NOT COVER
+#
+# A local tag only wins where the builder ASKS the local image store first.
+# Three builders, two answers:
+#
+#   docker build / docker compose build  -- shadow wins. The CLI asks BuildKit
+#                                           to prefer a local image.
+#   POST /build?version=1 (classic)      -- shadow wins. The classic builder
+#                                           only ever reads the local store.
+#   POST /build?version=2 (BuildKit)     -- shadow LOSES. This path does not
+#                                           ask for local-first, so BuildKit
+#                                           resolves the tag at the registry
+#                                           and pins `FROM ...@sha256:<their
+#                                           digest>`. Retagging here changes
+#                                           nothing it looks at.
+#
+# The last one is an SDK's default in some clients (dockerode with
+# version: "2", and anything wrapping it). Nothing in the build output says the
+# shadow was skipped: you get the pristine base, a long download of an image
+# you already have a derivative of, and then the certificate failure above --
+# which is a HANG first and an error much later, if at all.
+#
+# Two things do work there, and both are printed after a --shadow run: build
+# FROM the derivative's own tag (desolate-ca/<image>, which exists in no
+# registry, so BuildKit falls back to this store), or ask that build for the
+# classic builder instead.
 #
 # What does NOT fix this, and is the obvious thing to reach for: a CA in the
 # daemon's buildkitd.toml. That configures BuildKit's own REGISTRY client -- how
 # it pulls images -- and has no effect on the HTTPS traffic your RUN steps make.
+# Nor do the daemon's registry-mirrors: `docker pull` honours them, and the
+# BuildKit inside the same daemon ignores them, so a mirror serving derivatives
+# cannot stand in for the shadow either.
 set -eu
 
 CA_DIR=/desolate-ca
@@ -429,13 +460,28 @@ if [ "$SHADOW" = 1 ]; then
 
     cat <<EOF
 
-Done. Nothing else to run: every build in THIS daemon that says
-\`FROM $IMAGE\` now gets the CA-trusting derivative -- including builds made
-through the Engine API by an SDK (dockerode, docker-py, testcontainers), which
-is the case no build-context override can reach. Your Dockerfile is unchanged.
+Done. Builds in THIS daemon that say
+    FROM $IMAGE
+now get the CA-trusting derivative, with your Dockerfile unchanged. That covers
+\`docker build\`, \`docker compose build\`, and any build posted to the Engine
+API that does not ask for BuildKit.
 
-That is the blast radius, and it is worth reading as a warning as much as a
-feature: this is EVERY build here, not just yours. In a devcontainer's own
+It does NOT cover a build posted to the Engine API that DOES ask for BuildKit
+(\`/build?version=2\` -- dockerode with version: "2", and tools built on it).
+That path resolves the tag at the registry and pins the digest it gets back, so
+it never reads this one. You get the pristine base with no CA, no message
+saying so, and a build that hangs on its first HTTPS fetch. If that is your
+build, one of these:
+
+  * build FROM the derivative directly:  FROM $TAG
+    It exists in no registry, so BuildKit falls back to this image store and
+    the tag binds. Development-only -- keep it out of what you deploy.
+  * or ask that build for the classic builder (version: "1" in dockerode,
+    DOCKER_BUILDKIT=0 for a CLI wrapper), which reads this store and nothing
+    else.
+
+That blast radius is worth reading as a warning as much as a feature: this is
+EVERY build here that resolves locally, not just yours. In a devcontainer's own
 disposable daemon that is the point.
 
   * Lifetime: the tag lives in this devcontainer's inner image store and is
@@ -474,6 +520,11 @@ API, or plain \`docker build\` with no buildx -- there is no build context to
 override. Point the tag itself at the derivative instead:
 
     $0 --image $IMAGE --shadow
+
+That covers the classic builder and the CLI. A build that posts to the Engine
+API asking for BuildKit (\`/build?version=2\`) resolves \`$IMAGE\` at the
+registry and ignores local tags, so for that one build FROM $TAG directly, or
+ask it for the classic builder. --shadow says the same when you run it.
 EOF
     exit 0
 fi
