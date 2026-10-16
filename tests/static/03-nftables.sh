@@ -173,6 +173,33 @@ for range in ::1/128 fc00::/7 fe80::/10; do
   assert_contains "internal v6 list covers $range" "$V6" "$range"
 done
 
+# A per-project dind's bridge is created long after install.sh runs, so it can
+# only be covered by shape. Two things have to hold, and each fails silently on
+# its own: the glob has to be in the set, and it has to keep its hyphen.
+#
+# Without it, a bridge that appears later matches nothing -- no interception, no
+# lateral drop, and outside the forward chain's default-deny.
+#
+# With `br-d*` instead, nftables merges the literals the wildcard subsumes and
+# stores the set as `{ "br-d*" }`: both named bridges swallowed, and every
+# unrelated br-d... interface on the VM dragged under desolate's default-deny.
+IFS_SET=$(sed -n 's/^define DESOLATE_IFS = //p' "$CONF")
+assert_contains "the interface set covers per-project bridges by shape" \
+  "$IFS_SET" 'br-d-*'
+assert_eq "and does so with the hyphen, so it cannot swallow br-desolate" \
+  "$(printf '%s' "$IFS_SET" | grep -c '"br-d\*"')" "0"
+for named in br-desolate br-desolate-in; do
+  assert_contains "the interface set still names $named in its own right" \
+    "$IFS_SET" "$named"
+done
+
+# install.sh REWRITES that define with the bridges it detected, so a glob
+# present only in the conf is one the installed ruleset never sees.
+assert_ok "install.sh's rewrite carries the glob too, so the two cannot drift" \
+  grep -q "PROJECT_IF_GLOB='br-d-\*'" "$RELEASE/proxy/vm/install.sh"
+assert_ok "and uses it in the DESOLATE_IFS replacement" \
+  grep -q 'define DESOLATE_IFS = .*PROJECT_IF_GLOB' "$RELEASE/proxy/vm/install.sh"
+
 # nft resolves `skuid desolate-proxy` to a uid at PARSE time, so a missing
 # account is not a rule that fails -- it is a file that does not parse, and
 # `nft -f` applies nothing at all. Interception and the forward default-deny
