@@ -6,9 +6,8 @@
   // else. No daemon inside this container, so no `--privileged` below and no
   // `allowPrivileged` opt-in anywhere in this file.
   //
-  // Compare samples/sample-fastapi, which is the same application shape built
-  // the way this stack supports TODAY: docker-in-docker, privileged, and an
-  // explicit acknowledgement that it holds root over every other project.
+  // samples/sample-fastapi is the same application shape; both now take the
+  // project-daemon route (docker-in-docker and allowPrivileged are gone).
   "features": {
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },

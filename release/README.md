@@ -71,7 +71,7 @@ the repository.
 | # | Boundary | Verdict |
 | - | -------- | ------- |
 | 1 | A project can exfiltrate **its own** source | **Conceded, by design** |
-| 2 | A project can reach a **sibling** project's source | Holds — unless that project sets `allowPrivileged` |
+| 2 | A project can reach a **sibling** project's source | Holds — including for projects that use Docker, which get a daemon of their own |
 | 3 | A project can read the **editor's** credentials | Holds — raw keys are unreachable |
 | 4 | A project can escape to the **VM** or your **Mac** | Holds — sysbox, and it is the boundary everything else rests on |
 
@@ -99,18 +99,17 @@ are confined to its own namespace, and bind mounts are refused outright. The two
 mounts `desolate` injects — the editor server and the CA scripts — are
 per-project overlays, so a project writing to either changes only its own view.
 
-The exception is `allowPrivileged`, which a project requests **in its own
-`devcontainer.json`**. A privileged devcontainer is privileged relative to dind,
-and dind mounts `/workspaces` whole. So enabling it means:
-
-- every project's source becomes readable by that project,
-- every project's editor token in `/workspaces/.desolate/` becomes readable,
-- and proxy-injected secrets become **usable** by that project against every
-  allowlisted host.
-
-It does **not** reach the keyring (no mounts, no network) or the VM (sysbox).
-Treat `allowPrivileged` as "this project may read all my other projects", and
-note that it is currently grantable by cloning a repository that declares it.
+**Projects that use Docker get a daemon of their own.** There used to be an
+exception here: `allowPrivileged`, which the `docker-in-docker` feature needed,
+made a devcontainer privileged inside the one dind every project shares --
+root over all of them. Both are gone. A project that declares
+`docker-outside-of-docker` instead gets its own sysbox dind, started by the
+supervisor (the one container holding the VM's docker socket), whose
+`/workspaces` holds **only that project**. Its devcontainer holds that dind's
+socket and nothing more: unprivileged (CapEff 0), and root over a daemon that
+can see one project's files and images. The socket is not the boundary -- the
+one-project view and sysbox around the dind are. A project's worktrees share its
+daemon, as they already share its `.git`.
 
 ### 3. Credentials: usable while compromised, never copyable
 
@@ -574,7 +573,8 @@ The rules, and what each is actually defending:
 - **`dockerComposeFile` is refused.** A compose-mode devcontainer declares its
   privilege in the compose file, which this policy does not read; `privileged`,
   `pid: host`, `network_mode: host` and `- /:/host` are all expressible there.
-  Run compose _inside_ a devcontainer with the docker-in-docker feature instead.
+  Run compose _from_ a devcontainer with the docker-outside-of-docker feature
+  instead: the services run on the project's own daemon.
 - **Policy is enforced on the CLI's own `mergedConfiguration`**, not on our
   parse of the file. That is where a _feature_'s `privileged` / `capAdd` /
   `securityOpt` / `mounts` land -- a feature could otherwise inject
@@ -615,11 +615,14 @@ The rules, and what each is actually defending:
   built an image containing a sibling project's file -- see "A project may only
   reach its own folder" below.
 - **`appPort` is refused** (it collides with the relay bind).
-- **Privilege must be opted into explicitly**, in the project's own file:
-  `"customizations": {"desolate": {"allowPrivileged": true}}`. The
-  docker-in-docker feature needs it; the point is that it can no longer be
-  inherited _silently_ from a third-party feature, and that `git log` shows
-  which projects are in the escalated tier.
+- **`privileged` is refused outright**, and so is the `docker-in-docker`
+  feature (with the way out in the message). The `allowPrivileged` opt-in no
+  longer exists. On a project's own daemon -- `docker-outside-of-docker` --
+  `capAdd` and `securityOpt` are allowed (the socket is root over that dind
+  anyway, and features such as rust need `SYS_PTRACE`), except a seccomp
+  profile from a project path or switching off `no-new-privileges`; the one bind
+  allowed is that feature's own socket mount, exactly as it declares it. On the
+  shared daemon none of that is allowed.
 - **`shadowImages` entries must parse as image references** -- not a path, not a
   URL, and at most 32 of them. Unlike mounts and ports this one carries no
   cross-project risk (the tags land in the project's own disposable daemon), so
@@ -721,12 +724,14 @@ daemon, must not mount the socket volume, and the broker socket must be
 present. `tests/integration/stack` goes further and runs the attacks from
 inside the editor container.
 
-**Known limit:** a project that uses the docker-in-docker feature is privileged
-_within the sysbox userns_ on the inner daemon, so within one stack it remains
-possible for such a project, if compromised, to reach sibling containers'
-on-disk data. The broker cannot fix that -- it can only make you write the
-opt-in down. Run genuinely untrusted code in a separate stack (trust tier), not
-just a separate project.
+**What a project's own daemon does not change:** the socket a
+`docker-outside-of-docker` devcontainer holds is root over its project's dind,
+so a compromised project owns its own images, containers and worktrees -- the
+same trust domain its `.git` already was. It reaches no other project: that
+dind's `/workspaces` is a `volume-subpath` of one project, measured by
+`samples/sample-siblings/diagnose.sh` ("daemon's workspaces: only ..."). Run
+genuinely untrusted code in a separate stack (trust tier), not just a separate
+project.
 
 **Also unfixed by the broker:** all devcontainers share the inner daemon's
 default bridge with `icc=true`, so they can reach each other over the network
@@ -1096,8 +1101,8 @@ protection, which is why `desolate --stop` now asks a project's daemon to stop
 its containers and then itself before stopping the container that holds them --
 best-effort and bounded, so a project whose daemon is already hung cannot hang
 the stop as well. It needs the
-`docker-in-docker` feature (the tag has to land in a daemon of the project's
-own); without one, the start says so and carries on. A bare tag is enough here
+`docker-outside-of-docker` feature (the tag has to land in a daemon of the
+project's own); without one, the start says so and carries on. A bare tag is enough here
 and a digest is not accepted: this is a development trust store, not a
 reproducible build input, and the derivative is rebuilt from the pinned digest
 of whatever the tag resolved to anyway.
@@ -1698,10 +1703,10 @@ Boundaries, strongest first:
   per project instead of a copy.
 
   A read-only _flag_ would not have been enough, and that was measured rather
-  than assumed. `MS_RDONLY` is per-mount, so a devcontainer with
-  `allowPrivileged` -- holding `CAP_SYS_ADMIN` in dind's user namespace -- can
-  `mount -o remount,bind,rw` its own copy and write **through to the shared
-  file**. An overlay's lower layer is not writable through the overlay by any
+  than assumed. `MS_RDONLY` is per-mount, so a privileged devcontainer -- as
+  `allowPrivileged` used to allow, holding `CAP_SYS_ADMIN` in dind's user
+  namespace -- could `mount -o remount,bind,rw` its own copy and write
+  **through to the shared file**. An overlay's lower layer is not writable through the overlay by any
   means, so the same attempt changes only that project's own upper.
 
   `desolate` **refuses to start a project** if an overlay cannot be built --
@@ -1714,13 +1719,12 @@ Boundaries, strongest first:
   `E6` for the editor binary, `E7` for the CA scripts -- including the
   privileged remount.
 
-Note that a `--privileged` devcontainer is privileged _relative to dind_, and
-dind's own root is already an unprivileged VM user. Capabilities in a
-non-initial user namespace apply only to resources that namespace owns, so such
-a container cannot load kernel modules, touch VM devices, or reach the VM
-however it misbehaves. sysbox is what bounds the damage to dind's contents --
-which is precisely why `allowPrivileged` warns about _siblings_ and nothing
-beyond them.
+Note that even a `--privileged` container -- which a project's devcontainer can
+still start as a SIBLING through its own daemon's socket -- is privileged
+_relative to that dind_, and the dind's root is an unprivileged VM user.
+Capabilities in a non-initial user namespace apply only to resources that
+namespace owns, so it cannot load kernel modules, touch VM devices, or reach the
+VM however it misbehaves; and the dind it is root over holds one project.
 
 ## Verifying containment
 

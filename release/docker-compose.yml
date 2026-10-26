@@ -5,25 +5,32 @@
 #                                     │  unix socket (broker-run volume)
 #                                     ▼
 #                               [orchestrator: broker.ts]
-#                                     │  DOCKER_HOST=unix:///run/inner/docker.sock
-#                                     ▼
-#                               [dind: inner dockerd]  ◀── devcontainers live HERE
-#                                     │  unix socket (shared volume, never TCP)
-#                                     ▼
-#                               observe.sh, via `docker exec` on the orchestrator
+#                                │                    │  unix socket (supervisor-run)
+#        DOCKER_HOST=/run/inner/ │                    ▼
+#                                │          [supervisor] ── the VM docker socket
+#                                ▼                    │  creates, stops, reaps
+#           [dind: shared dockerd]                    ▼
+#             projects that need no docker   [desolate-dind-<project>]  one per
+#                                              project that uses docker (sysbox,
+#                                              sees ONLY that project's files)
+#
+#   browser ──127.0.0.1:<port>──(Lima)──▶ desolate-ingress, a VM process, opened
+#   on demand per editor / dev server ──▶ the target's dind ──▶ its relay
 #
 # Invariants:
-#   - The HOST docker socket is never mounted anywhere.
-#   - The inner dockerd listens ONLY on a unix socket inside a named volume.
-#   - Only the orchestrator mounts that socket. The editor reaches the daemon
+#   - The VM's docker socket is mounted by the supervisor and NOTHING else.
+#   - Every dockerd listens ONLY on a unix socket inside a named volume.
+#   - Only the orchestrator mounts those sockets. The editor reaches a daemon
 #     solely through the broker's fixed op vocabulary, never directly.
-#   - The only host-reachable surface is VSCODE_PORT (default 3000) -- the editor,
-#     token-gated -- bound to 127.0.0.1. Nothing else is published except the
-#     dev-server range.
+#   - The only published port is VSCODE_PORT (default 3000) -- the editor,
+#     token-gated -- bound to 127.0.0.1. Every other port a project uses is a
+#     loopback listener desolate-ingress opens for it while it runs.
 #   - dind sits on its OWN bridge (dindnet), NOT the one carrying the editor.
 #     Devcontainers live inside dind and egress through its address, so sharing
 #     a bridge with vscode put the editor -- and the git deploy keys in it --
 #     one routable hop from every project. See networks: at the bottom.
+#     Project dinds each get a bridge of their own (br-d-<hash>), covered by the
+#     same nftables rules by shape.
 
 name: desolate
 

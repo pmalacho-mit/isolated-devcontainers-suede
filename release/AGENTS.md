@@ -3,11 +3,21 @@
 You are running inside a **devcontainer managed by `desolate`** (isolated-devcontainers-suede). The nesting is: macOS host → Colima Linux VM → an unprivileged Docker-in-Docker daemon (sysbox runtime) → your devcontainer. You are at the bottom of that stack, and several things you would normally reach are deliberately unreachable. Read this before diagnosing any network, TLS, or git failure — most of them are expected here and are not bugs in the project.
 
 - Your project lives at `/workspaces/<project>` or `/workspaces/<owner>/<repo>`. The in-container path mirrors the outer path.
-- There is **no host Docker socket** anywhere in the stack. You have a Docker daemon of your own only if this project declares the `docker-in-docker` feature.
+- There is **no host Docker socket** anywhere in the stack. If this project declares the `docker-outside-of-docker` feature, `docker` here talks to **the project's own daemon** -- a sandboxed dind desolate runs for this project alone, which sees only this project's files (see "Docker" below). Otherwise there is no `docker` at all. `docker-in-docker` is refused: switch to `docker-outside-of-docker`.
 - Sibling projects' devcontainers are reachable over the network; the editor/orchestrator containers are not.
 - Dev servers: bind to `0.0.0.0`, not `127.0.0.1`. Ports declared in `customizations.desolate.ports` get forwarded to a host port (from 8080 up; `desolate` prints which). **The port you listen on is not the one the human opens.** When you print a URL for the human, read it from `DESOLATE_EXTERNAL_<port>_URL` (e.g. `$DESOLATE_EXTERNAL_5173_URL` for a server on 5173; `DESOLATE_EXTERNAL_<port>` is the bare host port). They are set in the editor's terminals and in login shells (`bash -l`); a port not declared in `devcontainer.json` has none, because nothing forwards it. Never add `appPort` to `devcontainer.json` — `desolate` hard-fails on it.
 - Changes to `devcontainer.json` need a rebuild from the host (`desolate --rebuild <project>`); you cannot apply them from in here.
 - Editor settings: `customizations.vscode.settings` IS applied, at Machine scope (`~/.desolate-editor/data/Machine/settings.json`, rewritten every start — do not edit it). A `.vscode/settings.json` in the repo overrides it, which is the right place for anything you want committed. Extensions come from Open VSX, not the Microsoft marketplace, so a marketplace-only extension will not install.
+
+## Docker: your project's own daemon
+
+With `docker-outside-of-docker`, `docker` and `docker compose` here drive a daemon that belongs to this project and its worktrees, and nothing else:
+
+- **Containers you start are siblings, not children.** They run beside this devcontainer on the project's daemon. `docker run -v $PWD:/x ...` works, because the project sits at the same path on both sides. Its `/workspaces` holds only this project, so a bind of `/workspaces` shows nothing of anyone else's.
+- **Reaching a compose service by name** needs this container on its network. desolate joins every network that exists when the project starts; for one a later `docker compose up` creates, run `/desolate-ca/desolate-net join --all` (or `join <network>`). `desolate-net list` shows what there is.
+- **A file a container wrote as root** (a compose service writing into the repo) can be reclaimed from here: `docker run --rm -v "$PWD":/w alpine chown -R "$(id -u):$(id -g)" /w`. The daemon sees only this project, so this reaches nothing else.
+- **TLS inside builds** still needs `/desolate-ca/trust-proxy-in-builds.sh` (below); the daemon's own pulls already trust the proxy.
+- The daemon is **stopped when the project has been idle a while** and started again on the next `desolate <project>` -- images and build cache survive; containers you left running do not.
 
 ## Network: everything goes through an intercepting proxy
 
@@ -80,7 +90,7 @@ Note the path is `/desolate-ca/`, not `/desolate/`. It derives `desolate-ca/<bas
 - Run it **once per (service, base image)** — a second service on a different base needs its own run.
 - **Never pass `--pull`** to the subsequent build; BuildKit will try to fetch `desolate-ca/*` from a registry and fail with `pull access denied`.
 - `--print-recipe` shows the Dockerfile it would build without building. `--image` alone derives without wiring up compose.
-- It needs a Docker daemon in this container — i.e. the `docker-in-docker` feature. If `docker info` fails, that's why, and adding the feature requires a rebuild from the host.
+- It needs `docker` here — i.e. the `docker-outside-of-docker` feature. If `docker info` fails, that's why, and adding the feature requires a rebuild from the host.
 - `compose.override.yml` is a development artifact. Leave it gitignored; it breaks builds if it reaches production.
 
 - **Builds that go through neither compose nor buildx** — anything driven by an SDK (`dockerode`, `docker-py`, `testcontainers`, the Go client) posting to the Engine API, or plain `docker build` with no buildx — cannot be handed a named build context at all. There is nothing to override. Point the base image's own tag at the derivative instead:
@@ -99,7 +109,7 @@ Note the path is `/desolate-ca/`, not `/desolate/`. It derives `desolate-ca/<bas
 "customizations": { "desolate": { "shadowImages": ["node:22-bookworm-slim"] } }
 ```
 
-Applied automatically at container start, in the foreground — a first start pulls and rebuilds each image, so it is minutes, printed as it goes. It does not detach: the work is a nested image build holding mounts inside the container, and a container stopped with one in flight cannot be stopped at all. Needs the `docker-in-docker` feature.
+Applied automatically at container start, in the foreground — a first start pulls and rebuilds each image, so it is minutes, printed as it goes. It does not detach: the work is a nested image build holding mounts inside the container, and a container stopped with one in flight cannot be stopped at all. Needs the `docker-outside-of-docker` feature; the shadow lives in the project's own daemon, so it applies to every build any of the project's containers starts.
 
 - **What does not work, and looks like it should:** configuring the CA in the daemon's `buildkitd.toml`. That is BuildKit's *registry* client — how it pulls images — and has no effect on the HTTPS your `RUN` steps make. Don't spend time on it.
 
