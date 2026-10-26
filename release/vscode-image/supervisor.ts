@@ -257,6 +257,24 @@ const ingress = {
     renameSync(`${file}.tmp`, file);
   },
   withdraw: (name: string) => rmSync(join(config.ingressDinds, name), { force: true }),
+  /** The SHARED dind's address too: every target without a daemon of its own
+   *  publishes its relays there, and reaches the Mac the same way (T2.4).
+   *  Re-read on every tick, so a recreated dind's new address follows it. */
+  publishShared: (settings: Settings) => {
+    // Listed as `desolate-dind` whatever its container is called: that is the
+    // name every ports/ file for a shared-dind target carries (desolate.ts).
+    const container = process.env.DESOLATE_SHARED_DIND_CONTAINER ?? "desolate-dind";
+    const address = docker.dind.address(container, `${settings.volumePrefix}dindnet`);
+    const file = join(config.ingressDinds, "desolate-dind");
+    if (!address) return rmSync(file, { force: true });
+    let current = "";
+    try {
+      current = readFileSync(file, "utf8").trim();
+    } catch {}
+    if (current === address) return;
+    writeFileSync(`${file}.tmp`, `${address}\n`);
+    renameSync(`${file}.tmp`, file);
+  },
 };
 
 const refuse = (message: string): never => {
@@ -410,9 +428,12 @@ const serve = (settings: Settings) => {
     console.log(`supervisor listening on ${config.socket} (${settings.runtime})`);
   });
 
+  ingress.publishShared(settings);
   setInterval(() => {
-    serially(async () => reap(settings, console.log)).catch((err) =>
-      console.error(`reaper: ${err?.message ?? err}`));
+    serially(async () => {
+      ingress.publishShared(settings);
+      reap(settings, console.log);
+    }).catch((err) => console.error(`reaper: ${err?.message ?? err}`));
   }, Math.min(settings.idleMs, 60_000)).unref?.();
 };
 

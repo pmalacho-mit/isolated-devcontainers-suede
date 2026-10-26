@@ -71,22 +71,19 @@ assert_eq "no service mounts inner-run except the orchestrator" \
   "$(q '[.services | to_entries[] | select(.key != "orchestrator" and .key != "dind" and .key != "volume-init")
         | select(.value.volumes[]?.source == "inner-run")] | length')" "0"
 
-group "the dind port publish and the allocator's range cannot drift apart"
-# desolate.ts allocates relay ports from DESOLATE_PORT_MIN..MAX; dind publishes
-# a range to the Mac. If the allocator's range is the WIDER of the two, relays
-# bind fine inside dind's netns and are unreachable from the Mac -- a probe
-# timeout with nothing in any log. Both must come from the same two variables.
-DIND_MIN=$(q '[.services.dind.ports[]?.target] | min')
-DIND_MAX=$(q '[.services.dind.ports[]?.target] | max')
-DIND_N=$(q '[.services.dind.ports[]?.target] | length')
-assert_eq "orchestrator's PORT_MIN matches dind's lowest published port" \
-  "$(q '.services.orchestrator.environment.DESOLATE_PORT_MIN')" "$DIND_MIN"
-assert_eq "orchestrator's PORT_MAX matches dind's highest published port" \
-  "$(q '.services.orchestrator.environment.DESOLATE_PORT_MAX')" "$DIND_MAX"
-# min/max agreeing is not enough -- a gap in the middle is the same failure for
-# whichever port lands in it.
-assert_eq "dind publishes the range with no holes" \
-  "$DIND_N" "$((DIND_MAX - DIND_MIN + 1))"
+group "no range: dev-server ports go through the ingress"
+# The published range (DESOLATE_PORT_MIN..MAX on dind) was replaced by
+# desolate-ingress, which opens each host port on demand. A publish that comes
+# back is a range someone re-added, on the same loopback as the ingress.
+assert_eq "dind publishes nothing" "$(q '[.services.dind.ports[]?] | length')" "0"
+assert_eq "no service reads DESOLATE_PORT_MIN/MAX any more" \
+  "$(q '[.services[].environment // {} | keys[] | select(. == "DESOLATE_PORT_MIN" or . == "DESOLATE_PORT_MAX")] | length')" "0"
+assert_eq "the orchestrator writes the ingress's ports/ (and nothing else does)" \
+  "$(q '[.services | to_entries[] | select(.value.volumes[]?.source == "/run/desolate-ingress/ports") | .key] | join(",")')" "orchestrator"
+assert_eq "the supervisor writes the ingress's dinds/ (and nothing else does)" \
+  "$(q '[.services | to_entries[] | select(.value.volumes[]?.source == "/run/desolate-ingress/dinds") | .key] | join(",")')" "supervisor"
+assert_eq "the allocator is told the editor's own port" \
+  "$(q '.services.orchestrator.environment.VSCODE_PORT // "unset"')" "3000"
 
 group "dind runs unprivileged under sysbox"
 assert_eq "dind runtime is sysbox-runc" "$(q '.services.dind.runtime // "unset"')" "sysbox-runc"

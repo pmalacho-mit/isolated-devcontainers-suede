@@ -215,8 +215,9 @@ if printf '%s' "$OUT" | grep -q "is ready:"; then
   pass "desolate example-project succeeded from inside the editor"
   URL=$(printf '%s' "$OUT" | grep -oE 'http://127\.0\.0\.1:[0-9]+/\?tkn=[a-f0-9]+' | head -1)
   INNER_PORT=$(printf '%s' "$URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
-  # The Mac-side hop: the test stack maps 8180-8219 -> dind's 8080-8119.
-  MAC_PORT=$((INNER_PORT + 100))
+  # The Mac-side hop is desolate-ingress: the port desolate printed is the
+  # one Lima carries to this Mac, with nothing remapped in between.
+  MAC_PORT=$INNER_PORT
   CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1:$MAC_PORT/" || echo none)
   case "$CODE" in 200|302|401|403) pass "the project editor answers through the relay (HTTP $CODE)" ;;
     *) fail "the project editor answers through the relay" "got '$CODE' on 127.0.0.1:$MAC_PORT" ;; esac

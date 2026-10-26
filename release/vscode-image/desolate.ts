@@ -85,11 +85,14 @@ import * as shutdown from "./shutdown.ts";
 import { snapshotDirectory, snapshot, initDirectory } from "./snapshot.ts";
 import {
   allocatePorts,
+  ingressPorts,
+  movePort,
   ownRelayPorts,
+  portBase,
   portMapFile,
-  portRange,
   publishedPorts,
   type PortMap,
+  type PortWorld,
 } from "./ports.ts";
 import {
   labelledConfig,
@@ -189,6 +192,56 @@ const overrideConfigFlag = (config?: string) =>
 
 const stateDir = stateDirectory(WORKSPACES);
 
+/**
+ * desolate-ingress's ports/ directory (ingress.py): one file per host port,
+ * `<dind>:<port>`, and the ingress opens 127.0.0.1:<host port> in the VM for
+ * each -- which Lima carries to the Mac. There is no published range: a file
+ * here IS the forward, and removing it closes it.
+ *
+ * Every target's relays publish on the SHARED dind until projects get daemons
+ * of their own (Phase 3), so every file names it.
+ */
+const ingressFiles = {
+  directory: process.env.DESOLATE_INGRESS_PORTS ?? "/run/ingress/ports",
+  dind: "desolate-dind",
+  read: (): Map<string, string> => {
+    let names: string[];
+    try {
+      names = fs.readdirSync(ingressFiles.directory);
+    } catch {
+      return die(`the ingress directory ${ingressFiles.directory} is missing, so no port could
+        reach your Mac. The VM predates desolate-ingress: install it, then restart:
+          ${hint.mac("vm install --proxy-only")}  and  ${hint.mac("down")} / ${hint.mac("up")}`);
+    }
+    const entries = new Map<string, string>();
+    for (const name of names) {
+      try {
+        entries.set(name, fs.readFileSync(path.join(ingressFiles.directory, name), "utf8"));
+      } catch {} // gone between the listing and the read: not held
+    }
+    return entries;
+  },
+  /** Atomic, as the ingress expects: a rename, so a reader never sees half. */
+  write: (hostPort: number) => {
+    const file = path.join(ingressFiles.directory, String(hostPort));
+    fs.writeFileSync(`${path.join(ingressFiles.directory, `.${hostPort}`)}`, `${ingressFiles.dind}:${hostPort}\n`);
+    fs.renameSync(path.join(ingressFiles.directory, `.${hostPort}`), file);
+  },
+  remove: (hostPort: number) =>
+    fs.rmSync(path.join(ingressFiles.directory, String(hostPort)), { force: true }),
+  /** This target's forwards, exactly: what it held before and no longer does
+   *  is withdrawn, then each port in `map` is (re)written -- a rewrite is what
+   *  makes the ingress reopen a listener, which a collided port needs (L6). */
+  publish: (previous: PortMap, map: PortMap) => {
+    const now = new Set(map.values());
+    for (const port of previous.values()) if (!now.has(port)) ingressFiles.remove(port);
+    for (const port of map.values()) ingressFiles.write(port);
+  },
+  withdraw: (map: PortMap) => {
+    for (const port of map.values()) ingressFiles.remove(port);
+  },
+};
+
 const ports = {
   load: (target: Target): PortMap => {
     try {
@@ -203,23 +256,25 @@ const ports = {
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(stateFile(target, "ports"), portMapFile.format(map));
   },
+  /** Who holds what: every ingress forward, and anything the inner daemon
+   *  publishes (a stricter union than either alone, at no cost). */
+  world: (target: Target): PortWorld => ({
+    base: dieOnError(() => portBase(process.env)),
+    published: new Map([
+      ...publishedPorts(docker.container.publishedPortsTable()),
+      ...ingressPorts(ingressFiles.read()),
+      // The editor's own publish, which no forward may take.
+      [Number(process.env.VSCODE_PORT ?? "3000"), "the editor (VSCODE_PORT)"],
+    ]),
+    ownRelayPorts: ownRelayPorts(ownRelayNames(target)),
+    previous: ports.load(target),
+  }),
   allocate: (target: Target, appPorts: number[]): PortMap => {
-    const map = dieOnError(() =>
-      allocatePorts(
-        {
-          range: portRange(process.env),
-          published: publishedPorts(docker.container.publishedPortsTable()),
-          ownRelayPorts: ownRelayPorts(ownRelayNames(target)),
-          previous: ports.load(target),
-        },
-        appPorts,
-      ),
-    );
+    const map = dieOnError(() => allocatePorts(ports.world(target), appPorts));
     ports.save(target, map);
     return map;
   },
 };
-
 const spec = {
   /** Capture what the running container was actually built from. */
   fingerprint: (dir: string, config?: string) => {
@@ -925,6 +980,19 @@ function probeEditor(target: Target, port: number): boolean {
   return false;
 }
 
+/** `--ports <p> --move <label> <port>`. A running target's relays move with
+ *  it; a stopped one keeps the new port for its next start. */
+function movePorts(target: Target, move: { label: string; port: number }): void {
+  const world = ports.world(target);
+  const map = dieOnError(() => movePort(world, move.label, move.port));
+  ports.save(target, map);
+  if (devcontainerId(target.dir)) {
+    recreateRelays(target, map);
+    ingressFiles.publish(world.previous, map);
+  }
+  showPorts(target);
+}
+
 function showPorts(target: Target): void {
   const map = ports.load(target);
   if (map.size === 0)
@@ -1039,6 +1107,8 @@ function stopTarget(target: Target): void {
     docker.container.remove(relays);
     console.log("removed relays");
   }
+  // The relays are gone, so the forwards would lead nowhere: close them.
+  ingressFiles.withdraw(ports.load(target));
   const id = devcontainerId(target.dir);
   if (id) {
     shutdown.devcontainer(docker, id, desolog);
@@ -1212,6 +1282,7 @@ function purgeTarget(target: Target): void {
         ${hint.desolate(`--stop ${invocation(target)}`)}`);
 
   docker.container.remove(ownRelayNames(target));
+  ingressFiles.withdraw(ports.load(target));
   const id = devcontainerId(target.dir, /* includeStopped */ true);
   if (id) docker.container.remove([id]);
 
@@ -1281,6 +1352,7 @@ async function runTarget(
 
   const willCreate = rebuild || !existing;
 
+  const previousPorts = ports.load(target);
   const map = ports.allocate(target, project.appPorts);
   const editorPort = map.get("editor")!;
   const token = connectionToken(target);
@@ -1292,6 +1364,7 @@ async function runTarget(
   shadowBaseImages(dir, project.shadowImages);
   startEditor(target, project, token, config);
   recreateRelays(target, map);
+  ingressFiles.publish(previousPorts, map);
 
   if (!probeEditor(target, editorPort))
     return die(`editor did not answer through the relay on :${editorPort} -- check the log:
@@ -1401,7 +1474,8 @@ async function main(): Promise<void> {
 
   const target = targetOf(args);
   if (args.command === "remove-worktree") return removeWorktree(target, args.force);
-  if (args.command === "ports") showPorts(target);
+  if (args.command === "ports" && args.move) movePorts(target, args.move);
+  else if (args.command === "ports") showPorts(target);
   else if (args.command === "purge") purgeTarget(target);
   else if (args.command === "uncommitted") reportUncommitted(target);
   else if (args.command === "populate") populateWorktree(target);

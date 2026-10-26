@@ -78,6 +78,9 @@ export type Args = {
   branch?: string;
   /** `remove-worktree` without asking whether anything would be lost. */
   force: boolean;
+  /** `--ports <p> --move <label> <port>`: give one label a different host
+   *  port -- for when the Mac already holds it, which Lima never forwards. */
+  move?: { label: string; port: number };
 };
 
 /** The wire form the broker spawns desolate with. */
@@ -91,6 +94,7 @@ export type Flags =
   | "--force"
   | ["--config", string]
   | ["--worktree", string]
+  | ["--move", string, string]
   | "--rebuild"
   | [
       "--rebuild",
@@ -101,7 +105,7 @@ export type Flags =
 
 export const USAGE =
   `usage: desolate [--config <path>] [--worktree <name>] [--rebuild [--no-cache]]
-                [--stop|--ports|--purge] <project>
+                [--stop|--ports [--move <label> <port>]|--purge] <project>
        desolate --list                    what is running right now
        desolate --stop all|--stop --all   stop every running target
        <project> is 'name' or 'owner/name', relative to /workspaces
@@ -149,6 +153,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let all = false;
   let branch: string | undefined;
   let force = false;
+  let move: Args["move"];
   const positional: string[] = [];
   const queue = [...argv];
 
@@ -194,6 +199,14 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--all":
         all = true;
         break;
+      case "--move": {
+        const label = queue.shift() ?? "";
+        const port = queue.shift() ?? "";
+        if (!/^(editor|[1-9][0-9]{0,4})$/.test(label) || !/^[1-9][0-9]{0,4}$/.test(port))
+          throw new UsageError(`--move takes a label (editor, or a container port) and a host port`);
+        move = { label, port: Number(port) };
+        break;
+      }
       case "--rebuild":
         rebuild = true;
         break;
@@ -215,6 +228,8 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     throw new UsageError("--force only means something with --remove-worktree");
   if ((command === "create-worktree" || command === "remove-worktree") && worktree === undefined)
     throw new UsageError(`--${command} acts on a worktree; name it with --worktree`);
+  if (move && command !== "ports")
+    throw new UsageError("--move only means something with --ports");
 
   if (namesNoTarget(command, all)) {
     if (positional.length)
@@ -235,5 +250,6 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     all,
     branch,
     force,
+    ...(move ? { move } : {}),
   };
 };

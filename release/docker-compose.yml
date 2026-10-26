@@ -154,16 +154,13 @@ services:
       timeout: 3s
       retries: 24
       start_period: 15s
-    ports:
-      # Reaches editors/apps running INSIDE devcontainers. Chain:
-      #   Mac 127.0.0.1:PORT -> dind's netns :PORT -> socat relay container
-      #   (joined to the devcontainer's network) -> devcontainer bridge IP.
-      # Widen the range in .env with the following variables:
-      #   DESOLATE_PORT_MIN=8080
-      #   DESOLATE_PORT_MAX=8159
-      # The SAME two variables are handed to the orchestrator, which is what
-      # desolate.ts allocates from. Do NOT hardcode either side.
-      - "127.0.0.1:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8119}:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8119}"
+    # NO ports. Editors and dev servers inside devcontainers reach the Mac
+    # through desolate-ingress, a VM process (release/proxy/vm/ingress.py):
+    #   Mac 127.0.0.1:P -> (Lima) -> VM 127.0.0.1:P, opened on demand
+    #   -> this dind's address :P -> socat relay (published HERE, inside it)
+    #   -> devcontainer IP.
+    # The range this used to publish is gone, and with it the ceiling on how
+    # many editors and dev servers can be up at once.
     # NOT devnet. dind is the container world; devnet is the editor world.
     networks: [dindnet]
     restart: unless-stopped
@@ -184,10 +181,10 @@ services:
     environment:
       DOCKER_HOST: unix:///run/inner/docker.sock
       DESOLATE_BROKER: /run/broker/desolate.sock
-      # The range desolate.ts allocates relay ports from. MUST be the same two
-      # variables dind publishes above.
-      DESOLATE_PORT_MIN: ${DESOLATE_PORT_MIN:-8080}
-      DESOLATE_PORT_MAX: ${DESOLATE_PORT_MAX:-8119}
+      # Where host-port allocation starts (ports.ts); >= 1024, as the ingress
+      # forwards nothing lower. And the editor's own port, which it must skip.
+      DESOLATE_PORT_BASE: ${DESOLATE_PORT_BASE:-8080}
+      VSCODE_PORT: ${VSCODE_PORT:-3000}
     entrypoint: ["/usr/local/bin/with-ca", "tsx", "/usr/local/lib/desolate/broker.ts"]
     volumes:
       - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
@@ -200,6 +197,7 @@ services:
       - server-dist:/server-dist:ro
       - broker-run:/run/broker
       - supervisor-run:/run/supervisor   # the supervisor's request socket -- this service only
+      - /run/desolate-ingress/ports:/run/ingress/ports   # one file per forwarded host port
       - dind-sockets:/run/dind-sockets   # every project dind's socket, one directory each
     security_opt:
       - no-new-privileges:true
@@ -216,6 +214,9 @@ services:
   supervisor:
     build: ./vscode-image           # same image; a different entrypoint again
     container_name: desolate-supervisor
+    depends_on:
+      dind:
+        condition: service_healthy   # it publishes the shared dind's address at start
     user: "0:0"                     # the VM socket is root's
     entrypoint: ["tsx", "/usr/local/lib/desolate/supervisor.ts"]
     environment:
@@ -344,9 +345,8 @@ services:
       - keyring-run:/run/keyring:ro
     ports:
       # Set VSCODE_PORT in .env to move the editor off 3000 (e.g. when something
-      # else on your Mac already uses it). It MUST stay outside of
-      # DESOLATE_PORT_MIN..MAX -- dind publishes that whole range on the same
-      # loopback address, and the two publishes would collide;
+      # else on your Mac already uses it). The port allocator is told it, and
+      # never hands it to a dev server.
       - "127.0.0.1:${VSCODE_PORT:-3000}:3000"
     security_opt:
       - no-new-privileges:true

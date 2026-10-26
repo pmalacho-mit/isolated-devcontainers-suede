@@ -181,24 +181,16 @@ else
     ok "editor (port $VSPORT) not exposed beyond loopback"
   fi
 fi
-# The dind publish is what makes a relay reachable from the Mac; DESOLATE_PORT_*
-# is what desolate.ts allocates relays from. compose feeds both from the same
-# variables, so these agree unless a running container predates an .env edit --
-# and the failure mode is silent: the relay starts, the URL just never answers.
-PMIN=$(docker exec desolate-orchestrator printenv DESOLATE_PORT_MIN 2>/dev/null || echo 8080)
-PMAX=$(docker exec desolate-orchestrator printenv DESOLATE_PORT_MAX 2>/dev/null || echo 8119)
-PUB=" $(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}' \
-        desolate-dind 2>/dev/null) "
-missing=""
-for p in $(seq "${PMIN:-8080}" "${PMAX:-8119}"); do
-  case "$PUB" in *" $p "*) ;; *) missing="$missing $p" ;; esac
-done
-if [ -z "$missing" ]; then
-  ok "dind publishes every port desolate allocates from ($PMIN-$PMAX)"
+# Nothing in the container world publishes a port to the VM any more: every
+# dev-server port is a listener desolate-ingress opens on demand (section 8).
+# A publish that reappears is a range someone re-added, and it would sit beside
+# the ingress's forwards on the same loopback.
+PUB=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{$p}} {{end}}' desolate-dind 2>/dev/null)
+if [ -z "$PUB" ]; then
+  ok "dind publishes nothing (dev-server ports go through the ingress)"
 else
-  bad "desolate allocates from $PMIN-$PMAX but dind does not publish:$missing"
-  note "relays on those ports bind inside dind and are unreachable from the Mac"
-  note "recreate dind so it picks up the range: ./cli.sh up"
+  bad "dind publishes ports again: $PUB"
+  note "the range was replaced by desolate-ingress; remove 'ports:' from the dind service"
 fi
 if [ -z "$VSPORT" ]; then
   note "editor container not running -- skipping the token-gate check"

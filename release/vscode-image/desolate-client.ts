@@ -82,6 +82,7 @@ const VALUES = ["--worktree", "--branch"] as const;
 const MODIFIERS = ["--all"] as const;
 
 let op = "start";
+let move: { label: string; port: number } | undefined;
 const value: Record<string, string | undefined> = {};
 const modifier = new Set<string>();
 const rest: string[] = [];
@@ -92,6 +93,11 @@ while (queue.length) {
     // Two ops in one command line is a mistake, not a precedence question.
     if (op !== "start") refuse(`'${a}' conflicts with the operation already given`);
     op = OPS[a];
+  } else if (a === "--move") {
+    const label = queue.shift(), port = queue.shift();
+    if (!label || !port || !/^(editor|[1-9][0-9]{0,4})$/.test(label) || !/^[1-9][0-9]{0,4}$/.test(port))
+      refuse("--move takes a label (editor, or a container port) and a host port");
+    move = { label: label!, port: Number(port) };
   } else if ((MODIFIERS as readonly string[]).includes(a)) {
     modifier.add(a);
   } else if ((VALUES as readonly string[]).includes(a)) {
@@ -114,6 +120,7 @@ if (value["--branch"] !== undefined && worktree === undefined)
   refuse("--branch only means something with --worktree");
 
 if (modifier.has("--all") && op !== "stop") refuse("--all only means something with --stop");
+if (move && op !== "ports") refuse("--move only means something with --ports");
 
 // The two spellings of "everything". `--all` says so outright; the bare word
 // only widens when no project of that name is there to be meant instead, which
@@ -140,7 +147,7 @@ if (op === "list" || stopsEverything) {
       : `desolate: '${op}' takes ONE project, got ${rest.length}: ${rest.join(" ")}`);
     usage(1);
   }
-  request = { op, project: rest[0], worktree };
+  request = { op, project: rest[0], worktree, ...(move ? { move } : {}) };
 }
 
 // Created before the broker is asked to start it -- by the broker as well, in

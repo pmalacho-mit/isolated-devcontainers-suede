@@ -575,31 +575,47 @@ editor_url() {
 # starts first (vscode depends_on it), so the loser is the EDITOR -- and the
 # symptom is "the editor container is not running" long after the port numbers
 # have gone out of mind. Refuse before starting instead.
+# Before a start: does THIS Mac already listen on a port the target had last
+# time? Lima then forwards nothing for it, and never retries once the Mac lets
+# go (tests/probes/vm-loopback-forward.sh L6) -- so the URL would just not
+# answer. Said before the start, with the command that moves it. Only a start
+# is checked; every other op passes through untouched, and so does a target
+# with nothing saved yet.
+warn_if_the_mac_holds_saved_ports() {
+  local project="" worktree="" arg
+  while [ $# -gt 0 ]; do
+    arg=$1; shift
+    case "$arg" in
+      --stop|--ports|--purge|--list|--uncommitted|--populate|-h|--help) return 0 ;;
+      --worktree) worktree=${1:-}; shift ;;
+      --config|--branch) shift ;;
+      -*) ;;
+      *) project=$arg ;;
+    esac
+  done
+  [ -n "$project" ] && command -v lsof >/dev/null 2>&1 || return 0
+  local where=("$project"); [ -n "$worktree" ] && where+=(--worktree "$worktree")
+  docker exec "$ORCHESTRATOR" desolate-run --ports "${where[@]}" 2>/dev/null \
+    | awk '/-> http:\/\/127\.0\.0\.1:/ { label=$1; sub(/^container:/, "", label);
+                                          n=split($NF, a, ":"); print label, a[n] }' \
+    | while read -r label port; do
+        if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+          echo "cli.sh: WARNING -- something on this Mac already listens on $port ($label's port)." >&2
+          echo "        Lima will not forward it, so that URL will not answer. Move it:" >&2
+          echo "          ./cli.sh desolate --ports ${where[*]} --move $label <a free port>" >&2
+        fi
+      done
+}
+
 require_free_vscode_port() {
-  local port min max
+  local port
   port=$(vscode_port)
-  min=$(env_value DESOLATE_PORT_MIN); min=${min:-8080}
-  max=$(env_value DESOLATE_PORT_MAX); max=${max:-8119}
   case "$port" in
     ''|*[!0-9]*)
       echo "cli.sh: VSCODE_PORT='$port' is not a port number (1-65535)" >&2; exit 1 ;;
   esac
   if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
     echo "cli.sh: VSCODE_PORT=$port is out of range (1-65535)" >&2; exit 1
-  fi
-  if [ "$port" -ge "$min" ] && [ "$port" -le "$max" ]; then
-    cat >&2 <<EOF
-cli.sh: VSCODE_PORT=$port is inside DESOLATE_PORT_MIN..MAX ($min-$max).
-
-dind publishes that whole range on 127.0.0.1 for dev-server relays, and the
-editor would be publishing the same address -- they cannot both have it, and the
-editor is the one that loses (it starts after dind).
-
-Fix either side in $SCRIPT_DIR/.env, then './cli.sh up':
-  VSCODE_PORT=3000                       # outside $min-$max
-  DESOLATE_PORT_MIN / DESOLATE_PORT_MAX  # move the range instead
-EOF
-    exit 1
   fi
 }
 
@@ -1061,6 +1077,7 @@ case "$CMD" in
              echo "cli.sh: exported $PROJ/${REL#./} to ./$NAME" ;;
 
   desolate)  ensure_running
+             warn_if_the_mac_holds_saved_ports "$@"
              # From the Mac we use the DIRECT runner in the orchestrator (the
              # Mac is already trusted). Inside the editor, `desolate` is a
              # broker client -- the editor has no daemon access. DESOLATE_PLANE

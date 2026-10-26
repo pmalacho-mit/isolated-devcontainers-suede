@@ -111,7 +111,9 @@ type Request = {
       ? { op: op; project: string; worktree: string; branch?: string }
       : op extends "worktree-remove"
         ? { op: op; project: string; worktree: string; force?: boolean }
-        : { op: op; project: string; worktree?: string };
+        : op extends "ports"
+          ? { op: op; project: string; worktree?: string; move?: { label: string; port: number } }
+          : { op: op; project: string; worktree?: string };
 }[Operation];
 
 /** Absent, or of this type. */
@@ -119,6 +121,23 @@ const optional = (query: object, key: string, type: "string" | "boolean") =>
   !(key in query) ||
   (query as Record<string, unknown>)[key] === undefined ||
   typeof (query as Record<string, unknown>)[key] === type;
+
+
+/** `--move`'s two values, held to what the runner's grammar accepts: a label
+ *  is `editor` or a container port, and the port an integer. Nothing else
+ *  reaches its argv. */
+const isMove = (move: unknown): move is { label: string; port: number } =>
+  move !== null &&
+  typeof move === "object" &&
+  "label" in move &&
+  "port" in move &&
+  Object.keys(move).length === 2 &&
+  typeof move.label === "string" &&
+  /^(editor|[1-9][0-9]{0,4})$/.test(move.label) &&
+  typeof move.port === "number" &&
+  Number.isInteger(move.port) &&
+  move.port >= 1 &&
+  move.port <= 65535;
 
 type GlobalRequest = Extract<Request, { op: GlobalOperation }>;
 
@@ -155,7 +174,8 @@ const request = {
           ? "worktree" in query && typeof query.worktree === "string"
           : true) &&
         (query.op === "worktree-add" ? optional(query, "branch", "string") : !("branch" in query)) &&
-        (query.op === "worktree-remove" ? optional(query, "force", "boolean") : !("force" in query)))),
+        (query.op === "worktree-remove" ? optional(query, "force", "boolean") : !("force" in query)) &&
+        (!("move" in query) || (query.op === "ports" && isMove(query.move))))),
 };
 
 /**
@@ -289,8 +309,11 @@ async function handle(req: unknown, send: Send) {
         break;
       }
       case "stop":
+        flags = ["--stop"];
+        break;
       case "ports":
-        flags = [`--${req.op}`];
+        flags = ["--ports"];
+        if (req.move) flags.push(["--move", req.move.label, String(req.move.port)]);
         break;
     }
 

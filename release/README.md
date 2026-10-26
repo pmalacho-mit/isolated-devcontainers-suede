@@ -45,8 +45,9 @@ The name is `desolate` = **de**v + i**solate**.
 ```
 
 **One** host-reachable surface, loopback-only: `3000` by default (`VSCODE_PORT`),
-the editor, token-gated. (Plus the dev-server range, 8080-8119 by default, once a
-project is running.)
+the editor, token-gated. (Plus one loopback port per project editor and declared
+dev server while it runs, from 8080 up, each opened on demand by
+`desolate-ingress` in the VM -- never a published range.)
 
 There is deliberately no network path to the inner Docker daemon.
 
@@ -374,8 +375,8 @@ proxy can only do its job if containers trust its certificate. That's what the
 publisher is for, and it's why a devcontainer that skips installing the CA gets
 TLS errors.
 
-Your own dev servers (ports 8080-8119 by default) are deliberately left out of
-all this -- that range belongs to your projects.
+Your own dev servers (host ports from 8080 up) are deliberately left out of all
+this -- those ports belong to your projects.
 
 > [!NOTE]
 > `./cli.sh up` may re-run the proxy installation by invoking `cli.sh vm install` with the `--proxy-only` flag. The firewall rules are tied to the name of the network the stack runs on, and that name can change out from under them -- which would turn interception off silently. So `up` checks on every start and repairs it if needed (see [Why `up` re-checks the proxy](#why-up-re-checks-the-proxy)). `--proxy-only` skips the sysbox half, which restarts docker and would kill the stack that just started.
@@ -806,15 +807,17 @@ collide):
 "customizations": { "desolate": { "ports": [5173] } }
 ```
 
-`desolate` allocates a free host port from **8080-8119** at start, remembers it
-per project (stable URLs across restarts), and forwards it via a socat relay.
+`desolate` allocates a free host port from **8080 up** at start, remembers it
+per project (stable URLs across restarts), and forwards it via a socat relay and
+`desolate-ingress`, which opens that port on the VM's loopback only while the
+project runs.
 Start your dev server bound to `0.0.0.0` (e.g. `npx vite --host 0.0.0.0`); the
 URL `desolate` printed answers once the server is up. Do **not** put `appPort`
 in devcontainer.json -- `desolate` hard-fails on it, because it collides with
 the relay's port bind.
 
-Each project spends one port on its editor plus one per declared port, so the
-default range holds roughly five or six projects at once.
+Each project spends one port on its editor plus one per declared port. There is
+no range to run out of: the ports are listeners, not a publish made in advance.
 
 ## Editor extensions and settings
 
@@ -1166,43 +1169,41 @@ Rebuilding is never automatic, because it destroys anything written inside the
 container outside `/workspaces` -- packages installed ad hoc, a local database.
 `/workspaces` itself is a volume and survives.
 
-### Changing the range
+### How a host port reaches your Mac
 
-8080-8119 is the default, not a constant. Forty ports sounds generous until you
-count: every target takes one for its editor before it asks for a single dev
-server, and a project's worktrees are targets of their own. Set both bounds in
-the `.env` next to `docker-compose.yml` and restart:
+There is no published range. Each host port is a file in the VM's
+`/run/desolate-ingress/ports/`, written by `desolate` once the port's relay is
+up and removed when the target stops, and `desolate-ingress` (a VM service,
+`release/proxy/vm/ingress.py`) opens `127.0.0.1:<port>` for each one. Lima
+forwards any VM loopback listener to the Mac's loopback within a fraction of a
+second, so the URL works with nothing published by docker at all.
+
+The forwarder refuses anything outside its bounds and logs it: a port below
+1024 (Lima forwards those onto your LAN), an address that is not a dind's, or a
+bridge's own gateway (the VM itself). Its uid can open connections to dind
+bridges and nowhere else -- an nftables rule, counted, that does not trust the
+forwarder's own checks. `./cli.sh preflight` proves the whole path from your
+Mac: it opens a port on demand and fetches through it.
+
+Allocation starts at `DESOLATE_PORT_BASE` (8080) and takes the lowest free port,
+keeping a target's previous ports when it can. Set the base in the `.env` next
+to `docker-compose.yml` if 8080 is busy on your Mac; nothing else needs to agree
+with it.
+
+### When your Mac already holds the port
+
+If something on your Mac already listens on a port a target wants, Lima does not
+forward it -- and does not retry once the Mac lets go. `./cli.sh desolate` warns
+before a start when that is the case. Move just that one label:
 
 ```bash
-DESOLATE_PORT_MIN=8080
-DESOLATE_PORT_MAX=8159
+./cli.sh desolate --ports acme/widgets --move editor 8095   # or: --move 5173 8096
 ```
 
-```bash
-./cli.sh up          # recreates dind (the publish) and the orchestrator (the allocator)
-```
-
-Set **both** variables, and change them only here. They feed two places that
-have to agree: the range dind publishes to the Mac, and the range `desolate`
-allocates relays from. Of the two ways to get that wrong, only one is loud --
-publishing more than you allocate merely wastes port bindings, while allocating
-more than you publish produces a relay that binds happily inside dind and is
-simply unreachable from the Mac, so the URL never answers and nothing logs an
-error. Driving both from one pair of variables is what prevents that;
-`cli.sh preflight` re-checks it against the _running_ containers, which is the
-case config alone cannot catch (an `.env` edit without a restart).
-
-### When the range runs out
-
-There is no queue and no overflow range: `desolate <project>` stops with a
-listing of every port in the range and what holds it, and does nothing else.
-Allocation happens before `devcontainer up`, so a refusal leaves nothing
-half-started and does not disturb the port maps of projects already running.
-
-The usual cause is simply too many projects at once -- `desolate --stop <other>`
-frees a port immediately. The other cause is worth knowing: a devcontainer
-deleted by hand rather than through `desolate --stop` leaves its relays behind,
-still holding their ports. `./cli.sh observe ps` lists them as
+A running target's relay and forward move with it; a stopped one keeps the new
+port for its next start. The usual other cause of a missing port is a
+devcontainer deleted by hand rather than through `desolate --stop`, which leaves
+its relays behind: `./cli.sh observe ps` lists them as
 `desolate-relay-<project>-<port>`, or `desolate-relay-<project>--wt--<worktree>-<port>`
 for a worktree; `./cli.sh reset-inner` sweeps the ones that are no longer
 running.
@@ -1831,8 +1832,8 @@ machine.
 | Variable                     | Default         | What it does                                                                                                                                                            |
 | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
-| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. Must sit **outside** `DESOLATE_PORT_MIN..MAX` -- dind publishes that whole range, and `cli.sh up` refuses a collision. |
-| `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8119` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else.                   |
+| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. The port allocator is told it and never hands it to a dev server.                                                      |
+| `DESOLATE_PORT_BASE`         | `8080`          | Where project editor and dev-server host ports are allocated from (>= 1024). No upper bound: each is a listener `desolate-ingress` opens on demand.                      |
 | `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |
 | `DESOLATE_SKIP_VM_CHECK`     | unset           | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
 

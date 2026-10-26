@@ -264,7 +264,17 @@ verify_ingress() {
   inner_docker run -d --rm --name "$inner" -p "$port:$port" alpine/socat \
     "TCP-LISTEN:$port,fork,reuseaddr" "SYSTEM:echo desolate-ingress-selftest" >/dev/null 2>&1 \
     || { bad "could not start the self-test listener in the shared dind"; return 1; }
-  printf '%s\n' "$dind_ip" | sudo tee "$INGRESS_ROOT/dinds/desolate-dind" >/dev/null
+  # The supervisor publishes the shared dind's address; this only checks it did.
+  local published=""
+  for _ in $(seq 1 20); do
+    published=$(cat "$INGRESS_ROOT/dinds/desolate-dind" 2>/dev/null) && [ -n "$published" ] && break
+    sleep 0.5
+  done
+  if [ "$published" = "$dind_ip" ]; then
+    ok "the supervisor published the shared dind's address ($published)"
+  else
+    bad "dinds/desolate-dind is '${published:-missing}', the dind is at $dind_ip"; return 1
+  fi
   printf 'desolate-dind:%s\n' "$port" > "$INGRESS_ROOT/ports/$host_port"
   for _ in $(seq 1 20); do
     # --http0.9: the target answers with a bare line, not HTTP.
