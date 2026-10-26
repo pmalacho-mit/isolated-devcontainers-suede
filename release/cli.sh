@@ -374,11 +374,12 @@ require_supervisor() {
   exit 1
 }
 
-# What projects.ts accepts, closely enough to refuse anything that would make
-# a different docker name: `name` or `owner/name`, no leading dot, no `__`.
+# What projects.ts accepts (validName), closely enough to refuse anything that
+# would make a different docker name: `name` or `owner/name`, each segment
+# starting alphanumeric, and no `__`.
 # A worktree has no dind of its own; it shares its project's.
 valid_project() {
-  printf '%s' "$1" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)?' \
+  printf '%s' "$1" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?' \
     && case "$1" in *__*) false ;; esac
 }
 

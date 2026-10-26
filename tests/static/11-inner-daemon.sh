@@ -204,7 +204,7 @@ group "a project's dind climbs the same ladder"
 for fn in valid_project select_project_dind restart_dind delete_data_root; do
   define_from_cli "$fn"
 done
-for bad in "../etc" "a/b/c" ".hidden" "a__b" "" "a b" "a;rm" "-rf" "acme/widgets@wt"; do
+for bad in "../etc" "a/b/c" ".hidden" "a__b" "" "a b" "a;rm" "-rf" "acme/widgets@wt" "_x" "acme/-w"; do
   if (select_project_dind "$bad") >/dev/null 2>&1; then
     fail "'$bad' is refused as a project" "it was accepted"
   else

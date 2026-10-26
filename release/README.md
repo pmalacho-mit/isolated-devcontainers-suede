@@ -1846,6 +1846,7 @@ machine.
 | `DESOLATE_PORT_BASE`         | `8080`          | Where project editor and dev-server host ports are allocated from (>= 1024). No upper bound: each is a listener `desolate-ingress` opens on demand.                      |
 | `DESOLATE_DIND_IDLE`         | `30`            | Minutes a project daemon may sit with no devcontainer running before it is stopped. Its images stay; the next start is warm.                                             |
 | `DESOLATE_MAX_DINDS`         | `16`            | Project daemons running at once. A newcomer past it stops the longest-idle one; a daemon with a devcontainer running is never stopped for it.                            |
+| `DESOLATE_DIND_GRACE`        | `15`            | Minutes after a project daemon was started or last busy during which it is never stopped to make room -- its devcontainer may still be building.                       |
 | `DESOLATE_DIND_MEM_FLOOR`    | `2147483648`    | Bytes of VM memory kept free. A project daemon that would start below it is refused, naming the busy daemons in the way, after idle ones have been stopped.              |
 | `DESOLATE_DIND_MEMORY`       | `6g`            | Memory ceiling of each project daemon, everything it runs included.                                                                                                     |
 | `DESOLATE_DIND_CPUS`         | `4`             | CPU ceiling of each project daemon (never more than the VM has).                                                                                                        |
