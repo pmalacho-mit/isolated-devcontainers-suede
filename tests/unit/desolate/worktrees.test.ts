@@ -18,6 +18,7 @@ import { target } from "../../../release/vscode-image/projects.ts";
 import {
   CHECKOUT_IMAGE,
   addArguments,
+  awaitsCheckout,
   checkoutMounts,
   hardenedGit,
   sandboxMounts,
@@ -266,5 +267,37 @@ describe("the checkout sandbox's reach", () => {
     const project = join(box.workspaces, "acme/widgets");
     assert.ok(!sources.includes(project), `${sources}`);
     assert.ok(!sources.some((source) => source.endsWith("/other")), `${sources}`);
+  });
+});
+
+describe("which worktrees a sandbox should check out", () => {
+  test("one that git registered and never checked out", () => {
+    const box = sandbox();
+    box.project("acme/widgets");
+    assert.equal(awaitsCheckout(box.worktree("acme/widgets", "fresh")), true);
+  });
+
+  test("not one already checked out", () => {
+    const box = sandbox();
+    box.project("acme/widgets");
+    const done = box.worktree("acme/widgets", "done");
+    fs.writeFileSync(join(box.workspaces, "acme/widgets/.git/worktrees/done/index"), "");
+    assert.equal(awaitsCheckout(done), false);
+  });
+
+  test("not a directory that is no worktree at all", () => {
+    // No .git file, or one naming an admin directory that is gone: checking
+    // it out would fail, so it is started -- or refused -- as it always was.
+    const box = sandbox();
+    box.project("acme/widgets");
+    fs.mkdirSync(join(box.workspaces, "acme/widgets/.worktrees/handmade"), { recursive: true });
+    assert.equal(awaitsCheckout(target(box.workspaces, "acme/widgets", "handmade")), false);
+    const orphan = box.worktree("acme/widgets", "orphan");
+    fs.rmSync(join(box.workspaces, "acme/widgets/.git/worktrees/orphan"), { recursive: true });
+    assert.equal(awaitsCheckout(orphan), false);
+  });
+
+  test("never a root target", () => {
+    assert.equal(awaitsCheckout(sandbox().project("acme/widgets")), false);
   });
 });

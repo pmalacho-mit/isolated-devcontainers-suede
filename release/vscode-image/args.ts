@@ -30,7 +30,11 @@ export type Command =
   /** Whether a worktree holds anything a removal would lose, asked in its
    *  sandbox. What `cli.sh worktree remove` runs before deleting one; the
    *  editor cannot ask git that itself (worktrees.ts). */
-  | "uncommitted";
+  | "uncommitted"
+  /** Check a never-started worktree out in its sandbox, and nothing else.
+   *  What the broker asks for BEFORE it reads the spec: a worktree the editor
+   *  created holds no `.devcontainer/` until this has run (worktrees.ts). */
+  | "populate";
 
 export type Args = {
   command: Command;
@@ -67,6 +71,7 @@ export type Args = {
 export type Flags =
   | "--stop"
   | "--ports"
+  | "--populate"
   | ["--config", string]
   | ["--worktree", string]
   | "--rebuild"
@@ -145,6 +150,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--purge":
         command = "purge";
+        break;
+      case "--populate":
+        command = "populate";
         break;
       case "--uncommitted":
         command = "uncommitted";

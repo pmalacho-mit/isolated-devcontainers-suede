@@ -656,7 +656,7 @@ const worktreeSandbox = (target: Target, mounts: string[]) => {
 };
 
 function populateWorktree(target: Target): void {
-  if (worktrees.isPopulated(target)) return;
+  if (!worktrees.awaitsCheckout(target)) return;
   const ca = SHARED_DIRECTORIES.find((mount) => mount.target === CA_DIR)!;
 
   desolog(`checking out ${target.name} in a sandbox (first start) ...`);
@@ -1288,6 +1288,7 @@ async function main(): Promise<void> {
   if (args.command === "ports") showPorts(target);
   else if (args.command === "purge") purgeTarget(target);
   else if (args.command === "uncommitted") reportUncommitted(target);
+  else if (args.command === "populate") populateWorktree(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }
 

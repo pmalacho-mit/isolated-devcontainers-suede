@@ -132,6 +132,18 @@ export const SANDBOX_LABEL = "desolate.worktree-sandbox";
  *  post-checkout hook, which may fetch, install or simply hang. */
 export const SANDBOX_SECONDS = 600;
 
+/** Is this a git worktree that was created and never checked out -- the state
+ *  `add` leaves it in, and the only one a sandbox should populate?
+ *
+ *  Narrower than `!isPopulated`: a directory with no `.git` file, or one
+ *  naming an admin directory that is not there, is not a worktree waiting for
+ *  files, and checking it out would fail rather than help. */
+export const awaitsCheckout = (worktree: Target) => {
+  if (!worktree.worktree) return false;
+  const admin = adminDirectory(worktree);
+  return admin !== "" && existsSync(admin) && !existsSync(join(admin, "index"));
+};
+
 /** Is this worktree exempt from pruning?
  *
  *  Asked of the filesystem rather than of git, because the orchestrator needs

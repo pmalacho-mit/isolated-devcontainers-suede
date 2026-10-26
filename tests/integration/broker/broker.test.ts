@@ -116,12 +116,21 @@ before(async () => {
   resetRunner();
 
   // Stub runner: record argv, succeed. Reaching it at all is the failure signal
-  // for every hostile case below.
+  // for every hostile case below. `--populate` it ALSO does what the real
+  // runner's sandbox does -- check the worktree out -- so the broker's next
+  // step has a spec to read; a project named `populate-fails` makes it fail.
   const stub = path.join(tmp, "stub-runner.ts");
   fs.writeFileSync(
     stub,
     `import * as fs from "node:fs";\n` +
-      `fs.appendFileSync(${JSON.stringify(runnerLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n` +
+      `import { execFileSync } from "node:child_process";\n` +
+      `const argv = process.argv.slice(2);\n` +
+      `fs.appendFileSync(${JSON.stringify(runnerLog)}, JSON.stringify(argv) + "\\n");\n` +
+      `if (argv[0] === "--populate") {\n` +
+      `  const project = argv.at(-1), worktree = argv[argv.indexOf("--worktree") + 1];\n` +
+      `  if (project === "populate-fails") process.exit(7);\n` +
+      `  execFileSync("git", ["-C", ${JSON.stringify(workspaces)} + "/" + project + "/.worktrees/" + worktree, "checkout", "--force", "-q"]);\n` +
+      `}\n` +
       `console.log("stub runner ok");\n`,
   );
 
@@ -968,5 +977,50 @@ describe("preconditions", () => {
       encoding: "utf8",
     }).trim();
     assert.match(v, /\d+\.\d+/);
+  });
+});
+
+// ===========================================================================
+describe("a worktree the editor created is populated before its spec is read", () => {
+  // ===========================================================================
+  // The editor creates worktrees with --no-checkout (worktrees.ts), so until
+  // its sandbox has run there is no .devcontainer/ to snapshot. Found by
+  // starting one through the nested stack: the broker failed with "no
+  // devcontainer.json" before the runner -- which owns the sandbox -- ever ran.
+  const gitProject = (name: string) => {
+    const dir = project(name, JSON.stringify({ image: "alpine:3" }));
+    const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { stdio: "ignore" });
+    git("init", "-q", "-b", "main", ".");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "add", "-A");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+    git("worktree", "add", "-q", "--no-checkout", "-b", "wip", ".worktrees/wip");
+    return dir;
+  };
+
+  test("start runs --populate first, then starts from the populated spec", async () => {
+    gitProject("fresh-wt");
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "fresh-wt", worktree: "wip" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    const calls = runnerInvocations();
+    assert.deepEqual(calls[0], ["--populate", "--worktree", "wip", "fresh-wt"]);
+    assert.equal(calls.length, 2, JSON.stringify(calls));
+    assert.ok(calls[1].includes("--config"), JSON.stringify(calls[1]));
+  });
+
+  test("a populated worktree is not populated again", async () => {
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "fresh-wt", worktree: "wip" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    assert.ok(!runnerInvocations().some((argv) => argv[0] === "--populate"));
+  });
+
+  test("a failed populate stops the start, and says so", async () => {
+    gitProject("populate-fails");
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "populate-fails", worktree: "wip" });
+    assert.equal(result(msgs).ok, false);
+    assert.equal(result(msgs).exit, 7);
+    assert.deepEqual(runnerInvocations().map((argv) => argv[0]), ["--populate"]);
   });
 });

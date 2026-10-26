@@ -19,6 +19,7 @@ import { createServer } from "node:net";
 import { dirname } from "node:path";
 import { resolveSpec } from "./devcontainer.ts";
 import { PLANE_VARIABLE } from "./hints.ts";
+import { awaitsCheckout } from "./worktrees.ts";
 import {
   snapshot,
   initDirectory as initSnapshotDirectory,
@@ -239,6 +240,13 @@ async function handle(req: unknown, send: Send) {
     switch (req.op) {
       case "start":
       case "rebuild": {
+        // The editor creates a worktree with nothing checked out, so there is
+        // no spec to read until its sandbox has populated it (worktrees.ts).
+        // Done by the runner, which owns that sandbox, and before the snapshot.
+        if (awaitsCheckout(target)) {
+          const populated = await spawnDesolate(targetArgv(target, ["--populate"]), send);
+          if (populated !== 0) return send({ ok: false, exit: populated });
+        }
         const configPath = snapshot(target, config);
         const resolved = resolveSpec(target.dir, configPath);
         enforcePolicy(target, resolved, listTargets(config.workspaces));
