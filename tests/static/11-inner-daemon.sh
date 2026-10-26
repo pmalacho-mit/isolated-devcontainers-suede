@@ -156,6 +156,31 @@ if define_from_cli sweep_inner && define_from_cli inner_ids; then
   unset -f inner_docker
 fi
 
+group "a project's daemon cannot make the sweep expand globs here"
+# On a project's dind, what `ps` prints comes from binaries the project can
+# replace. An unquoted `$ids` expanded a printed `*` against THIS machine's
+# files and handed the matches back to that daemon as argv -- the names of
+# files on the Mac, to a process the project owns (found in review, measured
+# with this stub). Only container ids reach `rm`, and the rest is said.
+if define_from_cli sweep_inner && define_from_cli inner_ids; then
+  HERE_FILES=$(mktemp -d)
+  touch "$HERE_FILES/id_ed25519" "$HERE_FILES/known_hosts"
+  REMOVED=""
+  inner_docker() {
+    case "$1" in
+      ps) printf '%s\n' "$HERE_FILES/*" '*' 0123456789ab ;;
+      *) shift 2; REMOVED="$*" ;;
+    esac
+  }
+  OUT=$(cd "$HERE_FILES" && sweep_inner "relays" desolate.relay exited; printf 'REMOVED=%s' "$REMOVED")
+  assert_contains "only the container id reaches the daemon" "$OUT" "REMOVED=0123456789ab"
+  assert_not_contains "no file name from this machine does" "$OUT" "id_ed25519"
+  assert_contains "and what was dropped is said" "$OUT" "ignored 2 entries in the listing that are not container ids"
+  unset -f inner_docker
+  rmdir_files() { find "$HERE_FILES" -type f -delete; rmdir "$HERE_FILES"; }
+  rmdir_files
+fi
+
 group "the rung that deletes every project's images needs asking for"
 # EXECUTED, not read: rung 3 is today's folklore ("delete the data root") turned
 # into a command, and the whole reason to have it as a command is that the

@@ -494,9 +494,27 @@ sweep_inner() {
     echo "  no stale $what"
     return 0
   fi
-  echo "  removing $(printf '%s\n' "$ids" | wc -l | tr -d ' ') stale $what"
-  # shellcheck disable=SC2086  # several ids, deliberately word-split
-  inner_docker rm -f $ids >/dev/null 2>&1 || echo "  ...some of them would not go"
+  # Container ids and nothing else, read line by line and never word-split:
+  # on a project's dind the listing is printed by binaries the project can
+  # replace, and an unquoted `$ids` would glob-expand what it printed against
+  # THIS machine's filesystem and hand the matches back to its daemon.
+  local id kept=() ignored=0
+  while IFS= read -r id; do
+    case "$id" in
+      "") ;;
+      *[!0-9a-f]*) ignored=$((ignored + 1)) ;;
+      *) if [ "${#id}" -ge 12 ] && [ "${#id}" -le 64 ]; then kept+=("$id"); else ignored=$((ignored + 1)); fi ;;
+    esac
+  done <<EOF
+$(printf '%s\n' "$ids" | tr -s '[:space:]' '\n')
+EOF
+  [ "$ignored" -gt 0 ] && echo "  ignored $ignored entr$([ "$ignored" = 1 ] && echo y || echo ies) in the listing that are not container ids"
+  if [ "${#kept[@]}" -eq 0 ]; then
+    echo "  no stale $what"
+    return 0
+  fi
+  echo "  removing ${#kept[@]} stale $what"
+  inner_docker rm -f "${kept[@]}" >/dev/null 2>&1 || echo "  ...some of them would not go"
 }
 
 # The daemon's container alone. A project dind is the supervisor's: it
