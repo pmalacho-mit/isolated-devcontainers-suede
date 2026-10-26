@@ -1428,6 +1428,22 @@ None of it runs until you enable it:
 ./cli.sh work verify acme/widgets        # every message an append by its writer, or exit 1
 ```
 
+**Agents' credentials are placeholders.** Claude Code sends whatever token it
+is given as the bearer, with no local check of its shape (measured:
+`tests/probes/agent-token-placeholder.sh`), so the real token stays in the VM
+and is bound to the one project that may spend it:
+
+```bash
+./cli.sh secret add ACME-CLAUDE-TOKEN --hosts api.anthropic.com --projects acme/widgets
+```
+
+```jsonc
+"containerEnv": { "CLAUDE_CODE_OAUTH_TOKEN": "ACME-CLAUDE-TOKEN" }   // or ANTHROPIC_API_KEY
+```
+
+Every target of the project -- `main` and each worktree -- starts logged in; a
+worker in another project cannot spend it.
+
 **The policy is not in the repository.** It lives in
 `/workspaces/.desolate/factory/`, with your approvals and the watcher's record,
 where no devcontainer reaches: every agent in the project can commit to its
