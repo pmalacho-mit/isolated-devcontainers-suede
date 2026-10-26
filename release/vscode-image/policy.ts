@@ -54,13 +54,6 @@ const allowlist = (() => {
           "-t",
         ] as const),
       ),
-      deny: {
-        "--security-opt": [
-          /unconfined/i, // seccomp=unconfined, apparmor=unconfined
-          /label\s*=\s*disable/i, // SELinux off
-          /^seccomp\s*=\s*[./]/i, // a profile loaded from a project-writable path
-        ],
-      } satisfies Partial<Record<ItemFromSet<typeof values>, RegExp[]>>,
     },
     /** Avoid dangerous mounts like:
      * - `volume-driver=local`
@@ -397,18 +390,60 @@ type Payload = Readonly<{
   read: ReturnType<typeof reader>;
 }>;
 
+/**
+ * A security option as docker reads it -- not as it looks. The CLI cuts at the
+ * first `=`, or failing that the first `:` (the old spelling, still honoured);
+ * a bare `no-new-privileges` means true, and the daemon reads a bare `disable`
+ * as `label=disable`. A deny list of patterns over the raw text missed every
+ * one of those (`seccomp:/workspaces/p/allow.json`, `label:disable`,
+ * `no-new-privileges=0`), so the rules below judge the parsed key and value,
+ * and anything they do not name is refused.
+ */
+export const securityOption = (option: string): { key: string; value: string } | undefined => {
+  if (option === "no-new-privileges") return { key: "no-new-privileges", value: "true" };
+  if (option === "disable") return { key: "label", value: "disable" };
+  const separator = option.includes("=") ? "=" : option.includes(":") ? ":" : undefined;
+  if (separator === undefined) return undefined;
+  const at = option.indexOf(separator);
+  return { key: option.slice(0, at), value: option.slice(at + 1) };
+};
+
+/** Go's strconv.ParseBool, which is what docker reads these with. */
+const GO_TRUE = new Set(["1", "t", "T", "TRUE", "true", "True"]);
+
+/** seccomp values the CLI does NOT read as a file path; any other value is a
+ *  profile loaded from a path the project can write. */
+const BUILT_IN_SECCOMP = new Set(["builtin", "unconfined"]);
+
 const helpers = {
-  /** What a security option may not do, by daemon. On the shared one, the
-   *  whole deny list. On a project daemon only what still weakens anything:
-   *  a seccomp profile read from a project-writable path, and switching off
-   *  no-new-privileges. */
-  disallowedSecurityOption: (option: string, daemon: Daemon) =>
-    // Switching no-new-privileges off is refused everywhere: it is what keeps
-    // a setuid binary in the image from undoing the container's user.
-    /^no-new-privileges\s*[:=]\s*false$/i.test(option) ||
-    (daemon === "shared"
-      ? allowlist.runargs.deny["--security-opt"].some((regex) => regex.test(option))
-      : /^seccomp\s*=\s*[./]/i.test(option)),
+  /** Whether a security option is refused on this daemon.
+   *
+   *  Everywhere: no-new-privileges switched off (it keeps a setuid binary in
+   *  the image from undoing the container's user), and a seccomp profile read
+   *  from a path. On the SHARED daemon, which every project shares, only what
+   *  tightens or restates the default passes: no-new-privileges, the builtin
+   *  seccomp profile, the docker-default AppArmor profile. On a project's own
+   *  daemon the rest is allowed -- its socket is root over that dind anyway --
+   *  but an option docker would not recognise is refused on either. */
+  disallowedSecurityOption: (option: string, daemon: Daemon) => {
+    const parsed = securityOption(option);
+    if (!parsed) return true;
+    const { key, value } = parsed;
+    switch (key) {
+      case "no-new-privileges":
+        return !GO_TRUE.has(value);
+      case "seccomp":
+        return !BUILT_IN_SECCOMP.has(value) || (daemon === "shared" && value !== "builtin");
+      case "apparmor":
+        return daemon === "shared" && value !== "docker-default";
+      case "label":
+      case "writable-cgroups":
+      case "systempaths":
+        return daemon === "shared";
+      default:
+        return true;
+    }
+  },
   /** The repository's own directory name -- what `${localWorkspaceFolderBasename}`
    *  expands to for a project, and the owner-less half of a nested name. */
   basename: ({ project }: Target) => project.split("/").pop()!,

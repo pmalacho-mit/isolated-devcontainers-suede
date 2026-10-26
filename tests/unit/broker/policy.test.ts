@@ -1535,6 +1535,44 @@ describe("E19: capabilities and securityOpt branch on the daemon", () => {
   });
 });
 
+describe("E21: a security option is judged as docker reads it, not as it is spelled", () => {
+  // From an independent review: the CLI also accepts `key:value`, the daemon
+  // reads a bare `disable` as label=disable, and no-new-privileges is a Go
+  // ParseBool. Each line below passed the old pattern deny list.
+  const both = (option: string) => [
+    spec({ image: "x" }, { securityOpt: [option] }),
+    spec({ image: "x", runArgs: ["--security-opt", option] }),
+    spec({ image: "x", runArgs: [`--security-opt=${option}`] }),
+  ];
+  const refusedOn = (args: EnforceArgs, option: string) => {
+    for (const candidate of both(option))
+      assert.throws(() => enforcePolicy(named(PROJECT), candidate, ...args), /weakens the sandbox/, `${option} on ${args[1]}`);
+  };
+  const allowedOn = (args: EnforceArgs, option: string) => {
+    for (const candidate of both(option)) enforcePolicy(named(PROJECT), candidate, ...args);
+  };
+
+  for (const option of [
+    "seccomp:/workspaces/x/allow.json", "seccomp:./allow.json", "seccomp:unconfined",
+    "label:disable", "disable", "apparmor:unconfined", "apparmor=some-looser-profile",
+    "systempaths=unconfined", "writable-cgroups=true", "label=type:spc_t",
+    "no-new-privileges=0", "no-new-privileges=f", "no-new-privileges:False", "no-new-privileges=",
+    "unknown-key=1", "seccomp", " seccomp=unconfined",
+  ])
+    test(`'${option}' is refused on the shared daemon`, () => refusedOn(alone(PROJECT), option));
+
+  for (const option of ["seccomp:/workspaces/x/allow.json", "seccomp=/tmp/p.json", "no-new-privileges=0", "no-new-privileges:f", "bogus:1"])
+    test(`'${option}' is refused on a project daemon too`, () => refusedOn(onItsOwnDaemon(PROJECT), option));
+
+  for (const option of ["no-new-privileges", "no-new-privileges:true", "no-new-privileges=1", "seccomp=builtin", "apparmor=docker-default"])
+    test(`'${option}' restates or tightens the default, and passes on the shared daemon`, () =>
+      allowedOn(alone(PROJECT), option));
+
+  for (const option of ["label=disable", "seccomp=unconfined", "seccomp:unconfined", "systempaths=unconfined", "apparmor=unconfined"])
+    test(`'${option}' passes on a project daemon, whose socket is root over it anyway`, () =>
+      allowedOn(onItsOwnDaemon(PROJECT), option));
+});
+
 describe("E20: the daemon is decided by the one provisioning rule", () => {
   test("docker-outside-of-docker means a project daemon; anything else the shared one", () => {
     assert.equal(daemonOf(spec({ image: "x", features: OUTSIDE })), "project");

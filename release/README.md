@@ -622,7 +622,10 @@ The rules, and what each is actually defending:
   anyway, and features such as rust need `SYS_PTRACE`), except a seccomp
   profile from a project path or switching off `no-new-privileges`; the one bind
   allowed is that feature's own socket mount, exactly as it declares it. On the
-  shared daemon none of that is allowed.
+  shared daemon none of that is allowed, and a security option may only restate
+  or tighten the default: `no-new-privileges`, `seccomp=builtin`,
+  `apparmor=docker-default`. Options are judged as docker parses them, so
+  `seccomp:<path>` is the same option as `seccomp=<path>`.
 - **`shadowImages` entries must parse as image references** -- not a path, not a
   URL, and at most 32 of them. Unlike mounts and ports this one carries no
   cross-project risk (the tags land in the project's own disposable daemon), so
