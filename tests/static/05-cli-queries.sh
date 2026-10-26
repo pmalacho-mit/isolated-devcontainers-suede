@@ -235,6 +235,30 @@ case "$PREFLIGHT_RE" in
   *) fail "found preflight's leak oracle pattern" "sed matched nothing anchored -- was it reformatted?" ;;
 esac
 
+group "proxy audit <n> shows n requests, not n journal lines"
+# A request writes about eight journal lines and one AUDIT line, so reading
+# `journalctl -n <n>` showed fewer than n requests -- with n=5, usually none
+# (measured on the VM, 2026-10-26). A stand-in colima serves the VM's own lines
+# and honours -n the way journalctl does.
+STUB=$(mktemp -d)
+{ for i in 1 2 3; do
+    printf '%s\n' "[12:0$i:00.000][172.19.0.2:3448$i] client connect" \
+      "[12:0$i:00.100] AUDIT verdict=ALLOW method=GET host=h$i.example path=/ secrets=- suspect=- project=acme/widgets" \
+      "      << HTTP/2.0 200 OK 1b" "[12:0$i:00.200][172.19.0.2:3448$i] client disconnect" \
+      "[12:0$i:00.200][172.19.0.2:3448$i] server disconnect 1.2.3.4:443"
+  done; } > "$STUB/journal"
+cat > "$STUB/colima" <<EOF
+#!/bin/sh
+n=10; while [ \$# -gt 0 ]; do [ "\$1" = -n ] && n=\$2; shift; done
+tail -n "\$n" "$STUB/journal"
+EOF
+chmod +x "$STUB/colima"
+assert_eq "proxy audit 2: the last two requests" \
+  "$(PATH="$STUB:$PATH" "$RELEASE/cli.sh" proxy audit 2 2>&1 | awk '{print $4}' | tr '\n' ' ')" "h2.example/ h3.example/ "
+assert_eq "proxy logs --project acme/widgets 1: its last request" \
+  "$(PATH="$STUB:$PATH" "$RELEASE/cli.sh" proxy logs --project acme/widgets 1 2>&1 | grep -o 'host=[^ ]*')" "host=h3.example"
+rm -rf "$STUB"
+
 group "proxy logs --project matches its project exactly"
 AWK=$(sed -n "s/^PROJECT_AUDIT_AWK='\(.*\)'$/\1/p" "$RELEASE/cli.sh")
 if [ -z "$AWK" ]; then

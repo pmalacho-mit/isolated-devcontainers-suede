@@ -117,6 +117,10 @@ AUDIT_FIELDS_SED='s/^(\[[0-9:.]*\] )?AUDIT //p'
 PROJECT_AUDIT_AWK='{ line = $0; sub(/^\[[0-9:.]*\] /, "", line) } index(line, "AUDIT ") == 1 && substr(line, length(line) - length(want) + 1) == want'
 # One request's LEAK-SUSPECT line, by the unique path it was sent to: what
 # `proxy test` and preflight's oracle look for. `grep -E`, with the path.
+# How many journal lines to read for <n> AUDIT lines: a request writes about
+# eight (connect, the line itself, the response, disconnects), so `-n <n>` alone
+# read <n> journal lines and usually held no AUDIT line at all.
+audit_window() { echo $(( $1 * 50 )); }
 leak_suspect_line() { grep -aE "^(\[[0-9:.]*\] )?AUDIT verdict=LEAK-SUSPECT .* path=/$1 " | tail -n 1; }
 
 # `export`, run INSIDE the editor where the files are:
@@ -1197,8 +1201,11 @@ case "$CMD" in
                        if [ "${1:-}" = --project ]; then
                          P="${2:?usage: cli.sh proxy logs --project <project> [n]}"
                          valid_project "$P" || { echo "cli.sh: '$P' is not a project name" >&2; exit 1; }
-                         colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${3:-2000}" --no-pager -o cat \
-                           | awk -v want=" project=$P" "$PROJECT_AUDIT_AWK"
+                         N="${3:-50}"
+                         case "$N" in *[!0-9]*|"") echo "cli.sh: proxy logs --project takes a line count" >&2; exit 1 ;; esac
+                         # The last N of ITS lines, not its lines among the last N.
+                         colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "$(audit_window "$N")" --no-pager -o cat \
+                           | awk -v want=" project=$P" "$PROJECT_AUDIT_AWK" | tail -n "$N"
                        else
                          colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${1:-50}" --no-pager
                        fi ;;
@@ -1223,9 +1230,10 @@ case "$CMD" in
                          shift 2
                        fi
                        N="${1:-200}"
-                       case "$N" in *[!0-9]*) echo "cli.sh: proxy audit takes a line count" >&2; exit 1 ;; esac
+                       case "$N" in *[!0-9]*|"") echo "cli.sh: proxy audit takes a line count" >&2; exit 1 ;; esac
+                       # The last N requests, read from enough journal to hold them.
                        colima ssh -p "$COLIMA_PROFILE" -- \
-                         sudo journalctl -u desolate-proxy -n "$N" --no-pager -o cat \
+                         sudo journalctl -u desolate-proxy -n "$(audit_window "$N")" --no-pager -o cat \
                        | sed -nE "$AUDIT_FIELDS_SED" \
                        | awk -v only="$ONLY" '
                            {
@@ -1247,7 +1255,8 @@ case "$CMD" in
                              printf "%-14s %-6s %-20s %s%s%s%s\n", verdict, method, project, host, path,
                                     (secrets == "" ? "" : "   <- " secrets),
                                     (suspect == "" ? "" : "   NOT substituted: " suspect);
-                           }'
+                           }' \
+                       | tail -n "$N"
                        ;;
                test)   ensure_running
                        # `with-ca` is load-bearing: the orchestrator trusts the
