@@ -653,7 +653,9 @@ export const createDocker = (run: Runner) => {
      *  it could not be read (no such volume, or no helper image). */
     volumeKib: (helperImage: string, volumeName: string) => {
       const kib = Number.parseInt(
-        query("run", "--rm", "--network", "none", "-v", `${volumeName}:/v:ro`, helperImage, "du", "-sk", "/v"),
+        // Bounded: the supervisor asks this on its one event loop, and a
+        // project can fill its own store with as many inodes as it likes.
+        query("run", "--rm", "--network", "none", "-v", `${volumeName}:/v:ro`, helperImage, "timeout", "30", "du", "-sk", "/v"),
         10,
       );
       return Number.isFinite(kib) ? kib : undefined;

@@ -104,6 +104,10 @@ EOF
 # needs a quoted separator.
 # tests/static/05-cli-queries.sh executes this against a fixture.
 SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length)]+(.value.projects//[])+.value.hosts|@tsv'
+# `proxy logs --project <p>`: the AUDIT lines whose project field is <p>,
+# compared as a string. A grep for `project=$P$` read <p> as a regex, so a
+# `.` in a name matched any character.
+PROJECT_AUDIT_AWK='index($0, "AUDIT ") == 1 && substr($0, length($0) - length(want) + 1) == want'
 
 # `export`, run INSIDE the editor where the files are:
 #   sh -c "$EXPORT_TAR_SH" sh <workspaces> <project> <relative-path>
@@ -1020,10 +1024,15 @@ case "$CMD" in
                  if [ -n "$PROJECTS" ]; then
                    case ",$PROJECTS," in *,,*)
                      echo "cli.sh: --projects has an empty entry (a stray comma?)" >&2; exit 1 ;; esac
-                   for P in ${PROJECTS//,/ }; do
+                   # Split by `read`, which never globs: the list that is
+                   # validated is the list that is stored.
+                   IFS=, read -ra PARTS <<<"$PROJECTS"
+                   PROJECTS_JSON=""
+                   for P in "${PARTS[@]}"; do
                      valid_project "$P" || { echo "cli.sh: --projects entry '$P' is not a project name (name or owner/name)" >&2; exit 1; }
+                     PROJECTS_JSON="${PROJECTS_JSON:+$PROJECTS_JSON,}\"$P\""
                    done
-                   PROJECTS_JSON=$(printf '%s' "$PROJECTS" | awk -F, '{printf "["; for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}; printf "]"}')
+                   PROJECTS_JSON="[$PROJECTS_JSON]"
                  fi
                  [ -n "$HOSTS" ] || { echo "cli.sh: --hosts is required (a secret with no allowlist is refused by the proxy)" >&2; exit 1; }
                  case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
@@ -1179,7 +1188,7 @@ case "$CMD" in
                          P="${2:?usage: cli.sh proxy logs --project <project> [n]}"
                          valid_project "$P" || { echo "cli.sh: '$P' is not a project name" >&2; exit 1; }
                          colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${3:-2000}" --no-pager -o cat \
-                           | grep -a "^AUDIT .* project=$P\$"
+                           | awk -v want=" project=$P" "$PROJECT_AUDIT_AWK"
                        else
                          colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${1:-50}" --no-pager
                        fi ;;

@@ -210,4 +210,17 @@ else
   rm -rf "$WS"
 fi
 
+group "proxy logs --project matches its project exactly"
+AWK=$(sed -n "s/^PROJECT_AUDIT_AWK='\(.*\)'$/\1/p" "$RELEASE/cli.sh")
+if [ -z "$AWK" ]; then
+  fail "found PROJECT_AUDIT_AWK in cli.sh" "sed matched nothing -- was it renamed or reformatted?"
+else
+  LINES='AUDIT verdict=ALLOW host=a.com project=a.b
+AUDIT verdict=ALLOW host=b.com project=aXb
+AUDIT verdict=ALLOW host=c.com project=a.b/c
+NOTE project=a.b'
+  assert_eq "only the AUDIT line naming exactly that project" \
+    "$(printf '%s\n' "$LINES" | awk -v want=" project=a.b" "$AWK")" "AUDIT verdict=ALLOW host=a.com project=a.b"
+fi
+
 summary
