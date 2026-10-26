@@ -33,6 +33,10 @@
 #   ./tests/probes/v2-baseline.sh
 #
 # It re-execs itself inside the Colima VM. Paste the SUMMARY block back.
+# ANSWERED 2026-10-26 on the VM (docker 29.2.1, kernel 6.8.0-100): B1
+# volume-subpath YES; B2 the shared dind at 546.6MiB holding 49 images; B3
+# 32.3 GB of 39.1 GB free, 8 cpus; B4 2 devcontainers running; B5 br-d-* not
+# matched by the live ruleset (it predates phase 2's install).
 set -uo pipefail
 
 PROFILE="${COLIMA_PROFILE:-desolate}"

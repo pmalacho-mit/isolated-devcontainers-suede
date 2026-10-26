@@ -59,6 +59,8 @@
 # stack should be UP for W3 to have counters to read:
 #
 #   ./tests/probes/nft-bridge-wildcard.sh
+# Re-run 2026-10-26 on the VM (nftables v1.0.9): unchanged -- W1/W2 YES, W3 a
+# confirmed bypass of the live ruleset, which predates phase 2's br-d-* element.
 set -uo pipefail
 
 PROFILE="${COLIMA_PROFILE:-desolate}"

@@ -44,6 +44,14 @@
 # The SUMMARY ends with the mount strings each variant actually had, read from
 # `docker inspect` on the project dind, so desolate.ts can emit exactly those.
 #
+# ANSWERED 2026-10-26 on the VM under sysbox-runc (outer docker 29.2.1, project
+# dind 29.7.2, kernel 6.8.0-100, devcontainer CLI 0.88.0): HOLDS -- the gate
+# for the Phase 3 deploy is met. The runc answers below all carried over:
+#   F1 the same one mount, label=disable and docker-init.sh; F2/F8 the dind,
+#   and a sibling mounting /workspaces, see only sample-siblings; F3 and F4
+#   YES as uid 1000; F5 no entrypoint errors; F6 PID 1 holds docker's default
+#   set (00000000a80425fb) and the remote user none; F7 YES.
+#
 # APPROXIMATION 2026-10-26, --runc in this repo's own .devcontainer (docker
 # 29.9.2, devcontainer CLI 0.88.0): HOLDS, and two answers change Phase 3.
 #   F1  the feature declares ONE mount, and not the one the plan assumed:

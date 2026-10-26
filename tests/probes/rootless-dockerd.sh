@@ -76,6 +76,8 @@
 # container's namespaces work like a machine's, so a rootless daemon that fails
 # under plain runc may well succeed under sysbox, and vice versa. R1 in
 # particular says nothing at all unless the outer container is a sysbox one.
+# Re-run 2026-10-26 on the VM: unchanged -- NO at R1 (unshare: Operation not
+# permitted), with kernel.apparmor_restrict_unprivileged_userns=1.
 set -uo pipefail
 
 PROFILE="${COLIMA_PROFILE:-desolate}"

@@ -113,6 +113,7 @@
 # the host daemon and never pulls anything itself, so nothing here depends on
 # what egress looks like one level in. Only the HOST daemon needs to be able to
 # reach a registry, and only for images it has probably already cached.
+# Re-run 2026-10-26 on the VM: unchanged -- Q1-Q7 as answered; the verdict holds.
 set -uo pipefail
 
 PROFILE="${COLIMA_PROFILE:-desolate}"

@@ -53,6 +53,9 @@
 #          (127.0.0.1:8080-8119 on the shared dind), not this probe's dind, whose
 #          outer publish was empty. The probe now uses 18099 and compares the
 #          VM's listeners before and after the dind starts; re-run for R5.
+#   R5     re-run 2026-10-26: YES -- nothing published; the VM's listeners on
+#          :18099 were 0 before the dind and 0 after. Every other answer above
+#          repeated exactly.
 #
 # APPROXIMATION 2026-10-25, --runc in this repo's own .devcontainer (docker
 # 29.9.2, kernel 6.8.0-100): HOLDS. R1/R1b YES (login user and nobody); R2 the
