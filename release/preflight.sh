@@ -633,6 +633,50 @@ else
 fi
 
 echo
+echo "== 9. every bridge is covered, every forward is bounded =="
+# The nftables rules match bridges by NAME: the two the stack pins and, by
+# shape, every project dind's br-d-<hash>. A bridge that matches none of them is
+# outside interception, the lateral drops and the default-deny -- silently --
+# so every br-* interface on the VM is asked about, not a list of the expected.
+IFS_LINE=$(vm_ssh sudo nft list table inet desolate 2>/dev/null | sed -n 's/.*iifname { \(.*\) } .*/\1/p' | head -1)
+bridges=$(vm_ssh ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*//' | grep '^br-' | sort -u)
+uncovered=""
+for bridge in $bridges; do
+  covered=""
+  case "$bridge" in br-desolate|br-desolate-in) case "$IFS_LINE" in *"\"$bridge\""*) covered=1 ;; esac ;; esac
+  case "$bridge" in br-d-*) case "$IFS_LINE" in *'"br-d-*"'*) covered=1 ;; esac ;; esac
+  [ -n "$covered" ] || uncovered="$uncovered $bridge"
+done
+if [ -z "$IFS_LINE" ]; then
+  bad "could not read the interface set the desolate ruleset matches"
+elif [ -n "$uncovered" ]; then
+  # A br-<hash> that is not ours (docker's default networks on the VM, say) is
+  # reported, not failed: it carries no desolate traffic. Ours must all match.
+  ours=$(printf '%s\n' $uncovered | grep -E '^br-(desolate|d-)' || true)
+  if [ -n "$ours" ]; then
+    bad "desolate bridges outside the ruleset: $(echo $ours)"
+    note "re-arm it: ./cli.sh vm install --proxy-only"
+  else
+    ok "every desolate bridge is matched by the ruleset (not desolate's, so not covered:$uncovered)"
+  fi
+else
+  ok "every br-* interface on the VM is matched by the desolate ruleset"
+fi
+published=""
+for dind in $(docker ps --filter label=desolate.dind --format '{{.Names}}'); do
+  [ -n "$(docker port "$dind" 2>/dev/null)" ] && published="$published $dind"
+done
+[ -z "$published" ] && ok "no project dind publishes a port" \
+  || bad "project dinds publish ports:$published -- every port goes through the ingress"
+if vm_ssh sudo nft list chain inet desolate output 2>/dev/null \
+     | grep -q "meta skuid $(vm_ssh id -u desolate-ingress 2>/dev/null | tr -d '\r') counter packets"; then
+  ok "the ingress uid's output rule is loaded, with its counter"
+else
+  bad "no nftables output rule bounds the ingress uid"
+  note "re-arm it: ./cli.sh vm install --proxy-only"
+fi
+
+echo
 echo "-- $pass passed, $fail failed, $skip skipped --"
 [ "$fail" -eq 0 ] && echo "Stack looks good. Next: ./cli.sh desolate example-project" || \
   echo "Fix the FAIL lines above; see Troubleshooting in README.md"
