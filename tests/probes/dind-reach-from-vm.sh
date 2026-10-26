@@ -40,6 +40,20 @@
 #   R6  TEARDOWN    the relay is removed: the VM's next dial is refused, rather
 #                   than accepted and dropped.
 #
+# ANSWERED 2026-10-25 on the VM under sysbox-runc (docker 29.2.1, kernel
+# 6.8.0-100): HOLDS on everything it measured; R5 was not measured (see below).
+#   R1/R1b YES -- the VM reaches the inner relay at the dind's br-d-* address,
+#          as the login user and as `nobody`: sysbox's userns changes nothing.
+#   R2     the inner publish binds 0.0.0.0 and [::] via two docker-proxies.
+#   R3     a second br-d-* bridge times out (control on the dind's own bridge
+#          reached it). R3b both stack bridges time out too.
+#   R4     main's ruleset does not cover br-d-* (PR #10's change not installed).
+#   R6     refused at once once the relay is gone.
+#   R5     reported a VM listener on :8099 -- the STACK's own published range
+#          (127.0.0.1:8080-8119 on the shared dind), not this probe's dind, whose
+#          outer publish was empty. The probe now uses 18099 and compares the
+#          VM's listeners before and after the dind starts; re-run for R5.
+#
 # APPROXIMATION 2026-10-25, --runc in this repo's own .devcontainer (docker
 # 29.9.2, kernel 6.8.0-100): HOLDS. R1/R1b YES (login user and nobody); R2 the
 # inner publish binds 0.0.0.0 and [::] via two docker-proxy processes; R3 a
@@ -118,7 +132,10 @@ DIND_IMG="docker:29-dind"
 RELAY_IMG="alpine/socat"           # relays.ts IMAGE: the relay is the real one
 WEB_IMG="busybox:1.37"
 SOCK=/run/dind-sock/docker.sock
-PORT=8099
+# Outside the stack's published range (DESOLATE_PORT_MIN..MAX, 8080-8119 by
+# default): R5 asks whether THIS dind opened a VM listener, and the first run
+# answered the stack's instead.
+PORT=18099
 MARKER=REACHPROBE-MARKER
 
 R1="UNKNOWN"; R1B="UNKNOWN"; R2="UNKNOWN"; R3="UNKNOWN"; R3B="UNKNOWN"
@@ -202,6 +219,10 @@ for pair in "$NET_A:$BRIDGE_A" "$NET_B:$BRIDGE_B"; do
     || { bad "network $net exists but no interface is named $bridge"; exit 1; }
 done
 ok "created $BRIDGE_A and $BRIDGE_B"
+
+# R5 is a difference, not an absolute: whatever already listens on the port is
+# someone else's, and only what appears with the dind is the dind's.
+VM_LISTEN_BEFORE=$(ss -Hltn "sport = :$PORT" 2>/dev/null | wc -l | tr -d ' ')
 
 vm run -d --name "$DIND" "${CONTAINMENT[@]}" --network "$NET_A" \
   -e DOCKER_TLS_CERTDIR="" -e DOCKER_HOST="unix://$SOCK" \
@@ -361,12 +382,13 @@ echo
 echo "== R5. the dind publishes nothing on the VM =="
 outer_ports=$(vm port "$DIND" 2>/dev/null | tr '\n' ' ')
 vm_listen=$(ss -Hltn "sport = :$PORT" 2>/dev/null | wc -l | tr -d ' ')
-if [ -z "$outer_ports" ] && [ "$vm_listen" = 0 ]; then
-  ok "no outer publish, and nothing on the VM listens on :$PORT"
-  R5="YES, nothing published"
+note "VM listeners on :$PORT before the dind: $VM_LISTEN_BEFORE, now: $vm_listen"
+if [ -z "$outer_ports" ] && [ "$vm_listen" = "$VM_LISTEN_BEFORE" ]; then
+  ok "no outer publish, and the dind opened no VM listener on :$PORT"
+  R5="YES, nothing published (VM listeners on :$PORT unchanged at $vm_listen)"
 else
-  bad "outer publish '${outer_ports}', VM listeners on :$PORT: $vm_listen"
-  R5="NO: outer publish '${outer_ports% }', VM listeners on :$PORT: $vm_listen"
+  bad "outer publish '${outer_ports}', VM listeners on :$PORT: $VM_LISTEN_BEFORE -> $vm_listen"
+  R5="NO: outer publish '${outer_ports% }', VM listeners on :$PORT: $VM_LISTEN_BEFORE -> $vm_listen"
 fi
 
 # --- R6: teardown -------------------------------------------------------------------

@@ -37,6 +37,27 @@
 #   L8  UID         a listener owned by an unprivileged system user (the ingress
 #                   runs as its own uid, `desolate-ingress`).
 #
+# ANSWERED 2026-10-25 on the Mac (colima 0.10.1, limactl 2.1.2, portForwarder
+# ssh, VM kernel 6.8.0-100): the ingress design STANDS, with two constraints it
+# now has to honour rather than assume.
+#
+#   - L1/L5/L8: a loopback listener opened at any time, by any uid, appears on
+#     the Mac's 127.0.0.1 in ~20-215 ms. L7: twenty at once, all within ~420 ms.
+#   - L4: after a listener closes, a client gets EMPTY replies for ~270 ms and
+#     then a refusal -- an accept-then-drop window, not an instant refusal.
+#   - L2: a VM listener on 0.0.0.0 is forwarded to the Mac on EVERY interface
+#     (`ssh@*`), i.e. onto the LAN. L3: so is a ROOT listener below 1024 even
+#     when it is bound to 127.0.0.1 in the VM (`limactl@*`) -- the "expected:
+#     not forwarded" in the plan was wrong. So "the ingress binds 127.0.0.1 and
+#     refuses ports < 1024" is a SECURITY bound, not hygiene, and preflight has
+#     to assert that nothing in the VM listens on 0.0.0.0 or below 1024 that the
+#     stack did not put there.
+#   - L6: when the Mac already holds a port, the Mac's listener wins, and Lima
+#     does NOT retry once the Mac lets go (30 s, still refused). A collided
+#     forward stays dead until the VM listener is closed and reopened -- which
+#     is what `desolate --ports --move` and the ingress's reopen-on-rewrite
+#     have to provide.
+#
 # ---------------------------------------------------------------------------
 # HOW TO RUN -- on your Mac, with the stack UP (the question is about listeners
 # that appear while it runs):
