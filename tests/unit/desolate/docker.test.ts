@@ -495,3 +495,48 @@ describe("images", () => {
     assert.equal(calls[0].at(-1), "/desolate-ca");
   });
 });
+
+describe("checking a worktree out in its sandbox", () => {
+  const spec = {
+    image: "alpine/git@sha256:abc",
+    label: "desolate.checkout=acme/widgets",
+    dir: "/workspaces/acme/widgets/.worktrees/alpha",
+    mounts: [
+      "type=bind,source=/workspaces/acme/widgets/.worktrees/alpha,target=/workspaces/acme/widgets/.worktrees/alpha",
+      "type=bind,source=/workspaces/acme/widgets/.git,target=/workspaces/acme/widgets/.git",
+    ],
+    caFile: "/desolate-ca/ca.pem",
+  };
+  const argvFor = () => {
+    const { runner, calls } = recorder();
+    createDocker(runner).checkoutWorktree(spec);
+    return calls[0];
+  };
+
+  test("runs as the editor user, gone when it exits", () => {
+    const argv = argvFor();
+    assert.deepEqual(argv.slice(0, 2), ["run", "--rm"]);
+    assert.equal(argv[argv.indexOf("--user") + 1], "1000:1000");
+  });
+
+  test("is given exactly the mounts it was handed, and nothing privileged", () => {
+    const argv = argvFor();
+    const given = argv.flatMap((word, i) => (word === "--mount" ? [argv[i + 1]] : []));
+    assert.deepEqual(given, spec.mounts);
+    for (const flag of ["--privileged", "--cap-add", "-v", "--volume", "--network"])
+      assert.ok(!argv.includes(flag), `${flag} in ${argv}`);
+  });
+
+  test("checks out in the worktree, trusting the proxy for lfs", () => {
+    const argv = argvFor();
+    const image = argv.indexOf(spec.image);
+    assert.ok(argv.indexOf("--workdir") < image, "flags must precede the image");
+    assert.equal(argv[argv.indexOf("--workdir") + 1], spec.dir);
+    assert.deepEqual(argv.slice(image + 1), [
+      "-c",
+      "http.sslCAInfo=/desolate-ca/ca.pem",
+      "checkout",
+      "--force",
+    ]);
+  });
+});

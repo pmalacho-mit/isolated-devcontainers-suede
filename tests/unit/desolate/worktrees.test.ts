@@ -16,7 +16,12 @@ import { join } from "node:path";
 
 import { target } from "../../../release/vscode-image/projects.ts";
 import {
+  CHECKOUT_IMAGE,
+  addArguments,
+  checkoutMounts,
+  filterNeutralizers,
   isLocked,
+  isPopulated,
   mounts,
   runArgs,
   unlocked,
@@ -188,5 +193,81 @@ describe("the main tree's view of .worktrees", () => {
     assert.equal(isLocked(ours), false);
     assert.equal(isLocked(root), false);
     assert.deepEqual(runArgs(root), []);
+  });
+});
+
+describe("git in the editor executes nothing the repository configured", () => {
+  test("every configured filter driver is emptied by name", () => {
+    const argv = filterNeutralizers([
+      "filter.lfs.clean",
+      "filter.lfs.smudge",
+      "filter.dotted.name.process",
+      "core.fsmonitor",
+    ]);
+    const set = argv.filter((_, i) => argv[i - 1] === "-c");
+    assert.deepEqual(set, [
+      "filter.lfs.clean=",
+      "filter.lfs.smudge=",
+      "filter.lfs.process=",
+      "filter.lfs.required=false",
+      "filter.dotted.name.clean=",
+      "filter.dotted.name.smudge=",
+      "filter.dotted.name.process=",
+      "filter.dotted.name.required=false",
+    ]);
+  });
+
+  test("a driver named with '=' cannot be switched off, so it is refused", () => {
+    assert.throws(() => filterNeutralizers(["filter.a=b.clean"]), /cannot be switched off/);
+  });
+
+  test("add never checks out", () => {
+    const box = sandbox();
+    const alpha = target(box.workspaces, "acme/widgets", "alpha");
+    for (const exists of [true, false])
+      assert.ok(addArguments(alpha, "alpha", exists).includes("--no-checkout"));
+  });
+
+  test("the sandbox image is pinned by digest", () => {
+    assert.match(CHECKOUT_IMAGE, /@sha256:[0-9a-f]{64}$/);
+  });
+});
+
+describe("whether a worktree has been checked out", () => {
+  test("not until its admin directory holds an index", () => {
+    const box = sandbox();
+    const feature = box.worktree("acme/widgets", "feature123");
+    assert.equal(isPopulated(feature), false);
+    fs.writeFileSync(join(box.workspaces, "acme/widgets/.git/worktrees/feature123/index"), "");
+    assert.equal(isPopulated(feature), true);
+  });
+
+  test("a root target always is", () => {
+    assert.equal(isPopulated(sandbox().project("acme/widgets")), true);
+  });
+});
+
+describe("the checkout sandbox's reach", () => {
+  test("is the worktree's own: its directory, the project .git, the CA read-only", () => {
+    const box = sandbox();
+    const feature = box.worktree("acme/widgets", "feature123");
+    const project = join(box.workspaces, "acme/widgets");
+    assert.deepEqual(checkoutMounts(feature, "acme__widgets--wt--feature123-desolate-ca", "/desolate-ca"), [
+      `type=bind,source=${feature.dir},target=${feature.dir}`,
+      `type=bind,source=${project}/.git,target=${project}/.git`,
+      "type=volume,source=acme__widgets--wt--feature123-desolate-ca,target=/desolate-ca,readonly",
+    ]);
+  });
+
+  test("never the project directory itself, nor a sibling worktree", () => {
+    const box = sandbox();
+    box.worktree("acme/widgets", "other");
+    const feature = box.worktree("acme/widgets", "feature123");
+    const sources = checkoutMounts(feature, "ca", "/desolate-ca").map(
+      (mount) => /source=([^,]+)/.exec(mount)![1],
+    );
+    const project = join(box.workspaces, "acme/widgets");
+    assert.ok(!sources.includes(project), `${sources}`);
+    assert.ok(!sources.some((source) => source.endsWith("/other")), `${sources}`);
   });
 });

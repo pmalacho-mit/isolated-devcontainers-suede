@@ -332,6 +332,38 @@ export const createDocker = (run: Runner) => {
     container,
     volume,
     image,
+    /** Check a worktree out in a throwaway container that can reach exactly
+     *  what that worktree's own devcontainer will: its directory, the
+     *  project's `.git`, and the proxy. The repository's hooks, filters and
+     *  fsmonitor run HERE, which is why it is not the editor (worktrees.ts).
+     *  Output is the user's: a post-checkout hook may have something to say. */
+    checkoutWorktree: (spec: {
+      image: string;
+      label: string;
+      dir: string;
+      mounts: string[];
+      caFile: string;
+    }) =>
+      run.status([
+        "run",
+        "--rm",
+        "--label",
+        spec.label,
+        "--user",
+        "1000:1000",
+        "-e",
+        "HOME=/tmp",
+        ...spec.mounts.flatMap((mount) => ["--mount", mount]),
+        "--workdir",
+        spec.dir,
+        "--entrypoint",
+        "git",
+        spec.image,
+        "-c",
+        `http.sslCAInfo=${spec.caFile}`,
+        "checkout",
+        "--force",
+      ]),
     /** Run a throwaway helper container against one volume. */
     inVolume: (
       helperImage: string,

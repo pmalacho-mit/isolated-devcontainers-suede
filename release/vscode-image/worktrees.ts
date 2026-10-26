@@ -20,17 +20,26 @@
  *
  * Two branches that must not reach each other need two clones.
  *
- * Everything below the divider RUNS `git`, which obeys the project's own config
- * and hooks -- `worktree add` alone fires `post-checkout`. So it may be called
- * from the editor container, which already executes project content, and
- * nowhere else. The orchestrator holds the inner Docker socket, so it reads
- * lock FILES rather than asking git anything.
+ * Everything below the divider RUNS `git`, from the editor container -- which
+ * mounts EVERY project read-write and holds the deploy keys' agent socket. Any
+ * devcontainer can write its project's `.git`, so what that git obeys is
+ * attacker-writable: a plain `worktree add` ran the project's post-checkout
+ * hook, smudge filter and fsmonitor in the editor, and a TTY'd `worktree list`
+ * ran its `pager.worktree`. So every git here is `hardenedGit`, which switches
+ * off each knob that names a command, and `add` does not check anything out.
+ * The checkout is the one step that has to execute project content, and it
+ * runs in a sandbox with this worktree's own reach (`populate` in desolate.ts),
+ * not here. Measured on git 2.51; tests/integration/worktrees E17 re-measures.
+ *
+ * The orchestrator holds the inner Docker socket, so it reads lock and index
+ * FILES rather than asking git anything.
  */
 /// <reference types="node" />
 import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -87,6 +96,28 @@ const adminDirectory = (worktree: Target) => {
   return named ? resolve(worktree.dir, named) : "";
 };
 
+/** Has this worktree been checked out yet?
+ *
+ *  `add` creates it with `--no-checkout`, which leaves the admin directory
+ *  without an index; the sandboxed checkout writes one. Asked of the filesystem
+ *  for the same reason `isLocked` is. A root target is always populated. */
+export const isPopulated = (worktree: Target) => {
+  if (!worktree.worktree) return true;
+  const admin = adminDirectory(worktree);
+  return admin !== "" && existsSync(join(admin, "index"));
+};
+
+/** The image a worktree is checked out in. Pinned by digest: it runs with the
+ *  worktree's own reach, and a moved tag would be someone else's code there.
+ *  git 2.54.0 with git-lfs, whose global config makes the lfs filter
+ *  `required` -- which is why the sandbox is handed the proxy CA.
+ *  Tag f4166bc, published 2026-09-27. */
+export const CHECKOUT_IMAGE =
+  "alpine/git@sha256:832b1cd1a271509f3d5272a1a62d4cb2ab1a53426ebde1f6c2cb7349f907dc6f";
+
+/** Stamped on the checkout container, so a sweep can find one a crash left. */
+export const CHECKOUT_LABEL = "desolate.checkout";
+
 /** Is this worktree exempt from pruning?
  *
  *  Asked of the filesystem rather than of git, because the orchestrator needs
@@ -122,6 +153,24 @@ export const mounts = (target: Target): string[] =>
   target.worktree ? [sharedGitDirectory(target)] : [];
 
 /**
+ * What the checkout sandbox is given: the worktree's own directory and the
+ * project's `.git` -- exactly what its devcontainer will get -- plus the proxy
+ * CA, read-only, for git-lfs.
+ *
+ * For `docker run --mount`, NOT `devcontainer up --mount`: the CLI's grammar
+ * refuses `readonly` (tests/static/01-syntax.sh), docker's accepts it.
+ */
+export const checkoutMounts = (
+  target: Target,
+  caVolume: string,
+  caDirectory: string,
+): string[] => [
+  `type=bind,source=${target.dir},target=${target.dir}`,
+  ...mounts(target),
+  `type=volume,source=${caVolume},target=${caDirectory},readonly`,
+];
+
+/**
  * An empty tmpfs over `.worktrees`, so the main tree's editor holds one copy of
  * every filename rather than one per branch.
  *
@@ -155,22 +204,96 @@ const die = (message: string): never => {
   process.exit(1);
 };
 
-const git = (target: Target, ...args: string[]) =>
-  run.status("git", ["-C", target.projectDir, ...args]);
+/** The knobs in a repository's config that name a command, and the value that
+ *  switches each off. `--no-pager` covers `core.pager` and every `pager.<cmd>`. */
+const NO_COMMANDS = [
+  "--no-pager",
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.fsmonitor=false",
+];
 
-const branchExists = ({ projectDir }: Target, branch: string) =>
+/**
+ * Filter drivers are NAMED by the project's config and SELECTED by its
+ * `.gitattributes`, and git has no switch that turns them all off. So each
+ * driver the config defines is emptied by name: an empty clean/smudge/process
+ * is no filter, and `required=false` keeps git from refusing for want of one.
+ * A driver no config defines is not a command, so the list is complete.
+ *
+ * `git config` itself executes nothing; `--get-regexp` follows includes, so a
+ * driver hidden behind `include.path` is found too.
+ *
+ * @throws for a driver named with an `=`. A config subsection may contain one,
+ * and `-c` splits at the FIRST `=`, so `-c filter.a=b.clean=` would set some
+ * other key and leave the driver live -- refusing is the only safe reading.
+ */
+export const filterNeutralizers = (configKeys: string[]) => {
+  const drivers = new Set<string>();
+  for (const key of configKeys) {
+    const match = /^filter\.(.+)\.[^.]+$/s.exec(key);
+    if (!match) continue;
+    if (match[1].includes("="))
+      throw new Error(
+        `this repository's config defines a filter driver named '${match[1]}', which cannot be switched off from the command line`,
+      );
+    drivers.add(match[1]);
+  }
+  return [...drivers].flatMap((driver) =>
+    ["clean=", "smudge=", "process=", "required=false"].flatMap((setting) => [
+      "-c",
+      `filter.${driver}.${setting}`,
+    ]),
+  );
+};
+
+const configuredFilterKeys = (dir: string) =>
+  run(
+    "git",
+    ["-C", dir, ...NO_COMMANDS, "config", "--null", "--name-only", "--get-regexp", "^filter\\."],
+    { encoding: "utf8" },
+    true,
+  )
+    .split("\0")
+    .filter(Boolean);
+
+/** git that executes nothing the repository configured. See the header.
+ *
+ *  Drivers are read from the worktree as well as the project: with
+ *  `extensions.worktreeConfig` a worktree carries a `config.worktree` of its
+ *  own, and `worktree remove` runs its cleanliness check INSIDE the worktree,
+ *  where that file applies and the project's view of the config does not. */
+export const hardenedGit = (target: Target) => {
+  const views = [target.projectDir];
+  if (target.dir !== target.projectDir && existsSync(join(target.dir, ".git")))
+    views.push(target.dir);
+  let neutralizers: string[] = [];
+  try {
+    neutralizers = filterNeutralizers(views.flatMap(configuredFilterKeys));
+  } catch (err: any) {
+    return die(`${err.message}; refusing to run git against it from the editor`);
+  }
+  return ["-C", target.projectDir, ...NO_COMMANDS, ...neutralizers];
+};
+
+const git = (target: Target, ...args: string[]) =>
+  run.status("git", [...hardenedGit(target), ...args]);
+
+const branchExists = (target: Target, branch: string) =>
   run.status.ok(
     "git",
-    ["-C", projectDir, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+    [...hardenedGit(target), "show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
     { quiet: true },
   );
 
 /** Check out an existing branch, or start a new one -- the two spellings git
- *  has for `worktree add`, chosen by whether the ref is already there. */
-const addArguments = (target: Target, branch: string) =>
-  branchExists(target, branch)
-    ? ["worktree", "add", target.dir, branch]
-    : ["worktree", "add", "-b", branch, target.dir];
+ *  has for `worktree add`, chosen by whether the ref is already there. Never
+ *  checked out HERE: `--no-checkout` was measured to run no hook, filter or
+ *  fsmonitor, and a checkout runs all three. */
+export const addArguments = (target: Target, branch: string, exists: boolean) =>
+  exists
+    ? ["worktree", "add", "--no-checkout", target.dir, branch]
+    : ["worktree", "add", "--no-checkout", "-b", branch, target.dir];
 
 /** `.git/info/exclude`, not `.gitignore`: `.gitignore` is tracked, and this
  *  tool's layout has no business in the user's next commit. */
@@ -192,7 +315,7 @@ const add = (target: Target, branch: string) => {
   // git's own refusals here are better than anything worth wrapping them in --
   // "fatal: 'main' is already used by worktree at ..." says precisely why the
   // main tree may not be checked out twice.
-  if (git(target, ...addArguments(target, branch)) !== 0)
+  if (git(target, ...addArguments(target, branch, branchExists(target, branch))) !== 0)
     return die(`git could not create the worktree (see its message above)`);
 
   if (git(target, "worktree", "lock", "--reason", LOCK_REASON, target.dir) !== 0)
@@ -206,6 +329,9 @@ const add = (target: Target, branch: string) => {
 
   excludeFromTheRepository(target);
   console.log(`worktree: ${target.name} is at ${target.dir}`);
+  console.log(
+    `          its files are checked out in a sandbox when it first starts`,
+  );
 };
 
 const remove = (target: Target) => {
@@ -215,7 +341,13 @@ const remove = (target: Target) => {
   // locked, so unlocking is a step rather than a repair.
   git(target, "worktree", "unlock", target.dir);
 
-  if (git(target, "worktree", "remove", target.dir) !== 0)
+  // Never started, so never checked out: no index, so git reads every tracked
+  // file as deleted and refuses. Nothing is there to lose -- unless someone put
+  // files in it by hand, in which case git's own check stands.
+  const neverCheckedOut =
+    !isPopulated(target) && readdirSync(target.dir).every((entry) => entry === ".git");
+
+  if (git(target, "worktree", "remove", ...(neverCheckedOut ? ["--force"] : []), target.dir) !== 0)
     return die(
       `git could not remove the worktree (uncommitted changes? see its message above)`,
     );

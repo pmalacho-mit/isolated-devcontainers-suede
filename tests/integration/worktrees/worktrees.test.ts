@@ -17,7 +17,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { target } from "../../../release/vscode-image/projects.ts";
-import { isLocked, unlocked } from "../../../release/vscode-image/worktrees.ts";
+import {
+  isLocked,
+  isPopulated,
+  unlocked,
+} from "../../../release/vscode-image/worktrees.ts";
 
 const COMMAND = fileURLToPath(
   new URL("../../../release/vscode-image/worktrees.ts", import.meta.url),
@@ -214,6 +218,18 @@ describe("worktree remove", () => {
     );
   });
 
+  test("one that was never started still keeps a file put there by hand", () => {
+    // Never checked out means no index, which is why remove forces it -- but
+    // only while `.git` is all the directory holds.
+    const box = repository();
+    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "draft").ok);
+    fs.writeFileSync(join(box.dir, ".worktrees", "draft", "scratch.txt"), "keep me\n");
+
+    const { ok } = worktree(box.workspaces, "remove", "acme/widgets", "draft");
+    assert.equal(ok, false);
+    assert.ok(fs.existsSync(join(box.dir, ".worktrees", "draft", "scratch.txt")));
+  });
+
   test("a worktree that is not there is a refusal, not a no-op", () => {
     const box = repository();
     const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "ghost");
@@ -239,5 +255,145 @@ describe("worktree list", () => {
     const { ok, output } = worktree(box.workspaces, "list", "acme/plain");
     assert.equal(ok, false);
     assert.match(output, /not a git repository/);
+  });
+});
+
+// E17. A devcontainer can write its project's `.git`, and the editor -- which
+// mounts every project and holds the deploy keys -- runs git against it. Each
+// trap below is a command the repository's own config names, armed to leave a
+// marker OUTSIDE the repository when it runs. Measured on git 2.51 before the
+// fix: a plain `worktree add` fired the hook, the smudge filter and fsmonitor;
+// a TTY'd `worktree list` fired `pager.worktree`; removing a racily clean
+// worktree fired the clean filter.
+describe("E17: nothing the repository configured runs in the editor", () => {
+  const armed = () => {
+    const box = repository();
+    const markers = fs.mkdtempSync(join(tmpdir(), "desolate-wt-markers-"));
+    const trap = (name: string) => `sh -c 'touch ${markers}/${name}; cat'`;
+
+    fs.writeFileSync(join(box.dir, ".gitattributes"), "*.txt filter=evil\n*.md filter=wtonly\n");
+    fs.writeFileSync(join(box.dir, "notes.md"), "notes\n");
+    git(box.dir, "add", "-A");
+    git(box.dir, "commit", "-qm", "attributes");
+
+    for (const hook of ["post-checkout", "reference-transaction", "post-index-change"]) {
+      const file = join(box.dir, ".git", "hooks", hook);
+      fs.writeFileSync(file, `#!/bin/sh\ntouch ${markers}/hook-${hook}\n`);
+      fs.chmodSync(file, 0o755);
+    }
+    const fsmonitor = join(markers, "..", `${markers.split("/").pop()}-fsmonitor.sh`);
+    fs.writeFileSync(fsmonitor, `#!/bin/sh\ntouch ${markers}/fsmonitor\n`);
+    fs.chmodSync(fsmonitor, 0o755);
+
+    git(box.dir, "config", "filter.evil.smudge", trap("smudge"));
+    git(box.dir, "config", "filter.evil.clean", trap("clean"));
+    git(box.dir, "config", "core.fsmonitor", fsmonitor);
+    git(box.dir, "config", "core.pager", trap("core-pager"));
+    git(box.dir, "config", "pager.worktree", trap("pager-worktree"));
+    // A driver only a WORKTREE's own config defines, for `remove`, which runs
+    // its cleanliness check inside the worktree.
+    git(box.dir, "config", "extensions.worktreeConfig", "true");
+
+    const fired = () => fs.readdirSync(markers).sort();
+    const clear = () => {
+      for (const marker of fs.readdirSync(markers)) fs.rmSync(join(markers, marker));
+    };
+    return { ...box, markers, trap, fired, clear };
+  };
+
+  /** What `populateWorktree` runs in its sandbox, run here instead: the
+   *  traps' own control, since a test that never saw them fire proves nothing. */
+  const sandboxCheckout = (dir: string) => git(dir, "checkout", "--force");
+
+  test("the traps are live: a plain checkout fires every one", () => {
+    const box = armed();
+    git(box.dir, "worktree", "add", "-q", "--no-checkout", "-b", "control", ".worktrees/control");
+    box.clear();
+    sandboxCheckout(join(box.dir, ".worktrees", "control"));
+    for (const marker of ["fsmonitor", "hook-post-checkout", "smudge"])
+      assert.ok(box.fired().includes(marker), `${marker} did not fire: ${box.fired()}`);
+  });
+
+  test("add runs none of them, and leaves the worktree for the sandbox", () => {
+    const box = armed();
+    const { ok, output } = worktree(box.workspaces, "add", "acme/widgets", "alpha");
+    assert.ok(ok, output);
+    assert.deepEqual(box.fired(), []);
+
+    const alpha = target(box.workspaces, "acme/widgets", "alpha");
+    assert.deepEqual(fs.readdirSync(alpha.dir), [".git"]);
+    assert.equal(isPopulated(alpha), false);
+    assert.ok(isLocked(alpha), "the unpopulated worktree must still be locked");
+
+    sandboxCheckout(alpha.dir);
+    assert.equal(isPopulated(alpha), true);
+    assert.equal(fs.readFileSync(join(alpha.dir, "which-tree.txt"), "utf8"), "main\n");
+  });
+
+  test("list runs no pager, even on a terminal", (t) => {
+    // The pager only engages on a TTY, so the attack needs one: util-linux
+    // `script` gives the command a pseudo-terminal.
+    try {
+      execFileSync("script", ["--version"], { stdio: "ignore" });
+    } catch {
+      return t.skip("needs util-linux `script` for a pseudo-terminal");
+    }
+    const box = armed();
+    const command = [process.execPath, COMMAND, "list", "acme/widgets"]
+      .map((word) => `'${word}'`)
+      .join(" ");
+    execFileSync("script", ["-qec", command, "/dev/null"], {
+      env: { ...process.env, DESOLATE_WORKSPACES: box.workspaces },
+      stdio: "ignore",
+    });
+    assert.deepEqual(box.fired(), []);
+  });
+
+  test("remove refuses a racily-clean edit without running a filter", () => {
+    const box = armed();
+    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "racy").ok);
+    const racy = target(box.workspaces, "acme/widgets", "racy");
+    sandboxCheckout(racy.dir);
+    fs.writeFileSync(
+      join(box.dir, ".git", "worktrees", "racy", "config.worktree"),
+      `[filter "wtonly"]\n\tclean = ${box.trap("wtonly-clean")}\n`,
+    );
+
+    // Same size, and the index's own mtime: git cannot tell from stat alone,
+    // so it re-reads both files through their clean filters to compare.
+    const index = join(box.dir, ".git", "worktrees", "racy", "index");
+    for (const [file, content] of [["which-tree.txt", "MAIN\n"], ["notes.md", "NOTES\n"]]) {
+      fs.writeFileSync(join(racy.dir, file), content);
+      const { atime, mtime } = fs.statSync(index);
+      fs.utimesSync(join(racy.dir, file), atime, mtime);
+    }
+    box.clear();
+
+    const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "racy");
+    assert.equal(ok, false, "the edit was lost: remove did not see it");
+    assert.match(output, /could not remove/);
+    assert.deepEqual(box.fired(), []);
+  });
+
+  test("remove of a clean worktree runs none of them either", () => {
+    const box = armed();
+    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "tidy").ok);
+    sandboxCheckout(target(box.workspaces, "acme/widgets", "tidy").dir);
+    box.clear();
+
+    const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "tidy");
+    assert.ok(ok, output);
+    assert.deepEqual(box.fired(), []);
+  });
+
+  test("a filter driver that cannot be switched off is a refusal", () => {
+    // `-c` splits at the first '=', so `-c filter.a=b.clean=` would set some
+    // other key and leave this driver live.
+    const box = armed();
+    git(box.dir, "config", "filter.a=b.clean", box.trap("equals"));
+    const { ok, output } = worktree(box.workspaces, "add", "acme/widgets", "beta");
+    assert.equal(ok, false);
+    assert.match(output, /cannot be switched off/);
+    assert.deepEqual(box.fired(), []);
   });
 });

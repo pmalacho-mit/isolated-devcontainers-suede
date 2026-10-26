@@ -1309,6 +1309,12 @@ repo twice -- two projects are a real boundary; two worktrees are not.
   safe direction. Like every other mount, it is decided when the container is
   created, so a project already running when you add your first worktree needs
   `desolate --rebuild <project>` before the mask appears.
+- **A new worktree is empty until it first starts.** `worktree add` creates it
+  with `--no-checkout`, and `desolate --worktree` checks it out in a throwaway
+  container with that worktree's own mounts -- so the repository's hooks,
+  filters and fsmonitor run there, not in the editor, which reaches every
+  project. A post-checkout hook that needs tools the sandbox lacks (it is
+  `alpine/git`, with git-lfs) fails there with a warning; the files still land.
 - **`git worktree list` inside a worktree names paths that are not there.** Its
   siblings and the main tree are not mounted in that container. They are locked,
   so nothing prunes them; the output is just confusing.
@@ -1613,8 +1619,11 @@ Boundaries, strongest first:
 - **project <-> editor** -- the weakest boundary in the stack, and the one that
   is not enforced by a mechanism at all. They share `/workspaces` read-write,
   and a repository's `.git/config`, `.git/hooks/` and `.gitattributes` are
-  executable configuration consumed by the editor's git. Assume any project you
-  open in the outer editor can execute there. The design response is not to
+  executable configuration consumed by the editor's git. The git desolate runs
+  there for you (`worktree add`, `list`, `remove`) switches off every knob that
+  names a command and checks nothing out (tests/integration/worktrees, E17), but
+  git you type in the editor's terminal obeys the repository like any git does.
+  Assume any project you work on in the outer editor can execute there. The design response is not to
   prevent it but to make it survivable: there is nothing in that container worth
   stealing, only capabilities that stop when it restarts.
 - **dind <-> containers** -- Linux namespaces, and the weakest of the three.

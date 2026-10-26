@@ -946,9 +946,10 @@ case "$CMD" in
              esac ;;
 
   worktree)  ensure_running
-             # `git worktree add` fires the repository's own hooks, so it runs
-             # in the EDITOR container, which already executes project content.
-             # The orchestrator holds the inner Docker socket and must never.
+             # git runs in the EDITOR container, hardened so nothing the
+             # repository configured executes (worktrees.ts); the checkout,
+             # which must run its hooks, happens in a sandbox at first start.
+             # The orchestrator holds the inner Docker socket and runs no git.
              SUB="${1:-list}"; shift || true
              case "$SUB" in
                list|add)

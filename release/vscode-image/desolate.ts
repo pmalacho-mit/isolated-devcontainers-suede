@@ -58,6 +58,7 @@ import { isEntryPoint, run, type JSONValue } from "./utils.ts";
 import { parseArgs, USAGE, type Args } from "./args.ts";
 import { createDocker, type NetworkAttachment, type Runner } from "./docker.ts";
 import {
+  CA_DIR,
   OVERLAY_KEY_LABEL,
   SERVER_DST,
   SHARED_DIRECTORIES,
@@ -624,6 +625,39 @@ const injectedMounts = (target: Target) => [
   ...worktrees.mounts(target),
 ];
 
+/**
+ * Check a worktree's files out, the first time it starts.
+ *
+ * The editor creates worktrees with `--no-checkout`, because a checkout runs
+ * the repository's hooks, filters and fsmonitor and the editor reaches every
+ * project (worktrees.ts). So the checkout happens here instead, in a throwaway
+ * container on the same daemon and with the same mounts this worktree's
+ * devcontainer is about to get -- the reach that code would have anyway. It
+ * has to precede the snapshot: `.devcontainer/` is one of the files it writes.
+ */
+function populateWorktree(target: Target): void {
+  if (worktrees.isPopulated(target)) return;
+  const ca = SHARED_DIRECTORIES.find((mount) => mount.target === CA_DIR)!;
+
+  desolog(`checking out ${target.name} in a sandbox (first start) ...`);
+  const code = docker.checkoutWorktree({
+    image: worktrees.CHECKOUT_IMAGE,
+    label: `${worktrees.CHECKOUT_LABEL}=${target.project}`,
+    dir: target.dir,
+    mounts: worktrees.checkoutMounts(target, overlay.ensureVolume(target, ca), CA_DIR),
+    caFile: `${CA_DIR}/ca.pem`,
+  });
+  // A hook that fails after the files land still exits non-zero, and git has
+  // written the index by then -- so the index, not the status, says whether
+  // there is a checkout to start from.
+  if (!worktrees.isPopulated(target))
+    die(`the checkout of ${target.name} failed in its sandbox (exit ${code}; its output is above).
+      The worktree is left empty, and the next start tries again.`);
+  if (code !== 0)
+    desolog(`the checkout of ${target.name} landed, but git exited ${code} -- a
+      post-checkout hook failing in the sandbox, most likely (see above)`);
+}
+
 const devcontainerUp = (target: Target, config: string, noCache = false) => {
   const args = [
     "up",
@@ -1039,6 +1073,7 @@ async function runTarget(
   noCache = false,
 ): Promise<void> {
   const { name, dir } = target;
+  populateWorktree(target);
   config ??= dieOnError(() => snapshot(target, { specs: DIRECT_SPEC_DIR }));
 
   const project = readProjectConfig(resolveOrDie(target, config));
@@ -1132,10 +1167,9 @@ async function runTarget(
 
 /** Turn a validated command line into the one directory it denotes.
  *
- *  Worktrees are NOT created here. `git worktree add` reads the repository's
- *  own config and fires its hooks, and this process holds the inner Docker
- *  socket; the editor container is where git already runs against project
- *  content, so that is where creating one belongs. */
+ *  Worktrees are NOT created here: this process holds the inner Docker socket
+ *  and must never run a repository's git. The editor creates them, hardened
+ *  and without a checkout; `populateWorktree` checks them out in a sandbox. */
 function targetFromArguments(project: string, worktree?: string): Target {
   if (!validName(project))
     die(`'${project}' is not a usable project name.
