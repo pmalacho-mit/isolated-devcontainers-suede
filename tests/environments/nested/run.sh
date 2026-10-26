@@ -91,6 +91,13 @@ refuse_a_real_vm() {
   fi
   command -v colima >/dev/null 2>&1 && die "colima is on PATH -- this is a Mac, not a devcontainer. Refusing."
   sudo -n true 2>/dev/null || die "needs passwordless sudo (nft, the proxy's uid, dnsmasq)"
+  # The VM-side wall is nftables in the network namespace the stack's bridges
+  # live in, so the daemon has to run in THIS container (docker-in-docker).
+  # With docker-outside-of-docker it is a sibling's, and a ruleset loaded here
+  # would intercept nothing -- a harness that verified a wall that is not there.
+  pgrep -x dockerd >/dev/null 2>&1 || die "no dockerd runs in this container: the daemon is a sibling's
+      (docker-outside-of-docker), and the harness's nftables wall would sit in a
+      network namespace the stack does not use. It needs a docker-in-docker devcontainer."
 }
 
 # --- up ------------------------------------------------------------------------
