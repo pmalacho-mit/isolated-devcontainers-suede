@@ -1072,12 +1072,14 @@ function reportUncommitted(target: Target): void {
   if (!worktrees.isPopulated(target))
     return console.log(`${target.name} was never checked out; nothing in it to lose`);
 
-  const changes = parseWorktreeChanges(
-    docker.worktreeChanges(worktreeSandbox(target, worktrees.sandboxMounts(target))),
+  const report = docker.worktreeChanges(
+    worktreeSandbox(target, worktrees.sandboxMounts(target)),
   );
+  const changes = parseWorktreeChanges(report);
   if (changes === null)
     return die(`could not check ${target.name} for uncommitted changes in its sandbox,
-      so it is not known to be safe to remove. To discard whatever is in it:
+      so it is not known to be safe to remove.${report ? `\n      git said: ${report.split("\n").slice(0, 3).join(" / ")}` : ""}
+      To discard whatever is in it:
         ${hint.mac(`worktree remove ${target.project} ${target.worktree} --force`)}`);
   if (changes.length === 0) return console.log(`${target.name} has no uncommitted changes`);
 

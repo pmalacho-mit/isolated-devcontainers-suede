@@ -393,13 +393,19 @@ export const createDocker = (run: Runner) => {
     /** `git status --porcelain` of a worktree, asked in its sandbox: the one
      *  question about content the editor must not ask itself. Read it with
      *  `parseWorktreeChanges`; untracked files count and ignored ones do not,
-     *  as for `git worktree remove`'s own check. */
+     *  as for `git worktree remove`'s own check.
+     *
+     *  ANY warning fails the check. git exits 0 with only a warning for a
+     *  directory it cannot read -- root-owned output of a compose service,
+     *  say -- and those files would otherwise be reported as nothing. The
+     *  warnings are printed before the marker, so a refusal can quote them. */
     worktreeChanges: (spec: WorktreeSandbox) =>
       run.output([
         ...worktreeSandbox(spec, "sh"),
         "-c",
-        `timeout ${spec.seconds} git status --porcelain --ignore-submodules=none > /tmp/changes ` +
-          `&& echo ${STATUS_RAN} && cat /tmp/changes`,
+        `timeout ${spec.seconds} git status --porcelain --ignore-submodules=none ` +
+          `> /tmp/changes 2> /tmp/warnings; ran=$?; cat /tmp/warnings; ` +
+          `[ "$ran" = 0 ] && [ ! -s /tmp/warnings ] && echo ${STATUS_RAN} && cat /tmp/changes`,
       ]),
     /** Run a throwaway helper container against one volume. */
     inVolume: (

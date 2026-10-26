@@ -548,9 +548,10 @@ describe("a worktree's sandbox", () => {
     ]);
   });
 
-  test("the changes check prints its marker only after git status succeeded", () => {
+  test("the changes check prints its marker only after a clean, silent git status", () => {
     const script = argvFor("changes").at(-1)!;
-    assert.match(script, /^timeout 600 git status --porcelain --ignore-submodules=none > \/tmp\/changes && echo desolate-status-ran && cat \/tmp\/changes$/);
+    assert.match(script, /^timeout 600 git status --porcelain --ignore-submodules=none /);
+    assert.match(script, /\[ "\$ran" = 0 \] && \[ ! -s \/tmp\/warnings \] && echo desolate-status-ran/);
   });
 });
 

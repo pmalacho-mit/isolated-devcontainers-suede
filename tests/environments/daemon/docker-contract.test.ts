@@ -334,5 +334,15 @@ describe("a worktree checked out in its sandbox", () => {
       null,
       "a check that could not run must not read as clean",
     );
+
+    // Measured: git exits 0 with only a WARNING for a directory it cannot
+    // read, so root-owned output would have been reported as nothing at all.
+    realRunner.status(["run", "--rm", "-v", `${store}:/w`, HELPER, "sh", "-c",
+      `mkdir ${dir}/root-owned && echo precious > ${dir}/root-owned/db && chmod 700 ${dir}/root-owned`]);
+    assert.equal(
+      parseWorktreeChanges(docker.worktreeChanges(sandbox)),
+      null,
+      "a directory the sandbox could not read was reported as clean",
+    );
   });
 });
