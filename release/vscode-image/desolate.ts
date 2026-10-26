@@ -82,6 +82,7 @@ import {
 } from "./editor.ts";
 import * as relay from "./relays.ts";
 import * as shutdown from "./shutdown.ts";
+import { ingressDirectory, IngressMissingError, ownedForwards } from "./ingress-files.ts";
 import { snapshotDirectory, snapshot, initDirectory } from "./snapshot.ts";
 import {
   allocatePorts,
@@ -193,54 +194,41 @@ const overrideConfigFlag = (config?: string) =>
 const stateDir = stateDirectory(WORKSPACES);
 
 /**
- * desolate-ingress's ports/ directory (ingress.py): one file per host port,
- * `<dind>:<port>`, and the ingress opens 127.0.0.1:<host port> in the VM for
- * each -- which Lima carries to the Mac. There is no published range: a file
- * here IS the forward, and removing it closes it.
+ * desolate-ingress's ports/ directory (ingress-files.ts), for targets: each
+ * file's owner is the target that claimed it.
  *
  * Every target's relays publish on the SHARED dind until projects get daemons
  * of their own (Phase 3), so every file names it.
  */
+const ingress = ingressDirectory(process.env.DESOLATE_INGRESS_PORTS ?? "/run/ingress/ports");
 const ingressFiles = {
-  directory: process.env.DESOLATE_INGRESS_PORTS ?? "/run/ingress/ports",
   dind: "desolate-dind",
+  owner: (target: Target) => target.namespace,
   read: (): Map<string, string> => {
-    let names: string[];
     try {
-      names = fs.readdirSync(ingressFiles.directory);
-    } catch {
-      return die(`the ingress directory ${ingressFiles.directory} is missing, so no port could
+      return ingress.read();
+    } catch (err) {
+      if (!(err instanceof IngressMissingError)) throw err;
+      return die(`the ingress directory ${err.message} is missing, so no port could
         reach your Mac. The VM predates desolate-ingress: install it, then restart:
           ${hint.mac("vm install --proxy-only")}  and  ${hint.mac("down")} / ${hint.mac("up")}`);
     }
-    const entries = new Map<string, string>();
-    for (const name of names) {
-      try {
-        entries.set(name, fs.readFileSync(path.join(ingressFiles.directory, name), "utf8"));
-      } catch {} // gone between the listing and the read: not held
-    }
-    return entries;
   },
-  /** Atomic, as the ingress expects: a rename, so a reader never sees half. */
-  write: (hostPort: number) => {
-    const file = path.join(ingressFiles.directory, String(hostPort));
-    fs.writeFileSync(`${path.join(ingressFiles.directory, `.${hostPort}`)}`, `${ingressFiles.dind}:${hostPort}\n`);
-    fs.renameSync(path.join(ingressFiles.directory, `.${hostPort}`), file);
+  claim: (hostPort: number, target: Target) =>
+    ingress.claim(hostPort, ingressFiles.dind, ingressFiles.owner(target)),
+  release: (hostPort: number, target: Target) => ingress.release(hostPort, ingressFiles.owner(target)),
+  publish: (previous: PortMap, map: PortMap, target: Target) => {
+    const lost = ingress.publish(previous, map, ingressFiles.dind, ingressFiles.owner(target));
+    if (lost.length)
+      die(`${target.name}'s forwards on ${lost.join(", ")} are held by another target now
+        (${lost.map((port) => ingress.ownerOf(port) || "a file that names no owner").join(", ")}).
+        Start it again for fresh ports.`);
   },
-  remove: (hostPort: number) =>
-    fs.rmSync(path.join(ingressFiles.directory, String(hostPort)), { force: true }),
-  /** This target's forwards, exactly: what it held before and no longer does
-   *  is withdrawn, then each port in `map` is (re)written -- a rewrite is what
-   *  makes the ingress reopen a listener, which a collided port needs (L6). */
-  publish: (previous: PortMap, map: PortMap) => {
-    const now = new Set(map.values());
-    for (const port of previous.values()) if (!now.has(port)) ingressFiles.remove(port);
-    for (const port of map.values()) ingressFiles.write(port);
-  },
-  withdraw: (map: PortMap) => {
-    for (const port of map.values()) ingressFiles.remove(port);
-  },
+  withdraw: (map: PortMap, target: Target) => ingress.withdraw(map, ingressFiles.owner(target)),
+  ownerOf: (hostPort: number) => ingress.ownerOf(hostPort),
 };
+
+const CLAIM_ATTEMPTS = 5;
 
 const ports = {
   load: (target: Target): PortMap => {
@@ -267,12 +255,25 @@ const ports = {
       [Number(process.env.VSCODE_PORT ?? "3000"), "the editor (VSCODE_PORT)"],
     ]),
     ownRelayPorts: ownRelayPorts(ownRelayNames(target)),
+    ownForwards: ownedForwards(ingressFiles.read(), ingressFiles.owner(target)),
     previous: ports.load(target),
   }),
+  /** Allocated AND claimed: a start on another daemon, minutes from writing
+   *  anything else, sees these as taken from here on. A claim lost to a start
+   *  that got there between the read and the create gives back what this one
+   *  took, and looks again. */
   allocate: (target: Target, appPorts: number[]): PortMap => {
-    const map = dieOnError(() => allocatePorts(ports.world(target), appPorts));
-    ports.save(target, map);
-    return map;
+    for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
+      const world = ports.world(target);
+      const map = dieOnError(() => allocatePorts(world, appPorts));
+      const claimed = [...map.values()].filter((port) => ingressFiles.claim(port, target));
+      if (claimed.length === map.size) {
+        ports.save(target, map);
+        return map;
+      }
+      for (const port of claimed) if (!world.ownForwards.has(port)) ingressFiles.release(port, target);
+    }
+    return die(`could not claim host ports for ${target.name}: other starts took them ${CLAIM_ATTEMPTS} times running`);
   },
 };
 const spec = {
@@ -987,8 +988,10 @@ function movePorts(target: Target, move: { label: string; port: number }): void 
   const map = dieOnError(() => movePort(world, move.label, move.port));
   ports.save(target, map);
   if (devcontainerId(target.dir)) {
+    if (!ingressFiles.claim(move.port, target))
+      die(`${move.port} was taken by ${ingressFiles.ownerOf(move.port) || "another target"} just now; pick another`);
     recreateRelays(target, map);
-    ingressFiles.publish(world.previous, map);
+    ingressFiles.publish(world.previous, map, target);
   }
   showPorts(target);
 }
@@ -1108,7 +1111,7 @@ function stopTarget(target: Target): void {
     console.log("removed relays");
   }
   // The relays are gone, so the forwards would lead nowhere: close them.
-  ingressFiles.withdraw(ports.load(target));
+  ingressFiles.withdraw(ports.load(target), target);
   const id = devcontainerId(target.dir);
   if (id) {
     shutdown.devcontainer(docker, id, desolog);
@@ -1282,7 +1285,7 @@ function purgeTarget(target: Target): void {
         ${hint.desolate(`--stop ${invocation(target)}`)}`);
 
   docker.container.remove(ownRelayNames(target));
-  ingressFiles.withdraw(ports.load(target));
+  ingressFiles.withdraw(ports.load(target), target);
   const id = devcontainerId(target.dir, /* includeStopped */ true);
   if (id) docker.container.remove([id]);
 
@@ -1364,7 +1367,7 @@ async function runTarget(
   shadowBaseImages(dir, project.shadowImages);
   startEditor(target, project, token, config);
   recreateRelays(target, map);
-  ingressFiles.publish(previousPorts, map);
+  ingressFiles.publish(previousPorts, map, target);
 
   if (!probeEditor(target, editorPort))
     return die(`editor did not answer through the relay on :${editorPort} -- check the log:

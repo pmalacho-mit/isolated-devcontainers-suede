@@ -574,17 +574,29 @@ else
   # The self-test forward. A free port on THIS Mac, since a port the Mac holds
   # is one Lima never forwards (L6) -- that would fail the probe, not the stack.
   probe_port=""
+  # ...nor one a target's forward holds: its ports/ file is created only if
+  # absent (a link, which fails rather than replaces), and removed only if it
+  # still names this probe as its owner.
   for candidate in 18996 18986 18976 18966; do
-    lsof -nP -iTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1 || { probe_port=$candidate; break; }
+    lsof -nP -iTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1 && continue
+    vm_ssh sudo sh -c "printf 'desolate-dind:18997 desolate-preflight\n' > $INGRESS_ROOT/ports/.preflight \
+      && ln $INGRESS_ROOT/ports/.preflight $INGRESS_ROOT/ports/$candidate; held=\$?; rm -f $INGRESS_ROOT/ports/.preflight; exit \$held" \
+      2>/dev/null && { probe_port=$candidate; break; }
   done
+  release_probe_port() {
+    [ -n "$probe_port" ] || return 0
+    vm_ssh sudo sh -c "grep -qx 'desolate-dind:18997 desolate-preflight' $INGRESS_ROOT/ports/$probe_port && rm -f $INGRESS_ROOT/ports/$probe_port"
+  }
   dind_ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "desolate_dindnet").IPAddress}}' desolate-dind 2>/dev/null)
   if [ -z "$probe_port" ] || [ -z "$dind_ip" ]; then
+    release_probe_port
     skipped "ingress self-test: no free probe port on this Mac, or the dind has no address"
   else
     inner() { docker exec -e DOCKER_HOST=unix:///run/inner/docker.sock desolate-dind docker "$@"; }
     inner rm -f "$INGRESS_PROBE" >/dev/null 2>&1
     if ! inner run -d --rm --name "$INGRESS_PROBE" -p 18997:18997 alpine/socat \
            "TCP-LISTEN:18997,fork,reuseaddr" "SYSTEM:echo desolate-ingress-selftest" >/dev/null 2>&1; then
+      release_probe_port
       bad "could not start the ingress self-test listener on the inner daemon"
     else
       # Only write the shared dind's entry if nothing owns it yet, and only
@@ -594,7 +606,6 @@ else
         vm_ssh sudo sh -c "printf '%s\n' '$dind_ip' > $INGRESS_ROOT/dinds/.desolate-dind && mv $INGRESS_ROOT/dinds/.desolate-dind $INGRESS_ROOT/dinds/desolate-dind" \
           && wrote_dind=1
       fi
-      vm_ssh sudo sh -c "printf 'desolate-dind:18997\n' > $INGRESS_ROOT/ports/.$probe_port && mv $INGRESS_ROOT/ports/.$probe_port $INGRESS_ROOT/ports/$probe_port"
       body=""
       for _ in $(seq 1 40); do
         body=$(curl -s --http0.9 -m 1 "http://127.0.0.1:$probe_port/" 2>/dev/null) && [ -n "$body" ] && break
@@ -609,7 +620,7 @@ else
                                      note "Lima forwards a VM 0.0.0.0 listener onto the Mac's LAN (vm-loopback-forward.sh L2)" ;;
         *) ok "every ingress listener is loopback-only ($bound)" ;;
       esac
-      vm_ssh sudo rm -f "$INGRESS_ROOT/ports/$probe_port"
+      release_probe_port
       [ -n "$wrote_dind" ] && vm_ssh sudo rm -f "$INGRESS_ROOT/dinds/desolate-dind"
       inner rm -f "$INGRESS_PROBE" >/dev/null 2>&1
       case "$body" in

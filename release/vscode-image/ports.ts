@@ -51,6 +51,8 @@ export interface PortWorld {
   published: Map<number, string>;
   /** Ports this project's own relays already hold; taking one back is not a clash. */
   ownRelayPorts: Set<number>;
+  /** Ports whose ports/ file this target claimed; nor is taking one of those. */
+  ownForwards: Set<number>;
   /** This project's previous allocation, so URLs stay stable across restarts. */
   previous: PortMap;
 }
@@ -104,7 +106,7 @@ export const allocatePorts = (
     port >= world.base &&
     port <= HIGHEST &&
     !taken.has(port) &&
-    (!world.published.has(port) || world.ownRelayPorts.has(port));
+    (!world.published.has(port) || world.ownRelayPorts.has(port) || world.ownForwards.has(port));
 
   const claim = (label: string): number => {
     const remembered = world.previous.get(label);
@@ -137,7 +139,7 @@ export const movePort = (world: PortWorld, label: string, port: number): PortMap
   if (!Number.isInteger(port) || port < LOWEST_FORWARDED || port > HIGHEST)
     throw new PortRangeError(`${port} is not a port the ingress forwards (${LOWEST_FORWARDED}-${HIGHEST})`);
   const holder = world.published.get(port);
-  if (holder !== undefined && !world.ownRelayPorts.has(port))
+  if (holder !== undefined && !world.ownRelayPorts.has(port) && !world.ownForwards.has(port))
     throw new PortRangeError(`${port} is held by ${holder}`);
   for (const [other, held] of world.previous)
     if (other !== label && held === port)

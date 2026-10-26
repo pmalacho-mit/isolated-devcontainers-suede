@@ -41,6 +41,7 @@ const world = (over: Partial<PortWorld> = {}): PortWorld => ({
   base: 8080,
   published: new Map(),
   ownRelayPorts: new Set(),
+  ownForwards: new Set(),
   previous: new Map(),
   ...over,
 });
@@ -219,6 +220,35 @@ describe("allocatePorts", () => {
     assert.match(error.message, /65530\s+relay-0/);
     assert.match(error.message, /65535\s+this project/);
     assert.doesNotMatch(error.message, /65530\s+this project/, "a port held by another was reported as ours");
+  });
+});
+
+describe("a target's own forwards are not a clash", () => {
+  test("a port whose ports/ file this target claimed is its to take back", () => {
+    // A start that died after claiming, or a restart: the file is still there.
+    const map = allocatePorts(world({
+      published: new Map([[8080, "desolate-dind:8080"]]),
+      ownForwards: new Set([8080]),
+      previous: new Map([["editor", 8080]]),
+    }), []);
+    assert.equal(map.get("editor"), 8080);
+  });
+
+  test("another target's is not, saved or not", () => {
+    const map = allocatePorts(world({
+      published: new Map([[8080, "desolate-dind:8080"]]),
+      previous: new Map([["editor", 8080]]),
+    }), []);
+    assert.equal(map.get("editor"), 8081);
+  });
+
+  test("and a move onto a forward of its own is allowed", () => {
+    const moved = movePort(world({
+      published: new Map([[8090, "desolate-dind:8090"]]),
+      ownForwards: new Set([8090]),
+      previous: new Map([["editor", 8080]]),
+    }), "editor", 8090);
+    assert.equal(moved.get("editor"), 8090);
   });
 });
 
