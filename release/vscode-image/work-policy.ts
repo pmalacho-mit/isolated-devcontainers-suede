@@ -140,5 +140,11 @@ const appendLine = (file: string, line: string) => {
 export const recordHandled = (workspaces: string, project: string, id: string, outcome: string) =>
   appendLine(factoryFiles(workspaces, project).handled, `${id} ${outcome.replace(/\s+/g, " ")}`);
 
-export const recordApproval = (workspaces: string, project: string, id: string) =>
+/** What an approval writes into the handled record: the request is looked at
+ *  again, now with a human's yes -- the last outcome recorded is the one read. */
+export const REOPENED = "reopened";
+
+export const recordApproval = (workspaces: string, project: string, id: string) => {
   appendLine(factoryFiles(workspaces, project).approved, id);
+  recordHandled(workspaces, project, id, REOPENED);
+};

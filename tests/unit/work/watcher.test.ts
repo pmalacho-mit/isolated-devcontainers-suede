@@ -49,6 +49,7 @@ describe("what the watcher decides", () => {
     assert.equal(decide(request(), by("main"), policy(), world(["w"]), false).kind, "refuse");
     assert.equal(decide(request(), by("main"), policy(), world([], true), false).kind, "refuse");
     assert.equal(decide(request(), by("main"), policy({ allow_hooks: true }), world([], true), false).kind, "open");
+    assert.equal(decide(request(), by("main"), policy(), world([], true), true).kind, "open", "a human may approve one");
   });
 
   test("at the cap, an open waits rather than being refused", () =>

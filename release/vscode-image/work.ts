@@ -31,6 +31,7 @@ import {
   parsePolicy,
   readPolicy,
   recordApproval,
+  REOPENED,
   type Policy,
 } from "./work-policy.ts";
 import {
@@ -222,7 +223,8 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
           const time = timeOf(root.projectDir, commit);
           rows.push({ time, line: `${commit.slice(0, 12)}  ${time}  ${message.from.padEnd(16)} ${subjectOf(message)}` });
         }
-      for (const { line } of rows.sort((a, b) => (a.time < b.time ? 1 : -1))) out(line);
+      // Newest first; a stable sort keeps a ref's own order within a second.
+      for (const { line } of rows.sort((a, b) => (a.time === b.time ? 0 : a.time < b.time ? 1 : -1))) out(line);
       return 0;
     }
     case "requests": {
@@ -237,7 +239,8 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
         } catch (err: any) {
           what = `unreadable: ${err?.message ?? err}`;
         }
-        const outcome = outcomes.get(id) ?? (outcomes.has(`wait:${id}`) ? "waiting" : "pending");
+        const recorded = outcomes.get(id);
+        const outcome = recorded && recorded !== REOPENED ? recorded : outcomes.has(`wait:${id}`) ? "waiting" : "pending";
         out(`${id}  ${what}  -- ${outcome}${approved.has(id) ? " (approved)" : ""}`);
       }
       return 0;
@@ -254,7 +257,7 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
       if (!workGit.resolve(root.projectDir, refs.request(id))) throw new UsageError(`there is no request ${id}`);
       recordApproval(WORKSPACES, root.project, id);
       humanSays(root.projectDir, "status", `approved request ${id}`);
-      out(`work: approved ${id}; the watcher acts on it at its next tick`);
+      out(`work: approved ${id}; the watcher looks at it again at its next tick`);
       return 0;
     }
     case "push":

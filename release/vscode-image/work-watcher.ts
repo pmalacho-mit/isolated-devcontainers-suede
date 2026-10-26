@@ -37,6 +37,7 @@ import * as workGit from "./work-git.ts";
 import {
   approvals,
   FACTORY_DIRECTORY,
+  REOPENED,
   handled,
   readPolicy,
   recordHandled,
@@ -99,8 +100,8 @@ export const decide = (
       if (!request.branch!.startsWith(policy.branch_prefix))
         return refuse(`branch '${request.branch}' is not under the policy's prefix '${policy.branch_prefix}'`);
       if (exists) return refuse(`${request.worktree} exists already`);
-      if (world.hooks && !policy.allow_hooks)
-        return refuse("the repository has hooks of its own, and the policy does not allow_hooks");
+      if (world.hooks && !policy.allow_hooks && !approved)
+        return refuse("the repository has hooks of its own, and the policy does not allow_hooks; a human may approve it");
       if (world.worktrees.length >= policy.max_open_worktrees)
         return { kind: "wait", reason: `${world.worktrees.length} of ${policy.max_open_worktrees} worktrees are open` };
       return { kind: "open" };
@@ -272,7 +273,8 @@ export const tickProject = (project: string, say: Say) => {
 
   const pending = workGit.refsUnder(root.projectDir, "refs/desolate/requests/")
     .map(({ ref, commit }) => ({ id: ref.slice("refs/desolate/requests/".length), commit }))
-    .filter(({ id }) => !done.has(id))
+    // Finished with, unless a human reopened it by approving it since.
+    .filter(({ id }) => !done.has(id) || done.get(id) === REOPENED)
     .sort((a, b) => (a.id < b.id ? -1 : 1));
 
   for (const { id, commit } of pending) {

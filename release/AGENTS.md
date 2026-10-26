@@ -150,6 +150,7 @@ When a project runs several agents -- one in its main tree, one per worktree -- 
 - **Pushing and merging are not yours to do.** Say `done` (or `request push <worktree>`), and a human -- or the policy file they committed, `.desolate/factory.json` -- decides whether the branch is pushed. Merges are always a person's.
 - **A request is a request.** Opening and closing worktrees goes through `request`; whether it happens is decided outside your container, and the answer arrives in your inbox as a `state` message.
 - `refs/desolate/*` are never pushed. Do not add a refspec for them.
+- **Leave your worktree clean when you are done.** It is closed only if it holds nothing uncommitted or untracked. The first start of a project with features writes `.devcontainer/devcontainer-lock.json` if the project has none -- it pins those features: commit it.
 
 ## When to stop and ask
 
