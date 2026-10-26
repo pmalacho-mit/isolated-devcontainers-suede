@@ -474,8 +474,15 @@ report_inner_daemon() {
   return "$verdict"
 }
 
+# Removes the containers carrying a label in the given states. A daemon that
+# cannot answer the listing says so: "no stale relays" would be a guess.
 sweep_inner() {
-  local what=$1 ids=$2
+  local what=$1 ids
+  shift
+  if ! ids=$(inner_ids "$@"); then
+    echo "  cannot sweep $what: the daemon did not answer"
+    return 0
+  fi
   if [ -z "${ids//[[:space:]]/}" ]; then
     echo "  no stale $what"
     return 0
@@ -499,13 +506,11 @@ restart_dind() {
 # alone -- the editor, the keyring and every other project stay up.
 sweep_and_restart_dind() {
   echo "-- rung 2: sweeping stale objects, then restarting $DIND --"
-  sweep_inner "relays that are no longer running" \
-    "$(inner_ids desolate.relay created exited dead restarting)"
+  sweep_inner "relays that are no longer running" desolate.relay created exited dead restarting
   # `dead` only. A STOPPED devcontainer is one `desolate --stop` deliberately
   # kept so the next start is fast; `dead` is what docker leaves behind when it
   # could not finish removing one, and that is the object reconciliation trips on.
-  sweep_inner "devcontainers the daemon could not finish removing" \
-    "$(inner_ids devcontainer.local_folder dead)"
+  sweep_inner "devcontainers the daemon could not finish removing" devcontainer.local_folder dead
   echo "  restarting $DIND (nothing else in the stack is touched)"
   restart_dind || echo "cli.sh: the restart itself failed" >&2
 }

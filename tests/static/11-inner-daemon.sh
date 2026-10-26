@@ -143,6 +143,19 @@ if define_from_cli count_by_state; then
   assert_eq "nothing to reconcile reads as 'none'" "$(count_by_state "")" "none"
 fi
 
+group "rung 2 does not guess on a daemon that will not answer"
+# Wedged is the state rung 2 exists for, and a wedged daemon answers no `ps`:
+# "no stale relays" there would be a claim nobody measured.
+if define_from_cli sweep_inner && define_from_cli inner_ids; then
+  inner_docker() { sleep 0; return 124; }
+  assert_contains "an unanswered listing is said to be one" \
+    "$(sweep_inner "relays" desolate.relay exited)" "cannot sweep relays: the daemon did not answer"
+  inner_docker() { return 0; }
+  assert_contains "an empty answer is still 'none'" \
+    "$(sweep_inner "relays" desolate.relay exited)" "no stale relays"
+  unset -f inner_docker
+fi
+
 group "the rung that deletes every project's images needs asking for"
 # EXECUTED, not read: rung 3 is today's folklore ("delete the data root") turned
 # into a command, and the whole reason to have it as a command is that the

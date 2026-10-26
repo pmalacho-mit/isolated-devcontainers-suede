@@ -254,9 +254,9 @@ const daemons = {
     return "booting";
   },
 
-  stop: (name: string, say: Say) => {
+  stop: (name: string, say: Say, purging = false) => {
     if (docker.dind.state(name) !== "running") return;
-    say(`${name}: quiescing, then stopping (its images stay)`);
+    say(`${name}: quiescing, then stopping${purging ? "" : " (its images stay)"}`);
     shutdown.devcontainer(docker, name, say);
   },
 };
@@ -391,7 +391,7 @@ const operations_ = {
   purge: async (target: Target, settings: Settings, say: Say) => {
     const spec = specFor(target, settings);
     ingress.withdraw(spec.name);
-    daemons.stop(spec.name, say);
+    daemons.stop(spec.name, say, /* purging */ true);
     docker.container.remove([spec.name]);
     docker.volume.remove([spec.volumes.data]);
     if (docker.dind.networkExists(spec.network) && docker.dind.removeNetwork(spec.network) !== 0)
