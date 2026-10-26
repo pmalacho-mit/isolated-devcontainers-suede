@@ -32,6 +32,8 @@ describe("parseArgs", () => {
       rebuild: false,
       noCache: false,
       all: false,
+      branch: undefined,
+      force: false,
     });
   });
 
@@ -134,6 +136,14 @@ describe("parseArgs", () => {
   test("--config with no value yields an empty config rather than eating the project", () => {
     refuses(["--config"], /usage:/);
   });
+
+  test("creating or removing a worktree names one, and nothing else takes their flags", () => {
+    refuses(["--create-worktree", "myapp"], /name it with --worktree/);
+    refuses(["--remove-worktree", "myapp"], /name it with --worktree/);
+    refuses(["--branch", "x", "myapp"], /--branch only means something with --create-worktree/);
+    refuses(["--force", "--worktree", "wip", "myapp"], /--force only means something with --remove-worktree/);
+    refuses(["--create-worktree", "--force", "--worktree", "wip", "myapp"], /--force only/);
+  });
 });
 
 describe("every flag shape `Flags` declares round-trips", () => {
@@ -153,6 +163,9 @@ describe("every flag shape `Flags` declares round-trips", () => {
     { flags: [["--rebuild", "--no-cache"]], expect: { rebuild: true, noCache: true } },
     { flags: ["--stop"], expect: { command: "stop" } },
     { flags: ["--ports"], expect: { command: "ports" } },
+    { flags: ["--create-worktree", ["--branch", "feature/1"], ["--worktree", "wip"]], expect: { command: "create-worktree", branch: "feature/1", worktree: "wip" } },
+    { flags: ["--remove-worktree", ["--worktree", "wip"]], expect: { command: "remove-worktree", force: false } },
+    { flags: ["--remove-worktree", "--force", ["--worktree", "wip"]], expect: { command: "remove-worktree", force: true } },
   ];
 
   for (const { flags, expect } of shapes)

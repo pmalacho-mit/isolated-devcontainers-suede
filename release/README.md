@@ -1334,18 +1334,21 @@ repo twice -- two projects are a real boundary; two worktrees are not.
   safe direction. Like every other mount, it is decided when the container is
   created, so a project already running when you add your first worktree needs
   `desolate --rebuild <project>` before the mask appears.
-- **A new worktree is empty until it first starts.** `worktree add` creates it
-  with `--no-checkout`, and `desolate --worktree` checks it out in a throwaway
-  container with that worktree's own mounts -- so the repository's hooks,
-  filters and fsmonitor run there, not in the editor, which reaches every
-  project. A post-checkout hook that needs tools the sandbox lacks (it is
-  `alpine/git`, with git-lfs) fails there with a warning; the files still land.
-- **`worktree remove` checks for uncommitted changes in a sandbox too.** That
-  check reads file content, which runs the repository's filters, so
-  `./cli.sh worktree remove` asks it on the orchestrator's side and refuses,
-  listing what it found, if anything would be lost. `--force` skips it. In the
-  editor's own terminal `worktree remove` cannot ask, so it refuses unless
-  given `--force` (or the worktree was never started and holds nothing).
+- **A new worktree is empty until it first starts.** `worktree add` asks the
+  orchestrator to create it, with `--no-checkout`, in a throwaway container
+  that mounts the project and nothing else; `desolate --worktree` checks it out
+  in the same kind of container at first start -- so the repository's hooks,
+  filters and fsmonitor run there, never in the editor, which reaches every
+  project. git in the editor also followed links a project planted: with its
+  `.git` or `.worktrees` pointing into another project, `add` made a branch in
+  that project's repository. In the sandbox those links point at nothing. A
+  post-checkout hook that needs tools the sandbox lacks (it is `alpine/git`,
+  with git-lfs) fails there with a warning; the files still land.
+- **`worktree remove` checks for uncommitted changes first, in the sandbox.**
+  From the editor or the Mac, it refuses -- listing what it found -- if
+  anything would be lost, including files put by hand into a worktree that
+  was never started. `--force` skips the check. Then the worktree's container
+  and volumes are purged, and git removes it, in the sandbox again.
 - **A worktree's container holds its whole project.** It is mounted as the
   project's root, with the worktree as its folder, so the main tree and its
   siblings are there too (its editor opens only the worktree). Not the

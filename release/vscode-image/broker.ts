@@ -19,7 +19,7 @@ import { createServer } from "node:net";
 import { dirname } from "node:path";
 import { resolveSpec } from "./devcontainer.ts";
 import { PLANE_VARIABLE } from "./hints.ts";
-import { awaitsCheckout } from "./worktrees.ts";
+import { awaitsCheckout, validBranch } from "./worktrees.ts";
 import {
   snapshot,
   initDirectory as initSnapshotDirectory,
@@ -81,11 +81,16 @@ const config = environment.tryOverride({
 const globalOperations = ["list", "stop-all"] as const;
 type GlobalOperation = (typeof globalOperations)[number];
 
+/** Ops on a worktree that has to be NAMED, and whose git the runner does in
+ *  its sandbox -- the editor must not (worktrees.ts). */
+const worktreeOperations = ["worktree-add", "worktree-remove"] as const;
+
 const operations = [
   "start",
   "rebuild",
   "stop",
   "ports",
+  ...worktreeOperations,
   ...globalOperations,
 ] as const;
 type Operation = (typeof operations)[number];
@@ -102,8 +107,18 @@ const globalArgv: Record<GlobalOperation, string[]> = {
 type Request = {
   [op in Operation]: op extends GlobalOperation
     ? { op: op }
-    : { op: op; project: string; worktree?: string };
+    : op extends "worktree-add"
+      ? { op: op; project: string; worktree: string; branch?: string }
+      : op extends "worktree-remove"
+        ? { op: op; project: string; worktree: string; force?: boolean }
+        : { op: op; project: string; worktree?: string };
 }[Operation];
+
+/** Absent, or of this type. */
+const optional = (query: object, key: string, type: "string" | "boolean") =>
+  !(key in query) ||
+  (query as Record<string, unknown>)[key] === undefined ||
+  typeof (query as Record<string, unknown>)[key] === type;
 
 type GlobalRequest = Extract<Request, { op: GlobalOperation }>;
 
@@ -135,9 +150,12 @@ const request = {
     (isGlobalOperation(query.op) ||
       ("project" in query &&
         typeof query.project === "string" &&
-        (!("worktree" in query) ||
-          query.worktree === undefined ||
-          typeof query.worktree === "string"))),
+        optional(query, "worktree", "string") &&
+        (query.op === "worktree-add" || query.op === "worktree-remove"
+          ? "worktree" in query && typeof query.worktree === "string"
+          : true) &&
+        (query.op === "worktree-add" ? optional(query, "branch", "string") : !("branch" in query)) &&
+        (query.op === "worktree-remove" ? optional(query, "force", "boolean") : !("force" in query)))),
 };
 
 /**
@@ -235,9 +253,25 @@ async function handle(req: unknown, send: Send) {
       return send({ ok: code === 0, exit: code });
     }
 
+    if (req.op === "worktree-add") {
+      // Validated as a project -- the worktree is not there yet -- and its
+      // name and branch on their own. The runner refuses one that is there.
+      validate(req.project);
+      if (!validWorktree(req.worktree))
+        throw new Error(`invalid worktree name: ONE path segment, starting with a letter or digit`);
+      const branch = req.branch ?? req.worktree;
+      if (!validBranch(branch)) throw new Error(`invalid branch name`);
+      const target = resolveTarget(config.workspaces, req.project, req.worktree);
+      const code = await spawnDesolate(targetArgv(target, ["--create-worktree", ["--branch", branch]]), send);
+      return send({ ok: code === 0, exit: code });
+    }
+
     const target = validate(req.project, req.worktree);
     let flags: Flags[];
     switch (req.op) {
+      case "worktree-remove":
+        flags = ["--remove-worktree", ...(req.force ? (["--force"] as const) : [])];
+        break;
       case "start":
       case "rebuild": {
         // The editor creates a worktree with nothing checked out, so there is

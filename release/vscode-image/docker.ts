@@ -390,6 +390,19 @@ export const createDocker = (run: Runner) => {
         "checkout",
         "--force",
       ]),
+    /** A step of a worktree's life -- `createScript`, `removeScript`
+     *  (worktrees.ts) -- run in its sandbox, `args` as the script's positional
+     *  parameters and never spliced into it. Its output is the user's. */
+    worktreeScript: (spec: WorktreeSandbox, script: string, args: string[]) =>
+      run.status([
+        ...worktreeSandbox(spec, "timeout"),
+        String(spec.seconds),
+        "sh",
+        "-c",
+        script,
+        "desolate-worktree",
+        ...args,
+      ]),
     /** `git status --porcelain` of a worktree, asked in its sandbox: the one
      *  question about content the editor must not ask itself. Read it with
      *  `parseWorktreeChanges`; untracked files count and ignored ones do not,

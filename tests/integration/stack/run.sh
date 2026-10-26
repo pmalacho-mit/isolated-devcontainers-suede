@@ -613,6 +613,28 @@ else
   assert_contains "a worktree asking for more than its project is refused" \
     "$OUT" "exactly"
 
+  # --- creating one follows no link its project planted -----------------
+  # git ran in the editor, which mounts every project, and followed whatever
+  # the project's agent made its `.git` or `.git/info/exclude`: measured, the
+  # editor's `add` then made a branch in ANOTHER project's repository, and
+  # appended to its config until git there refused to run. Creating one is
+  # the orchestrator's now, in a sandbox that mounts this project alone.
+  VICTIM=/workspaces/wt-victim
+  ed sh -c "rm -rf $VICTIM && mkdir -p $VICTIM && cd $VICTIM && git init -q -b main . &&
+            git -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init" >/dev/null 2>&1
+  VICTIM_CONFIG=$(ed cat "$VICTIM/.git/config")
+  ed sh -c "mv $WT_DIR/.git/info/exclude $WT_DIR/.git/info/exclude-real;
+            ln -s $VICTIM/.git/config $WT_DIR/.git/info/exclude" >/dev/null 2>&1
+  ed worktree add "$WT" gamma >/dev/null 2>&1
+  assert_eq "an exclude made a link to another project's config leaves it alone" \
+    "$(ed cat "$VICTIM/.git/config")" "$VICTIM_CONFIG"
+  ed sh -c "rm $WT_DIR/.git/info/exclude; mv $WT_DIR/.git/info/exclude-real $WT_DIR/.git/info/exclude;
+            mv $WT_DIR/.git $WT_DIR/.git-real; ln -s $VICTIM/.git $WT_DIR/.git" >/dev/null 2>&1
+  ed worktree add "$WT" delta >/dev/null 2>&1
+  assert_eq "a .git made a link to another project's gets no branch made in it" \
+    "$(ed git -C "$VICTIM" branch --format='%(refname:short)' | tr '\n' ' ')" "main "
+  ed sh -c "rm $WT_DIR/.git; mv $WT_DIR/.git-real $WT_DIR/.git; rm -rf $VICTIM $WT_DIR/.worktrees/delta" >/dev/null 2>&1
+
   # --- the main tree masks .worktrees, and the lock survives a gc --------
   OUT=$(ed desolate "$WT" 2>&1)
   if printf '%s' "$OUT" | grep -q "is ready:"; then

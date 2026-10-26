@@ -576,9 +576,9 @@ describe("request-level validation", () => {
 // ===========================================================================
 describe("worktrees are targets of their own", () => {
   // ===========================================================================
-  // The broker never creates one -- `git worktree add` fires the repository's
-  // hooks and this process holds the inner Docker socket. It only has to route
-  // an existing one correctly, and refuse every name that is not one.
+  // Starting one never creates it: that is `worktree-add`, below, which the
+  // runner does in the worktree's sandbox. A start only has to route an
+  // existing one correctly, and refuse every name that is not one.
 
   const worktreeSpec = (name: string) => {
     const dir = path.join(
@@ -1022,5 +1022,87 @@ describe("a worktree the editor created is populated before its spec is read", (
     assert.equal(result(msgs).ok, false);
     assert.equal(result(msgs).exit, 7);
     assert.deepEqual(runnerInvocations().map((argv) => argv[0]), ["--populate"]);
+  });
+});
+
+describe("worktree add and remove: the editor asks, the runner runs git in a sandbox", () => {
+  // ===========================================================================
+  // git in the editor followed links the project planted -- `.git`,
+  // `.worktrees`, `.git/info/exclude` -- into OTHER projects (measured,
+  // worktrees.ts). So the editor's `worktree add|remove` are requests, and
+  // what reaches the runner is names it re-validates, never paths.
+  const widgets = () => {
+    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
+    fs.mkdirSync(path.join(workspaces, "acme/widgets/.worktrees"), { recursive: true });
+  };
+
+  test("add reaches the runner as --create-worktree, the branch defaulting to the name", async () => {
+    widgets();
+    resetRunner();
+    let msgs = await ask({ op: "worktree-add", project: "acme/widgets", worktree: "fresh" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    msgs = await ask({ op: "worktree-add", project: "acme/widgets", worktree: "other", branch: "feature/123" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    assert.deepEqual(runnerInvocations(), [
+      ["--create-worktree", "--branch", "fresh", "--worktree", "fresh", "acme/widgets"],
+      ["--create-worktree", "--branch", "feature/123", "--worktree", "other", "acme/widgets"],
+    ]);
+  });
+
+  test("add refuses a name, a branch or a project that is not one, before the runner", async () => {
+    widgets();
+    fs.symlinkSync(os.tmpdir(), path.join(workspaces, "linked"));
+    const refused = [
+      { worktree: "../escape" }, { worktree: "a/b" }, { worktree: ".hidden" }, { worktree: "-x" },
+      { worktree: "ok", branch: "-b" }, { worktree: "ok", branch: "a b" }, { worktree: "ok", branch: "" },
+      { worktree: "ok", branch: 7 }, { worktree: "ok", force: true },
+      { project: "linked", worktree: "ok" }, { project: "nowhere", worktree: "ok" },
+      { worktree: undefined },
+    ];
+    for (const fields of refused) {
+      resetRunner();
+      const msgs = await ask({ op: "worktree-add", project: "acme/widgets", ...fields });
+      assert.equal(result(msgs).ok, false, `accepted: ${JSON.stringify(fields)}`);
+      assert.deepEqual(runnerInvocations(), [], JSON.stringify(fields));
+    }
+  });
+
+  test("remove reaches the runner as --remove-worktree, forced only when asked", async () => {
+    widgets();
+    fs.mkdirSync(path.join(workspaces, "acme/widgets/.worktrees/done"), { recursive: true });
+    resetRunner();
+    for (const force of [undefined, false, true]) {
+      const msgs = await ask({ op: "worktree-remove", project: "acme/widgets", worktree: "done", force });
+      assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    }
+    assert.deepEqual(runnerInvocations(), [
+      ["--remove-worktree", "--worktree", "done", "acme/widgets"],
+      ["--remove-worktree", "--worktree", "done", "acme/widgets"],
+      ["--remove-worktree", "--force", "--worktree", "done", "acme/widgets"],
+    ]);
+  });
+
+  test("remove refuses a worktree that is missing, a link, or forced by anything but true", async () => {
+    widgets();
+    project("other/repo", JSON.stringify({ image: "alpine:3" }));
+    fs.symlinkSync(path.join(workspaces, "other/repo"), path.join(workspaces, "acme/widgets/.worktrees/linked-away"));
+    fs.mkdirSync(path.join(workspaces, "acme/widgets/.worktrees/real"), { recursive: true });
+    for (const fields of [{ worktree: "ghost" }, { worktree: "linked-away" }, { worktree: "real", force: "yes" }, {}]) {
+      resetRunner();
+      const msgs = await ask({ op: "worktree-remove", project: "acme/widgets", ...fields });
+      assert.equal(result(msgs).ok, false, `accepted: ${JSON.stringify(fields)}`);
+      assert.deepEqual(runnerInvocations(), [], JSON.stringify(fields));
+    }
+  });
+
+  test("no other op carries a branch or a force", async () => {
+    widgets();
+    fs.mkdirSync(path.join(workspaces, "acme/widgets/.worktrees/real"), { recursive: true });
+    for (const op of ["start", "stop", "ports"]) {
+      resetRunner();
+      const msgs = await ask({ op, project: "acme/widgets", worktree: "real", force: true });
+      assert.equal(result(msgs).ok, false, op);
+      assert.deepEqual(runnerInvocations(), [], op);
+    }
   });
 });

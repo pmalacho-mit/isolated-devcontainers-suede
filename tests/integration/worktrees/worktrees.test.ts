@@ -1,8 +1,12 @@
 /// <reference types="node" />
-// The `worktree` command against a real git repository.
+// Creating and removing worktrees against a real git repository.
 //
 // The unit tests read the state `git worktree` leaves behind; this one makes
-// git leave it. Everything here is a claim about git's behaviour that the rest
+// git leave it. The scripts the orchestrator runs in a worktree's sandbox
+// (worktrees.ts createScript, removeScript) are run HERE, against the same
+// paths -- what is measured is what git does with them; the sandbox's own
+// reach is the nested and stack tests'. The editor's `worktree` command is
+// run as itself for what it still decides alone: names, options, `list`. Everything here is a claim about git's behaviour that the rest
 // of the design rests on -- that `lock` writes the file the orchestrator reads,
 // that a locked worktree survives a `gc` which cannot see it, and that removal
 // needs the unlock. Any of those changing is a silent data-loss bug, so they
@@ -10,7 +14,7 @@
 
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,8 +22,15 @@ import { fileURLToPath } from "node:url";
 
 import { target } from "../../../release/vscode-image/projects.ts";
 import {
+  CREATE_EXIT,
+  REMOVE_EXIT,
+  createArguments,
+  createScript,
   isLocked,
   isPopulated,
+  removal,
+  removeArguments,
+  removeScript,
   unlocked,
 } from "../../../release/vscode-image/worktrees.ts";
 
@@ -30,14 +41,15 @@ const COMMAND = fileURLToPath(
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
 
-/** Run the CLI as the editor container would, against a throwaway workspace. */
+/** Run the CLI as the editor container would, against a throwaway workspace
+ *  and a broker that is not there: what it refuses, it refuses first. */
 const worktree = (workspaces: string, ...args: string[]) => {
   try {
     return {
       ok: true,
       output: execFileSync(process.execPath, [COMMAND, ...args], {
         encoding: "utf8",
-        env: { ...process.env, DESOLATE_WORKSPACES: workspaces },
+        env: { ...process.env, DESOLATE_WORKSPACES: workspaces, DESOLATE_BROKER: join(workspaces, "no-broker.sock") },
         stdio: ["ignore", "pipe", "pipe"],
       }),
     };
@@ -45,6 +57,18 @@ const worktree = (workspaces: string, ...args: string[]) => {
     return { ok: false, output: String(err?.stderr ?? err?.stdout ?? err) };
   }
 };
+
+/** A sandbox script, run here with its positional parameters. */
+const sandboxed = (script: string, args: string[]) => {
+  const result = spawnSync("sh", ["-c", script, "desolate-worktree", ...args], { encoding: "utf8" });
+  return { ok: result.status === 0, code: result.status, output: `${result.stdout}${result.stderr}` };
+};
+/** What the orchestrator runs for `worktree add acme/widgets <name> [<branch>]`. */
+const add = (workspaces: string, name: string, branch = name) =>
+  sandboxed(createScript, createArguments(target(workspaces, "acme/widgets", name), branch));
+/** What it runs to remove one, once `removal` has allowed it. */
+const remove = (workspaces: string, name: string) =>
+  sandboxed(removeScript, removeArguments(target(workspaces, "acme/widgets", name)));
 
 const repository = () => {
   const workspaces = fs.mkdtempSync(join(tmpdir(), "desolate-wt-live-"));
@@ -66,7 +90,7 @@ describe("worktree add", () => {
   });
 
   test("creates the directory and a branch named after it", () => {
-    const { ok, output } = worktree(box.workspaces, "add", "acme/widgets", "alpha");
+    const { ok, output } = add(box.workspaces, "alpha");
     assert.ok(ok, output);
     assert.ok(fs.existsSync(join(box.dir, ".worktrees", "alpha")));
     assert.match(git(box.dir, "branch", "--list", "alpha"), /alpha/);
@@ -88,15 +112,14 @@ describe("worktree add", () => {
   });
 
   test("adding it twice is refused, not silently repeated", () => {
-    const { ok, output } = worktree(box.workspaces, "add", "acme/widgets", "alpha");
-    assert.equal(ok, false);
+    const { code, output } = add(box.workspaces, "alpha");
+    assert.equal(code, CREATE_EXIT.exists);
     assert.match(output, /already exists/);
   });
 
   test("a branch that already exists is checked out rather than recreated", () => {
     git(box.dir, "branch", "existing");
-    const { ok, output } = worktree(
-      box.workspaces, "add", "acme/widgets", "wt", "existing",
+    const { ok, output } = add(box.workspaces, "wt", "existing",
     );
     assert.ok(ok, output);
     assert.match(
@@ -108,8 +131,7 @@ describe("worktree add", () => {
   test("git's own refusal to check out one branch twice is surfaced", () => {
     // "fatal: 'main' is already used by worktree at ..." says precisely why the
     // main tree may not be checked out twice; nothing here improves on it.
-    const { ok, output } = worktree(
-      box.workspaces, "add", "acme/widgets", "second-main", "main",
+    const { ok, output } = add(box.workspaces, "second-main", "main",
     );
     assert.equal(ok, false);
     assert.match(output, /already used by worktree/);
@@ -119,6 +141,7 @@ describe("worktree add", () => {
     for (const name of ["../escape", "a/b", ".hidden", "a--wt--b"]) {
       const { ok, output } = worktree(box.workspaces, "add", "acme/widgets", name);
       assert.equal(ok, false, name);
+      assert.doesNotMatch(output, /cannot reach the orchestrator broker/, name);
       assert.match(output, /not a usable worktree name/, name);
     }
   });
@@ -140,7 +163,7 @@ describe("the lock is what survives a prune", () => {
 
   test("a prune that cannot see the worktree leaves it registered and usable", () => {
     const box = repository();
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "alpha").ok);
+    assert.ok(add(box.workspaces, "alpha").ok);
 
     pruneWhileHidden(box);
 
@@ -195,7 +218,7 @@ describe("which admin directory belongs to which worktree", () => {
   test("and reports OUR lock as ours, under the suffixed directory", () => {
     const box = repository();
     git(box.dir, "worktree", "add", "-q", "-b", "other", "elsewhere/wip");
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "wip").ok);
+    assert.ok(add(box.workspaces, "wip").ok);
 
     assert.equal(isLocked(target(box.workspaces, "acme/widgets", "wip")), true);
     assert.deepEqual(unlocked(target(box.workspaces, "acme/widgets")), []);
@@ -205,9 +228,9 @@ describe("which admin directory belongs to which worktree", () => {
 describe("worktree remove", () => {
   test("unlocks first, because `git worktree remove` refuses a locked one", () => {
     const box = repository();
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "alpha").ok);
+    assert.ok(add(box.workspaces, "alpha").ok);
 
-    const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "alpha");
+    const { ok, output } = remove(box.workspaces, "alpha");
     assert.ok(ok, output);
     assert.equal(fs.existsSync(join(box.dir, ".worktrees", "alpha")), false);
     assert.doesNotMatch(git(box.dir, "worktree", "list"), /alpha/);
@@ -219,15 +242,15 @@ describe("worktree remove", () => {
   });
 
   test("one that was never started still keeps a file put there by hand", () => {
-    // Never checked out means no index, which is why remove forces it -- but
-    // only while `.git` is all the directory holds.
+    // Never checked out means no index, so git has nothing to compare -- but
+    // anything beside `.git` was put there by someone.
     const box = repository();
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "draft").ok);
+    assert.ok(add(box.workspaces, "draft").ok);
     fs.writeFileSync(join(box.dir, ".worktrees", "draft", "scratch.txt"), "keep me\n");
-
-    const { ok } = worktree(box.workspaces, "remove", "acme/widgets", "draft");
-    assert.equal(ok, false);
-    assert.ok(fs.existsSync(join(box.dir, ".worktrees", "draft", "scratch.txt")));
+    const draft = target(box.workspaces, "acme/widgets", "draft");
+    assert.deepEqual(removal(draft, false), { kind: "refuse", stray: ["scratch.txt"] });
+    fs.rmSync(join(draft.dir, "scratch.txt"));
+    assert.deepEqual(removal(draft, false), { kind: "nothing" });
   });
 
   test("a worktree that is not there is a refusal, not a no-op", () => {
@@ -241,7 +264,7 @@ describe("worktree remove", () => {
 describe("worktree list", () => {
   test("reports the main tree and every worktree", () => {
     const box = repository();
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "alpha").ok);
+    assert.ok(add(box.workspaces, "alpha").ok);
 
     const { ok, output } = worktree(box.workspaces, "list", "acme/widgets");
     assert.ok(ok, output);
@@ -265,7 +288,7 @@ describe("worktree list", () => {
 // fix: a plain `worktree add` fired the hook, the smudge filter and fsmonitor;
 // a TTY'd `worktree list` fired `pager.worktree`; removing a racily clean
 // worktree fired the clean filter.
-describe("E17: nothing the repository configured runs in the editor", () => {
+describe("E17: nothing the repository configured runs where desolate runs git", () => {
   const armed = () => {
     const box = repository();
     const markers = fs.mkdtempSync(join(tmpdir(), "desolate-wt-markers-"));
@@ -316,7 +339,7 @@ describe("E17: nothing the repository configured runs in the editor", () => {
 
   test("add runs none of them, and leaves the worktree for the sandbox", () => {
     const box = armed();
-    const { ok, output } = worktree(box.workspaces, "add", "acme/widgets", "alpha");
+    const { ok, output } = add(box.workspaces, "alpha");
     assert.ok(ok, output);
     assert.deepEqual(box.fired(), []);
 
@@ -353,7 +376,7 @@ describe("E17: nothing the repository configured runs in the editor", () => {
    *  file -- the state in which git's own cleanliness check re-reads content
    *  through the clean filters, which is what ran them in the editor before. */
   const racilyEdited = (box: ReturnType<typeof armed>, name: string) => {
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", name).ok);
+    assert.ok(add(box.workspaces, name).ok);
     const wt = target(box.workspaces, "acme/widgets", name);
     sandboxCheckout(wt.dir);
     fs.writeFileSync(
@@ -370,31 +393,27 @@ describe("E17: nothing the repository configured runs in the editor", () => {
     return wt;
   };
 
-  test("remove without a warrant is refused before git runs at all", () => {
+  test("whether a checked-out tree may be removed is git's question, asked in its sandbox", () => {
     // Checking for uncommitted changes is the content read that ran the clean
-    // filter. The editor no longer asks; cli.sh asks a sandbox and says so.
+    // filter. Deciding to ask runs nothing; the asking is `--uncommitted`,
+    // in the sandbox.
     const box = armed();
     const wt = racilyEdited(box, "racy");
-    const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "racy");
-    assert.equal(ok, false);
-    assert.match(output, /refusing to remove .* unchecked/);
-    assert.equal(fs.readFileSync(join(wt.dir, "which-tree.txt"), "utf8"), "MAIN\n");
-    assert.ok(isLocked(wt), "a refused remove must leave the lock in place");
+    assert.deepEqual(removal(wt, false), { kind: "check" });
     assert.deepEqual(box.fired(), []);
   });
 
-  for (const warrant of ["--checked-clean", "--force"])
-    test(`remove ${warrant} on a racily-edited tree runs no filter`, () => {
-      // The strong version: every filter is armed AND git would have had to
-      // read content to decide -- so a filter firing here means the editor
-      // asked git about content.
-      const box = armed();
-      const wt = racilyEdited(box, "gone");
-      const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "gone", warrant);
-      assert.ok(ok, output);
-      assert.equal(fs.existsSync(wt.dir), false);
-      assert.deepEqual(box.fired(), []);
-    });
+  test("remove on a racily-edited tree runs no filter", () => {
+    // The strong version: every filter is armed AND git would have had to
+    // read content to decide -- so a filter firing here means the removal
+    // asked git about content.
+    const box = armed();
+    const wt = racilyEdited(box, "gone");
+    const { ok, output } = remove(box.workspaces, "gone");
+    assert.ok(ok, output);
+    assert.equal(fs.existsSync(wt.dir), false);
+    assert.deepEqual(box.fired(), []);
+  });
 
   test("a config too large to enumerate changes nothing", () => {
     // The first version of this fix listed filter drivers and switched each
@@ -405,7 +424,7 @@ describe("E17: nothing the repository configured runs in the editor", () => {
     const padding = Array.from({ length: 50_000 }, (_, i) => `[filter "pad${i}"]\n\tclean = x\n`).join("");
     fs.appendFileSync(join(box.dir, ".git", "config"), padding);
     const wt = racilyEdited(box, "big");
-    const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "big", "--checked-clean");
+    const { ok, output } = remove(box.workspaces, "big");
     assert.ok(ok, output);
     assert.equal(fs.existsSync(wt.dir), false);
     assert.deepEqual(box.fired(), []);
@@ -431,7 +450,7 @@ describe("E17: nothing the repository configured runs in the editor", () => {
     try {
       for (let round = 0; round < 10; round++) {
         const wt = racilyEdited(box, `flip${round}`);
-        worktree(box.workspaces, "remove", "acme/widgets", `flip${round}`, "--checked-clean");
+        remove(box.workspaces, `flip${round}`);
         assert.equal(fs.existsSync(wt.dir), false, `round ${round} did not remove it`);
       }
     } finally {
@@ -446,14 +465,13 @@ describe("E17: nothing the repository configured runs in the editor", () => {
     // lock file that cannot be deleted makes the unlock fail and git refuse a
     // still-locked worktree, with its registration intact.
     const box = armed();
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "stuck").ok);
+    assert.ok(add(box.workspaces, "stuck").ok);
     const wt = target(box.workspaces, "acme/widgets", "stuck");
     const admin = join(box.dir, ".git", "worktrees", "stuck");
     fs.chmodSync(admin, 0o555);
     try {
-      const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "stuck", "--force");
-      assert.equal(ok, false);
-      assert.match(output, /locked again/);
+      const { code, output } = remove(box.workspaces, "stuck");
+      assert.equal(code, REMOVE_EXIT.relocked, output);
       assert.ok(isLocked(wt), "the worktree was left unlocked");
     } finally {
       fs.chmodSync(admin, 0o755);
@@ -464,7 +482,7 @@ describe("E17: nothing the repository configured runs in the editor", () => {
     // The other shape, measured: git drops the registration, then cannot
     // delete a file -- the root-owned files compose services leave (#15).
     const box = armed();
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "half").ok);
+    assert.ok(add(box.workspaces, "half").ok);
     const wt = target(box.workspaces, "acme/widgets", "half");
     sandboxCheckout(wt.dir);
     const pinned = join(wt.dir, "pinned");
@@ -472,9 +490,8 @@ describe("E17: nothing the repository configured runs in the editor", () => {
     fs.writeFileSync(join(pinned, "file"), "x");
     fs.chmodSync(pinned, 0o555);
     try {
-      const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "half", "--force");
-      assert.equal(ok, false);
-      assert.match(output, /no longer a worktree/);
+      const { code, output } = remove(box.workspaces, "half");
+      assert.equal(code, REMOVE_EXIT.partial, output);
       assert.doesNotMatch(git(box.dir, "worktree", "list"), /half/);
     } finally {
       fs.chmodSync(pinned, 0o755);
@@ -483,7 +500,7 @@ describe("E17: nothing the repository configured runs in the editor", () => {
 
   test("an unknown option to remove is a refusal, not a positional", () => {
     const box = repository();
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "alpha").ok);
+    assert.ok(add(box.workspaces, "alpha").ok);
     const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "alpha", "--yes");
     assert.equal(ok, false);
     assert.match(output, /unknown option '--yes'/);

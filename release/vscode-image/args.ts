@@ -34,7 +34,15 @@ export type Command =
   /** Check a never-started worktree out in its sandbox, and nothing else.
    *  What the broker asks for BEFORE it reads the spec: a worktree the editor
    *  created holds no `.devcontainer/` until this has run (worktrees.ts). */
-  | "populate";
+  | "populate"
+  /** Create a worktree, with nothing checked out, in its sandbox: the broker's
+   *  answer to the editor's `worktree add`, which must not run git itself
+   *  (worktrees.ts). The one command whose target must NOT exist yet. */
+  | "create-worktree"
+  /** Remove a worktree -- once nothing would be lost, or `--force` -- in its
+   *  sandbox, after purging what desolate made for it. What `worktree remove`
+   *  asks for, from the editor or the Mac. */
+  | "remove-worktree";
 
 export type Args = {
   command: Command;
@@ -65,6 +73,11 @@ export type Args = {
   /** `--all`: widen `stop` from one target to every running one. The spelling
    *  that cannot be mistaken for a project called `all`. */
   all: boolean;
+  /** The branch `create-worktree` checks out, made if it is not there. Absent
+   *  is the worktree's own name. */
+  branch?: string;
+  /** `remove-worktree` without asking whether anything would be lost. */
+  force: boolean;
 };
 
 /** The wire form the broker spawns desolate with. */
@@ -72,6 +85,10 @@ export type Flags =
   | "--stop"
   | "--ports"
   | "--populate"
+  | "--create-worktree"
+  | ["--branch", string]
+  | "--remove-worktree"
+  | "--force"
   | ["--config", string]
   | ["--worktree", string]
   | "--rebuild"
@@ -130,6 +147,8 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let rebuild = false;
   let noCache = false;
   let all = false;
+  let branch: string | undefined;
+  let force = false;
   const positional: string[] = [];
   const queue = [...argv];
 
@@ -157,6 +176,18 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--uncommitted":
         command = "uncommitted";
         break;
+      case "--create-worktree":
+        command = "create-worktree";
+        break;
+      case "--remove-worktree":
+        command = "remove-worktree";
+        break;
+      case "--branch":
+        branch = queue.shift() ?? "";
+        break;
+      case "--force":
+        force = true;
+        break;
       case "--list":
         command = "list";
         break;
@@ -178,6 +209,12 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
 
   if (all && command !== "stop")
     throw new UsageError("--all only means something with --stop");
+  if (branch !== undefined && command !== "create-worktree")
+    throw new UsageError("--branch only means something with --create-worktree");
+  if (force && command !== "remove-worktree")
+    throw new UsageError("--force only means something with --remove-worktree");
+  if ((command === "create-worktree" || command === "remove-worktree") && worktree === undefined)
+    throw new UsageError(`--${command} acts on a worktree; name it with --worktree`);
 
   if (namesNoTarget(command, all)) {
     if (positional.length)
@@ -185,7 +222,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         `'${all ? "--all" : "--list"}' acts on every target, so it takes no ` +
           `project (got '${positional.join(" ")}')`,
       );
-    return { command, worktree, config, rebuild, noCache, all };
+    return { command, worktree, config, rebuild, noCache, all, branch, force };
   }
 
   return {
@@ -196,5 +233,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     rebuild,
     noCache,
     all,
+    branch,
+    force,
   };
 };

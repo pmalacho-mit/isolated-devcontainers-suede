@@ -17,10 +17,14 @@ import { join } from "node:path";
 import { target } from "../../../release/vscode-image/projects.ts";
 import {
   CHECKOUT_IMAGE,
-  addArguments,
   awaitsCheckout,
   checkoutMounts,
+  createArguments,
+  createScript,
   hardenedGit,
+  removal,
+  removeScript,
+  validBranch,
   projectRoot,
   sandboxMounts,
   isLocked,
@@ -226,10 +230,9 @@ describe("git in the editor executes nothing the repository configured", () => {
   });
 
   test("add never checks out", () => {
-    const box = sandbox();
-    const alpha = target(box.workspaces, "acme/widgets", "alpha");
-    for (const exists of [true, false])
-      assert.ok(addArguments(alpha, "alpha", exists).includes("--no-checkout"));
+    const adds = createScript.split("\n").filter((line) => line.includes("worktree add"));
+    assert.equal(adds.length, 2, createScript);
+    for (const line of adds) assert.match(line, /--no-checkout/);
   });
 
   test("the sandbox image is pinned by digest", () => {
@@ -306,5 +309,51 @@ describe("which worktrees a sandbox should check out", () => {
 
   test("never a root target", () => {
     assert.equal(awaitsCheckout(sandbox().project("acme/widgets")), false);
+  });
+});
+
+describe("creating and removing one, in its sandbox", () => {
+  test("the scripts take every path and name as an argument, never as text", () => {
+    // A name spliced into a script is a name that can end the quote it sits
+    // in. These are fixed strings; what varies arrives as $1, $2, ...
+    const box = sandbox();
+    const alpha = target(box.workspaces, "acme/widgets", "alpha");
+    for (const script of [createScript, removeScript])
+      for (const word of [box.workspaces, "acme", "alpha"])
+        assert.ok(!script.includes(word), `'${word}' is in the script`);
+    assert.deepEqual(createArguments(alpha, "feature/1").slice(0, 3), [
+      alpha.projectDir,
+      alpha.dir,
+      "feature/1",
+    ]);
+  });
+
+  test("a branch that git would read as something else never reaches it", () => {
+    for (const branch of ["-b", "--orphan", "a b", "a\nb", "", "x".repeat(256), 7])
+      assert.equal(validBranch(branch), false, JSON.stringify(branch));
+    for (const branch of ["main", "feature/123", "hotfix-1.2"])
+      assert.equal(validBranch(branch), true, branch);
+  });
+
+  test("removal asks git only of a worktree that was checked out", () => {
+    const box = sandbox();
+    box.project("acme/widgets");
+    const fresh = box.worktree("acme/widgets", "fresh");
+    assert.deepEqual(removal(fresh, false), { kind: "nothing" });
+    assert.deepEqual(removal(fresh, true), { kind: "force" });
+
+    const started = box.worktree("acme/widgets", "started");
+    fs.writeFileSync(join(started.projectDir, ".git", "worktrees", "started", "index"), "");
+    assert.deepEqual(removal(started, false), { kind: "check" });
+  });
+
+  test("one never checked out still keeps a file put there by hand", () => {
+    // Never checked out means no index, so git has nothing to compare -- but
+    // anything beside `.git` was put there by someone, and is theirs.
+    const box = sandbox();
+    box.project("acme/widgets");
+    const draft = box.worktree("acme/widgets", "draft");
+    fs.writeFileSync(join(draft.dir, "scratch.txt"), "keep me\n");
+    assert.deepEqual(removal(draft, false), { kind: "refuse", stray: ["scratch.txt"] });
   });
 });

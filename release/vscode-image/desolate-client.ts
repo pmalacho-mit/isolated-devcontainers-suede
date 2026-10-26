@@ -14,16 +14,14 @@
 // The broker validates both the project name and the project's
 // devcontainer.json spec before acting -- see broker.ts.
 //
-// Creating a worktree happens HERE rather than in the broker, and that is
-// deliberate: `git worktree add` fires the repository's own hooks, and the
-// broker's process holds the inner Docker socket. This container already runs
-// git against project content, so it is the one place that costs nothing.
+// A worktree that is not there yet is created first, by asking the broker:
+// the orchestrator runs git for it in the worktree's sandbox, never here
+// (worktrees.ts).
 
-import * as net from "node:net";
+import { ask } from "./broker-client.ts";
 import { ensure as ensureWorktree } from "./worktrees.ts";
 import { EVERY_TARGET, meansEveryTarget } from "./projects.ts";
 
-const SOCKET = process.env.DESOLATE_BROKER ?? "/run/broker/desolate.sock";
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
 process.stdout.on("error", (err: NodeJS.ErrnoException) => {
@@ -145,41 +143,13 @@ if (op === "list" || stopsEverything) {
   request = { op, project: rest[0], worktree };
 }
 
-// Before the broker is asked to start it, because the broker cannot: it would
-// have to run git, and it holds the inner Docker socket.
-if (worktree !== undefined && (op === "start" || op === "rebuild"))
-  ensureWorktree(String(rest[0]), worktree, value["--branch"]);
+// Created before the broker is asked to start it -- by the broker as well, in
+// a request of its own, so a refusal to create says so rather than reading as
+// a missing worktree.
+const created = worktree !== undefined && (op === "start" || op === "rebuild")
+  ? ensureWorktree(String(rest[0]), worktree, value["--branch"])
+  : Promise.resolve(0);
 
-const conn = net.createConnection(SOCKET);
-let exitCode = 0;
-let buffer = "";
-
-conn.on("connect", () => conn.write(JSON.stringify(request) + "\n"));
-
-conn.on("data", chunk => {
-  buffer += chunk.toString();
-  let idx: number;
-  while ((idx = buffer.indexOf("\n")) >= 0) {
-    const line = buffer.slice(0, idx).trim();
-    buffer = buffer.slice(idx + 1);
-    if (!line) continue;
-    let msg: any;
-    try { msg = JSON.parse(line); } catch { console.log(line); continue; }
-    if (msg.log !== undefined) { console.log(msg.log); continue; }
-    if (msg.error) { console.error(`desolate: ${msg.error}`); }
-    if (msg.ok === false) exitCode = typeof msg.exit === "number" ? msg.exit : 1;
-  }
-});
-
-conn.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "ENOENT" || err.code === "ECONNREFUSED") {
-    console.error("desolate: cannot reach the orchestrator broker.");
-    console.error(`         socket: ${SOCKET}`);
-    console.error("         Is the stack up?  (on your Mac: ./cli.sh ps)");
-  } else {
-    console.error(`desolate: ${err.message}`);
-  }
-  process.exit(1);
-});
-
-conn.on("close", () => process.exit(exitCode));
+created
+  .then((code) => (code === 0 ? ask(request) : code))
+  .then((code) => process.exit(code));

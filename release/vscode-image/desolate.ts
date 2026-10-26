@@ -1076,8 +1076,17 @@ function stopTarget(target: Target): void {
 function reportUncommitted(target: Target): void {
   if (!target.worktree)
     return die(`--uncommitted asks about a worktree; name one with --worktree`);
-  if (!worktrees.isPopulated(target))
+  refuseUnlessItsOwnPath(target);
+  const removal = worktrees.removal(target, false);
+  if (removal.kind === "nothing")
     return console.log(`${target.name} was never checked out; nothing in it to lose`);
+  if (removal.kind === "refuse") {
+    console.error(`${target.name} was never checked out, but holds files put there by hand:`);
+    for (const entry of removal.stray.slice(0, 20)) console.error(`  ${entry}`);
+    console.error(`move them out, or discard them with:
+  ${forcedRemoval(target)}`);
+    process.exit(3);
+  }
 
   const report = docker.worktreeChanges(
     worktreeSandbox(target, worktrees.sandboxMounts(target)),
@@ -1087,15 +1096,106 @@ function reportUncommitted(target: Target): void {
     return die(`could not check ${target.name} for uncommitted changes in its sandbox,
       so it is not known to be safe to remove.${report ? `\n      git said: ${report.split("\n").slice(0, 3).join(" / ")}` : ""}
       To discard whatever is in it:
-        ${hint.mac(`worktree remove ${target.project} ${target.worktree} --force`)}`);
+        ${forcedRemoval(target)}`);
   if (changes.length === 0) return console.log(`${target.name} has no uncommitted changes`);
 
   console.error(`${target.name} has uncommitted or untracked files:`);
   for (const line of changes.slice(0, 20)) console.error(`  ${line}`);
   if (changes.length > 20) console.error(`  ... and ${changes.length - 20} more`);
   console.error(`commit or stash them, or discard them with:
-  ${hint.mac(`worktree remove ${target.project} ${target.worktree} --force`)}`);
+  ${forcedRemoval(target)}`);
   process.exit(3);
+}
+
+/** The command that removes this worktree whatever is in it. */
+const forcedRemoval = (target: Target) => {
+  const args = `${target.project} ${target.worktree} --force`;
+  return hint.anywhere(`worktree remove ${args}`, `./cli.sh worktree remove ${args}`);
+};
+
+/**
+ * A target must be the directory its names denote -- not a link that a
+ * project put where its worktree, or its `.worktrees`, should be. The broker
+ * asks the same of every request from the editor; this is for the ones that
+ * arrive from the Mac, and for the commands below that read and delete.
+ */
+function refuseUnlessItsOwnPath(target: Target): void {
+  const real = (dir: string) => {
+    try {
+      return fs.realpathSync(dir);
+    } catch {
+      return "";
+    }
+  };
+  const own = resolveTarget(real(WORKSPACES), target.project, target.worktree);
+  for (const [dir, expected] of [[target.projectDir, own.projectDir], [target.dir, own.dir]])
+    if (fs.existsSync(dir) && real(dir) !== expected)
+      die(`${dir} is a link to ${real(dir) || "nothing"}, not a directory of
+        ${target.project}'s own; refusing to act on it`);
+}
+
+/** Its sandbox, working in its project's root: the one directory every step
+ *  of a worktree's life can count on, including the ones that make it and
+ *  delete it. */
+const projectSandbox = (target: Target) => ({
+  ...worktreeSandbox(target, worktrees.sandboxMounts(target)),
+  dir: target.projectDir,
+});
+
+/**
+ * Create a worktree with nothing checked out, in its sandbox -- what the
+ * editor's `worktree add` asks the broker for. Not git in the editor: with
+ * the project's `.git`, `.worktrees` or `.git/info/exclude` made a link into
+ * another project, git there wrote into THAT project (measured). The sandbox
+ * mounts the project's root alone, so those links resolve to nothing.
+ */
+function createWorktree(target: Target, branch: string): void {
+  if (!worktrees.validBranch(branch)) return die(`'${branch}' is not a usable branch name`);
+  refuseUnlessItsOwnPath(target);
+  const code = docker.worktreeScript(
+    projectSandbox(target),
+    worktrees.createScript,
+    worktrees.createArguments(target, branch),
+  );
+  const { CREATE_EXIT } = worktrees;
+  if (code === CREATE_EXIT.exists) die(`${target.dir} already exists`);
+  if (code === CREATE_EXIT.lock)
+    die(`the worktree was created but could not be LOCKED. Unlocked, a prune in
+      a container that cannot see it destroys it, and no part of that is
+      recoverable. Remove it with
+        ${forcedRemoval(target)}
+      and report this.`);
+  if (code === CREATE_EXIT.exclude)
+    desolog(`could not add '${WORKTREES_DIRECTORY}/' to ${target.projectDir}/.git/info/exclude;
+      the main tree's \`git status\` will list .worktrees as untracked`);
+  else if (code !== 0) die(`git could not create the worktree (exit ${code}; see its message above)`);
+  console.log(`worktree: ${target.name} is at ${target.dir}`);
+  console.log(`          its files are checked out in a sandbox when it first starts`);
+}
+
+/**
+ * Remove a worktree: refused if anything in it would be lost (unless
+ * `force`), then what desolate made for it purged, then the worktree itself
+ * removed in its sandbox. Purge first: once git has removed the directory
+ * there is nothing left to identify the container by.
+ */
+function removeWorktree(target: Target, force: boolean): void {
+  refuseUnlessItsOwnPath(target);
+  if (!force) reportUncommitted(target);
+  purgeTarget(target);
+  const code = docker.worktreeScript(
+    projectSandbox(target),
+    worktrees.removeScript,
+    worktrees.removeArguments(target),
+  );
+  if (code === worktrees.REMOVE_EXIT.relocked)
+    die(`git could not remove the worktree (see its message above); it is locked again`);
+  if (code === worktrees.REMOVE_EXIT.partial)
+    die(`git unregistered the worktree but could not delete all of ${target.dir}
+      (see its message above) -- files a container wrote as root, most likely.
+      What is left there is no longer a worktree.`);
+  if (code !== 0) die(`the removal of ${target.name} failed in its sandbox (exit ${code})`);
+  console.log(`worktree: removed ${target.name}`);
 }
 
 /**
@@ -1234,7 +1334,7 @@ async function runTarget(
  *  Worktrees are NOT created here: this process holds the inner Docker socket
  *  and must never run a repository's git. The editor creates them, hardened
  *  and without a checkout; `populateWorktree` checks them out in a sandbox. */
-function targetFromArguments(project: string, worktree?: string): Target {
+function targetFromArguments(project: string, worktree?: string, absent = false): Target {
   if (!validName(project))
     die(`'${project}' is not a usable project name.
       A project is one path segment under /workspaces, or two for an
@@ -1253,6 +1353,13 @@ function targetFromArguments(project: string, worktree?: string): Target {
 
   if (!fs.existsSync(target.projectDir))
     die(`no such project: ${target.projectDir}`);
+
+  if (absent) {
+    // lstat, not exists: a dangling link is something there all the same.
+    if (fs.lstatSync(target.dir, { throwIfNoEntry: false }))
+      die(`${target.dir} already exists`);
+    return target;
+  }
 
   if (!fs.existsSync(target.dir))
     die(`no such worktree: ${target.dir}
@@ -1291,7 +1398,13 @@ async function main(): Promise<void> {
   if (args.command === "list") return showRunning();
   if (args.command === "stop") return stopFromArguments(args);
 
+  if (args.command === "create-worktree") {
+    const target = targetFromArguments(args.project!, args.worktree, /* absent */ true);
+    return createWorktree(target, args.branch ?? args.worktree!);
+  }
+
   const target = targetOf(args);
+  if (args.command === "remove-worktree") return removeWorktree(target, args.force);
   if (args.command === "ports") showPorts(target);
   else if (args.command === "purge") purgeTarget(target);
   else if (args.command === "uncommitted") reportUncommitted(target);

@@ -980,10 +980,11 @@ case "$CMD" in
              esac ;;
 
   worktree)  ensure_running
-             # git runs in the EDITOR container, hardened so nothing the
-             # repository configured executes (worktrees.ts); the checkout,
-             # which must run its hooks, happens in a sandbox at first start.
-             # The orchestrator holds the inner Docker socket and runs no git.
+             # Creating and removing one runs git in the worktree's sandbox,
+             # which the orchestrator starts and which mounts only its project
+             # -- never in the editor, which reaches every project
+             # (worktrees.ts). `list` runs hardened git in the editor; `add`
+             # asks the broker from there, as the editor's own `worktree` does.
              SUB="${1:-list}"; shift || true
              case "$SUB" in
                list|add)
@@ -992,24 +993,13 @@ case "$CMD" in
                  PROJ="${1:?usage: cli.sh worktree remove <project> <name> [--force]}"
                  NAME="${2:?usage: cli.sh worktree remove <project> <name> [--force]}"
                  case "${3:-}" in
-                   "") WARRANT=--checked-clean ;;
-                   --force) WARRANT=--force ;;
+                   "") REMOVE=(--remove-worktree) ;;
+                   --force) REMOVE=(--remove-worktree --force) ;;
                    *) echo "usage: cli.sh worktree remove <project> <name> [--force]" >&2; exit 1 ;;
                  esac
-                 # Is there anything to lose? Answering reads content through the
-                 # repository's own filters, so it is asked in a sandbox on the
-                 # orchestrator's side; the editor then removes it without asking
-                 # git anything about content (worktrees.ts). --force skips it.
-                 if [ "$WARRANT" = --checked-clean ]; then
-                   docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --uncommitted --worktree "$NAME" "$PROJ" || exit 1
-                 fi
-                 # Order matters and neither half can do the other's job: the
-                 # container and its volumes live on the inner daemon (the
-                 # orchestrator's side), the worktree itself is git (the
-                 # editor's side). Purge first -- once git has removed the
-                 # directory there is nothing left to identify the container by.
-                 docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --purge --worktree "$NAME" "$PROJ" || exit 1
-                 exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" worktree remove "$PROJ" "$NAME" "$WARRANT" ;;
+                 # Refused if anything in it would be lost (asked in its
+                 # sandbox) unless --force; then purged, then removed.
+                 exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run "${REMOVE[@]}" --worktree "$NAME" "$PROJ" ;;
                *) echo "usage: cli.sh worktree {list <project>|add <project> <name> [<branch>]|remove <project> <name> [--force]}" >&2; exit 1 ;;
              esac ;;
 
