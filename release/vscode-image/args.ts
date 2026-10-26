@@ -27,6 +27,10 @@ export type Command =
   /** What is UP right now, across every project and worktree. Names no target:
    *  the question is about all of them. Reads state; changes none. */
   | "list"
+  /** Every project dind, as the supervisor sees it -- state, health, idle
+   *  time, memory, image store -- and the VM's headroom, as JSON. Names no
+   *  target. What the editor's extension shows; `cli.sh dind list` prints it. */
+  | "dinds"
   /** Whether a worktree holds anything a removal would lose, asked in its
    *  sandbox. What `cli.sh worktree remove` runs before deleting one; the
    *  editor cannot ask git that itself (worktrees.ts). */
@@ -157,7 +161,7 @@ const projectName = (raw: string, workspaces: string) =>
 /** Commands that act on the whole stack, so a project argument has nothing to
  *  mean. `--all` puts `stop` in the same class. */
 const namesNoTarget = (command: Command, all: boolean) =>
-  command === "list" || all;
+  command === "list" || command === "dinds" || all;
 
 /** @throws UsageError unless exactly one project was given. */
 const theOneProject = (positional: string[], workspaces: string) => {
@@ -242,6 +246,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--list":
         command = "list";
         break;
+      case "--dinds":
+        command = "dinds";
+        break;
       case "--all":
         all = true;
         break;
@@ -291,7 +298,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   if (namesNoTarget(command, all)) {
     if (positional.length)
       throw new UsageError(
-        `'${all ? "--all" : "--list"}' acts on every target, so it takes no ` +
+        `'${all ? "--all" : `--${command}`}' acts on every target, so it takes no ` +
           `project (got '${positional.join(" ")}')`,
       );
     return { command, worktree, config, rebuild, noCache, all, branch, from, force, json };

@@ -1208,3 +1208,17 @@ describe("--json, for programs (F2)", () => {
       assert.deepEqual(runnerInvocations(), []);
     });
 });
+
+describe("dinds: the supervisor's status, for the editor's extension", () => {
+  test("reaches the runner as --dinds: a project on it is ignored, a json refused", async () => {
+    resetRunner();
+    let msgs = await ask({ op: "dinds" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    assert.deepEqual(runnerInvocations(), [["--dinds"]]);
+    for (const extra of [{ project: "acme/widgets" }, { json: true }]) {
+      resetRunner();
+      msgs = await ask({ op: "dinds", ...extra });
+      assert.deepEqual(runnerInvocations(), extra.project ? [["--dinds"]] : [], JSON.stringify(extra));
+    }
+  });
+});

@@ -42,6 +42,7 @@ snapshot that said `harmless`). Both were measured, not deduced.
 | `unit/desolate/` | node >= 22.18 | the runner's pure parts: the command line, port allocation, the docker argv, the overlay volume names, the editor script's interpolation guards, the keyring's path layout |
 | `unit/proxy/` | python + mitmproxy + pytest | the addon's decisions: proven-destination vs claimed Host, allowlists, fail-closed on internal error, response scrubbing |
 | `environments/` | docker daemon | the unit suite re-run inside containers that mirror the shipped runtime -- the pinned node/tsx, and the docker CLI actually accepting the argv `docker.ts` builds |
+| `environments/extension/` | docker daemon, a built editor image | the desolate extension in headless Chromium against the real editor: its three views, an action, the log's token redaction, Restricted Mode. `./tests/environments/extension/run.sh <image> [<out-dir>]`, screenshots in `<out-dir>` |
 | `integration/broker/` | node >= 22.18, `devcontainer` on PATH | the real broker over its unix socket, enforcing on the real CLI's `mergedConfiguration`, with a stub runner. Also the TOCTOU snapshot |
 | `integration/keyring/` | node >= 22.18, openssh-client | the real keyring process behind its real control socket: that no private key reaches the volume the editor mounts, and that a client cannot kill it |
 | `integration/proxy/` | root, nft, docker, mitmproxy | the addon under a real transparent proxy with real nftables REDIRECT, checking what an attacker-controlled server actually received |

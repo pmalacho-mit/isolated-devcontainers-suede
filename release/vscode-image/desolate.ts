@@ -205,6 +205,14 @@ const daemons = {
   },
 };
 
+/** Every project dind and the VM's headroom, as the supervisor answers
+ *  `status`, printed as JSON for a program (the editor's extension). */
+async function showDinds(): Promise<void> {
+  const answer = await supervisor.ask({ op: "status" });
+  if (answer.ok !== true) return die(`the supervisor did not say: ${answer.error ?? "no answer"}`);
+  console.log(JSON.stringify({ dinds: answer.dinds ?? [], headroom: answer.headroom ?? null }));
+}
+
 /** The supervisor (supervisor.ts), over its socket in supervisor-run. */
 const supervisor = {
   socket: process.env.DESOLATE_SUPERVISOR ?? "/run/supervisor/supervisor.sock",
@@ -1837,6 +1845,7 @@ async function main(): Promise<void> {
   const args = dieOnError(() => parseArgs(process.argv.slice(2), WORKSPACES));
 
   if (args.command === "list") return showRunning(args.json);
+  if (args.command === "dinds") return showDinds();
   if (args.command === "stop") return stopFromArguments(args);
 
   if (args.command === "create-worktree") {

@@ -38,6 +38,7 @@ function usage(code = 0): never {
   const out = code === 0 ? console.log : console.error;
   out("usage: desolate [--stop|--ports|--rebuild] [--worktree <name>] <project>");
   out("       desolate --list                    what is running right now");
+  out("       desolate --dinds                   every project dind and the VM's headroom, as JSON");
   out("       desolate --stop all|--stop --all   stop every running target");
   out("");
   out("  --rebuild  recreate the container from the current devcontainer.json.");
@@ -76,7 +77,7 @@ if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") usage();
 // already refuses unknown options; this side has to agree, or the two disagree
 // about what the same command line means.
 const OPS: Record<string, string> = {
-  "--list": "list", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild", "--purge": "purge", "--bundle": "bundle",
+  "--list": "list", "--dinds": "dinds", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild", "--purge": "purge", "--bundle": "bundle",
 };
 /** Flags that consume the next argument. */
 const VALUES = ["--worktree", "--branch"] as const;
@@ -140,7 +141,10 @@ const spelling = op === "list" ? "--list" : `--stop ${modifier.has("--all") ? "-
 const unaccountedFor = stopsEverything ? rest.filter((word) => word !== EVERY_TARGET) : rest;
 
 let request: Record<string, unknown>;
-if (op === "list" || stopsEverything) {
+if (op === "dinds") {
+  if (rest.length || worktree !== undefined) refuse("--dinds acts on every dind, so it takes no project");
+  request = { op: "dinds" };
+} else if (op === "list" || stopsEverything) {
   if (unaccountedFor.length)
     refuse(`${spelling} acts on every target, so it takes no project`,
            `got '${unaccountedFor.join(" ")}'`);

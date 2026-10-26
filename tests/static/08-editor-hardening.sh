@@ -13,6 +13,10 @@
 #      trusted", so a well-intentioned edit to quiet a prompt grants automatic
 #      task execution to every repository. Asserted explicitly, in the direction
 #      that is dangerous.
+#
+# And the one thing ADDED to that tree, the desolate extension (T4.7, F6): built
+# into the shell root alone, it may run the editor's own three commands and
+# nothing else -- no network, no shell, no git or docker of its own.
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=../lib/harness.sh
@@ -85,5 +89,27 @@ group "the seed does not overwrite a user's own settings"
 # ignored entirely.
 assert_contains "it only writes when the file is absent" "$SEED" '[ ! -f "$SETTINGS" ]'
 assert_contains "and execs the real command afterwards" "$SEED" 'exec "$@"'
+
+group "the desolate extension is the shell root's only addition, and holds no new power"
+EXT="$RELEASE/vscode-image/extension"
+assert_contains "it is built into the shell root" "$DF" 'out="${DESOLATE_SHELL_ROOT}/extensions/desolate"'
+assert_contains "and the build fails if the server root ever gets it" "$DF" \
+  'test ! -e "${DESOLATE_SERVER_ROOT}/extensions/desolate"'
+assert_contains "by the esbuild tsx already carries, fetching nothing" "$DF" 'require.resolve("esbuild", { paths: [process.argv[1]] })'
+SRC=$(cat "$EXT"/*.mts)
+assert_eq "its only process API is execFile" "$(grep -oE 'from "node:[a-z_]+"' "$EXT"/*.mts | sed 's/.*from //' | sort -u | tr '\n' ' ')" '"node:child_process" '
+assert_not_contains "it never spawns through a shell" "$SRC" "shell:"
+for api in 'node:http' 'node:https' 'node:net' 'node:dgram' 'fetch(' 'WebSocket' 'exec(' 'spawn('; do
+  assert_not_contains "it uses no $api" "$SRC" "$api"
+done
+assert_eq "it runs exactly the editor's three commands" \
+  "$(grep -oE 'command: "[a-z]+" \| "[a-z]+" \| "[a-z]+"' "$EXT/extension.mts" | head -1)" 'command: "desolate" | "worktree" | "work"'
+assert_contains "what it logs goes through redactTokens" "$SRC" "log.append(redactTokens("
+MANIFEST=$(cat "$EXT/package.json")
+assert_contains "its manifest's main is the bundle" "$MANIFEST" '"main": "./extension.js"'
+for key in '"browser"' '"extensionDependencies"' '"extensionPack"' '"authentication"' '"enabledApiProposals"'; do
+  assert_not_contains "its manifest declares no $key" "$MANIFEST" "$key"
+done
+assert_contains "and refuses to run in a virtual workspace" "$MANIFEST" '"virtualWorkspaces": false'
 
 summary

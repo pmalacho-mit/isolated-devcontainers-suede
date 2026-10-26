@@ -59,7 +59,7 @@ const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
 class UsageError extends Error {}
 const USAGE = `usage: work init <project> [--max N] [--on-done push|hold] [--prefix p/] [--requesters a,b] [--adapter file] [--remote url] [--allow-hooks] [--force]
-       work policy <project> | log <project> [--target t] [--type t] | requests <project> | verify <project>
+       work policy <project> | log <project> [--target t] [--type t] [--limit n] [--json] | requests <project> [--json] | verify <project>
        work approve <project> <request-id> | push <project> <worktree> | close <project> <worktree>
        work say <project> <type> <body> [--to t,...]
        work github <project> enable <owner/repo> [--label l] | sync | status | pr <number> <url>
@@ -248,8 +248,8 @@ export const main = (
       return 0;
     }
     case "log": {
-      const { found } = options(rest, ["--target", "--type"]);
-      const rows: { time: string; line: string }[] = [];
+      const { found, set } = options(rest, ["--target", "--type", "--limit"], ["--json"]);
+      const rows: { time: string; line: string; json: Record<string, unknown> }[] = [];
       for (const { ref } of workGit.refsUnder(root.projectDir, refs.glob))
         for (const commit of workGit.history(root.projectDir, ref)) {
           const read = workGit.readCommit(root.projectDir, commit);
@@ -258,27 +258,46 @@ export const main = (
           if (found["--target"] && message.from !== found["--target"]) continue;
           if (found["--type"] && message.type !== found["--type"]) continue;
           const time = timeOf(root.projectDir, commit);
-          rows.push({ time, line: `${commit.slice(0, 12)}  ${time}  ${printable(message.from).padEnd(16)} ${printable(subjectOf(message))}` });
+          rows.push({
+            time,
+            line: `${commit.slice(0, 12)}  ${time}  ${printable(message.from).padEnd(16)} ${printable(subjectOf(message))}`,
+            // For a program (the editor's extension): one object per line, the
+            // fields a view shows. JSON escapes what printable() replaces.
+            json: {
+              commit, time, ref, from: message.from, to: message.to, type: message.type, body: message.body,
+              item: message.item, reply_to: message.reply_to,
+              ...(typeof message.worktree === "string" ? { worktree: message.worktree } : {}),
+              ...(typeof message.state === "string" ? { state: message.state } : {}),
+            },
+          });
         }
       // Newest first; a stable sort keeps a ref's own order within a second.
-      for (const { line } of rows.sort((a, b) => (a.time === b.time ? 0 : a.time < b.time ? 1 : -1))) out(line);
+      const limit = found["--limit"] ? Number(found["--limit"]) : Infinity;
+      if (!(limit > 0)) throw new UsageError("--limit takes a positive number");
+      const sorted = rows.sort((a, b) => (a.time === b.time ? 0 : a.time < b.time ? 1 : -1)).slice(0, limit);
+      for (const row of sorted) out(set.has("--json") ? JSON.stringify(row.json) : row.line);
       return 0;
     }
     case "requests": {
+      const { set } = options(rest, [], ["--json"]);
       const outcomes = handled(WORKSPACES, root.project);
       const approved = approvals(WORKSPACES, root.project);
       for (const { ref, commit } of workGit.refsUnder(root.projectDir, "refs/desolate/requests/")) {
         const id = ref.slice("refs/desolate/requests/".length);
         let what: string;
+        let fields: Record<string, unknown> = {};
         try {
           const request = parseRequest(workGit.readCommit(root.projectDir, commit).json);
           what = `${request.action} ${request.worktree}${request.branch ? ` (${request.branch})` : ""} from ${request.from}`;
+          fields = { action: request.action, worktree: request.worktree, branch: request.branch, from: request.from, item: request.item, title: request.title };
         } catch (err: any) {
           what = `unreadable: ${err?.message ?? err}`;
+          fields = { unreadable: String(err?.message ?? err) };
         }
         const recorded = outcomes.get(id);
         const outcome = recorded && recorded !== REOPENED ? recorded : outcomes.has(`wait:${id}`) ? "waiting" : "pending";
-        out(printable(`${id}  ${what}  -- ${outcome}${approved.has(id) ? " (approved)" : ""}`));
+        if (set.has("--json")) out(JSON.stringify({ id, ...fields, outcome, approved: approved.has(id) }));
+        else out(printable(`${id}  ${what}  -- ${outcome}${approved.has(id) ? " (approved)" : ""}`));
       }
       return 0;
     }

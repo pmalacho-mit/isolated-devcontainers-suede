@@ -515,6 +515,26 @@ Three cases, by where the file lives:
   some destinations (your home directory's root, `~/Library`, a volume root)
   with a message about system files: pick a fresh empty folder instead.
 
+### The desolate panel in the editor
+
+The outer editor has a **desolate** view in its activity bar, built into the
+image (nothing is installed from a marketplace):
+
+- **Projects** -- every project and its worktrees, running or stopped, with
+  their ports. Start, stop, rebuild, open its editor in a new tab, copy its
+  URL, add or remove a worktree.
+- **Dinds** -- each project dind's health, whether it is in use or for how long
+  idle, its memory and image store, and the VM's headroom.
+- **Factory** -- for each project with a factory: the asks waiting on you
+  (answer them in place), its worktrees (push, close), its requests (approve
+  one the policy refused) and its messages, and its policy.
+
+It holds no power of its own: each action runs the command you would type in
+the editor's terminal (`desolate`, `worktree`, `work`), and its log is the
+**desolate** output channel, with editor tokens left out. It works in
+Restricted Mode, which is where this editor should stay for a folder of other
+people's code. Resetting a dind stays on the Mac: `./cli.sh dind reset`.
+
 ## Privilege separation (why the editor can't touch the daemon)
 
 The editor is a **universal file viewer/editor** over `/workspaces` -- you can

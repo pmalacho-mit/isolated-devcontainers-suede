@@ -139,6 +139,11 @@ describe("parseArgs", () => {
     refuses(["--config"], /usage:/);
   });
 
+  test("--dinds names no target", () => {
+    assert.equal(parse("--dinds").command, "dinds");
+    refuses(["--dinds", "myapp"], /acts on every target/);
+  });
+
   test("creating or removing a worktree names one, and nothing else takes their flags", () => {
     refuses(["--create-worktree", "myapp"], /name it with --worktree/);
     refuses(["--remove-worktree", "myapp"], /name it with --worktree/);

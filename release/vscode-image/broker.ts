@@ -78,7 +78,7 @@ const config = environment.tryOverride({
  *  and none for `validate` to check. Named once: the request TYPE and the
  *  runtime guard below both read it, and a shape either of them alone accepted
  *  would be a shape the other rejects. */
-const globalOperations = ["list", "stop-all"] as const;
+const globalOperations = ["list", "stop-all", "dinds"] as const;
 type GlobalOperation = (typeof globalOperations)[number];
 
 /** Ops on a worktree that has to be NAMED, and whose git the runner does in
@@ -104,6 +104,7 @@ const isGlobalOperation = (op: string) =>
 const globalArgv: Record<GlobalOperation, string[]> = {
   list: ["--list"],
   "stop-all": ["--stop", "--all"],
+  dinds: ["--dinds"],
 };
 
 type Request = {
