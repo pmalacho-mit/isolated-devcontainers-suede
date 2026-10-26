@@ -10,7 +10,7 @@
 
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -349,51 +349,143 @@ describe("E17: nothing the repository configured runs in the editor", () => {
     assert.deepEqual(box.fired(), []);
   });
 
-  test("remove refuses a racily-clean edit without running a filter", () => {
-    const box = armed();
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "racy").ok);
-    const racy = target(box.workspaces, "acme/widgets", "racy");
-    sandboxCheckout(racy.dir);
+  /** A populated worktree with a same-size, same-mtime edit in every filtered
+   *  file -- the state in which git's own cleanliness check re-reads content
+   *  through the clean filters, which is what ran them in the editor before. */
+  const racilyEdited = (box: ReturnType<typeof armed>, name: string) => {
+    assert.ok(worktree(box.workspaces, "add", "acme/widgets", name).ok);
+    const wt = target(box.workspaces, "acme/widgets", name);
+    sandboxCheckout(wt.dir);
     fs.writeFileSync(
-      join(box.dir, ".git", "worktrees", "racy", "config.worktree"),
+      join(box.dir, ".git", "worktrees", name, "config.worktree"),
       `[filter "wtonly"]\n\tclean = ${box.trap("wtonly-clean")}\n`,
     );
-
-    // Same size, and the index's own mtime: git cannot tell from stat alone,
-    // so it re-reads both files through their clean filters to compare.
-    const index = join(box.dir, ".git", "worktrees", "racy", "index");
+    const index = join(box.dir, ".git", "worktrees", name, "index");
     for (const [file, content] of [["which-tree.txt", "MAIN\n"], ["notes.md", "NOTES\n"]]) {
-      fs.writeFileSync(join(racy.dir, file), content);
+      fs.writeFileSync(join(wt.dir, file), content);
       const { atime, mtime } = fs.statSync(index);
-      fs.utimesSync(join(racy.dir, file), atime, mtime);
+      fs.utimesSync(join(wt.dir, file), atime, mtime);
     }
     box.clear();
+    return wt;
+  };
 
+  test("remove without a warrant is refused before git runs at all", () => {
+    // Checking for uncommitted changes is the content read that ran the clean
+    // filter. The editor no longer asks; cli.sh asks a sandbox and says so.
+    const box = armed();
+    const wt = racilyEdited(box, "racy");
     const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "racy");
-    assert.equal(ok, false, "the edit was lost: remove did not see it");
-    assert.match(output, /could not remove/);
-    assert.deepEqual(box.fired(), []);
-  });
-
-  test("remove of a clean worktree runs none of them either", () => {
-    const box = armed();
-    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "tidy").ok);
-    sandboxCheckout(target(box.workspaces, "acme/widgets", "tidy").dir);
-    box.clear();
-
-    const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "tidy");
-    assert.ok(ok, output);
-    assert.deepEqual(box.fired(), []);
-  });
-
-  test("a filter driver that cannot be switched off is a refusal", () => {
-    // `-c` splits at the first '=', so `-c filter.a=b.clean=` would set some
-    // other key and leave this driver live.
-    const box = armed();
-    git(box.dir, "config", "filter.a=b.clean", box.trap("equals"));
-    const { ok, output } = worktree(box.workspaces, "add", "acme/widgets", "beta");
     assert.equal(ok, false);
-    assert.match(output, /cannot be switched off/);
+    assert.match(output, /refusing to remove .* unchecked/);
+    assert.equal(fs.readFileSync(join(wt.dir, "which-tree.txt"), "utf8"), "MAIN\n");
+    assert.ok(isLocked(wt), "a refused remove must leave the lock in place");
     assert.deepEqual(box.fired(), []);
+  });
+
+  for (const warrant of ["--checked-clean", "--force"])
+    test(`remove ${warrant} on a racily-edited tree runs no filter`, () => {
+      // The strong version: every filter is armed AND git would have had to
+      // read content to decide -- so a filter firing here means the editor
+      // asked git about content.
+      const box = armed();
+      const wt = racilyEdited(box, "gone");
+      const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "gone", warrant);
+      assert.ok(ok, output);
+      assert.equal(fs.existsSync(wt.dir), false);
+      assert.deepEqual(box.fired(), []);
+    });
+
+  test("a config too large to enumerate changes nothing", () => {
+    // The first version of this fix listed filter drivers and switched each
+    // off by name; past node's 1 MiB output buffer the listing came back
+    // empty and every filter ran. Nothing here reads the config any more, so
+    // its size is irrelevant -- which is the property pinned.
+    const box = armed();
+    const padding = Array.from({ length: 50_000 }, (_, i) => `[filter "pad${i}"]\n\tclean = x\n`).join("");
+    fs.appendFileSync(join(box.dir, ".git", "config"), padding);
+    const wt = racilyEdited(box, "big");
+    const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "big", "--checked-clean");
+    assert.ok(ok, output);
+    assert.equal(fs.existsSync(wt.dir), false);
+    assert.deepEqual(box.fired(), []);
+  });
+
+  test("a config rewritten while git runs changes nothing", async () => {
+    // The same version read the config in one process and obeyed it in the
+    // next; a devcontainer flipping benign and evil configs won that gap in
+    // one try out of ten. Flip harder than that, across ten removals.
+    const box = armed();
+    const config = join(box.dir, ".git", "config");
+    const evil = fs.readFileSync(config, "utf8");
+    const benign = evil.replace(/\[filter "evil"\][^[]*/, "");
+    const child = spawn(process.execPath, [
+      "-e",
+      `const fs=require("fs");let i=0;` +
+        `for(;;){fs.writeFileSync(process.argv[1]+".tmp",(i++%2)?process.argv[2]:process.argv[3]);` +
+        `fs.renameSync(process.argv[1]+".tmp",process.argv[1]);}`,
+      config,
+      benign,
+      evil,
+    ]);
+    try {
+      for (let round = 0; round < 10; round++) {
+        const wt = racilyEdited(box, `flip${round}`);
+        worktree(box.workspaces, "remove", "acme/widgets", `flip${round}`, "--checked-clean");
+        assert.equal(fs.existsSync(wt.dir), false, `round ${round} did not remove it`);
+      }
+    } finally {
+      child.kill("SIGKILL");
+    }
+    assert.deepEqual(box.fired(), []);
+  });
+
+  test("a removal git refuses leaves the worktree locked again", () => {
+    // unlock is a step of removal, so a refusal after it has to undo it: an
+    // unlocked worktree hidden by the main tree's mask is a prunable one. A
+    // lock file that cannot be deleted makes the unlock fail and git refuse a
+    // still-locked worktree, with its registration intact.
+    const box = armed();
+    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "stuck").ok);
+    const wt = target(box.workspaces, "acme/widgets", "stuck");
+    const admin = join(box.dir, ".git", "worktrees", "stuck");
+    fs.chmodSync(admin, 0o555);
+    try {
+      const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "stuck", "--force");
+      assert.equal(ok, false);
+      assert.match(output, /locked again/);
+      assert.ok(isLocked(wt), "the worktree was left unlocked");
+    } finally {
+      fs.chmodSync(admin, 0o755);
+    }
+  });
+
+  test("a removal that fails half way says the directory is no longer a worktree", () => {
+    // The other shape, measured: git drops the registration, then cannot
+    // delete a file -- the root-owned files compose services leave (#15).
+    const box = armed();
+    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "half").ok);
+    const wt = target(box.workspaces, "acme/widgets", "half");
+    sandboxCheckout(wt.dir);
+    const pinned = join(wt.dir, "pinned");
+    fs.mkdirSync(pinned);
+    fs.writeFileSync(join(pinned, "file"), "x");
+    fs.chmodSync(pinned, 0o555);
+    try {
+      const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "half", "--force");
+      assert.equal(ok, false);
+      assert.match(output, /no longer a worktree/);
+      assert.doesNotMatch(git(box.dir, "worktree", "list"), /half/);
+    } finally {
+      fs.chmodSync(pinned, 0o755);
+    }
+  });
+
+  test("an unknown option to remove is a refusal, not a positional", () => {
+    const box = repository();
+    assert.ok(worktree(box.workspaces, "add", "acme/widgets", "alpha").ok);
+    const { ok, output } = worktree(box.workspaces, "remove", "acme/widgets", "alpha", "--yes");
+    assert.equal(ok, false);
+    assert.match(output, /unknown option '--yes'/);
   });
 });

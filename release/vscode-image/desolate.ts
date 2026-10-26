@@ -57,7 +57,12 @@ import { parse as parseJsonc } from "./jsonc.ts";
 import { isEntryPoint, run, type JSONValue } from "./utils.ts";
 import { parseArgs, USAGE, type Args } from "./args.ts";
 import { hint } from "./hints.ts";
-import { createDocker, type NetworkAttachment, type Runner } from "./docker.ts";
+import {
+  createDocker,
+  parseWorktreeChanges,
+  type NetworkAttachment,
+  type Runner,
+} from "./docker.ts";
 import {
   CA_DIR,
   OVERLAY_KEY_LABEL,
@@ -636,16 +641,30 @@ const injectedMounts = (target: Target) => [
  * devcontainer is about to get -- the reach that code would have anyway. It
  * has to precede the snapshot: `.devcontainer/` is one of the files it writes.
  */
+/** A worktree's sandbox, with any one a crash left for it removed first: two
+ *  at once would be two writers of the same index. */
+const worktreeSandbox = (target: Target, mounts: string[]) => {
+  const label = `${worktrees.SANDBOX_LABEL}=${target.name}`;
+  docker.container.remove(docker.container.namesWithLabel(label));
+  return {
+    image: worktrees.CHECKOUT_IMAGE,
+    label,
+    dir: target.dir,
+    mounts,
+    seconds: worktrees.SANDBOX_SECONDS,
+  };
+};
+
 function populateWorktree(target: Target): void {
   if (worktrees.isPopulated(target)) return;
   const ca = SHARED_DIRECTORIES.find((mount) => mount.target === CA_DIR)!;
 
   desolog(`checking out ${target.name} in a sandbox (first start) ...`);
   const code = docker.checkoutWorktree({
-    image: worktrees.CHECKOUT_IMAGE,
-    label: `${worktrees.CHECKOUT_LABEL}=${target.project}`,
-    dir: target.dir,
-    mounts: worktrees.checkoutMounts(target, overlay.ensureVolume(target, ca), CA_DIR),
+    ...worktreeSandbox(
+      target,
+      worktrees.checkoutMounts(target, overlay.ensureVolume(target, ca), CA_DIR),
+    ),
     caFile: `${CA_DIR}/ca.pem`,
   });
   // A hook that fails after the files land still exits non-zero, and git has
@@ -1039,6 +1058,38 @@ function stopTarget(target: Target): void {
 }
 
 /**
+ * Is this worktree safe to delete -- nothing uncommitted, nothing untracked?
+ *
+ * Asked in its sandbox, because answering reads content through the
+ * repository's own filters, and the editor that deletes it must not run those
+ * (worktrees.ts). `cli.sh worktree remove` asks this first and passes the
+ * answer on. Exits 0 when there is nothing to lose, 3 when there is (and says
+ * what), 1 when the check could not run -- which is never read as clean.
+ */
+function reportUncommitted(target: Target): void {
+  if (!target.worktree)
+    return die(`--uncommitted asks about a worktree; name one with --worktree`);
+  if (!worktrees.isPopulated(target))
+    return console.log(`${target.name} was never checked out; nothing in it to lose`);
+
+  const changes = parseWorktreeChanges(
+    docker.worktreeChanges(worktreeSandbox(target, worktrees.sandboxMounts(target))),
+  );
+  if (changes === null)
+    return die(`could not check ${target.name} for uncommitted changes in its sandbox,
+      so it is not known to be safe to remove. To discard whatever is in it:
+        ${hint.mac(`worktree remove ${target.project} ${target.worktree} --force`)}`);
+  if (changes.length === 0) return console.log(`${target.name} has no uncommitted changes`);
+
+  console.error(`${target.name} has uncommitted or untracked files:`);
+  for (const line of changes.slice(0, 20)) console.error(`  ${line}`);
+  if (changes.length > 20) console.error(`  ... and ${changes.length - 20} more`);
+  console.error(`commit or stash them, or discard them with:
+  ${hint.mac(`worktree remove ${target.project} ${target.worktree} --force`)}`);
+  process.exit(3);
+}
+
+/**
  * Remove everything desolate created for this target: its container, its
  * relays, the copy-on-write views it was given, and its saved ports, token and
  * spec fingerprint.
@@ -1234,6 +1285,7 @@ async function main(): Promise<void> {
   const target = targetOf(args);
   if (args.command === "ports") showPorts(target);
   else if (args.command === "purge") purgeTarget(target);
+  else if (args.command === "uncommitted") reportUncommitted(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }
 

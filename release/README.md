@@ -1298,7 +1298,7 @@ its own devcontainer with its own editor, ports and volumes:
 ./cli.sh worktree add pmalacho-mit/suede fix 'hotfix/123'
 ./cli.sh desolate pmalacho-mit/suede --worktree wip   # opens it; creates it if absent
 ./cli.sh worktree list pmalacho-mit/suede
-./cli.sh worktree remove pmalacho-mit/suede wip       # stop it first
+./cli.sh worktree remove pmalacho-mit/suede wip       # stop it first; --force discards changes
 ```
 
 They live in a fixed, dot-prefixed place, so they can never be mistaken for
@@ -1340,6 +1340,12 @@ repo twice -- two projects are a real boundary; two worktrees are not.
   filters and fsmonitor run there, not in the editor, which reaches every
   project. A post-checkout hook that needs tools the sandbox lacks (it is
   `alpine/git`, with git-lfs) fails there with a warning; the files still land.
+- **`worktree remove` checks for uncommitted changes in a sandbox too.** That
+  check reads file content, which runs the repository's filters, so
+  `./cli.sh worktree remove` asks it on the orchestrator's side and refuses,
+  listing what it found, if anything would be lost. `--force` skips it. In the
+  editor's own terminal `worktree remove` cannot ask, so it refuses unless
+  given `--force` (or the worktree was never started and holds nothing).
 - **`git worktree list` inside a worktree names paths that are not there.** Its
   siblings and the main tree are not mounted in that container. They are locked,
   so nothing prunes them; the output is just confusing.
@@ -1649,9 +1655,10 @@ Boundaries, strongest first:
   is not enforced by a mechanism at all. They share `/workspaces` read-write,
   and a repository's `.git/config`, `.git/hooks/` and `.gitattributes` are
   executable configuration consumed by the editor's git. The git desolate runs
-  there for you (`worktree add`, `list`, `remove`) switches off every knob that
-  names a command and checks nothing out (tests/integration/worktrees, E17), but
-  git you type in the editor's terminal obeys the repository like any git does.
+  there for you (`worktree add`, `list`, `remove`) switches off hooks, fsmonitor
+  and the pager on its command line and never reads file content, so no filter
+  runs either (tests/integration/worktrees, E17) -- but git you type in the
+  editor's terminal obeys the repository like any git does.
   Assume any project you work on in the outer editor can execute there. The design response is not to
   prevent it but to make it survivable: there is nothing in that container worth
   stealing, only capabilities that stop when it restarts.

@@ -19,7 +19,8 @@ import {
   CHECKOUT_IMAGE,
   addArguments,
   checkoutMounts,
-  filterNeutralizers,
+  hardenedGit,
+  sandboxMounts,
   isLocked,
   isPopulated,
   mounts,
@@ -197,28 +198,23 @@ describe("the main tree's view of .worktrees", () => {
 });
 
 describe("git in the editor executes nothing the repository configured", () => {
-  test("every configured filter driver is emptied by name", () => {
-    const argv = filterNeutralizers([
-      "filter.lfs.clean",
-      "filter.lfs.smudge",
-      "filter.dotted.name.process",
-      "core.fsmonitor",
+  test("the hardening is a fixed command line that reads nothing first", () => {
+    // Reading the repository's config to decide what to switch off was a race
+    // a devcontainer rewriting it could win, and a lookup that could fail
+    // open. So the argv cannot depend on the repository at all: a project
+    // directory that does not exist yields the same one.
+    const box = sandbox();
+    const real = hardenedGit(box.project("acme/widgets"));
+    const absent = hardenedGit(target(box.workspaces, "acme/nowhere"));
+    assert.deepEqual(real.slice(2), absent.slice(2));
+    const settings = real.filter((_, i) => real[i - 1] === "-c");
+    assert.deepEqual(settings, [
+      "core.hooksPath=/dev/null",
+      "core.fsmonitor=false",
+      "gc.auto=0",
+      "maintenance.auto=false",
     ]);
-    const set = argv.filter((_, i) => argv[i - 1] === "-c");
-    assert.deepEqual(set, [
-      "filter.lfs.clean=",
-      "filter.lfs.smudge=",
-      "filter.lfs.process=",
-      "filter.lfs.required=false",
-      "filter.dotted.name.clean=",
-      "filter.dotted.name.smudge=",
-      "filter.dotted.name.process=",
-      "filter.dotted.name.required=false",
-    ]);
-  });
-
-  test("a driver named with '=' cannot be switched off, so it is refused", () => {
-    assert.throws(() => filterNeutralizers(["filter.a=b.clean"]), /cannot be switched off/);
+    assert.ok(real.includes("--no-pager"));
   });
 
   test("add never checks out", () => {
@@ -252,6 +248,7 @@ describe("the checkout sandbox's reach", () => {
     const box = sandbox();
     const feature = box.worktree("acme/widgets", "feature123");
     const project = join(box.workspaces, "acme/widgets");
+    assert.deepEqual(sandboxMounts(feature), checkoutMounts(feature, "x", "/x").slice(0, 2));
     assert.deepEqual(checkoutMounts(feature, "acme__widgets--wt--feature123-desolate-ca", "/desolate-ca"), [
       `type=bind,source=${feature.dir},target=${feature.dir}`,
       `type=bind,source=${project}/.git,target=${project}/.git`,

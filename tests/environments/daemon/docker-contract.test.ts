@@ -16,9 +16,10 @@ import { randomBytes } from "node:crypto";
 
 import { createDocker, type Runner } from "../../../release/vscode-image/docker.ts";
 import { overlayOptions } from "../../../release/vscode-image/overlay.ts";
+import { parseWorktreeChanges } from "../../../release/vscode-image/docker.ts";
 import {
   CHECKOUT_IMAGE,
-  CHECKOUT_LABEL,
+  SANDBOX_LABEL,
 } from "../../../release/vscode-image/worktrees.ts";
 
 /** The real thing, for the shapes this suite exercises. `build` throws rather
@@ -301,13 +302,14 @@ describe("a worktree checked out in its sandbox", () => {
       "could not seed the repository",
     );
 
-    const code = docker.checkoutWorktree({
+    const sandbox = {
       image: CHECKOUT_IMAGE,
-      label: `${CHECKOUT_LABEL}=test`,
+      label: `${SANDBOX_LABEL}=test`,
       dir,
       mounts: [`type=volume,source=${store},target=/w`],
-      caFile: "/nonexistent/ca.pem",
-    });
+      seconds: 120,
+    };
+    const code = docker.checkoutWorktree({ ...sandbox, caFile: "/nonexistent/ca.pem" });
     assert.equal(code, 0, "the sandboxed checkout failed");
 
     const read = (path: string) =>
@@ -319,6 +321,18 @@ describe("a worktree checked out in its sandbox", () => {
         `${project}/.git/worktrees/alpha/index`]),
       0,
       "no index: isPopulated would call this worktree empty and check it out again",
+    );
+
+    // The removal check, in the same sandbox: the hook's own marker file is
+    // untracked, so even a fresh checkout is not clean -- which is right.
+    assert.deepEqual(parseWorktreeChanges(docker.worktreeChanges(sandbox)), ["?? .hook-ran-on"]);
+    realRunner.status(["run", "--rm", "-v", `${store}:/w`, HELPER, "sh", "-c",
+      `rm ${dir}/.hook-ran-on && echo changed > ${dir}/greeting.txt`]);
+    assert.deepEqual(parseWorktreeChanges(docker.worktreeChanges(sandbox)), [" M greeting.txt"]);
+    assert.equal(
+      parseWorktreeChanges(docker.worktreeChanges({ ...sandbox, dir: "/w/not-a-worktree" })),
+      null,
+      "a check that could not run must not read as clean",
     );
   });
 });

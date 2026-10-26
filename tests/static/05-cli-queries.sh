@@ -151,43 +151,50 @@ V6=$(printf '%s' "$GH_FIXTURE" | jq -r '.git[] | select(contains(":"))' | tr '\n
 assert_not_contains "the v4 filter excludes IPv6 ranges" "$V4" ":"
 assert_contains "the v6 filter keeps IPv6 ranges" "$V6" "2a0a"
 
-group "the 'export' path check"
+group "the 'export' archive"
 
 # Extracted, not retyped, and run against a real directory tree: the claim is
-# about what realpath does with a planted symlink, which only running it shows.
-RESOLVE=$(awk "/^EXPORT_RESOLVE_SH='/{p=1; sub(/^EXPORT_RESOLVE_SH='/, \"\")} p{ if (sub(/'\$/, \"\")) { print; exit } print }" "$RELEASE/cli.sh")
-if [ -z "$RESOLVE" ]; then
-  fail "found EXPORT_RESOLVE_SH in cli.sh" "awk matched nothing -- was it renamed or reformatted?"
+# about what realpath and tar do with planted symlinks, which only running it
+# shows. Judged on the archive's own listing, not on a printed path.
+EXPORT=$(awk "/^EXPORT_TAR_SH='/{p=1; sub(/^EXPORT_TAR_SH='/, \"\")} p{ if (sub(/'\$/, \"\")) { print; exit } print }" "$RELEASE/cli.sh")
+if [ -z "$EXPORT" ]; then
+  fail "found EXPORT_TAR_SH in cli.sh" "awk matched nothing -- was it renamed or reformatted?"
 else
-  pass "found EXPORT_RESOLVE_SH in cli.sh"
+  pass "found EXPORT_TAR_SH in cli.sh"
   WS=$(mktemp -d)
-  mkdir -p "$WS/acme/widgets/dist" "$WS/acme/gadgets"
+  mkdir -p "$WS/acme/widgets/dist" "$WS/acme/gadgets" "$WS/solo"
   echo built > "$WS/acme/widgets/dist/app.js"
   echo private > "$WS/acme/gadgets/secret.txt"
   ln -s ../gadgets "$WS/acme/widgets/escape"
   ln -s dist "$WS/acme/widgets/inside"
-  resolve() { sh -c "$RESOLVE" sh "$WS" "$@"; }
+  ln -s /etc "$WS/acme/widgets/dist/etc-link"
+  # The case the first version missed: a single-segment project whose child
+  # links to ANOTHER project, named as if it were an owner/repo.
+  ln -s ../acme/gadgets "$WS/solo/b"
+  archive() { sh -c "$EXPORT" sh "$WS" "$@"; }
+  listing() { archive "$@" 2>/dev/null | tar -tf - 2>/dev/null | sort | tr '\n' ' '; }
 
-  OUT=$(resolve acme/widgets dist); RC=$?
-  if [ "$RC" = 0 ] && [ "$OUT" = "$WS/acme/widgets/dist" ]; then pass "a path in the project resolves to itself"
-  else fail "a path in the project resolves to itself" "rc=$RC out=$OUT"; fi
-  OUT=$(resolve acme/widgets); RC=$?
-  if [ "$RC" = 0 ] && [ "$OUT" = "$WS/acme/widgets" ]; then pass "no path means the whole project"
-  else fail "no path means the whole project" "rc=$RC out=$OUT"; fi
-  OUT=$(resolve acme/widgets inside); RC=$?
-  if [ "$RC" = 0 ] && [ "$OUT" = "$WS/acme/widgets/dist" ]; then pass "a symlink that stays inside is followed"
-  else fail "a symlink that stays inside is followed" "rc=$RC out=$OUT"; fi
-  resolve acme/widgets escape >/dev/null; RC=$?
-  if [ "$RC" = 4 ]; then pass "a symlink into another project is refused"
-  else fail "a symlink into another project is refused" "rc=$RC"; fi
-  resolve acme/widgets ../gadgets/secret.txt >/dev/null; RC=$?
-  if [ "$RC" = 4 ]; then pass "'..' out of the project is refused"
-  else fail "'..' out of the project is refused" "rc=$RC"; fi
-  resolve acme/widgets nope >/dev/null; RC=$?
-  if [ "$RC" = 3 ]; then pass "a missing path is its own refusal"
-  else fail "a missing path is its own refusal" "rc=$RC"; fi
-  for project in .. . "" /etc acme/widgets/../gadgets/.. acme/ acme/widgets/dist .hidden nosuch; do
-    resolve "$project" . >/dev/null; RC=$?
+  OUT=$(listing acme/widgets dist)
+  if [ "$OUT" = "dist/ dist/app.js dist/etc-link " ]; then pass "a directory in the project is archived under its own name"
+  else fail "a directory in the project is archived under its own name" "got: $OUT"; fi
+  case "$(listing acme/widgets)" in
+    "widgets/ "*) pass "no path means the whole project" ;;
+    *) fail "no path means the whole project" "got: $(listing acme/widgets)" ;;
+  esac
+  if archive acme/widgets dist | tar -tvf - 2>/dev/null | grep -q 'etc-link -> /etc'; then
+    pass "a link inside is archived AS a link, never followed"
+  else fail "a link inside is archived AS a link, never followed" "tar followed it or dropped it"; fi
+  OUT=$(listing acme/widgets inside)
+  if [ "$OUT" = "dist/ dist/app.js dist/etc-link " ]; then pass "a symlink that stays inside is followed to its target"
+  else fail "a symlink that stays inside is followed to its target" "got: $OUT"; fi
+  for case in "escape:4" "../gadgets/secret.txt:4" "nope:3"; do
+    rel=${case%:*} want=${case#*:}
+    archive acme/widgets "$rel" >/dev/null 2>&1; RC=$?
+    if [ "$RC" = "$want" ]; then pass "acme/widgets '$rel' exits $want"
+    else fail "acme/widgets '$rel' exits $want" "rc=$RC"; fi
+  done
+  for project in solo/b .. . "" /etc acme/widgets/../gadgets/.. acme/ acme/widgets/dist .hidden nosuch; do
+    archive "$project" . >/dev/null 2>&1; RC=$?
     if [ "$RC" = 2 ]; then pass "'$project' is not a project"
     else fail "'$project' is not a project" "rc=$RC"; fi
   done

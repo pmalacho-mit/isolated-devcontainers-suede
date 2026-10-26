@@ -10,8 +10,10 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 
 import {
+  STATUS_RAN,
   createDocker,
   parseMounts,
+  parseWorktreeChanges,
   parseNetworkAttachments,
   parseWorkspaceCandidates,
   selectWorkspaceContainer,
@@ -496,47 +498,76 @@ describe("images", () => {
   });
 });
 
-describe("checking a worktree out in its sandbox", () => {
+describe("a worktree's sandbox", () => {
   const spec = {
     image: "alpine/git@sha256:abc",
-    label: "desolate.checkout=acme/widgets",
+    label: "desolate.worktree-sandbox=acme/widgets@alpha",
     dir: "/workspaces/acme/widgets/.worktrees/alpha",
     mounts: [
       "type=bind,source=/workspaces/acme/widgets/.worktrees/alpha,target=/workspaces/acme/widgets/.worktrees/alpha",
       "type=bind,source=/workspaces/acme/widgets/.git,target=/workspaces/acme/widgets/.git",
     ],
-    caFile: "/desolate-ca/ca.pem",
+    seconds: 600,
   };
-  const argvFor = () => {
+  const argvFor = (op: "checkout" | "changes") => {
     const { runner, calls } = recorder();
-    createDocker(runner).checkoutWorktree(spec);
+    const docker = createDocker(runner);
+    if (op === "checkout") docker.checkoutWorktree({ ...spec, caFile: "/desolate-ca/ca.pem" });
+    else docker.worktreeChanges(spec);
     return calls[0];
   };
 
-  test("runs as the editor user, gone when it exits", () => {
-    const argv = argvFor();
-    assert.deepEqual(argv.slice(0, 2), ["run", "--rm"]);
-    assert.equal(argv[argv.indexOf("--user") + 1], "1000:1000");
-  });
+  for (const op of ["checkout", "changes"] as const) {
+    test(`${op}: as the editor user, gone when it exits, labelled for a sweep`, () => {
+      const argv = argvFor(op);
+      assert.deepEqual(argv.slice(0, 2), ["run", "--rm"]);
+      assert.equal(argv[argv.indexOf("--user") + 1], "1000:1000");
+      assert.equal(argv[argv.indexOf("--label") + 1], spec.label);
+    });
 
-  test("is given exactly the mounts it was handed, and nothing privileged", () => {
-    const argv = argvFor();
-    const given = argv.flatMap((word, i) => (word === "--mount" ? [argv[i + 1]] : []));
-    assert.deepEqual(given, spec.mounts);
-    for (const flag of ["--privileged", "--cap-add", "-v", "--volume", "--network"])
-      assert.ok(!argv.includes(flag), `${flag} in ${argv}`);
-  });
+    test(`${op}: exactly the mounts it was handed, and nothing privileged`, () => {
+      const argv = argvFor(op);
+      const given = argv.flatMap((word, i) => (word === "--mount" ? [argv[i + 1]] : []));
+      assert.deepEqual(given, spec.mounts);
+      for (const flag of ["--privileged", "--cap-add", "-v", "--volume", "--network"])
+        assert.ok(!argv.includes(flag), `${flag} in ${argv}`);
+      assert.ok(argv.indexOf("--workdir") < argv.indexOf(spec.image), "flags must precede the image");
+    });
+  }
 
-  test("checks out in the worktree, trusting the proxy for lfs", () => {
-    const argv = argvFor();
-    const image = argv.indexOf(spec.image);
-    assert.ok(argv.indexOf("--workdir") < image, "flags must precede the image");
-    assert.equal(argv[argv.indexOf("--workdir") + 1], spec.dir);
-    assert.deepEqual(argv.slice(image + 1), [
+  test("checkout is bounded from inside, and trusts the proxy for lfs", () => {
+    const argv = argvFor("checkout");
+    assert.equal(argv[argv.indexOf("--entrypoint") + 1], "timeout");
+    assert.deepEqual(argv.slice(argv.indexOf(spec.image) + 1), [
+      "600",
+      "git",
       "-c",
       "http.sslCAInfo=/desolate-ca/ca.pem",
       "checkout",
       "--force",
     ]);
+  });
+
+  test("the changes check prints its marker only after git status succeeded", () => {
+    const script = argvFor("changes").at(-1)!;
+    assert.match(script, /^timeout 600 git status --porcelain --ignore-submodules=none > \/tmp\/changes && echo desolate-status-ran && cat \/tmp\/changes$/);
+  });
+});
+
+describe("reading the changes check", () => {
+  test("clean is the marker and nothing after it", () => {
+    assert.deepEqual(parseWorktreeChanges(STATUS_RAN), []);
+  });
+
+  test("each changed or untracked path is one line", () => {
+    assert.deepEqual(parseWorktreeChanges(`${STATUS_RAN}\n M src/app.ts\n?? notes.txt`), [
+      " M src/app.ts",
+      "?? notes.txt",
+    ]);
+  });
+
+  test("no marker is not clean: the check did not run", () => {
+    for (const text of ["", "fatal: not a git repository", "Unable to find image"])
+      assert.equal(parseWorktreeChanges(text), null, text);
   });
 });

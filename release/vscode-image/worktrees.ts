@@ -25,11 +25,19 @@
  * devcontainer can write its project's `.git`, so what that git obeys is
  * attacker-writable: a plain `worktree add` ran the project's post-checkout
  * hook, smudge filter and fsmonitor in the editor, and a TTY'd `worktree list`
- * ran its `pager.worktree`. So every git here is `hardenedGit`, which switches
- * off each knob that names a command, and `add` does not check anything out.
- * The checkout is the one step that has to execute project content, and it
- * runs in a sandbox with this worktree's own reach (`populate` in desolate.ts),
- * not here. Measured on git 2.51; tests/integration/worktrees E17 re-measures.
+ * ran its `pager.worktree`, and removing a racily-clean worktree ran its clean
+ * filter. Two rules close that, and both are measured in E17:
+ *
+ *   - Every git here is `hardenedGit`: hooks, fsmonitor, the pager and auto-gc
+ *     switched off on the COMMAND LINE, which outranks every config file and
+ *     needs no read of the repository's config to apply -- reading it first
+ *     would race a devcontainer rewriting it.
+ *   - No git here converts file content, so no filter driver is ever consulted
+ *     and none has to be switched off. `add` is `--no-checkout`; `remove` is
+ *     `--force`, after the uncommitted-changes check that DOES read content has
+ *     run in a sandbox. Both sandboxed steps live in desolate.ts and have this
+ *     worktree's own reach. A command that would convert content is refused
+ *     rather than hardened: git has no switch for every filter.
  *
  * The orchestrator holds the inner Docker socket, so it reads lock and index
  * FILES rather than asking git anything.
@@ -116,8 +124,13 @@ export const isPopulated = (worktree: Target) => {
 export const CHECKOUT_IMAGE =
   "alpine/git@sha256:832b1cd1a271509f3d5272a1a62d4cb2ab1a53426ebde1f6c2cb7349f907dc6f";
 
-/** Stamped on the checkout container, so a sweep can find one a crash left. */
-export const CHECKOUT_LABEL = "desolate.checkout";
+/** Stamped on a worktree's sandbox with the TARGET's name, so the next run
+ *  for that worktree removes one a crash left before starting its own. */
+export const SANDBOX_LABEL = "desolate.worktree-sandbox";
+
+/** How long a sandboxed step may run. A checkout runs the repository's
+ *  post-checkout hook, which may fetch, install or simply hang. */
+export const SANDBOX_SECONDS = 600;
 
 /** Is this worktree exempt from pruning?
  *
@@ -154,20 +167,25 @@ export const mounts = (target: Target): string[] =>
   target.worktree ? [sharedGitDirectory(target)] : [];
 
 /**
- * What the checkout sandbox is given: the worktree's own directory and the
- * project's `.git` -- exactly what its devcontainer will get -- plus the proxy
- * CA, read-only, for git-lfs.
- *
- * For `docker run --mount`, NOT `devcontainer up --mount`: the CLI's grammar
- * refuses `readonly` (tests/static/01-syntax.sh), docker's accepts it.
+ * What a worktree's sandbox is given: its own directory and the project's
+ * `.git` -- exactly what its devcontainer will get, and nothing else.
+ */
+export const sandboxMounts = (target: Target): string[] => [
+  `type=bind,source=${target.dir},target=${target.dir}`,
+  ...mounts(target),
+];
+
+/**
+ * The checkout's sandbox, which also gets the proxy CA, read-only, for
+ * git-lfs. For `docker run --mount`, NOT `devcontainer up --mount`: the CLI's
+ * grammar refuses `readonly` (tests/static/01-syntax.sh), docker's accepts it.
  */
 export const checkoutMounts = (
   target: Target,
   caVolume: string,
   caDirectory: string,
 ): string[] => [
-  `type=bind,source=${target.dir},target=${target.dir}`,
-  ...mounts(target),
+  ...sandboxMounts(target),
   `type=volume,source=${caVolume},target=${caDirectory},readonly`,
 ];
 
@@ -205,77 +223,28 @@ const die = (message: string): never => {
   process.exit(1);
 };
 
-/** The knobs in a repository's config that name a command, and the value that
- *  switches each off. `--no-pager` covers `core.pager` and every `pager.<cmd>`. */
+/** The knobs in a repository's config that name a command and that the
+ *  commands below can reach, and the value that switches each off.
+ *  `--no-pager` covers `core.pager` and every `pager.<cmd>`; auto-gc and
+ *  maintenance are commands git may spawn on its own after a write. */
 const NO_COMMANDS = [
   "--no-pager",
   "-c",
   "core.hooksPath=/dev/null",
   "-c",
   "core.fsmonitor=false",
+  "-c",
+  "gc.auto=0",
+  "-c",
+  "maintenance.auto=false",
 ];
 
-/**
- * Filter drivers are NAMED by the project's config and SELECTED by its
- * `.gitattributes`, and git has no switch that turns them all off. So each
- * driver the config defines is emptied by name: an empty clean/smudge/process
- * is no filter, and `required=false` keeps git from refusing for want of one.
- * A driver no config defines is not a command, so the list is complete.
- *
- * `git config` itself executes nothing; `--get-regexp` follows includes, so a
- * driver hidden behind `include.path` is found too.
- *
- * @throws for a driver named with an `=`. A config subsection may contain one,
- * and `-c` splits at the FIRST `=`, so `-c filter.a=b.clean=` would set some
- * other key and leave the driver live -- refusing is the only safe reading.
- */
-export const filterNeutralizers = (configKeys: string[]) => {
-  const drivers = new Set<string>();
-  for (const key of configKeys) {
-    const match = /^filter\.(.+)\.[^.]+$/s.exec(key);
-    if (!match) continue;
-    if (match[1].includes("="))
-      throw new Error(
-        `this repository's config defines a filter driver named '${match[1]}', which cannot be switched off from the command line`,
-      );
-    drivers.add(match[1]);
-  }
-  return [...drivers].flatMap((driver) =>
-    ["clean=", "smudge=", "process=", "required=false"].flatMap((setting) => [
-      "-c",
-      `filter.${driver}.${setting}`,
-    ]),
-  );
-};
-
-const configuredFilterKeys = (dir: string) =>
-  run(
-    "git",
-    ["-C", dir, ...NO_COMMANDS, "config", "--null", "--name-only", "--get-regexp", "^filter\\."],
-    { encoding: "utf8" },
-    true,
-  )
-    .split("\0")
-    .filter(Boolean);
-
-/** git that executes nothing the repository configured. See the header.
- *
- *  Drivers are read from the worktree as well as the project: with
- *  `extensions.worktreeConfig` a worktree carries a `config.worktree` of its
- *  own, and `worktree remove` runs its cleanliness check INSIDE the worktree,
- *  where that file applies and the project's view of the config does not. */
-export const hardenedGit = (target: Target) => {
-  const views = [target.projectDir];
-  if (target.dir !== target.projectDir && existsSync(join(target.dir, ".git")))
-    views.push(target.dir);
-  let neutralizers: string[] = [];
-  try {
-    neutralizers = filterNeutralizers(views.flatMap(configuredFilterKeys));
-  } catch (err: any) {
-    return die(`${err.message}; refusing to run git against it from the editor`);
-  }
-  return ["-C", target.projectDir, ...NO_COMMANDS, ...neutralizers];
-};
+/** git that executes nothing the repository configured. See the header. */
+export const hardenedGit = ({ projectDir }: Target) => [
+  "-C",
+  projectDir,
+  ...NO_COMMANDS,
+];
 
 const git = (target: Target, ...args: string[]) =>
   run.status("git", [...hardenedGit(target), ...args]);
@@ -335,30 +304,58 @@ const add = (target: Target, branch: string) => {
   );
 };
 
-const remove = (target: Target) => {
+/** Why a worktree may be removed without git checking it first: git's own
+ *  check reads content, which runs the repository's filters, so it never runs
+ *  here (see the header).
+ *
+ *   checked  `cli.sh worktree remove` had the orchestrator check it for
+ *            uncommitted changes in a sandbox, and it was clean.
+ *   force    the person typing said to discard whatever is in it. */
+export type RemovalWarrant = "checked" | "force";
+
+/** Never started, so never checked out, and nothing put there by hand: only
+ *  `.git`, and no index. There is nothing in it to lose. */
+const holdsNothing = (target: Target) =>
+  !isPopulated(target) && readdirSync(target.dir).every((entry) => entry === ".git");
+
+const remove = (target: Target, warrant?: RemovalWarrant) => {
   if (!existsSync(target.dir)) return die(`no such worktree: ${target.dir}`);
+  if (!warrant && !holdsNothing(target))
+    return die(
+      `refusing to remove ${target.name} unchecked. Checking it for uncommitted
+       changes runs the repository's own filters, which must not run in the
+       editor. Remove it with ${hint.mac(`worktree remove ${target.project} ${target.worktree}`)},
+       which checks it in a sandbox first -- or add --force here to discard
+       anything uncommitted in it.`,
+    );
 
   // `worktree remove` refuses a locked worktree, and every desolate worktree is
-  // locked, so unlocking is a step rather than a repair.
+  // locked, so unlocking is a step rather than a repair -- and one to undo if
+  // git refuses, or a main tree started with the mask up would see a
+  // prunable worktree. Measured on git 2.51, a failure has two shapes: git
+  // refuses before touching anything (the registration is still there, so
+  // lock it again), or it deletes the registration and then fails on a file
+  // (nothing is left to lock: the directory is no longer a worktree).
+  const admin = adminDirectory(target);
   git(target, "worktree", "unlock", target.dir);
-
-  // Never started, so never checked out: no index, so git reads every tracked
-  // file as deleted and refuses. Nothing is there to lose -- unless someone put
-  // files in it by hand, in which case git's own check stands.
-  const neverCheckedOut =
-    !isPopulated(target) && readdirSync(target.dir).every((entry) => entry === ".git");
-
-  if (git(target, "worktree", "remove", ...(neverCheckedOut ? ["--force"] : []), target.dir) !== 0)
+  if (git(target, "worktree", "remove", "--force", target.dir) !== 0) {
+    if (admin !== "" && existsSync(admin)) {
+      git(target, "worktree", "lock", "--reason", LOCK_REASON, target.dir);
+      return die(`git could not remove the worktree (see its message above); it is locked again`);
+    }
     return die(
-      `git could not remove the worktree (uncommitted changes? see its message above)`,
+      `git unregistered the worktree but could not delete all of ${target.dir}
+       (see its message above) -- files a container wrote as root, most likely.
+       What is left there is no longer a worktree.`,
     );
+  }
   console.log(`worktree: removed ${target.name}`);
 };
 
 const USAGE = [
   "usage: worktree list   <project>",
   "       worktree add    <project> <name> [<branch>]   (<branch> defaults to <name>)",
-  "       worktree remove <project> <name>",
+  "       worktree remove <project> <name> [--force]   (cli.sh checks it first)",
 ].join("\n");
 
 const targetFrom = (project: string, worktree?: string) => {
@@ -387,6 +384,16 @@ export const ensure = (project: string, worktree: string, branch?: string) => {
   add(target, branch || worktree);
 };
 
+/** `--checked-clean` is how cli.sh says the sandbox found no uncommitted
+ *  changes; `--force` is the person at the keyboard. Anything else after the
+ *  name is a third positional, which only `add` has. */
+const warrantFrom = (flag: string | undefined): RemovalWarrant | undefined => {
+  if (flag === undefined) return undefined;
+  if (flag === "--checked-clean") return "checked";
+  if (flag === "--force") return "force";
+  return die(`unknown option '${flag}' for remove\n${USAGE}`);
+};
+
 const main = ([command, project, name, branch]: string[]) => {
   if (!project) return die(`no project given\n${USAGE}`);
 
@@ -402,7 +409,7 @@ const main = ([command, project, name, branch]: string[]) => {
     }
     case "remove":
       if (!name) return die(`'remove' needs a worktree name\n${USAGE}`);
-      return remove(targetFrom(project, name));
+      return remove(targetFrom(project, name), warrantFrom(branch));
     default:
       return die(`unknown command '${command}'\n${USAGE}`);
   }

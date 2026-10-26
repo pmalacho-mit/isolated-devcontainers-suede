@@ -98,20 +98,26 @@ EOF
 # tests/static/05-cli-queries.sh executes this against a fixture.
 SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
 
-# `export`'s path check, run INSIDE the editor where the files are:
-#   sh -c "$EXPORT_RESOLVE_SH" sh <workspaces> <project> <relative-path>
-# prints the resolved source, or exits 2 (no such project), 3 (no such path) or
-# 4 (resolves outside the project). A project is one or two segments, neither
-# starting with a dot, as everywhere else. Symlinks are FOLLOWED before the check: a
-# link a project planted must not turn an export of its own files into a copy
-# of another project's. tests/static/05-cli-queries.sh executes it on a fixture.
-EXPORT_RESOLVE_SH='
+# `export`, run INSIDE the editor where the files are:
+#   sh -c "$EXPORT_TAR_SH" sh <workspaces> <project> <relative-path>
+# writes a tar of that path to stdout, or exits 2 (no such project), 3 (no such
+# path) or 4 (it resolves outside the project). A project is one or two
+# segments, neither starting with a dot, and must BE /workspaces/<project> --
+# not a link to some other project. Symlinks in the path are followed for the
+# check, and then the archive is made from the parent directory, entered and
+# re-checked first: tar works relative to that pinned directory and archives a
+# link as a link, so swapping a component after the check gains nothing.
+# tests/static/05-cli-queries.sh executes it against a fixture tree.
+EXPORT_TAR_SH='
   case "$2" in ""|/*|*/|*//*|*/*/*|.*|*/.*) exit 2 ;; esac
-  root=$(realpath -e "$1/$2" 2>/dev/null) || exit 2
   base=$(realpath -e "$1") || exit 2
-  case "$root" in "$base"/?*) ;; *) exit 2 ;; esac
+  root=$(realpath -e "$1/$2" 2>/dev/null) || exit 2
+  [ "$root" = "$base/$2" ] || exit 2
   path=$(realpath -e "$root/$3" 2>/dev/null) || exit 3
-  case "$path" in "$root"|"$root"/*) printf "%s" "$path" ;; *) exit 4 ;; esac'
+  case "$path" in "$root"|"$root"/*) ;; *) exit 4 ;; esac
+  cd "$(dirname "$path")" || exit 3
+  case "$(pwd -P)/" in "$root"/*|"$(dirname "$root")"/) ;; *) exit 4 ;; esac
+  exec tar -cf - -- "$(basename "$path")"'
 
 # Existing placeholders that OVERLAP the one being added ($n): either contains
 # the other. Same quoting discipline as SECRET_LIST_JQ -- it travels as a bare
@@ -929,12 +935,14 @@ case "$CMD" in
                        # Since #12 the placeholder goes out unsubstituted rather
                        # than being refused, so the evidence is the audit line.
                        echo "-- leak detection (expects the placeholder passed UNSUBSTITUTED, audited LEAK-SUSPECT):"
+                       # A path no earlier run used, so a stale line cannot answer.
+                       MARK="desolate-proxy-test-$(date +%s)-$$"
                        docker exec "$ORCHESTRATOR" with-ca sh -c \
-                         'curl -s -o /dev/null -w "   HTTP %{http_code}\n" https://example.com/desolate-proxy-test -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"'
+                         "curl -s -o /dev/null -w '   HTTP %{http_code}\n' https://example.com/$MARK -H 'X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER'"
                        sleep 1
                        colima ssh -p "$COLIMA_PROFILE" -- \
                          sudo journalctl -u desolate-proxy --since -2min --no-pager -o cat \
-                       | grep -a "^AUDIT verdict=LEAK-SUSPECT .* path=/desolate-proxy-test " | tail -n 1 \
+                       | grep -a "^AUDIT verdict=LEAK-SUSPECT .* path=/$MARK " | tail -n 1 \
                        | sed 's/^/   /' | grep . || echo "   (no LEAK-SUSPECT line -- leak detection is NOT live)" ;;
                *) echo "usage: cli.sh proxy {status|logs [n]|test}" >&2; exit 1 ;;
              esac ;;
@@ -981,16 +989,28 @@ case "$CMD" in
                list|add)
                  exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" worktree "$SUB" "$@" ;;
                remove)
-                 PROJ="${1:?usage: cli.sh worktree remove <project> <name>}"
-                 NAME="${2:?usage: cli.sh worktree remove <project> <name>}"
+                 PROJ="${1:?usage: cli.sh worktree remove <project> <name> [--force]}"
+                 NAME="${2:?usage: cli.sh worktree remove <project> <name> [--force]}"
+                 case "${3:-}" in
+                   "") WARRANT=--checked-clean ;;
+                   --force) WARRANT=--force ;;
+                   *) echo "usage: cli.sh worktree remove <project> <name> [--force]" >&2; exit 1 ;;
+                 esac
+                 # Is there anything to lose? Answering reads content through the
+                 # repository's own filters, so it is asked in a sandbox on the
+                 # orchestrator's side; the editor then removes it without asking
+                 # git anything about content (worktrees.ts). --force skips it.
+                 if [ "$WARRANT" = --checked-clean ]; then
+                   docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --uncommitted --worktree "$NAME" "$PROJ" || exit 1
+                 fi
                  # Order matters and neither half can do the other's job: the
                  # container and its volumes live on the inner daemon (the
                  # orchestrator's side), the worktree itself is git (the
                  # editor's side). Purge first -- once git has removed the
                  # directory there is nothing left to identify the container by.
                  docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --purge --worktree "$NAME" "$PROJ" || exit 1
-                 exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" worktree remove "$PROJ" "$NAME" ;;
-               *) echo "usage: cli.sh worktree {list <project>|add <project> <name> [<branch>]|remove <project> <name>}" >&2; exit 1 ;;
+                 exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" worktree remove "$PROJ" "$NAME" "$WARRANT" ;;
+               *) echo "usage: cli.sh worktree {list <project>|add <project> <name> [<branch>]|remove <project> <name> [--force]}" >&2; exit 1 ;;
              esac ;;
 
   export)    ensure_running
@@ -1000,27 +1020,39 @@ case "$CMD" in
              # every devcontainer sees, with no inner daemon involved.
              PROJ="${1:?usage: cli.sh export <project> [<path inside it>]}"
              REL="${2:-.}"
-             set +e
-             SRC=$(docker exec "$CONTAINER" with-ca sh -c "$EXPORT_RESOLVE_SH" sh /workspaces "$PROJ" "$REL")
-             WHY=$?
-             set -e
-             case "$WHY" in
-               0) ;;
-               2) echo "cli.sh: no such project: $PROJ" >&2; exit 1 ;;
-               3) echo "cli.sh: no such path in $PROJ: $REL" >&2; exit 1 ;;
-               4) echo "cli.sh: '$REL' resolves outside $PROJ (a symlink?); refusing" >&2; exit 1 ;;
-               *) echo "cli.sh: could not resolve '$REL' in the editor container" >&2; exit 1 ;;
-             esac
-             if [ -t 1 ]; then
-               DEST="./$(basename "$SRC")"
-               [ -e "$DEST" ] && { echo "cli.sh: $DEST already exists; refusing to overwrite it" >&2; exit 1; }
-               docker cp "$CONTAINER:$SRC" "$DEST"
-               echo "cli.sh: exported $PROJ/${REL#./} to $DEST"
-             else
+             export_explain() {
+               case "$1" in
+                 0) return 0 ;;
+                 2) echo "cli.sh: no such project: $PROJ" >&2 ;;
+                 3) echo "cli.sh: no such path in $PROJ: $REL" >&2 ;;
+                 4) echo "cli.sh: '$REL' resolves outside $PROJ (a symlink?); refusing" >&2 ;;
+                 *) echo "cli.sh: could not export '$REL' from the editor container (exit $1)" >&2 ;;
+               esac
+               exit 1
+             }
+             if [ ! -t 1 ]; then
                # A tar stream, so a pipe or a redirect gets something binary-clean:
                #   ./cli.sh export acme/widgets dist > dist.tar
-               exec docker cp "$CONTAINER:$SRC" -
-             fi ;;
+               set +e
+               docker exec "$CONTAINER" with-ca sh -c "$EXPORT_TAR_SH" sh /workspaces "$PROJ" "$REL"
+               export_explain $?
+               exit 0
+             fi
+             # On a terminal: unpack beside you, never over something already there.
+             # Into a fresh directory first, so the name is the archive's own.
+             STAGE=$(mktemp -d ./.desolate-export.XXXXXX)
+             trap 'rm -rf "$STAGE"' EXIT
+             set +e
+             docker exec "$CONTAINER" with-ca sh -c "$EXPORT_TAR_SH" sh /workspaces "$PROJ" "$REL" \
+               | tar -xf - -C "$STAGE"
+             WHY=("${PIPESTATUS[@]}")
+             set -e
+             export_explain "${WHY[0]}"
+             [ "${WHY[1]}" = 0 ] || { echo "cli.sh: could not unpack the export" >&2; exit 1; }
+             NAME=$(ls -A "$STAGE")
+             [ -e "./$NAME" ] && { echo "cli.sh: ./$NAME already exists; refusing to overwrite it" >&2; exit 1; }
+             mv "$STAGE/$NAME" "./$NAME"
+             echo "cli.sh: exported $PROJ/${REL#./} to ./$NAME" ;;
 
   desolate)  ensure_running
              # From the Mac we use the DIRECT runner in the orchestrator (the

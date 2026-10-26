@@ -155,6 +155,50 @@ const capped = (program: string) => [
   program,
 ];
 
+/** One worktree's sandbox: a throwaway container that reaches exactly what
+ *  that worktree's own devcontainer will -- its directory and the project's
+ *  `.git`, handed in as `mounts` -- as the editor user, under a label a sweep
+ *  can find, and gone when it exits. `seconds` bounds it from INSIDE, so a
+ *  hook that hangs ends with its container rather than outliving its caller. */
+export interface WorktreeSandbox {
+  image: string;
+  label: string;
+  dir: string;
+  mounts: string[];
+  seconds: number;
+}
+
+const worktreeSandbox = (spec: WorktreeSandbox, entrypoint: string) => [
+  "run",
+  "--rm",
+  "--label",
+  spec.label,
+  "--user",
+  "1000:1000",
+  "-e",
+  "HOME=/tmp",
+  ...spec.mounts.flatMap((mount) => ["--mount", mount]),
+  "--workdir",
+  spec.dir,
+  "--entrypoint",
+  entrypoint,
+  spec.image,
+];
+
+/** Printed by `worktreeChanges` only once `git status` has SUCCEEDED, so a
+ *  check that never ran -- no image, a timeout, a git error -- cannot read as
+ *  a clean worktree. */
+export const STATUS_RAN = "desolate-status-ran";
+
+/** The changed paths `worktreeChanges` reported, [] for a clean worktree, or
+ *  null when the check did not run -- which every caller must treat as dirty. */
+export const parseWorktreeChanges = (text: string): string[] | null => {
+  const lines = text.split("\n");
+  const ran = lines.indexOf(STATUS_RAN);
+  if (ran < 0) return null;
+  return lines.slice(ran + 1).filter((line) => line.trim() !== "");
+};
+
 export const createDocker = (run: Runner) => {
   const query = (...argv: string[]) => run.output(argv);
   const effect = (...argv: string[]) => run.status(argv);
@@ -332,37 +376,30 @@ export const createDocker = (run: Runner) => {
     container,
     volume,
     image,
-    /** Check a worktree out in a throwaway container that can reach exactly
-     *  what that worktree's own devcontainer will: its directory, the
-     *  project's `.git`, and the proxy. The repository's hooks, filters and
-     *  fsmonitor run HERE, which is why it is not the editor (worktrees.ts).
-     *  Output is the user's: a post-checkout hook may have something to say. */
-    checkoutWorktree: (spec: {
-      image: string;
-      label: string;
-      dir: string;
-      mounts: string[];
-      caFile: string;
-    }) =>
+    /** Check a worktree out in its sandbox (`worktreeSandbox`). The
+     *  repository's hooks, filters and fsmonitor run HERE, which is why it is
+     *  not the editor (worktrees.ts). Output is the user's: a post-checkout
+     *  hook may have something to say. */
+    checkoutWorktree: (spec: WorktreeSandbox & { caFile: string }) =>
       run.status([
-        "run",
-        "--rm",
-        "--label",
-        spec.label,
-        "--user",
-        "1000:1000",
-        "-e",
-        "HOME=/tmp",
-        ...spec.mounts.flatMap((mount) => ["--mount", mount]),
-        "--workdir",
-        spec.dir,
-        "--entrypoint",
+        ...worktreeSandbox(spec, "timeout"),
+        String(spec.seconds),
         "git",
-        spec.image,
         "-c",
         `http.sslCAInfo=${spec.caFile}`,
         "checkout",
         "--force",
+      ]),
+    /** `git status --porcelain` of a worktree, asked in its sandbox: the one
+     *  question about content the editor must not ask itself. Read it with
+     *  `parseWorktreeChanges`; untracked files count and ignored ones do not,
+     *  as for `git worktree remove`'s own check. */
+    worktreeChanges: (spec: WorktreeSandbox) =>
+      run.output([
+        ...worktreeSandbox(spec, "sh"),
+        "-c",
+        `timeout ${spec.seconds} git status --porcelain --ignore-submodules=none > /tmp/changes ` +
+          `&& echo ${STATUS_RAN} && cat /tmp/changes`,
       ]),
     /** Run a throwaway helper container against one volume. */
     inVolume: (

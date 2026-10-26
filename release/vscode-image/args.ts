@@ -26,7 +26,11 @@ export type Command =
   | "purge"
   /** What is UP right now, across every project and worktree. Names no target:
    *  the question is about all of them. Reads state; changes none. */
-  | "list";
+  | "list"
+  /** Whether a worktree holds anything a removal would lose, asked in its
+   *  sandbox. What `cli.sh worktree remove` runs before deleting one; the
+   *  editor cannot ask git that itself (worktrees.ts). */
+  | "uncommitted";
 
 export type Args = {
   command: Command;
@@ -141,6 +145,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--purge":
         command = "purge";
+        break;
+      case "--uncommitted":
+        command = "uncommitted";
         break;
       case "--list":
         command = "list";
