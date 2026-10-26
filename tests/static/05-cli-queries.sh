@@ -210,17 +210,44 @@ else
   rm -rf "$WS"
 fi
 
+group "the proxy's AUDIT lines are read as journald holds them"
+# Measured on the VM, 2026-10-26: mitmdump under systemd prefixes every line
+# with its time, and every reader here anchored on `^AUDIT` -- so `proxy audit`
+# printed nothing and preflight's leak oracle failed against a working addon.
+# These are that VM's lines, verbatim, and the same lines unprefixed.
+VM_LEAK='[12:05:13.007] AUDIT verdict=LEAK-SUSPECT method=GET host=example.com path=/desolate-manual-probe secrets=- suspect=DESOLATE-SELFTEST-PLACEHOLDER project=-'
+VM_ALLOW='[12:04:04.855] AUDIT verdict=ALLOW method=GET host=raw.githubusercontent.com path=/x secrets=- suspect=- project=pmalacho-mit/isolated-devcontainers-suede'
+VM_PROSE="[12:05:13.007] LEAK-SUSPECT placeholder 'DESOLATE-SELFTEST-PLACEHOLDER' sent toward 'example.com' -- passed UNSUBSTITUTED"
+JOURNAL=$(printf '%s\n' "$VM_PROSE" "$VM_LEAK" "$VM_ALLOW" "${VM_ALLOW#\[*\] }")
+FIELDS_SED=$(sed -n "s/^AUDIT_FIELDS_SED='\(.*\)'$/\1/p" "$RELEASE/cli.sh")
+assert_eq "proxy audit reads every AUDIT line, prefixed or not, and no prose" \
+  "$(printf '%s\n' "$JOURNAL" | sed -nE "$FIELDS_SED" | cut -d' ' -f1 | tr '\n' ' ')" \
+  "verdict=LEAK-SUSPECT verdict=ALLOW verdict=ALLOW "
+eval "$(sed -n '/^leak_suspect_line()/p' "$RELEASE/cli.sh")"
+assert_eq "proxy test finds its probe's line by path" \
+  "$(printf '%s\n' "$JOURNAL" | leak_suspect_line desolate-manual-probe)" "$VM_LEAK"
+# The oracle's own pattern, as preflight.sh writes it; anchored, or it proves
+# nothing -- a bare path would match on its own.
+PREFLIGHT_RE=$(sed -nE 's/.*grep -aE? "(\^.*AUDIT verdict=LEAK-SUSPECT \.\* path=\/)\$marker ".*/\1/p' "$RELEASE/preflight.sh")
+case "$PREFLIGHT_RE" in
+  "^"*) assert_eq "preflight's leak oracle matches it too" \
+          "$(printf '%s\n' "$JOURNAL" | grep -aE "${PREFLIGHT_RE}desolate-manual-probe " | tail -n 1)" "$VM_LEAK" ;;
+  *) fail "found preflight's leak oracle pattern" "sed matched nothing anchored -- was it reformatted?" ;;
+esac
+
 group "proxy logs --project matches its project exactly"
 AWK=$(sed -n "s/^PROJECT_AUDIT_AWK='\(.*\)'$/\1/p" "$RELEASE/cli.sh")
 if [ -z "$AWK" ]; then
   fail "found PROJECT_AUDIT_AWK in cli.sh" "sed matched nothing -- was it renamed or reformatted?"
 else
   LINES='AUDIT verdict=ALLOW host=a.com project=a.b
+[12:04:04.855] AUDIT verdict=ALLOW host=d.com project=a.b
 AUDIT verdict=ALLOW host=b.com project=aXb
 AUDIT verdict=ALLOW host=c.com project=a.b/c
-NOTE project=a.b'
-  assert_eq "only the AUDIT line naming exactly that project" \
-    "$(printf '%s\n' "$LINES" | awk -v want=" project=a.b" "$AWK")" "AUDIT verdict=ALLOW host=a.com project=a.b"
+[12:04:04.855] NOTE project=a.b'
+  assert_eq "only the AUDIT lines naming exactly that project, as journald holds them" \
+    "$(printf '%s\n' "$LINES" | awk -v want=" project=a.b" "$AWK" | tr '\n' '|')" \
+    "AUDIT verdict=ALLOW host=a.com project=a.b|[12:04:04.855] AUDIT verdict=ALLOW host=d.com project=a.b|"
 fi
 
 summary

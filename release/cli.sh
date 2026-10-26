@@ -105,10 +105,19 @@ EOF
 # needs a quoted separator.
 # tests/static/05-cli-queries.sh executes this against a fixture.
 SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length)]+(.value.projects//[])+.value.hosts|@tsv'
+# The proxy's AUDIT lines, as journald holds them. mitmdump under systemd
+# prefixes each with its time -- `[12:03:33.715] AUDIT verdict=...` -- and
+# every reader here once anchored on `^AUDIT`, so on the VM `proxy audit`
+# printed nothing and preflight's leak oracle never matched (measured
+# 2026-10-26). This prints each AUDIT line's fields, prefix or not: `sed -nE`.
+AUDIT_FIELDS_SED='s/^(\[[0-9:.]*\] )?AUDIT //p'
 # `proxy logs --project <p>`: the AUDIT lines whose project field is <p>,
-# compared as a string. A grep for `project=$P$` read <p> as a regex, so a
-# `.` in a name matched any character.
-PROJECT_AUDIT_AWK='index($0, "AUDIT ") == 1 && substr($0, length($0) - length(want) + 1) == want'
+# compared as a string, printed whole. A grep for `project=$P$` read <p> as a
+# regex, so a `.` in a name matched any character.
+PROJECT_AUDIT_AWK='{ line = $0; sub(/^\[[0-9:.]*\] /, "", line) } index(line, "AUDIT ") == 1 && substr(line, length(line) - length(want) + 1) == want'
+# One request's LEAK-SUSPECT line, by the unique path it was sent to: what
+# `proxy test` and preflight's oracle look for. `grep -E`, with the path.
+leak_suspect_line() { grep -aE "^(\[[0-9:.]*\] )?AUDIT verdict=LEAK-SUSPECT .* path=/$1 " | tail -n 1; }
 
 # `export`, run INSIDE the editor where the files are:
 #   sh -c "$EXPORT_TAR_SH" sh <workspaces> <project> <relative-path>
@@ -1217,8 +1226,7 @@ case "$CMD" in
                        case "$N" in *[!0-9]*) echo "cli.sh: proxy audit takes a line count" >&2; exit 1 ;; esac
                        colima ssh -p "$COLIMA_PROFILE" -- \
                          sudo journalctl -u desolate-proxy -n "$N" --no-pager -o cat \
-                       | grep -a "^AUDIT " \
-                       | sed -e 's/^AUDIT //' \
+                       | sed -nE "$AUDIT_FIELDS_SED" \
                        | awk -v only="$ONLY" '
                            {
                              verdict=""; method=""; host=""; path=""; secrets=""; suspect=""; project="-";
@@ -1261,7 +1269,7 @@ case "$CMD" in
                        sleep 1
                        colima ssh -p "$COLIMA_PROFILE" -- \
                          sudo journalctl -u desolate-proxy --since -2min --no-pager -o cat \
-                       | grep -a "^AUDIT verdict=LEAK-SUSPECT .* path=/$MARK " | tail -n 1 \
+                       | leak_suspect_line "$MARK" \
                        | sed 's/^/   /' | grep . || echo "   (no LEAK-SUSPECT line -- leak detection is NOT live)" ;;
                *) echo "usage: cli.sh proxy {status|logs [--project <p>] [n]|audit [--project <p>] [n]|test}" >&2; exit 1 ;;
              esac ;;

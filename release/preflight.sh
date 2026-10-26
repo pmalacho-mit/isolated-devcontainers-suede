@@ -368,7 +368,7 @@ probe_leak_detection() {
   # journald can trail the request by a moment.
   for attempt in 1 2 3 4 5; do
     line=$(vm_ssh sudo journalctl -u desolate-proxy --since -5min --no-pager -o cat 2>/dev/null \
-             | grep -a "^AUDIT verdict=LEAK-SUSPECT .* path=/$marker " | tail -n 1)
+             | grep -aE "^(\[[0-9:.]*\] )?AUDIT verdict=LEAK-SUSPECT .* path=/$marker " | tail -n 1)
     [ -n "$line" ] && break
     sleep 1
   done
@@ -606,11 +606,19 @@ else
         vm_ssh sudo sh -c "printf '%s\n' '$dind_ip' > $INGRESS_ROOT/dinds/.desolate-dind && mv $INGRESS_ROOT/dinds/.desolate-dind $INGRESS_ROOT/dinds/desolate-dind" \
           && wrote_dind=1
       fi
+      # About 15 s at most: Lima forwarded a new VM listener in 20-215 ms when
+      # measured (T1.2), and waiting longer only made a failure slower.
       body=""
-      for _ in $(seq 1 40); do
-        body=$(curl -s --http0.9 -m 1 "http://127.0.0.1:$probe_port/" 2>/dev/null) && [ -n "$body" ] && break
+      for _ in $(seq 1 20); do
+        body=$(curl -s --http0.9 -m 0.5 "http://127.0.0.1:$probe_port/" 2>/dev/null) && [ -n "$body" ] && break
         sleep 0.25
       done
+      # Nothing on the Mac: ask the VM the same question while the forward is
+      # still open, so the failure can say which half of the path it is.
+      vm_body=""
+      [ -z "$body" ] && vm_body=$(vm_ssh curl -s --http0.9 -m 2 "http://127.0.0.1:$probe_port/" 2>/dev/null)
+      mac_holder=""
+      [ -z "$body" ] && mac_holder=$(lsof -nP -iTCP:"$probe_port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 {print $1 "(" $2 ")"}' | sort -u | tr '\n' ' ')
       # Checked while the probe's own listener is open, so there is at least
       # one to see: an empty answer here is a check that measured nothing.
       bound=$(ingress_listeners)
@@ -625,8 +633,14 @@ else
       inner rm -f "$INGRESS_PROBE" >/dev/null 2>&1
       case "$body" in
         *desolate-ingress-selftest*) ok "a port opened on demand reached this Mac: 127.0.0.1:$probe_port -> dind $dind_ip:18997" ;;
-        *) bad "nothing came back through 127.0.0.1:$probe_port (the ingress or Lima's forwarding)"
-           note "./cli.sh vm status; colima ssh -p ${COLIMA_PROFILE:-desolate} -- sudo journalctl -u desolate-ingress -n 20" ;;
+        *) case "$vm_body" in
+             *desolate-ingress-selftest*)
+               bad "nothing came back through 127.0.0.1:$probe_port on this Mac -- but the VM's own 127.0.0.1:$probe_port answered, so the ingress works and Lima did not forward it"
+               note "on this Mac, 127.0.0.1:$probe_port is held by: ${mac_holder:-nothing} (a port the Mac holds is one Lima never forwards)" ;;
+             *)
+               bad "nothing came back through 127.0.0.1:$probe_port, on this Mac or inside the VM -- the ingress did not forward it"
+               note "colima ssh -p ${COLIMA_PROFILE:-desolate} -- sudo journalctl -u desolate-ingress -n 20" ;;
+           esac ;;
       esac
     fi
   fi
