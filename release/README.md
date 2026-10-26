@@ -878,6 +878,9 @@ image from your base with the CA installed, tags it
 `desolate-ca/base:<hash>`, and starts the project from that. It happens once per
 base image, is cached in the inner daemon afterwards, and nothing about it
 bypasses the proxy -- the build just trusts it like every other container does.
+The base is first pinned to the digest it resolves to there (`image:tag@sha256:...`,
+said at the start), and the derivative is built from and keyed on that pin, so
+a tag that moves upstream cannot change what a cached derivative stands for.
 
 **Projects that build from their own `Dockerfile` are not covered.** The `FROM`
 is yours, so `desolate` cannot derive it; build-time HTTPS in such a project

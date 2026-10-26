@@ -490,6 +490,16 @@ export const createDocker = (run: Runner) => {
     /** "" when the image is not present locally. */
     id: (tag: string) => query("image", "inspect", "-f", "{{.Id}}", tag),
     pull: (tag: string) => run.status(["pull", tag], { quiet: true }),
+    /** The registry digests a local image is known by, `repo@sha256:...`
+     *  each; none for an image that was only ever built here. */
+    repoDigests: (tag: string): string[] => {
+      try {
+        const digests = JSON.parse(query("image", "inspect", "-f", "{{json .RepoDigests}}", tag) || "[]");
+        return Array.isArray(digests) ? digests.filter((d): d is string => typeof d === "string") : [];
+      } catch {
+        return [];
+      }
+    },
     /** The image's declared USER, or "root" when it declares none.
      *
      *  A derived image has to restore it: building as root and leaving it there

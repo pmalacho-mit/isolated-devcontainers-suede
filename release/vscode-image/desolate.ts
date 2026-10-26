@@ -107,6 +107,7 @@ import {
 } from "./devcontainer.ts";
 import {
   caTrustingImage,
+  pinnedImage,
   installInstructions,
   trust,
 } from "./certificates.ts";
@@ -658,7 +659,12 @@ function caTrustedBaseImage(cfg: ProjectConfig): string {
   }
   if (!cfg.image) return "";
 
-  const tag = caTrustingImage(cfg.image, docker);
+  // Derived from the image as pinned now, so the derivative is keyed on what
+  // it was built from (T5.4).
+  const pinned = pinnedImage(cfg.image, docker);
+  if (pinned && pinned !== cfg.image) desolog(`${cfg.image} is ${pinned.split("@")[1]} here; deriving from that`);
+  else if (!pinned) desolog(`${cfg.image} has no registry digest here; deriving from it unpinned`);
+  const tag = caTrustingImage(pinned || cfg.image, docker);
   if (!tag)
     console.error(
       `desolate: warning -- proceeding with ${cfg.image}; build-time HTTPS may fail`,

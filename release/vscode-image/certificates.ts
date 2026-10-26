@@ -150,6 +150,43 @@ export const trust = {
   ],
 };
 
+/** An image reference's repository, as docker spells it in RepoDigests:
+ *  `node:22` is `node`, `ghcr.io/a/b:1` is `ghcr.io/a/b`. */
+const repositoryOf = (image: string) => {
+  const withoutDigest = image.split("@")[0];
+  const slash = withoutDigest.lastIndexOf("/");
+  const colon = withoutDigest.lastIndexOf(":");
+  return colon > slash ? withoutDigest.slice(0, colon) : withoutDigest;
+};
+
+/** Docker Hub's short spellings, expanded, so `node` and
+ *  `docker.io/library/node` compare equal. */
+const canonical = (repository: string) => {
+  const first = repository.split("/")[0];
+  const hasRegistry = repository.includes("/") && (first.includes(".") || first.includes(":") || first === "localhost");
+  if (hasRegistry) return repository;
+  return `docker.io/${repository.includes("/") ? "" : "library/"}${repository}`;
+};
+
+/**
+ * T5.4: the spec's image, pinned to the digest it resolves to here, now --
+ * `repo:tag@sha256:...`. Everything derived from it (the CA-trusting image,
+ * and so the devcontainer) is then built from exactly that, and a tag that
+ * moves upstream cannot change what a cached derivative stands for. An image
+ * already pinned is left alone; one with no registry digest (built locally)
+ * cannot be pinned, and "" says so.
+ */
+export function pinnedImage(image: string, docker: Docker): string {
+  if (/@sha256:[0-9a-f]{64}$/.test(image)) return image;
+  if (!docker.image.id(image) && docker.image.pull(image) !== 0) return "";
+  const repository = canonical(repositoryOf(image));
+  const digest = docker.image
+    .repoDigests(image)
+    .map((reference) => reference.split("@"))
+    .find(([name, sha]) => canonical(name) === repository && /^sha256:[0-9a-f]{64}$/.test(sha ?? ""))?.[1];
+  return digest ? `${image.split("@")[0]}@${digest}` : "";
+}
+
 /** Build (once) an image identical to `baseImage` but trusting the proxy CA.
  *  Returns its tag, or "" if it could not be produced. */
 export function caTrustingImage(baseImage: string, docker: Docker): string {
