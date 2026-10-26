@@ -37,11 +37,33 @@ export const label = ({ project }: Target) => `${LABEL_KEY}=${project}`;
  *
  *  Stopping a dind must leave its images unpacked -- that is the whole reason
  *  idle dinds are stopped rather than destroyed -- so the image store is a
- *  volume of its own and only a purge removes it. */
-export const volumes = (target: Target) => {
-  const namespace = projectNamespace(target);
-  return { data: `dind-data-${namespace}`, socket: `dind-sock-${namespace}` };
+ *  volume of its own and only a purge removes it.
+ *
+ *  Its SOCKET is not a volume of its own. Every project dind listens in one
+ *  shared volume (`sockets.volume`), each in the directory named for its
+ *  namespace, mounted into that dind alone with `volume-subpath`. The
+ *  orchestrator, which drives every project, mounts the whole volume -- a
+ *  container's mounts are fixed at creation, so a volume per project could
+ *  never reach an orchestrator that is already running. */
+export const volumes = (target: Target) => ({
+  data: `dind-data-${projectNamespace(target)}`,
+  socketSubpath: projectNamespace(target),
+});
+
+/** Where the shared sockets volume lives, from each side of it. */
+export const sockets = {
+  /** The compose volume (compose prefixes it with the project, `desolate_`). */
+  volume: "dind-sockets",
+  /** Where the orchestrator mounts the whole of it. */
+  orchestratorMount: "/run/dind-sockets",
+  /** One project's socket, as the orchestrator reaches it. */
+  forOrchestrator: (target: Target) =>
+    `/run/dind-sockets/${projectNamespace(target)}/docker.sock`,
 };
+
+/** The network a project dind sits on is named for the bridge it pins, so a
+ *  sweep that knows only bridges can find it. */
+export const network = (target: Target) => bridge(target);
 
 /** Linux caps interface names at IFNAMSIZ-1 and silently REJECTS longer ones,
  *  which is why this is hashed: a namespace may be 129 characters. */

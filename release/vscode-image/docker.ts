@@ -199,6 +199,99 @@ export const parseWorktreeChanges = (text: string): string[] | null => {
   return lines.slice(ran + 1).filter((line) => line.trim() !== "");
 };
 
+/**
+ * Everything a project dind is created with (supervisor.ts builds this from
+ * dind.ts names and its environment). Volume names are the daemon's own --
+ * compose-prefixed where compose made them.
+ */
+export interface DindSpec {
+  name: string;
+  /** `desolate.dind=<project>` (dind.label). */
+  label: string;
+  /** The network, named for the `br-d-<hash>` bridge it pins. */
+  network: string;
+  /** `sysbox-runc` in production. `runc` exists for the nested harness and
+   *  means --privileged; supervisor.ts refuses it outside that harness. */
+  runtime: "sysbox-runc" | "runc";
+  image: string;
+  /** The project, as a relative path: the subpath of `workspaces` it sees. */
+  project: string;
+  volumes: {
+    data: string;
+    workspaces: string;
+    sockets: string;
+    socketSubpath: string;
+    serverDist: string;
+    health: string;
+  };
+  /** Host path of the proxy CA directory (the VM's /var/lib/desolate-proxy/public). */
+  caDirectory: string;
+  limits: { memory: string; pids: number; cpus: string };
+  /** /etc/docker/daemon.json inside the dind: where the BuildKit GC lives. */
+  daemonJson: string;
+}
+
+/** Inside a project dind, written by its entrypoint before dockerd starts:
+ *  the CA (as the shared dind installs it), daemon.json, and the
+ *  /var/run/docker.sock ALIAS -- what docker-outside-of-docker's own mount
+ *  binds from (sibling-feature.sh F1/F3). */
+const DIND_ENTRYPOINT =
+  '[ -x /desolate-ca/install-ca.sh ] && /desolate-ca/install-ca.sh >/dev/null 2>&1 || true; ' +
+  'mkdir -p /etc/docker && printf "%s" "$DESOLATE_DAEMON_JSON" > /etc/docker/daemon.json; ' +
+  'ln -sf /run/dind-sock/docker.sock /var/run/docker.sock; ' +
+  'exec dockerd-entrypoint.sh "$@"';
+
+const dindRunArgv = (spec: DindSpec) => [
+  "run",
+  "-d",
+  "--name",
+  spec.name,
+  "--label",
+  spec.label,
+  ...(spec.runtime === "runc" ? ["--privileged"] : ["--runtime", spec.runtime]),
+  "--network",
+  spec.network,
+  // NO restart policy, deliberately: a VM reboot must not bring every dind
+  // back at once, independently of the projects that wanted them -- the
+  // reconciliation storm the relays' policy caused (docker.ts relay.start).
+  "--memory",
+  spec.limits.memory,
+  "--pids-limit",
+  String(spec.limits.pids),
+  "--cpus",
+  spec.limits.cpus,
+  "--ulimit",
+  "nofile=524288:524288",
+  "-e",
+  "DOCKER_TLS_CERTDIR=",
+  "-e",
+  `DESOLATE_DAEMON_JSON=${spec.daemonJson}`,
+  "--mount",
+  `type=volume,source=${spec.volumes.data},target=/var/lib/docker`,
+  "--mount",
+  `type=volume,source=${spec.volumes.sockets},target=/run/dind-sock,volume-subpath=${spec.volumes.socketSubpath}`,
+  // ONE project, at its own path: the whole of the containment (the socket
+  // is root over this daemon, so what it can see is what it can give away).
+  "--mount",
+  `type=volume,source=${spec.volumes.workspaces},target=/workspaces/${spec.project},volume-subpath=${spec.project}`,
+  "--mount",
+  `type=volume,source=${spec.volumes.serverDist},target=/server-dist,readonly`,
+  "--mount",
+  `type=volume,source=${spec.volumes.health},target=/desolate-health,readonly`,
+  "--mount",
+  `type=bind,source=${spec.caDirectory},target=/desolate-ca,readonly`,
+  "--entrypoint",
+  "/bin/sh",
+  spec.image,
+  "-c",
+  DIND_ENTRYPOINT,
+  "--",
+  "dockerd",
+  "--host=unix:///run/dind-sock/docker.sock",
+  "--group=1000",
+  "--default-ulimit=nofile=65536:524288",
+];
+
 export const createDocker = (run: Runner) => {
   const query = (...argv: string[]) => run.output(argv);
   const effect = (...argv: string[]) => run.status(argv);
@@ -420,6 +513,46 @@ export const createDocker = (run: Runner) => {
           `> /tmp/changes 2> /tmp/warnings; ran=$?; cat /tmp/warnings; ` +
           `[ "$ran" = 0 ] && [ ! -s /tmp/warnings ] && echo ${STATUS_RAN} && cat /tmp/changes`,
       ]),
+    /** A project's own daemon (supervisor.ts is the only caller). */
+    dind: {
+      networkExists: (network: string) =>
+        query("network", "inspect", "-f", "{{.Name}}", network) === network,
+      createNetwork: (network: string, bridge: string, label: string) =>
+        effect(
+          "network",
+          "create",
+          "--driver",
+          "bridge",
+          "--opt",
+          `com.docker.network.bridge.name=${bridge}`,
+          "--label",
+          label,
+          network,
+        ),
+      removeNetwork: (network: string) => effect("network", "rm", network),
+      /** Created AND started: `run -d`. */
+      create: (spec: DindSpec) => effect(...dindRunArgv(spec)),
+      start: (name: string) => effect("start", name),
+      /** "" when there is no such container. */
+      state: (name: string) => query("inspect", "-f", "{{.State.Status}}", name),
+      /** The same verdict the shared dind's healthcheck gives -- one script,
+       *  pointed at this dind's socket. 0 healthy, 1 booting, 2 wedged. */
+      health: (name: string) =>
+        run.status(
+          [
+            "exec",
+            "-e",
+            "DESOLATE_INNER_SOCKET=/run/dind-sock/docker.sock",
+            name,
+            "sh",
+            "/desolate-health/inner-health.sh",
+          ],
+          { quiet: true, timeoutMs: 10_000 },
+        ),
+      /** Names of every project dind, running or not. */
+      all: (labelKey: string) =>
+        nonEmptyLines(query("ps", "-a", "--filter", `label=${labelKey}`, "--format", "{{.Names}}")),
+    },
     /** Run a throwaway helper container against one volume. */
     inVolume: (
       helperImage: string,

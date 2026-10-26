@@ -569,3 +569,100 @@ describe("reading the changes check", () => {
       assert.equal(parseWorktreeChanges(text), null, text);
   });
 });
+
+describe("a project dind's create argv", () => {
+  const spec = {
+    name: "desolate-dind-acme__widgets",
+    label: "desolate.dind=acme/widgets",
+    network: "br-d-3f2a9c1e5b",
+    runtime: "sysbox-runc" as const,
+    image: "docker:29-dind",
+    project: "acme/widgets",
+    volumes: {
+      data: "dind-data-acme__widgets",
+      workspaces: "desolate_workspaces",
+      sockets: "desolate_dind-sockets",
+      socketSubpath: "acme__widgets",
+      serverDist: "desolate_server-dist",
+      health: "desolate_inner-health",
+    },
+    caDirectory: "/var/lib/desolate-proxy/public",
+    limits: { memory: "4g", pids: 4096, cpus: "4" },
+    daemonJson: '{"builder":{"gc":{"enabled":true,"defaultKeepStorage":"20GB"}}}',
+  };
+  const argvFor = (overrides: Partial<typeof spec> | { runtime: "runc" } = {}) => {
+    const { runner, calls } = recorder();
+    createDocker(runner).dind.create({ ...spec, ...overrides } as any);
+    return calls[0];
+  };
+  const mounts = (argv: string[]) => argv.flatMap((word, i) => (word === "--mount" ? [argv[i + 1]] : []));
+
+  test("publishes nothing and has no restart policy", () => {
+    const argv = argvFor();
+    for (const flag of ["-p", "--publish", "-P", "--publish-all", "--restart"])
+      assert.ok(!argv.includes(flag), `${flag} in ${argv}`);
+  });
+
+  test("runs under sysbox and is NOT privileged", () => {
+    const argv = argvFor();
+    assert.equal(argv[argv.indexOf("--runtime") + 1], "sysbox-runc");
+    assert.ok(!argv.includes("--privileged"));
+    assert.ok(!argv.some((word) => word.startsWith("--cap-add")));
+  });
+
+  test("runc means privileged, and is spelled that way rather than hidden", () => {
+    const argv = argvFor({ runtime: "runc" });
+    assert.ok(argv.includes("--privileged"));
+    assert.ok(!argv.includes("--runtime"));
+  });
+
+  test("sees ONE project, at its own path, as a subpath of the workspaces volume", () => {
+    const workspace = mounts(argvFor()).filter((m) => m.includes("desolate_workspaces"));
+    assert.deepEqual(workspace, [
+      "type=volume,source=desolate_workspaces,target=/workspaces/acme/widgets,volume-subpath=acme/widgets",
+    ]);
+  });
+
+  test("listens in its own directory of the shared sockets volume", () => {
+    assert.ok(mounts(argvFor()).includes(
+      "type=volume,source=desolate_dind-sockets,target=/run/dind-sock,volume-subpath=acme__widgets",
+    ));
+  });
+
+  test("keeps its images in a volume of its own, and mounts the rest read-only", () => {
+    const all = mounts(argvFor());
+    assert.ok(all.includes("type=volume,source=dind-data-acme__widgets,target=/var/lib/docker"));
+    for (const shared of ["desolate_server-dist", "desolate_inner-health", "/var/lib/desolate-proxy/public"])
+      assert.match(all.find((m) => m.includes(shared))!, /,readonly$/, shared);
+  });
+
+  test("is bounded: memory, pids and cpus", () => {
+    const argv = argvFor();
+    assert.equal(argv[argv.indexOf("--memory") + 1], "4g");
+    assert.equal(argv[argv.indexOf("--pids-limit") + 1], "4096");
+    assert.equal(argv[argv.indexOf("--cpus") + 1], "4");
+  });
+
+  test("dockerd listens on the socket the devcontainer binds, for the editor's group", () => {
+    const argv = argvFor();
+    const daemon = argv.slice(argv.indexOf("dockerd"));
+    assert.deepEqual(daemon, [
+      "dockerd",
+      "--host=unix:///run/dind-sock/docker.sock",
+      "--group=1000",
+      "--default-ulimit=nofile=65536:524288",
+    ]);
+    // and the alias docker-outside-of-docker's own mount takes its source from
+    assert.match(argv[argv.indexOf("-c") + 1], /ln -sf \/run\/dind-sock\/docker\.sock \/var\/run\/docker\.sock/);
+  });
+
+  test("carries its daemon.json in, for the BuildKit GC", () => {
+    const argv = argvFor();
+    assert.ok(argv.includes(`DESOLATE_DAEMON_JSON=${spec.daemonJson}`));
+  });
+
+  test("is labelled so a sweep that knows no targets finds it", () => {
+    const argv = argvFor();
+    assert.equal(argv[argv.indexOf("--label") + 1], "desolate.dind=acme/widgets");
+  });
+});

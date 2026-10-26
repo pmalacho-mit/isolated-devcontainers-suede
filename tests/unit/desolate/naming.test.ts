@@ -71,7 +71,7 @@ describe("a target with no worktree is named exactly as it was", () => {
     assert.equal(dind.label(nested), "desolate.dind=acme/widgets");
     assert.deepEqual(dind.volumes(nested), {
       data: "dind-data-acme__widgets",
-      socket: "dind-sock-acme__widgets",
+      socketSubpath: "acme__widgets",
     });
   });
 
