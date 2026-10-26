@@ -540,6 +540,83 @@ else
 fi
 
 echo
+echo "== 8. ingress (dev-server ports reach the Mac with no published range) =="
+# desolate-ingress (release/proxy/vm/ingress.py) opens 127.0.0.1:<port> in the
+# VM when a ports/ file appears, and Lima carries that to this Mac. Proved the
+# way a dev server will use it: a listener on the shared dind's INNER daemon,
+# published there and nowhere else, fetched from THIS machine's 127.0.0.1.
+INGRESS_ROOT=/run/desolate-ingress
+INGRESS_PROBE=desolate-preflight-ingress
+if ! vm_ssh systemctl is-active --quiet desolate-ingress 2>/dev/null; then
+  bad "desolate-ingress is not running in the VM"
+  note "install it: ./cli.sh vm install --proxy-only"
+else
+  ok "desolate-ingress is running in the VM"
+  owners=$(vm_ssh stat -c '%n=%u' "$INGRESS_ROOT/dinds" "$INGRESS_ROOT/ports" 2>/dev/null | tr '\n' ' ')
+  case "$owners" in
+    *"/dinds=0 "*"/ports=1000 "*) ok "its directories exist, owned by their writers ($owners)" ;;
+    *) bad "its directories are missing or owned wrongly: ${owners:-none}"
+       note "expected dinds/ owned by root (the supervisor) and ports/ by 1000 (the orchestrator)" ;;
+  esac
+  # Its listeners, by the unit's own pid -- `ss` names the process python3.
+  ingress_listeners() {
+    local pid
+    pid=$(vm_ssh systemctl show -p MainPID --value desolate-ingress 2>/dev/null)
+    [ -n "$pid" ] && [ "$pid" != 0 ] || return
+    vm_ssh sudo ss -Hltnp 2>/dev/null | awk -v p="pid=$pid," 'index($0, p) {print $4}' | sort -u | tr '\n' ' '
+  }
+
+  # The self-test forward. A free port on THIS Mac, since a port the Mac holds
+  # is one Lima never forwards (L6) -- that would fail the probe, not the stack.
+  probe_port=""
+  for candidate in 18996 18986 18976 18966; do
+    lsof -nP -iTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1 || { probe_port=$candidate; break; }
+  done
+  dind_ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "desolate_dindnet").IPAddress}}' desolate-dind 2>/dev/null)
+  if [ -z "$probe_port" ] || [ -z "$dind_ip" ]; then
+    skipped "ingress self-test: no free probe port on this Mac, or the dind has no address"
+  else
+    inner() { docker exec -e DOCKER_HOST=unix:///run/inner/docker.sock desolate-dind docker "$@"; }
+    inner rm -f "$INGRESS_PROBE" >/dev/null 2>&1
+    if ! inner run -d --rm --name "$INGRESS_PROBE" -p 18997:18997 alpine/socat \
+           "TCP-LISTEN:18997,fork,reuseaddr" "SYSTEM:echo desolate-ingress-selftest" >/dev/null 2>&1; then
+      bad "could not start the ingress self-test listener on the inner daemon"
+    else
+      # Only write the shared dind's entry if nothing owns it yet, and only
+      # remove what this wrote: the supervisor will publish it for real.
+      wrote_dind=""
+      if ! vm_ssh test -e "$INGRESS_ROOT/dinds/desolate-dind"; then
+        vm_ssh sudo sh -c "printf '%s\n' '$dind_ip' > $INGRESS_ROOT/dinds/.desolate-dind && mv $INGRESS_ROOT/dinds/.desolate-dind $INGRESS_ROOT/dinds/desolate-dind" \
+          && wrote_dind=1
+      fi
+      vm_ssh sudo sh -c "printf 'desolate-dind:18997\n' > $INGRESS_ROOT/ports/.$probe_port && mv $INGRESS_ROOT/ports/.$probe_port $INGRESS_ROOT/ports/$probe_port"
+      body=""
+      for _ in $(seq 1 40); do
+        body=$(curl -s --http0.9 -m 1 "http://127.0.0.1:$probe_port/" 2>/dev/null) && [ -n "$body" ] && break
+        sleep 0.25
+      done
+      # Checked while the probe's own listener is open, so there is at least
+      # one to see: an empty answer here is a check that measured nothing.
+      bound=$(ingress_listeners)
+      case "$bound" in
+        "") bad "could not see the ingress's listeners (ss, or the unit's pid)" ;;
+        *0.0.0.0:*|*"[::]:"*|*"*:"*) bad "the ingress listens beyond loopback: $bound"
+                                     note "Lima forwards a VM 0.0.0.0 listener onto the Mac's LAN (vm-loopback-forward.sh L2)" ;;
+        *) ok "every ingress listener is loopback-only ($bound)" ;;
+      esac
+      vm_ssh sudo rm -f "$INGRESS_ROOT/ports/$probe_port"
+      [ -n "$wrote_dind" ] && vm_ssh sudo rm -f "$INGRESS_ROOT/dinds/desolate-dind"
+      inner rm -f "$INGRESS_PROBE" >/dev/null 2>&1
+      case "$body" in
+        *desolate-ingress-selftest*) ok "a port opened on demand reached this Mac: 127.0.0.1:$probe_port -> dind $dind_ip:18997" ;;
+        *) bad "nothing came back through 127.0.0.1:$probe_port (the ingress or Lima's forwarding)"
+           note "./cli.sh vm status; colima ssh -p ${COLIMA_PROFILE:-desolate} -- sudo journalctl -u desolate-ingress -n 20" ;;
+      esac
+    fi
+  fi
+fi
+
+echo
 echo "-- $pass passed, $fail failed, $skip skipped --"
 [ "$fail" -eq 0 ] && echo "Stack looks good. Next: ./cli.sh desolate example-project" || \
   echo "Fix the FAIL lines above; see Troubleshooting in README.md"
