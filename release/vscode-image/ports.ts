@@ -6,6 +6,7 @@
  * holds), so the rule can be exercised on port maps that would take a running
  * stack to reproduce.
  */
+import { hint } from "./hints.ts";
 import * as relay from "./relays.ts";
 
 export type PortMap = Map<string, number>;
@@ -95,7 +96,7 @@ const exhausted = (label: string, world: PortWorld, taken: Set<number>) => {
       All ${max - min + 1} ports are spoken for:
 
 ${held.join("\n")}
-      Free some:  desolate --stop <project> [--worktree <name>]
+      Free some:  ${hint.desolate("--stop <project> [--worktree <name>]")}
       Every target holds a port for its editor, and a project's worktrees are
       targets of their own -- the holders above name each one, because a relay
       is called desolate-relay-<project>[--wt--<worktree>]-<port>.
@@ -104,10 +105,10 @@ ${held.join("\n")}
       that publish stay in agreement:
         DESOLATE_PORT_MIN=${min}
         DESOLATE_PORT_MAX=${max + 10}
-        ./cli.sh up
+        ${hint.mac("up")}
       Relay containers are 'restart: unless-stopped', so one whose project
       was deleted by hand still holds its port -- 'docker ps' on the inner
-      daemon (./cli.sh observe ps) shows those as desolate-relay-*.`,
+      daemon (${hint.mac("observe ps")}) shows those as desolate-relay-*.`,
   );
 };
 

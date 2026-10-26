@@ -953,7 +953,7 @@ case "$CMD" in
              SUB="${1:-list}"; shift || true
              case "$SUB" in
                list|add)
-                 exec docker exec "${TTY[@]}" "$CONTAINER" worktree "$SUB" "$@" ;;
+                 exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" worktree "$SUB" "$@" ;;
                remove)
                  PROJ="${1:?usage: cli.sh worktree remove <project> <name>}"
                  NAME="${2:?usage: cli.sh worktree remove <project> <name>}"
@@ -962,16 +962,17 @@ case "$CMD" in
                  # orchestrator's side), the worktree itself is git (the
                  # editor's side). Purge first -- once git has removed the
                  # directory there is nothing left to identify the container by.
-                 docker exec "$ORCHESTRATOR" desolate-run --purge --worktree "$NAME" "$PROJ" || exit 1
-                 exec docker exec "${TTY[@]}" "$CONTAINER" worktree remove "$PROJ" "$NAME" ;;
+                 docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --purge --worktree "$NAME" "$PROJ" || exit 1
+                 exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" worktree remove "$PROJ" "$NAME" ;;
                *) echo "usage: cli.sh worktree {list <project>|add <project> <name> [<branch>]|remove <project> <name>}" >&2; exit 1 ;;
              esac ;;
 
   desolate)  ensure_running
              # From the Mac we use the DIRECT runner in the orchestrator (the
              # Mac is already trusted). Inside the editor, `desolate` is a
-             # broker client -- the editor has no daemon access.
-             exec docker exec "${TTY[@]}" "$ORCHESTRATOR" desolate-run "$@" ;;
+             # broker client -- the editor has no daemon access. DESOLATE_PLANE
+             # makes the follow-up commands it prints the Mac's spelling (#9).
+             exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run "$@" ;;
 
   shell|bash) ensure_running
              # with-ca, because `docker exec` inherits NOTHING the entrypoint

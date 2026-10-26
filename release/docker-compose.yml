@@ -267,6 +267,9 @@ services:
       # so a malicious extension here cannot create containers, 
       # mount other projects' volumes, or exec into siblings.
       DESOLATE_BROKER: /run/broker/desolate.sock
+      # Which terminal printed hints name (hints.ts). cli.sh's own execs into
+      # this container override it with `mac`.
+      DESOLATE_PLANE: editor
       # Deliberately NOT set: GPG_AGENT_INFO, GIT_ASKPASS.
       # Nothing forwards your HOST agents into this stack -- SSH_AUTH_SOCK
       # below is the stack's own keyring, not yours. It is an agent socket, so

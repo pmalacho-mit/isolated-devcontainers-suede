@@ -51,6 +51,7 @@ import {
   worktreesOf,
   type Target,
 } from "./projects.ts";
+import { hint } from "./hints.ts";
 import { isEntryPoint, run } from "./utils.ts";
 
 /** Overridable so the whole tool can be pointed at a throwaway workspace, the
@@ -396,7 +397,7 @@ const main = ([command, project, name, branch]: string[]) => {
       if (!name) return die(`'add' needs a worktree name\n${USAGE}`);
       add(targetFrom(project, name), branch || name);
       return console.log(
-        `          start it with:  desolate ${project} --worktree ${name}`,
+        `          start it with:  ${hint.desolate(`${project} --worktree ${name}`)}`,
       );
     }
     case "remove":

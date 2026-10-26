@@ -18,6 +18,7 @@ import {
 import { createServer } from "node:net";
 import { dirname } from "node:path";
 import { resolveSpec } from "./devcontainer.ts";
+import { PLANE_VARIABLE } from "./hints.ts";
 import {
   snapshot,
   initDirectory as initSnapshotDirectory,
@@ -189,7 +190,9 @@ type Send = (payload: string | Record<string, any>) => void;
 
 const spawnDesolate = (argv: string[], send: Send) =>
   new Promise<number>((resolve) => {
-    const { env } = process;
+    // Every request reaching the broker came from the editor container, so
+    // that is where the hints desolate prints should send the reader.
+    const env = { ...process.env, [PLANE_VARIABLE]: "editor" };
     const child = spawn("tsx", [config.runner, ...argv], {
       env,
       stdio: ["ignore", "pipe", "pipe"],

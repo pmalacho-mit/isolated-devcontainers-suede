@@ -56,6 +56,7 @@ import * as worktrees from "./worktrees.ts";
 import { parse as parseJsonc } from "./jsonc.ts";
 import { isEntryPoint, run, type JSONValue } from "./utils.ts";
 import { parseArgs, USAGE, type Args } from "./args.ts";
+import { hint } from "./hints.ts";
 import { createDocker, type NetworkAttachment, type Runner } from "./docker.ts";
 import {
   CA_DIR,
@@ -834,9 +835,9 @@ const startRelay = (
       `relay for ${hostPort} started but died.\n      socat says: ${why}`,
       `      Most common cause: something else already publishes ${hostPort} on the`,
       `      inner daemon -- usually a leftover "appPort" in devcontainer.json.`,
-      `      Remove appPort (desolate allocates host ports itself), then:`,
-      `        docker rm -f $(docker ps -aq --filter label=devcontainer.local_folder=${target.dir})`,
-      `        desolate ${invocation(target)}`,
+      `      Remove appPort (desolate allocates host ports itself), then recreate`,
+      `      the container without it:`,
+      `        ${hint.desolate(`--rebuild ${invocation(target)}`)}`,
     ].join("\n"),
   );
 };
@@ -950,7 +951,7 @@ function showRunning(): void {
   const running = runningTargets();
   if (!running.length)
     return console.log(
-      "nothing is running.  Start something:  desolate <project>",
+      `nothing is running.  Start something:  ${hint.desolate("<project>")}`,
     );
 
   const width = Math.max(...running.map(({ name }) => name.length));
@@ -960,10 +961,8 @@ function showRunning(): void {
         `${target.worktree ? "worktree" : "project "}  ${editorUrl(target)}`,
     );
 
-  console.log(
-    `\n  Ports: desolate --ports <project>    ` +
-      `Stop: desolate --stop <project> | --stop all`,
-  );
+  console.log(`\n  Ports: ${hint.desolate("--ports <project>")}`);
+  console.log(`  Stop:  ${hint.desolate("--stop <project> | --stop all")}`);
 }
 
 /**
@@ -1007,7 +1006,7 @@ function refuseIfWorktreesAreRunning(target: Target): void {
   die(`${target.name} has ${running.length} worktree(s) still running.
       They are containers of their own, so stopping the project would leave
       them up. Stop them first:
-${running.map((w) => `        desolate --stop ${invocation(w)}`).join("\n")}`);
+${running.map((w) => `        ${hint.desolate(`--stop ${invocation(w)}`)}`).join("\n")}`);
 }
 
 function stopTarget(target: Target): void {
@@ -1027,10 +1026,16 @@ function stopTarget(target: Target): void {
     console.log(
       `stopped ${target.name} (container kept, so restarting is fast;`,
     );
-    console.log(
-      `         use 'desolate --rebuild ${invocation(target)}' to apply spec changes)`,
-    );
+    console.log(`         to apply spec changes: ${hint.desolate(`--rebuild ${invocation(target)}`)})`);
   } else console.log("not running");
+
+  // The next step for a worktree is usually to remove it, and the command that
+  // does that properly -- purge here, then git in the editor -- exists only on
+  // the Mac (#9).
+  if (target.worktree)
+    console.log(
+      `  done with it?  ${hint.mac(`worktree remove ${target.project} ${target.worktree}`)}`,
+    );
 }
 
 /**
@@ -1048,7 +1053,7 @@ function purgeTarget(target: Target): void {
   if (devcontainerId(target.dir))
     die(`${target.name} is running. Purging would pull its filesystem out from
       under it, so stop it first:
-        desolate --stop ${invocation(target)}`);
+        ${hint.desolate(`--stop ${invocation(target)}`)}`);
 
   docker.container.remove(ownRelayNames(target));
   const id = devcontainerId(target.dir, /* includeStopped */ true);
@@ -1113,7 +1118,7 @@ async function runTarget(
         'devcontainer up' reuses an existing container without re-reading
         devcontainer.json, so THE CHANGE IS NOT IN EFFECT below.
           .devcontainer fingerprint: ${saved} -> ${fingerprint}
-        Apply it:  desolate --rebuild ${invocation(target)}
+        Apply it:  ${hint.desolate(`--rebuild ${invocation(target)}`)}
         Why not automatic: recreating loses anything written inside the
         container outside /workspaces.
         `);
@@ -1160,9 +1165,8 @@ async function runTarget(
     );
   }
   const paste = invocation(target);
-  console.log(
-    `\n  Port map: desolate --ports ${paste}    Stop: desolate --stop ${paste}`,
-  );
+  console.log(`\n  Port map: ${hint.desolate(`--ports ${paste}`)}`);
+  console.log(`  Stop:     ${hint.desolate(`--stop ${paste}`)}`);
 }
 
 /** Turn a validated command line into the one directory it denotes.
@@ -1192,9 +1196,8 @@ function targetFromArguments(project: string, worktree?: string): Target {
 
   if (!fs.existsSync(target.dir))
     die(`no such worktree: ${target.dir}
-      Create it from the editor, where git already runs against this project:
-        ./cli.sh worktree add ${project} ${worktree}
-      (or, in the editor's terminal: worktree add ${project} ${worktree})`);
+      Create it:
+        ${hint.anywhere(`worktree add ${project} ${worktree}`, `./cli.sh worktree add ${project} ${worktree}`)}`);
 
   return target;
 }
@@ -1208,7 +1211,7 @@ const targetOf = ({ project, worktree }: Args): Target =>
 
 const ALL_IS_ALSO_A_PROJECT =
   `desolate: '${EVERY_TARGET}' is a project in ${WORKSPACES}, so this stops ` +
-  `THAT project.\n          To stop every running target: desolate --stop --all`;
+  `THAT project.\n          To stop every running target: ${hint.desolate("--stop --all")}`;
 
 /** `--all`, the word `all`, or one named target -- in that order, because only
  *  the first two can be widened by accident. */
