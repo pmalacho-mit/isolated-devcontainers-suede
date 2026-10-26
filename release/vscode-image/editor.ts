@@ -207,11 +207,26 @@ export const externalEnvironment = (map: Iterable<[string, number]>): [string, s
   return env;
 };
 
+/**
+ * DESOLATE_TARGET and DESOLATE_PROJECT: who this container is, in the
+ * factory's terms (work-protocol.ts) -- `main` for a project's own tree, the
+ * worktree's name otherwise. `desolate-work` writes as DESOLATE_TARGET. Both
+ * are names projects.ts has already validated, checked again here, as the
+ * ports are, before a shell sees them.
+ *
+ * @throws EditorScriptError for a name with anything a shell would read. */
+export const targetEnvironment = ({ project, worktree }: { project: string; worktree?: string }): [string, string][] => {
+  for (const name of [project, worktree ?? "main"])
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name))
+      throw new EditorScriptError(`refusing to export '${name}': not a project or worktree name`);
+  return [["DESOLATE_TARGET", worktree ?? "main"], ["DESOLATE_PROJECT", project]];
+};
+
 /** /etc/profile.d/desolate-ports.sh: the same variables for login shells --
  *  an agent's `bash -l`, a `docker exec ... bash -lc`. */
 export const externalProfile = (env: [string, string][]) =>
   [
-    "# written by desolate at every start: the host ports a human opens (#17)",
+    "# written by desolate at every start: who this container is, and the host ports a human opens (#17)",
     ...env.map(([name, value]) => `export ${name}=${value}`),
     "",
   ].join("\n");

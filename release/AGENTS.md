@@ -132,6 +132,25 @@ Environment variables may contain **placeholders** (e.g. `MYAPP-OPENAI-KEY`) rat
 - Never `COPY .env` or `ARG` a real credential into an image; layers are permanent.
 - Files you cannot delete because a container wrote them as root: with a daemon of your own, reclaim them yourself (the Docker section above). Without one, ask the human to run `./cli.sh reclaim <project> [<path>]` on the Mac. `./cli.sh worktree remove` does it before it removes anything.
 
+## Working in a factory
+
+When a project runs several agents -- one in its main tree, one per worktree -- they talk over the project's `.git` and nothing else. `/desolate-ca/desolate-work` writes and reads those messages; every message is a commit on your own ref, `refs/desolate/agents/$DESOLATE_TARGET/outbox` (`main` for the project's tree, the worktree's name otherwise).
+
+```bash
+/desolate-ca/desolate-work say status "tests green on $(git rev-parse --short HEAD)"
+/desolate-ca/desolate-work ask main "may I change the public schema?"
+/desolate-ca/desolate-work inbox                     # what was said to you, or to everyone
+/desolate-ca/desolate-work answer <sha> "yes, behind a flag"
+/desolate-ca/desolate-work done "ready for review on branch issue/42-headers"
+/desolate-ca/desolate-work request open issue-43 --branch issue/43-x --title "..."   # ask for a worktree
+/desolate-ca/desolate-work log --type ask            # the whole conversation, newest first
+```
+
+- **Write only through the helper, and only to your own outbox.** Never move another participant's ref, and never rewrite yours: `cli.sh work verify` fails on any history that is not a plain append by its named writer.
+- **Pushing and merging are not yours to do.** Say `done` (or `request push <worktree>`), and a human -- or the policy file they committed, `.desolate/factory.json` -- decides whether the branch is pushed. Merges are always a person's.
+- **A request is a request.** Opening and closing worktrees goes through `request`; whether it happens is decided outside your container, and the answer arrives in your inbox as a `state` message.
+- `refs/desolate/*` are never pushed. Do not add a refspec for them.
+
 ## When to stop and ask
 
 Escalate to the human rather than working around it: anything needing `git push`/`pull`, a new secret or allowlist entry, a `devcontainer.json` change, a new forwarded port, SSH access, or reaching a host the proxy refuses. These are all outside-the-container operations by design.

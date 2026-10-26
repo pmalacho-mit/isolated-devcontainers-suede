@@ -78,6 +78,7 @@ import {
   editorCustomizations,
   editorStartScript,
   externalEnvironment,
+  targetEnvironment,
   externalProfile,
   type EditorCustomizations,
   isValidToken,
@@ -1184,7 +1185,7 @@ function movePorts(target: Target, move: { label: string; port: number }, reacha
       die(`${move.port} was taken by ${ingressFiles.ownerOf(move.port) || "another target"} just now; pick another`);
     recreateRelays(target, map);
     ingressFiles.publish(world.previous, map, target, dindName);
-    publishExternalPorts(target, dieOnError(() => externalEnvironment(map)));
+    publishExternalPorts(target, dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map)]));
     console.log(`  login shells see the new DESOLATE_EXTERNAL_* now; the editor's terminals on its
   next start:  ${hint.desolate(invocation(target))}`);
   }
@@ -1681,7 +1682,7 @@ async function runTarget(
   if (willCreate) spec.save(target, fingerprint);
   installProxyCa(dir);
   shadowBaseImages(dir, project.shadowImages);
-  const external = dieOnError(() => externalEnvironment(map));
+  const external = dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map)]);
   publishExternalPorts(target, external);
   startEditor(target, project, token, config, external);
   recreateRelays(target, map);

@@ -63,6 +63,9 @@ run_unit() {
   printf '\n\033[1m-- desolate --\033[0m\n'
   node_test "$ROOT"/tests/unit/desolate/*.test.ts || rc=1
 
+  printf '\n\033[1m-- factory protocol --\033[0m\n'
+  node_test "$ROOT"/tests/unit/work/*.test.ts || rc=1
+
   printf '\n\033[1m-- proxy addon --\033[0m\n'
   local py
   if py=$(find_python); then

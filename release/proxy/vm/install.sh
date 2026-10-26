@@ -108,6 +108,7 @@ install -m 0755 ../container/install-ca.sh /var/lib/desolate-proxy/public/instal
 # developer needs to run in there has to arrive this way.
 install -m 0755 ../container/trust-proxy-in-builds.sh /var/lib/desolate-proxy/public/trust-proxy-in-builds.sh
 install -m 0755 ../container/desolate-net /var/lib/desolate-proxy/public/desolate-net
+install -m 0755 ../container/desolate-work /var/lib/desolate-proxy/public/desolate-work
 install -m 0755 ssh-allow.sh /opt/desolate-proxy/ssh-allow.sh
 
 # Both bridges, because the stack is split across two networks and BOTH must be

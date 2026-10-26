@@ -15,6 +15,7 @@ import {
   editorCustomizations,
   editorStartScript,
   externalEnvironment,
+  targetEnvironment,
   externalProfile,
   isValidExtensionId,
   isValidToken,
@@ -267,6 +268,25 @@ describe("reading customizations out of a spec", () => {
   test("a spec with no customizations at all is not a crash", () => {
     assert.deepEqual(editorCustomizations(), { extensions: [], settings: {} });
     assert.deepEqual(editorCustomizations({}), { extensions: [], settings: {} });
+  });
+});
+
+describe("DESOLATE_TARGET: who a container is, to the factory", () => {
+  test("the project's own tree is main; a worktree is its name", () => {
+    assert.deepEqual(targetEnvironment({ project: "acme/widgets" }),
+      [["DESOLATE_TARGET", "main"], ["DESOLATE_PROJECT", "acme/widgets"]]);
+    assert.deepEqual(targetEnvironment({ project: "acme/widgets", worktree: "issue-42" })[0], ["DESOLATE_TARGET", "issue-42"]);
+  });
+
+  test("a name a shell would read never reaches one", () => {
+    for (const bad of [{ project: "a;b" }, { project: "a", worktree: "$(x)" }, { project: "-x" }, { project: "a b" }])
+      assert.throws(() => targetEnvironment(bad), EditorScriptError, JSON.stringify(bad));
+  });
+
+  test("and it is exported for the editor's terminals with the ports", () => {
+    const env = [...targetEnvironment({ project: "acme/widgets", worktree: "w" }), ...externalEnvironment(new Map([["5173", 8081]]))];
+    assert.match(externalProfile(env), /^export DESOLATE_TARGET=w$/m);
+    assert.match(editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48), env), /export DESOLATE_TARGET=w/);
   });
 });
 
