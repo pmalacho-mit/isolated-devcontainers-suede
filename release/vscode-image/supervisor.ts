@@ -559,11 +559,11 @@ const client = async ([verb, op, project, ...rest]: string[]) => {
 
 if (isEntryPoint(import.meta.url)) {
   const argv = process.argv.slice(2);
-  try {
-    if (argv.length) await client(argv);
-    else serve(settingsFrom(process.env));
-  } catch (err: any) {
-    console.error(`supervisor: ${err?.message ?? err}`);
-    process.exit(1);
-  }
+  // A promise chain, not a top-level await: tsx in the image compiles this
+  // file to CommonJS, which has none (tests/static/09 checks every file).
+  new Promise<void>((resolve) => resolve(argv.length ? client(argv) : serve(settingsFrom(process.env))))
+    .catch((err: any) => {
+      console.error(`supervisor: ${err?.message ?? err}`);
+      process.exit(1);
+    });
 }
