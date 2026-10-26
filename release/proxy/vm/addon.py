@@ -18,10 +18,15 @@ Behavior per request:
      -- see "WHAT THE NETWORK POLICY DOES NOT DECIDE" below.
   3. Scan URL + headers + body for any configured placeholder. One kind of
      entry is scanned for more narrowly -- see "THE SELF-TEST FIXTURE" below.
-  4. If a placeholder is found but the proven destination is NOT in that
-     secret's allowlist -> block 403 (leak detection / honeypot defense).
-     Unlike step 2 this NEVER falls back: no SNI means no substitution.
-  5. Otherwise substitute every occurrence with the real value.
+  4. A placeholder whose allowlist does NOT cover the proven destination is
+     left exactly as written and the request passes, with an AUDIT line
+     `verdict=LEAK-SUSPECT` naming it (leak detection / honeypot defense). A
+     placeholder is not a secret: `git push` of code that mentions one, or an
+     issue quoting it, used to be a 403 with nothing secret in flight (#12).
+     Unlike step 2 this NEVER falls back: no SNI means no substitution, and a
+     placeholder over plaintext is still refused outright.
+  5. Substitute every placeholder whose allowlist DOES cover it, and only
+     those -- the bound that matters, a real value reaches only its hosts.
   6. On responses, scrub real values back to placeholders, so an endpoint that
      echoes a secret VERBATIM does not hand it to the container -- see "WHAT
      SCRUBBING IS, AND WHAT IT IS NOT" below for how far that goes.
@@ -32,7 +37,8 @@ a gzipped message, which is most of them, and a size cap turned the largest
 responses into the ones that went unscrubbed.
 
 Redirect safety falls out of the model: substitution is decided per-request,
-so a redirect to an unlisted host receives the placeholder, which trips rule 4.
+so a redirect to an unlisted host receives the placeholder, unsubstituted, and
+rule 4 records it.
 
 ---------------------------------------------------------------------------
 WHY "PROVEN DESTINATION" AND NOT THE HOST HEADER
@@ -173,8 +179,8 @@ nowhere, so it travels as itself and no value can leave.
 THE SELF-TEST FIXTURE, AND WHY IT IS MATCHED DIFFERENTLY
 ---------------------------------------------------------------------------
 `preflight.sh` proves leak detection is running by tripping it: it sends a
-placeholder toward a host that placeholder is not allowlisted for and demands a
-403. That needs a placeholder to exist, so one ships in settings.example.json
+placeholder toward a host that placeholder is not allowlisted for and demands
+the `LEAK-SUSPECT` audit line for that exact request (it was a 403 before #12). That needs a placeholder to exist, so one ships in settings.example.json
 -- DESOLATE-SELFTEST-PLACEHOLDER, fake value, pinned to httpbin.org.
 
 Its NAME is a published string: it appears in this file, in install.sh, in
@@ -392,7 +398,7 @@ class DesolateProxy:
                 continue
         return None
 
-    def audit(self, flow, verdict, host, route, method, secrets):
+    def audit(self, flow, verdict, host, route, method, secrets, suspect=()):
         """One machine-readable line per request, for `cli.sh proxy audit`.
 
         Separate from the human log lines above on purpose. Those are prose and
@@ -404,6 +410,10 @@ class DesolateProxy:
         token would sit, so `route` arrives already stripped by the caller. The
         whole point of substitution is that a real value exists in one 0600 file
         on this VM; writing one into journald would quietly make that false.
+
+        `suspect` is the placeholders that passed UNSUBSTITUTED toward a host
+        their allowlist does not cover. Last, so every older field keeps its
+        position for parsers that predate it.
         """
         try:
             log.info(
@@ -412,7 +422,8 @@ class DesolateProxy:
                 f"method={method} "
                 f"host={host or '?'} "
                 f"path={route or '/'} "
-                f"secrets={','.join(secrets) if secrets else '-'}"
+                f"secrets={','.join(secrets) if secrets else '-'} "
+                f"suspect={','.join(suspect) if suspect else '-'}"
             )
         except Exception:
             # An audit line must never be the reason a request fails.
@@ -582,12 +593,15 @@ class DesolateProxy:
                             f"Host header '{claimed}' does not match the TLS destination "
                             f"'{proven}'; refusing to substitute a secret")
                 return
-            for name in sorted(found):
-                if not self._host_matches(proven, self.secrets[name]["hosts"]):
-                    log.warning(f"LEAK  placeholder {name!r} sent toward {proven!r} "
-                                f"(allowed: {self.secrets[name]['hosts']}) -- blocked")
-                    self._block(flow, 403, f"secret {name} is not permitted for host {proven}")
-                    return
+        # A placeholder toward a host its allowlist does not cover is not
+        # refused: nothing secret is in flight, only a name. It goes out as
+        # written -- never substituted, which is the bound -- and is recorded.
+        suspect = sorted(name for name in found
+                         if not self._host_matches(proven, self.secrets[name]["hosts"]))
+        for name in suspect:
+            log.warning(f"LEAK-SUSPECT placeholder {name!r} sent toward {proven!r} "
+                        f"(allowed: {self.secrets[name]['hosts']}) -- passed UNSUBSTITUTED")
+        found = found - set(suspect)
 
         # Captured BEFORE substitution and stripped of its query string, for the
         # audit line and the SUBST log below. See the comment at the log call.
@@ -634,7 +648,11 @@ class DesolateProxy:
         if substituted is not body:
             flow.request.content = substituted
 
-        if found:
+        if suspect:
+            if found:
+                log.info(f"SUBST {method} {proven}{route} <- {sorted(found)}")
+            self.audit(flow, "LEAK-SUSPECT", proven, route, method, sorted(found), suspect)
+        elif found:
             # `route` was captured BEFORE the loop above and has its query string
             # stripped. Both halves matter: `flow.request.path` covers path AND
             # query, and the substitution has already run by the time we get

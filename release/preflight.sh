@@ -341,16 +341,38 @@ have_selftest_fixture() {
 # fails to load leaves a working transparent proxy that substitutes nothing.
 # with-ca is required -- `docker exec` inherits none of the entrypoint's exports,
 # so a bare curl fails cert verification, returns 000, and reads as a dead addon.
+#
+# Since #12 a placeholder toward a host it is not allowlisted for passes through
+# UNSUBSTITUTED instead of being refused, so the oracle is no longer the status
+# but the audit line the addon writes for exactly this request. The path is
+# unique to this run, so a line from any other request cannot satisfy it.
 probe_leak_detection() {
-  local code
+  local code marker line attempt
+  marker="desolate-preflight-$(date +%s)-$$"
   code=$(docker exec desolate-orchestrator with-ca sh -c \
-         'curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.com \
-            -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
+         "curl -s -o /dev/null -w '%{http_code}' --max-time 8 https://example.com/$marker \
+            -H 'X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER'" 2>/dev/null || true)
   case "$code" in
-    403) ok "leak detection is live (placeholder toward a non-allowlisted host -> 403)" ;;
     000) bad "leak detection got no response at all (000) -- TLS to the proxy failed"
-         note "not necessarily the addon: check the interception line above first" ;;
-    *)   bad "leak detection returned '$code', expected 403 -- the addon may have failed to load" ;;
+         note "not necessarily the addon: check the interception line above first"
+         return ;;
+    403) bad "leak detection REFUSED the probe (403): the VM runs an addon from before #12"
+         note "re-install it:  ./cli.sh vm install --proxy-only"
+         return ;;
+  esac
+  # journald can trail the request by a moment.
+  for attempt in 1 2 3 4 5; do
+    line=$(vm_ssh sudo journalctl -u desolate-proxy --since -5min --no-pager -o cat 2>/dev/null \
+             | grep -a "^AUDIT verdict=LEAK-SUSPECT .* path=/$marker " | tail -n 1)
+    [ -n "$line" ] && break
+    sleep 1
+  done
+  case "$line" in
+    *" suspect=DESOLATE-SELFTEST-PLACEHOLDER"*)
+      ok "leak detection is live (placeholder toward a non-allowlisted host -> LEAK-SUSPECT, unsubstituted)" ;;
+    "") bad "no LEAK-SUSPECT audit line for the probe (got HTTP $code) -- the addon may have failed to load"
+        note "./cli.sh proxy logs | grep -E 'failed to load|AUDIT'" ;;
+    *)  bad "the probe's audit line does not name the fixture as suspect: $line" ;;
   esac
 }
 

@@ -403,7 +403,7 @@ Open the printed `http://127.0.0.1:3000/?tkn=...` URL. That's your editor.
 secrets machinery work end to end:
 
 ```bash
-./cli.sh proxy test     # substitution + scrubbing, then a blocked exfil (403)
+./cli.sh proxy test     # substitution + scrubbing, then an audited LEAK-SUSPECT pass-through
 ```
 
 ### Why `up` re-checks the proxy
@@ -1437,7 +1437,7 @@ and still accept `{"host": "*"}` -- see "What this does not give you" below.
 That is a **test fixture**, not a credential. Its value is fake and published,
 and it exists so `./cli.sh preflight` can prove leak detection is actually
 running -- by sending it toward a host it is not allowlisted for and demanding
-a 403. Without it those probes cannot fail closed, so they report
+the `LEAK-SUSPECT` audit line for that request. Without it those probes cannot fail closed, so they report
 `secrets can be exfiltrated` against a perfectly healthy addon. `vm install`
 re-asserts it on every run and `secret rm` refuses it
 (`--force` if you really mean to).
@@ -1447,17 +1447,21 @@ placeholder matched **only as a complete request header value** rather than
 anywhere in a request. Its name is a string this project publishes -- in these
 docs, in `addon.py`, in the test suite -- so under the ordinary substring rule
 every request that merely *mentioned* it was a 403 toward anything but
-`httpbin.org`: `git push` of this repo, an agent sending a diff to a model API,
-pasting preflight output into a ticket. The flag separates the probe from prose
-about the probe. Do not set it on a real secret; it would mean that secret
+`httpbin.org` (and, since #12, would be an audited suspect): `git push` of this
+repo, an agent sending a diff to a model API, pasting preflight output into a
+ticket. The flag separates the probe from prose about the probe. Do not set it on a real secret; it would mean that secret
 travels unnoticed in a body or a URL.
 
 ### Why this is stronger than a secrets file
 
 - **Exfiltration is bounded.** The real value is only ever put on the wire
   toward that secret's allowlisted hosts. Sending the placeholder anywhere else
-  is refused with 403 and logged -- so the honeypot case is caught, not just
-  survived. This is the guarantee the design actually rests on; the two below
+  sends just that -- the placeholder, never substituted -- and writes an
+  `AUDIT verdict=LEAK-SUSPECT` line naming it (`./cli.sh proxy audit`), so the
+  honeypot case is caught, not just survived. It used to be a 403, which
+  refused a `git push` of code that merely mentions a placeholder although
+  nothing secret was in flight (#12). A placeholder over plaintext is still
+  refused outright. This is the guarantee the design actually rests on; the two below
   are weaker than they read, and "What this does not give you" says how.
 - **Nothing to find at rest.** There is no key material on any
   container-reachable filesystem. Even an escape into the dind container finds
@@ -1707,7 +1711,7 @@ under sysbox with an active user-namespace (`uid_map` shows container-root
 mapping to a non-zero VM uid). It also now proves the _proxy policy_ is live,
 not merely that the proxy is running: an addon that fails to load leaves a
 working transparent proxy that substitutes nothing, so preflight trips the
-leak detector on purpose and expects a 403.
+leak detector on purpose and demands the `LEAK-SUSPECT` audit line it writes.
 
 To see it yourself, from a terminal inside any devcontainer:
 

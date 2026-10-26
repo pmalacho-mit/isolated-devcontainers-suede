@@ -882,7 +882,7 @@ case "$CMD" in
                        | sed -e 's/^AUDIT //' \
                        | awk '
                            {
-                             verdict=""; method=""; host=""; path=""; secrets="";
+                             verdict=""; method=""; host=""; path=""; secrets=""; suspect="";
                              for (i = 1; i <= NF; i++) {
                                split($i, kv, "=");
                                v = substr($i, index($i, "=") + 1);
@@ -891,10 +891,13 @@ case "$CMD" in
                                else if (kv[1] == "host")  host = v;
                                else if (kv[1] == "path")  path = v;
                                else if (kv[1] == "secrets") secrets = v;
+                               else if (kv[1] == "suspect") suspect = v;
                              }
                              if (secrets == "-") secrets = "";
-                             printf "%-14s %-6s %s%s%s\n", verdict, method, host, path,
-                                    (secrets == "" ? "" : "   <- " secrets);
+                             if (suspect == "-") suspect = "";
+                             printf "%-14s %-6s %s%s%s%s\n", verdict, method, host, path,
+                                    (secrets == "" ? "" : "   <- " secrets),
+                                    (suspect == "" ? "" : "   NOT substituted: " suspect);
                            }'
                        ;;
                test)   ensure_running
@@ -907,9 +910,16 @@ case "$CMD" in
                        docker exec "$ORCHESTRATOR" with-ca sh -c \
                          'curl -s https://httpbin.org/headers -H "Authorization: Bearer DESOLATE-SELFTEST-PLACEHOLDER"' \
                          | grep -i authorization || echo "   (no response -- is the proxy up?)"
-                       echo "-- leak detection (expects 403):"
+                       # Since #12 the placeholder goes out unsubstituted rather
+                       # than being refused, so the evidence is the audit line.
+                       echo "-- leak detection (expects the placeholder passed UNSUBSTITUTED, audited LEAK-SUSPECT):"
                        docker exec "$ORCHESTRATOR" with-ca sh -c \
-                         'curl -s -o /dev/null -w "%{http_code}\n" https://example.com -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' ;;
+                         'curl -s -o /dev/null -w "   HTTP %{http_code}\n" https://example.com/desolate-proxy-test -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"'
+                       sleep 1
+                       colima ssh -p "$COLIMA_PROFILE" -- \
+                         sudo journalctl -u desolate-proxy --since -2min --no-pager -o cat \
+                       | grep -a "^AUDIT verdict=LEAK-SUSPECT .* path=/desolate-proxy-test " | tail -n 1 \
+                       | sed 's/^/   /' | grep . || echo "   (no LEAK-SUSPECT line -- leak detection is NOT live)" ;;
                *) echo "usage: cli.sh proxy {status|logs [n]|test}" >&2; exit 1 ;;
              esac ;;
 
