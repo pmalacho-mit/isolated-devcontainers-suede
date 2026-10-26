@@ -65,6 +65,13 @@ export const writerOf = (ref: string): string | undefined => {
  *  time, as text, and two writers do not collide. */
 export const REQUEST_ID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+export const ulid = (now = Date.now(), random = (n: number) => crypto.getRandomValues(new Uint8Array(n))) => {
+  let time = "";
+  for (let t = now, i = 0; i < 10; i++, t = Math.floor(t / 32)) time = CROCKFORD[t % 32] + time;
+  return time + [...random(16)].map((byte) => CROCKFORD[byte % 32]).join("");
+};
+
 export interface Message {
   v: 1;
   from: string;

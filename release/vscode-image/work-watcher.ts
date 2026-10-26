@@ -42,9 +42,11 @@ import {
   recordHandled,
   type Policy,
 } from "./work-policy.ts";
+import { tickForge } from "./work-forge.ts";
 import {
   author,
   isTarget,
+  ulid,
   MessageError,
   parseMessage,
   parseRequest,
@@ -263,6 +265,8 @@ export const tickProject = (project: string, say: Say) => {
     return say(`${project}: the factory policy cannot be read (${err?.message ?? err}); doing nothing`);
   }
   if (!policy || !existsSync(join(root.projectDir, ".git"))) return;
+  // New work items become requests first, so they are acted on this tick.
+  tickForge(project, config.workspaces, policy, say, ulid);
   const done = handled(config.workspaces, project);
   const approved = approvals(config.workspaces, project);
 

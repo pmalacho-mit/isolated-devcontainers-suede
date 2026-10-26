@@ -6,6 +6,8 @@
 #              (needs: node >= 22.18, `devcontainer` on PATH)
 #   worktrees -- the `worktree` command against a real repository, including the
 #              prune that would destroy an unlocked one (needs: git, node)
+#   factory -- a project's agents, watcher and file adapter, end to end, on a
+#              real repository (needs: git, node)
 #   proxy   -- the real addon under transparent mitmproxy with nftables REDIRECT
 #              (needs: root, nft, docker, mitmproxy)
 #   stack   -- the whole compose stack, attacked from inside the editor
@@ -39,6 +41,13 @@ elif ! node -e 'const [a,b]=process.versions.node.split(".").map(Number); proces
   printf '  skip: needs node >= 22.18 for native type stripping\n'
 else
   node --test "$ROOT"/tests/integration/worktrees/*.test.ts || RC=1
+fi
+
+printf '\n\033[1m-- factory (helper, watcher, file adapter, verify, on a real repo) --\033[0m\n'
+if ! command -v git >/dev/null 2>&1; then
+  printf '  skip: needs git\n'
+else
+  bash "$ROOT/tests/integration/factory/run.sh" || RC=1
 fi
 
 printf '\n\033[1m-- proxy (transparent mitmproxy + nftables) --\033[0m\n'

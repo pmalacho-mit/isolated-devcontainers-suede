@@ -49,7 +49,12 @@ export interface Policy {
   /** Open a worktree in a repository with hooks? They run in the worktree's
    *  sandbox at its first start (worktrees.ts), never in the editor. */
   allow_hooks: boolean;
+  /** Where work items come from (work-forge.ts). Each also needs
+   *  `forge/<adapter>` among the requesters for its opens to be honoured. */
+  adapters: string[];
 }
+
+export const KNOWN_ADAPTERS = ["file"] as const;
 
 export const DEFAULT_POLICY: Policy = {
   v: 1,
@@ -58,6 +63,7 @@ export const DEFAULT_POLICY: Policy = {
   branch_prefix: "factory/",
   on_done: "hold",
   allow_hooks: false,
+  adapters: [],
 };
 
 export class PolicyFileError extends Error {}
@@ -88,6 +94,8 @@ export const parsePolicy = (text: string): Policy => {
     throw new PolicyFileError("branch_prefix must be empty or path segments ending in /");
   if (policy.on_done !== "push" && policy.on_done !== "hold") throw new PolicyFileError("on_done must be push or hold");
   if (typeof policy.allow_hooks !== "boolean") throw new PolicyFileError("allow_hooks must be true or false");
+  if (!Array.isArray(policy.adapters) || !policy.adapters.every((a: unknown) => (KNOWN_ADAPTERS as readonly unknown[]).includes(a)))
+    throw new PolicyFileError(`adapters must be among: ${KNOWN_ADAPTERS.join(", ")}`);
   return policy;
 };
 

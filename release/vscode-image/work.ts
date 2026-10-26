@@ -51,7 +51,7 @@ import { answer, closeWorktree, push } from "./work-watcher.ts";
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
 class UsageError extends Error {}
-const USAGE = `usage: work init <project> [--max N] [--on-done push|hold] [--prefix p/] [--requesters a,b] [--allow-hooks] [--force]
+const USAGE = `usage: work init <project> [--max N] [--on-done push|hold] [--prefix p/] [--requesters a,b] [--adapter file] [--allow-hooks] [--force]
        work policy <project> | log <project> [--target t] [--type t] | requests <project> | verify <project>
        work approve <project> <request-id> | push <project> <worktree> | close <project> <worktree>
        work say <project> <type> <body> [--to t,...]`;
@@ -177,7 +177,7 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
 
   switch (verb) {
     case "init": {
-      const { found, set, rest: extra } = options(rest, ["--max", "--on-done", "--prefix", "--requesters"], ["--allow-hooks", "--force"]);
+      const { found, set, rest: extra } = options(rest, ["--max", "--on-done", "--prefix", "--requesters", "--adapter"], ["--allow-hooks", "--force"]);
       if (extra.length) throw new UsageError(`unexpected '${extra.join(" ")}'`);
       const files = factoryFiles(WORKSPACES, root.project);
       if (existsSync(files.policy) && !set.has("--force")) throw new UsageError(`${root.project} already has a factory (${files.policy}); --force replaces its policy`);
@@ -189,6 +189,12 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
         ...(found["--requesters"] ? { requesters: found["--requesters"].split(",") } : {}),
         ...(set.has("--allow-hooks") ? { allow_hooks: true } : {}),
       }));
+      // An adapter's opens are honoured only from a requester it is among.
+      if (found["--adapter"]) {
+        policy.adapters = [found["--adapter"]];
+        if (!policy.requesters.includes(`forge/${found["--adapter"]}`)) policy.requesters.push(`forge/${found["--adapter"]}`);
+        parsePolicy(JSON.stringify(policy));
+      }
       mkdirSync(dirname(files.policy), { recursive: true });
       writeFileSync(files.policy, `${JSON.stringify(policy, null, 2)}\n`);
       humanSays(root.projectDir, "status", `factory enabled: ${JSON.stringify(policy)}`);
