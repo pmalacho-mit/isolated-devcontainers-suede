@@ -191,8 +191,16 @@ const daemons = {
   },
   /** Does the daemon at this socket answer right now? A project dind the
    *  reaper stopped does not, and nothing of the target is running on it. */
-  answers: (socket: string) =>
-    run.status("docker", ["-H", socket, "info", "--format", "ok"], { quiet: true, timeoutMs: 10_000 }) === 0,
+  answers: (socket: string) => {
+    // A question, not a command: a daemon that is down is an answer, and the
+    // CLI's "failed to connect" on stderr would print through --list.
+    try {
+      execFileSync("docker", ["-H", socket, "info", "--format", "ok"], { stdio: "ignore", timeout: 10_000 });
+      return true;
+    } catch {
+      return false;
+    }
+  },
 };
 
 /** The supervisor (supervisor.ts), over its socket in supervisor-run. */
