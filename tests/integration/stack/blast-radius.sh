@@ -85,9 +85,18 @@ reaches() { inside "$1" "timeout 5 bash -c '</dev/tcp/$2/$3' 2>/dev/null"; }   #
 address_of() { docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$1" 2>/dev/null | awk '{print $1}'; }
 # Whether the VM itself connects: where a target that A must not reach is
 # shown to be listening at all, so A's refusal is the wall and not an empty port.
-vm_reaches() {
-  if [ -n "${DESOLATE_BLAST_NESTED:-}" ]; then timeout 5 bash -c "</dev/tcp/$1/$2" 2>/dev/null
-  else colima ssh -p "${COLIMA_PROFILE:-desolate}" -- timeout 5 nc -z "$1" "$2" 2>/dev/null; fi
+#
+# bash's /dev/tcp on both paths, not nc: the Colima VM does not ship nc. The
+# script travels on STDIN and the address and port as plain arguments, so it
+# reads the same whether or not `colima ssh` escapes its argv (versions differ).
+VM_TCP_PROBE='exec 3<>"/dev/tcp/$1/$2" && exec 3>&-'
+vm_reaches() {   # <address> <port>; exit 0: connected
+  if [ -n "${DESOLATE_BLAST_NESTED:-}" ]; then
+    printf '%s\n' "$VM_TCP_PROBE" | timeout 5 bash -s "$1" "$2" 2>/dev/null
+  else
+    printf '%s\n' "$VM_TCP_PROBE" | \
+      colima ssh -p "${COLIMA_PROFILE:-desolate}" -- timeout 5 bash -s "$1" "$2" 2>/dev/null
+  fi
 }
 mem_available() {
   if [ -n "${DESOLATE_BLAST_NESTED:-}" ]; then awk '/^MemAvailable/ {print $2}' /proc/meminfo
