@@ -695,8 +695,8 @@ group "reset-inner's sweep asks the daemon something it understands"
 # rather than retyped here where the two could drift apart.
 eval "$(sed -n '/^inner_docker()/,/^}/p' "$RELEASE/cli.sh")"
 eval "$(sed -n '/^inner_ids()/,/^}/p' "$RELEASE/cli.sh")"
-RELAY_STATES=$(grep -oE 'inner_ids desolate\.relay [a-z ]+' "$RELEASE/cli.sh" \
-               | sed 's/inner_ids desolate\.relay //')
+RELAY_STATES=$(grep -oE 'sweep_inner "[^"]*" desolate\.relay [a-z ]+' "$RELEASE/cli.sh" \
+               | sed -E 's/.*desolate\.relay //')
 if [ -z "$RELAY_STATES" ]; then
   fail "found the sweep's relay states in cli.sh" "grep matched nothing -- did the call change shape?"
 else
