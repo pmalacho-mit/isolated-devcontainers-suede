@@ -32,7 +32,7 @@ import {
   volumeNamespace,
   type Target,
 } from "./projects.ts";
-import { enforcePolicy, PolicyError } from "./policy.ts";
+import { daemonOf, enforcePolicy, PolicyError } from "./policy.ts";
 import type { Flags } from "./args.ts";
 import { identity, noop } from "./utils.ts";
 
@@ -303,7 +303,7 @@ async function handle(req: unknown, send: Send) {
         }
         const configPath = snapshot(target, config);
         const resolved = resolveSpec(target.dir, configPath);
-        enforcePolicy(target, resolved, listTargets(config.workspaces));
+        enforcePolicy(target, resolved, listTargets(config.workspaces), daemonOf(resolved));
         flags = [["--config", configPath]];
         if (req.op === "rebuild") flags.push("--rebuild");
         break;

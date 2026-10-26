@@ -3,6 +3,7 @@
 // Pure and side-effect free.
 import { posix } from "node:path";
 import type { ResolvedSpec } from "./devcontainer.ts";
+import * as dind from "./dind.ts";
 import type { Target } from "./projects.ts";
 import {
   isWithin,
@@ -61,20 +62,6 @@ const allowlist = (() => {
         ],
       } satisfies Partial<Record<ItemFromSet<typeof values>, RegExp[]>>,
     },
-    featureVolumes: [
-      /**
-       * The docker-in-docker feature mounts volumes for the nested daemon's state:
-       * dind-var-lib-docker-<devcontainerId> for /var/lib/docker, and
-       * dind-var-lib-containerd-<devcontainerId> for /var/lib/containerd.
-       *
-       * The `-<devcontainerId>` suffix is what keeps this safe: the CLI substitutes a
-       * value it derives from the workspace folder, so one project cannot name
-       * another's. The trailing `-` is therefore load-bearing -- a bare
-       * `dind-var-lib-docker` (no suffix) is NOT this feature's volume and stays
-       * refused.
-       */
-      ...[/^dind-var-lib-docker-/, /^dind-var-lib-containerd-/],
-    ],
     /** Avoid dangerous mounts like:
      * - `volume-driver=local`
      * - `volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/` */
@@ -198,10 +185,53 @@ export const mount = {
   /** The public proxy CA, which desolate injects into every project. */
   isPublicCa: ({ type, source }: NormalMount) =>
     type === "bind" && source === CA_BIND_SOURCE,
-  /** e.g. dind-var-lib-docker-<id>, for an opted-in docker-in-docker project. */
-  isFeatureVolume: ({ source }: NormalMount) =>
-    allowlist.featureVolumes.some((regex) => regex.test(source)),
+  /**
+   * The ONE bind a project dind's devcontainer may hold: its daemon's socket,
+   * exactly as `docker-outside-of-docker` declares it -- measured
+   * (tests/probes/sibling-feature.sh F1):
+   *   type=bind,source=/var/run/docker.sock,target=/var/run/docker-host.sock
+   * The source is the dind's alias for its own socket. Every field by
+   * equality, never by prefix: `/var/run/docker.sock.evil` is not it.
+   */
+  isProjectDaemonSocket: ({ type, source, target }: NormalMount) =>
+    type === "bind" &&
+    dind.socket.isNamedBy(source) &&
+    target === DOCKER_HOST_SOCKET_TARGET,
 };
+
+/** Where docker-outside-of-docker binds the daemon's socket; its entrypoint
+ *  proxies it on to /var/run/docker.sock for the remote user. */
+const DOCKER_HOST_SOCKET_TARGET = "/var/run/docker-host.sock";
+
+/**
+ * Which daemon a target runs on -- decided by the caller from the same rule
+ * that provisions one (dind.isRequiredBy), and REQUIRED here, because what a
+ * spec may ask for depends on it:
+ *
+ *   shared   the one dind every other project shares. Nothing that reaches
+ *            past the devcontainer is allowed, exactly as before.
+ *   project  a daemon of the project's own (supervisor.ts). Its socket is root
+ *            over that dind and its /workspaces holds only this project, so
+ *            the boundary is sysbox around the dind -- not the devcontainer's
+ *            capabilities or seccomp profile, which the socket can sidestep
+ *            anyway by starting a --privileged sibling.
+ */
+export type Daemon = "shared" | "project";
+
+/** The daemon a spec will run on: a project's own when it declares the one
+ *  feature that asks for one (dind.isRequiredBy), the shared one otherwise.
+ *  Read off the features the PROJECT declared -- the same keys the CLI
+ *  installs -- so the broker and the runner, judging the same frozen spec,
+ *  cannot come to different answers. */
+export const daemonOf = ({ configuration }: ResolvedSpec): Daemon => {
+  const declared = nonNullObject(configuration) ? (configuration.features ?? null) : null;
+  return dind.isRequiredBy(nonNullObject(declared) ? Object.keys(declared) : [])
+    ? "project"
+    : "shared";
+};
+
+/** The feature v2 removes, and what replaces it. */
+const NESTED_DAEMON_FEATURE = /^ghcr\.io\/devcontainers\/features\/docker-in-docker(?:[:@]|$)/i;
 
 export const feature = {
   /**
@@ -360,6 +390,7 @@ const reader = ({ configuration, mergedConfiguration }: ResolvedSpec) => {
 
 type Payload = Readonly<{
   target: Target;
+  daemon: Daemon;
   /** Every target that could contest a volume namespace, so a volume can be
    *  awarded to the longest claim rather than the first. */
   targets: Target[];
@@ -367,12 +398,17 @@ type Payload = Readonly<{
 }>;
 
 const helpers = {
-  allowPrivileged: ({ read }: Pick<Payload, "read">) =>
-    read.desolate("allowPrivileged") === true,
-  disallowedSecurityOption: (option: string) =>
-    allowlist.runargs.deny["--security-opt"].some((regex) =>
-      regex.test(option),
-    ),
+  /** What a security option may not do, by daemon. On the shared one, the
+   *  whole deny list. On a project daemon only what still weakens anything:
+   *  a seccomp profile read from a project-writable path, and switching off
+   *  no-new-privileges. */
+  disallowedSecurityOption: (option: string, daemon: Daemon) =>
+    // Switching no-new-privileges off is refused everywhere: it is what keeps
+    // a setuid binary in the image from undoing the container's user.
+    /^no-new-privileges\s*[:=]\s*false$/i.test(option) ||
+    (daemon === "shared"
+      ? allowlist.runargs.deny["--security-opt"].some((regex) => regex.test(option))
+      : /^seccomp\s*=\s*[./]/i.test(option)),
   /** The repository's own directory name -- what `${localWorkspaceFolderBasename}`
    *  expands to for a project, and the owner-less half of a nested name. */
   basename: ({ project }: Target) => project.split("/").pop()!,
@@ -442,6 +478,12 @@ const helpers = {
 
     if (mount.isPublicCa(mounted)) return;
 
+    // The one bind, and only from a feature onto a project daemon: a project
+    // writing it itself, or one on the SHARED daemon, would be handed every
+    // other project there.
+    if (fromFeature && payload.daemon === "project" && mount.isProjectDaemonSocket(mounted))
+      return;
+
     if (mounted.type !== "volume")
       return fail`
         mount type '${mounted.type}' requested by ${origin} is not allowed
@@ -457,13 +499,6 @@ const helpers = {
         '${owner.name}', not '${target.name}' -- '${namespace}-*' also matches
         names that start with '${namespace}-', and the longer project owns them`;
     }
-
-    if (
-      fromFeature &&
-      helpers.allowPrivileged(payload) &&
-      mount.isFeatureVolume(mounted)
-    )
-      return;
 
     return helpers.refuseForeignVolume(payload, mounted, origin);
   },
@@ -568,7 +603,7 @@ const checks = {
         compose-based devcontainers ("dockerComposeFile") are not supported:
         their privilege is declared in the compose file, which this policy
         cannot validate. Use an image/Dockerfile devcontainer, and run compose
-        INSIDE it with the docker-in-docker feature.
+        from it with the docker-outside-of-docker feature.
       `;
   },
   noInitializeCommand: ({ read }) => {
@@ -594,6 +629,13 @@ const checks = {
       return fail`"features" must be an object mapping feature ids to options`;
 
     for (const id of Object.keys(declared)) {
+      if (NESTED_DAEMON_FEATURE.test(id))
+        return fail`
+          the docker-in-docker feature is no longer supported: it runs a daemon
+          INSIDE the devcontainer, which needs --privileged. Switch to
+          "ghcr.io/devcontainers/features/docker-outside-of-docker:1" -- desolate
+          provides the project a daemon of its own, and docker, compose and
+          builds work against it unchanged. Then: desolate --rebuild <project>`;
       const origin = feature.origin(id);
       if (origin === "registry" || origin === "tarball") continue;
 
@@ -617,26 +659,30 @@ const checks = {
         check has passed.`;
     }
   },
-  privilegeMustBeExplicit: (payload) => {
-    if (payload.read.truthy("privileged"))
-      if (!helpers.allowPrivileged(payload))
-        return fail`
-          this spec requests a PRIVILEGED container (often pulled in by a
-          feature such as docker-in-docker). Privileged containers can reach
-          sibling projects' data on the inner daemon. 
-          If that is intended, declare it explicitly: 
-          "customizations": { "desolate": { "allowPrivileged": true } }`;
-  },
-  capAddsOnlyWhenPrivileged: (payload) => {
-    const capAdd = payload.read.asList("capAdd").map(String);
-    if (capAdd.length && !helpers.allowPrivileged(payload))
+  /** Never, on either daemon. allowPrivileged is gone, not deprecated: a
+   *  project that needs docker gets a daemon of its own instead. */
+  neverPrivileged: ({ read }) => {
+    if (read.truthy("privileged"))
       return fail`
-        capability additions are not allowed (requested: ${capAdd.join(", ")}).
-        Add them via an explicit allowPrivileged opt-in if genuinely required.`;
+        this spec requests a PRIVILEGED container, which desolate no longer
+        runs (the "allowPrivileged" opt-in has been removed). If it is for
+        docker, use the docker-outside-of-docker feature: the project gets a
+        daemon of its own, and nothing needs --privileged.`;
   },
-  securityOptKeepsTheSandbox: ({ read }) => {
+  /** On the shared daemon, none. On a project daemon, any: the socket is root
+   *  over that dind already, so refusing SYS_PTRACE protects nothing and
+   *  blocks real features (rust declares it for lldb). */
+  capAddsOnlyOnAProjectDaemon: ({ read, daemon }) => {
+    const capAdd = read.asList("capAdd").map(String);
+    if (capAdd.length && daemon === "shared")
+      return fail`
+        capability additions are not allowed on the shared daemon (requested:
+        ${capAdd.join(", ")}). A project that uses docker-outside-of-docker
+        runs on a daemon of its own, where they are.`;
+  },
+  securityOptKeepsTheSandbox: ({ read, daemon }) => {
     for (const option of read.asList("securityOpt").map(String))
-      if (helpers.disallowedSecurityOption(option))
+      if (helpers.disallowedSecurityOption(option, daemon))
         return fail`securityOpt '${option}' is not allowed (it weakens the sandbox)`;
   },
   mountsStayInOwnNamespace: (payload) => {
@@ -655,10 +701,10 @@ const checks = {
         !writtenByProject.has(mount.identity(mounted)),
       );
   },
-  runArgsOnAllowlist: ({ read }) => {
+  runArgsOnAllowlist: ({ read, daemon }) => {
     const args = read.asList("runArgs").map(String);
     for (const { flag, value } of helpers.runArgs.allowedPairs(args)) {
-      if (flag === "--security-opt" && helpers.disallowedSecurityOption(value))
+      if (flag === "--security-opt" && helpers.disallowedSecurityOption(value, daemon))
         return fail`--security-opt '${value}' is not allowed (it weakens the sandbox)`;
 
       if (flag === "--tmpfs" && !value.startsWith("/"))
@@ -778,9 +824,11 @@ const checks = {
 } satisfies Record<string, Check>;
 
 const checker = (
-  ...[target, spec, targets]: Parameters<typeof enforcePolicy>
+  ...[target, spec, targets, daemon]: Parameters<typeof enforcePolicy>
 ) => {
-  const payload: Payload = { target, targets, read: reader(spec) };
+  if (daemon !== "shared" && daemon !== "project")
+    fail`internal: no daemon given for ${target.name}; refusing to judge a spec without one`;
+  const payload: Payload = { target, targets, daemon, read: reader(spec) };
   return Object.entries(checks).reduce(
     (acc, [key, check]) => {
       acc[key as keyof typeof checks] = check.bind(null, payload);
@@ -795,6 +843,7 @@ const checker = (
  *
  * @param targets every target that could contest a volume namespace, so a
  * volume can be awarded to the longest claim rather than the first.
+ * @param daemon which daemon it will run on (dind.isRequiredBy decides).
  * @throws PolicyError with a specific reason if the project asks for anything
  * outside its own trust domain.
  */
@@ -802,16 +851,17 @@ export function enforcePolicy(
   target: Target,
   spec: ResolvedSpec,
   targets: Target[],
+  daemon: Daemon,
 ): void {
-  const checks = checker(target, spec, targets);
+  const checks = checker(target, spec, targets, daemon);
 
   checks.noCompose();
   checks.noInitializeCommand();
   checks.noBuildOptions();
   checks.noAppPorts();
   checks.featuresMustBeFetched();
-  checks.privilegeMustBeExplicit();
-  checks.capAddsOnlyWhenPrivileged();
+  checks.neverPrivileged();
+  checks.capAddsOnlyOnAProjectDaemon();
   checks.securityOptKeepsTheSandbox();
   checks.mountsStayInOwnNamespace();
   checks.runArgsOnAllowlist();

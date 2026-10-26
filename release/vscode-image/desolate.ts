@@ -36,7 +36,9 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { enforcePolicy } from "./policy.ts";
+import * as net from "node:net";
+import * as dind from "./dind.ts";
+import { daemonOf, enforcePolicy, type Daemon } from "./policy.ts";
 import {
   EVERY_TARGET,
   list as listTargets,
@@ -161,6 +163,125 @@ const dockerRunner: Runner = {
 
 const docker = createDocker(dockerRunner);
 
+/**
+ * Which daemon this process is driving.
+ *
+ * Every docker and devcontainer call it makes is a CLI that reads DOCKER_HOST,
+ * so choosing a daemon IS pointing that at its socket: the shared dind's (the
+ * orchestrator's own environment), or a project dind's, which the supervisor
+ * keeps in one directory each of the dind-sockets volume (dind.sockets).
+ */
+const daemons = {
+  shared: process.env.DOCKER_HOST ?? "unix:///run/inner/docker.sock",
+  socketOf: (target: Target, daemon: Daemon) =>
+    daemon === "project" ? `unix://${dind.sockets.forOrchestrator(target)}` : daemons.shared,
+  use: (target: Target, daemon: Daemon) => {
+    process.env.DOCKER_HOST = daemons.socketOf(target, daemon);
+  },
+  saved: (target: Target): Daemon => {
+    try {
+      return fs.readFileSync(stateFile(target, "daemon"), "utf8").trim() === "project" ? "project" : "shared";
+    } catch {
+      return "shared";
+    }
+  },
+  save: (target: Target, daemon: Daemon) => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(stateFile(target, "daemon"), `${daemon}\n`);
+  },
+  /** Does the daemon at this socket answer right now? A project dind the
+   *  reaper stopped does not, and nothing of the target is running on it. */
+  answers: (socket: string) =>
+    run.status("docker", ["-H", socket, "info", "--format", "ok"], { quiet: true, timeoutMs: 10_000 }) === 0,
+};
+
+/** The supervisor (supervisor.ts), over its socket in supervisor-run. */
+const supervisor = {
+  socket: process.env.DESOLATE_SUPERVISOR ?? "/run/supervisor/supervisor.sock",
+  ask: (request: Record<string, string>): Promise<Record<string, any>> =>
+    new Promise((resolve) => {
+      const connection = net.createConnection(supervisor.socket);
+      let buffer = "";
+      let last: Record<string, any> = { ok: false, error: "the supervisor closed without an answer" };
+      connection.on("connect", () => connection.write(JSON.stringify(request) + "\n"));
+      connection.on("data", (chunk) => {
+        buffer += chunk.toString();
+        let at: number;
+        while ((at = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, at).trim();
+          buffer = buffer.slice(at + 1);
+          if (!line) continue;
+          const message = JSON.parse(line);
+          if (typeof message.log === "string") desolog(message.log);
+          else last = message;
+        }
+      });
+      connection.on("close", () => resolve(last));
+      connection.on("error", (err) =>
+        resolve({ ok: false, error: `the supervisor is not reachable at ${supervisor.socket} (${err.message})` }));
+    }),
+};
+
+/**
+ * T3.4. A target whose existing container, on the shared daemon, predates the
+ * daemon it runs on now -- the pre-v2 privileged shape with a nested dockerd,
+ * or one now moving to a daemon of its own -- needs --rebuild: both would
+ * otherwise keep running beside the new one, over the same directory. With
+ * it, that container goes, with its relays, its forwards, and the nested
+ * daemon's dind-var-lib-* volumes (orphaned by definition once no nested
+ * daemon exists). Called while DOCKER_HOST is the shared daemon.
+ */
+function migrateOffTheSharedDaemon(target: Target, daemon: Daemon, rebuild: boolean): void {
+  const legacy = devcontainerId(target.dir, true);
+  if (!legacy) return;
+  const privileged = docker.container.isPrivileged(legacy);
+  if (daemon === "shared" && !privileged) return;
+
+  const why = privileged
+    ? "it was created --privileged, with a Docker daemon inside it (docker-in-docker), which desolate no longer runs"
+    : "it now runs on a Docker daemon of its own, and its existing container is on the shared one";
+  if (!rebuild)
+    die(`${target.name} needs migrating: ${why}.
+      Recreate it -- this discards anything written inside the old container outside
+      /workspaces (/workspaces itself is untouched):
+        ${hint.desolate(`--rebuild ${invocation(target)}`)}
+      If devcontainer.json still says docker-in-docker, switch it first to
+        "ghcr.io/devcontainers/features/docker-outside-of-docker:1"`);
+
+  const nested = docker.container.volumeNames(legacy).filter((name) => /^dind-var-lib-(docker|containerd)-/.test(name));
+  docker.container.remove(ownRelayNames(target));
+  ingressFiles.withdraw(ports.load(target), target);
+  docker.container.remove([legacy]);
+  docker.volume.remove(nested);
+  desolog(`migrated: removed the old container${nested.length ? ` and its nested daemon's volumes (${nested.join(", ")})` : ""}`);
+}
+
+/** Drive the daemon this target last ran on. False when that is a project
+ *  dind that is not up (the reaper stopped it), in which case nothing of the
+ *  target is running and there is nothing to drive. */
+const driveSaved = (target: Target) => {
+  const daemon = daemons.saved(target);
+  if (daemon === "project" && !daemons.answers(daemons.socketOf(target, "project"))) return false;
+  daemons.use(target, daemon);
+  return true;
+};
+
+/**
+ * Start (or confirm) this project's own daemon, and drive it from here on.
+ *
+ * Fail closed: a project that declares docker-outside-of-docker never falls
+ * back to the shared daemon -- that would hand it a socket that is root over
+ * every other project.
+ */
+async function useProjectDaemon(target: Target): Promise<void> {
+  const answer = await supervisor.ask({ op: "ensure", project: target.project });
+  if (answer.ok !== true)
+    die(`${target.name} uses docker-outside-of-docker, so it runs on a daemon of its own,
+      and that daemon is not available -- refusing to start (it never falls back to the
+      shared one). The supervisor said: ${answer.error ?? "nothing"}`);
+  daemons.use(target, "project");
+}
+
 /** Blocking sleep (we are in a sequential CLI, not an event loop hot path). */
 const sleep = (ms: number) => execFileSync("sleep", [String(ms / 1000)]);
 
@@ -199,13 +320,14 @@ const stateDir = stateDirectory(WORKSPACES);
  * desolate-ingress's ports/ directory (ingress-files.ts), for targets: each
  * file's owner is the target that claimed it.
  *
- * Every target's relays publish on the SHARED dind until projects get daemons
- * of their own (Phase 3), so every file names it.
+ * A file names the dind the target's relays publish on: its project's own,
+ * or the shared one (dindOf).
  */
 const ingress = ingressDirectory(process.env.DESOLATE_INGRESS_PORTS ?? "/run/ingress/ports");
 const ingressFiles = {
-  dind: "desolate-dind",
   owner: (target: Target) => target.namespace,
+  /** The dind a target's relays publish on, as dinds/ names it. */
+  dindOf: (target: Target, daemon: Daemon) => (daemon === "project" ? dind.name(target) : "desolate-dind"),
   read: (): Map<string, string> => {
     try {
       return ingress.read();
@@ -216,11 +338,11 @@ const ingressFiles = {
           ${hint.mac("vm install --proxy-only")}  and  ${hint.mac("down")} / ${hint.mac("up")}`);
     }
   },
-  claim: (hostPort: number, target: Target) =>
-    ingress.claim(hostPort, ingressFiles.dind, ingressFiles.owner(target)),
+  claim: (hostPort: number, target: Target, dindName: string) =>
+    ingress.claim(hostPort, dindName, ingressFiles.owner(target)),
   release: (hostPort: number, target: Target) => ingress.release(hostPort, ingressFiles.owner(target)),
-  publish: (previous: PortMap, map: PortMap, target: Target) => {
-    const lost = ingress.publish(previous, map, ingressFiles.dind, ingressFiles.owner(target));
+  publish: (previous: PortMap, map: PortMap, target: Target, dindName: string) => {
+    const lost = ingress.publish(previous, map, dindName, ingressFiles.owner(target));
     if (lost.length)
       die(`${target.name}'s forwards on ${lost.join(", ")} are held by another target now
         (${lost.map((port) => ingress.ownerOf(port) || "a file that names no owner").join(", ")}).
@@ -264,11 +386,11 @@ const ports = {
    *  anything else, sees these as taken from here on. A claim lost to a start
    *  that got there between the read and the create gives back what this one
    *  took, and looks again. */
-  allocate: (target: Target, appPorts: number[]): PortMap => {
+  allocate: (target: Target, appPorts: number[], dindName: string): PortMap => {
     for (let attempt = 0; attempt < CLAIM_ATTEMPTS; attempt++) {
       const world = ports.world(target);
       const map = dieOnError(() => allocatePorts(world, appPorts));
-      const claimed = [...map.values()].filter((port) => ingressFiles.claim(port, target));
+      const claimed = [...map.values()].filter((port) => ingressFiles.claim(port, target, dindName));
       if (claimed.length === map.size) {
         ports.save(target, map);
         return map;
@@ -553,11 +675,30 @@ const asList = (value: JSONValue | undefined): JSONValue[] =>
 const mustMirrorItsOwnPath = (
   target: Target,
   spec: ResolvedSpec["configuration"],
-) =>
-  target.worktree !== undefined ||
-  (target.project.includes("/") &&
-    spec.workspaceFolder === undefined &&
-    spec.workspaceMount === undefined);
+  daemon: Daemon,
+) => {
+  if (daemon === "project") {
+    // Unconditional on a project daemon: `docker run -v $(pwd)` from inside
+    // hands that daemon the devcontainer's path, and docker creates a missing
+    // bind source as an EMPTY directory -- the build "succeeds" on nothing.
+    // So the path has to mean the same directory on both sides, always.
+    const own = (value: unknown) =>
+      value === undefined || value === target.dir ||
+      (typeof value === "string" && /(^|,)\s*source=([^,]*)/.exec(value)?.[2] === target.dir &&
+        /(^|,)\s*target=([^,]*)/.exec(value)?.[2] === target.dir);
+    if (!own(spec.workspaceFolder) || !own(spec.workspaceMount))
+      die(`${target.name} runs on a daemon of its own, where the workspace must sit at its
+        own path (${target.dir}) on both sides -- otherwise 'docker run -v $(pwd)' binds a
+        directory that daemon does not have, which docker silently creates empty.
+        Remove "workspaceFolder" and "workspaceMount" from devcontainer.json; desolate
+        mounts it at ${target.dir} itself.`);
+    return true;
+  }
+  return target.worktree !== undefined ||
+    (target.project.includes("/") &&
+      spec.workspaceFolder === undefined &&
+      spec.workspaceMount === undefined);
+};
 
 /**
  * Narrow, derived rewrites of a validated spec. Returns the --config path to
@@ -567,6 +708,7 @@ function deriveRunConfig(
   target: Target,
   config: string,
   cfg: ProjectConfig,
+  daemon: Daemon,
 ): string {
   const { dir, name } = target;
   const tag = caTrustedBaseImage(cfg);
@@ -586,7 +728,7 @@ function deriveRunConfig(
 
   const applied: string[] = [];
 
-  if (mustMirrorItsOwnPath(target, spec)) {
+  if (mustMirrorItsOwnPath(target, spec, daemon)) {
     spec.workspaceFolder = dir;
     // A worktree's mount is its project's root, the worktree inside it:
     // never a bind of a path its project could have made a link
@@ -899,7 +1041,14 @@ const startRelay = (
   // Chain: Mac:hostPort -> (daemon #0 range publish) -> dind ns:hostPort
   //        -> (this relay's publish on daemon #1) -> socat -> devcontainer IP.
   // The relay joins the devcontainer's network so `ip` is directly routable.
-  const code = docker.relay.start({
+  // On a project daemon a dev-server port may be published by a compose
+  // sibling on the dind, not served from the devcontainer: fall back to the
+  // dind itself when the devcontainer refuses. Never for the editor.
+  const fallbackIp =
+    daemons.saved(target) === "project" && targetPort !== EDITOR_INTERNAL_PORT
+      ? docker.networkGateway(network) || undefined
+      : undefined;
+  const code = dieOnError(() => docker.relay.start({
     image: relay.IMAGE,
     name: relay.name(target, hostPort),
     label: relay.label(target),
@@ -907,7 +1056,8 @@ const startRelay = (
     hostPort,
     targetIp,
     targetPort,
-  });
+    fallbackIp,
+  }));
 
   if (code !== 0)
     die(
@@ -1009,10 +1159,11 @@ function movePorts(target: Target, move: { label: string; port: number }): void 
   const map = dieOnError(() => movePort(world, move.label, move.port));
   ports.save(target, map);
   if (devcontainerId(target.dir)) {
-    if (!ingressFiles.claim(move.port, target))
+    const dindName = ingressFiles.dindOf(target, daemons.saved(target));
+    if (!ingressFiles.claim(move.port, target, dindName))
       die(`${move.port} was taken by ${ingressFiles.ownerOf(move.port) || "another target"} just now; pick another`);
     recreateRelays(target, map);
-    ingressFiles.publish(world.previous, map, target);
+    ingressFiles.publish(world.previous, map, target, dindName);
     publishExternalPorts(target, dieOnError(() => externalEnvironment(map)));
     console.log(`  login shells see the new DESOLATE_EXTERNAL_* now; the editor's terminals on its
   next start:  ${hint.desolate(invocation(target))}`);
@@ -1039,10 +1190,42 @@ function showPorts(target: Target): void {
  * handful. What comes back is display-grade, which is why `stopTarget` below
  * still resolves each container by its full identity before touching it.
  */
+/** Every running target, across every daemon that answers: the shared one,
+ *  and each project dind a target last ran on. */
 const runningTargets = (): Target[] => {
-  const up = docker.container.runningWorkspaceFolders();
-  return listTargets(WORKSPACES).filter(({ dir }) => up.has(dir));
+  const bySocket = new Map<string, Target[]>();
+  for (const target of listTargets(WORKSPACES)) {
+    const socket = daemons.socketOf(target, daemons.saved(target));
+    bySocket.set(socket, [...(bySocket.get(socket) ?? []), target]);
+  }
+  const running: Target[] = [];
+  for (const [socket, targets] of bySocket) {
+    if (socket !== daemons.shared && !daemons.answers(socket)) continue;
+    process.env.DOCKER_HOST = socket;
+    const up = docker.container.runningWorkspaceFolders();
+    running.push(...targets.filter(({ dir }) => up.has(dir)));
+  }
+  process.env.DOCKER_HOST = daemons.shared;
+  return running;
 };
+
+/**
+ * Join the devcontainer to every network on its project's daemon (Q5b).
+ *
+ * Sibling services sit on compose's bridge, which docker isolates from the
+ * devcontainer's own, so `wget http://web:8000` does not resolve until the two
+ * share one -- measured in tests/probes/sibling-docker.sh. On a project dind
+ * every network is the project's, so joining them all is joining its own.
+ * Networks made later (a `compose up` from inside) are `desolate-net join`.
+ */
+function joinProjectNetworks(target: Target): void {
+  const id = devcontainerId(target.dir);
+  if (!id) return;
+  const on = new Set(docker.container.networks(id).map(({ network }) => network));
+  for (const network of docker.userNetworks())
+    if (!on.has(network) && docker.connectNetwork(network, id) === 0)
+      desolog(`joined ${network}, so its services resolve by name`);
+}
 
 /** The URL that opens this target's editor, or "" when nothing is saved to
  *  build one from. Same shape `runTarget` prints, so a listed row is as usable
@@ -1106,7 +1289,18 @@ const worktreesFirst = (a: Target, b: Target) =>
 
 /** The worktrees of this project whose containers are up right now. */
 const runningWorktrees = (target: Target) =>
-  worktreesOf(target).filter(({ dir }) => devcontainerId(dir));
+  worktreesOf(target).filter(isRunningOnItsDaemon);
+
+/** Asked of the daemon THIS target last ran on, not the one being driven: a
+ *  project's worktrees decide their daemons by their own specs, so a project
+ *  on its own dind can have a worktree on the shared one, and vice versa. */
+const isRunningOnItsDaemon = (target: Target) => {
+  const daemon = daemons.saved(target);
+  const socket = daemons.socketOf(target, daemon);
+  if (daemon === "project" && !daemons.answers(socket)) return false;
+  return run("docker", ["-H", socket, "ps", "-q", "--filter", `label=devcontainer.local_folder=${target.dir}`],
+             { encoding: "utf8" }, true) !== "";
+};
 
 /**
  * Refuse to stop a project while its worktrees are running.
@@ -1127,6 +1321,10 @@ ${running.map((w) => `        ${hint.desolate(`--stop ${invocation(w)}`)}`).join
 }
 
 function stopTarget(target: Target): void {
+  if (!driveSaved(target)) {
+    ingressFiles.withdraw(ports.load(target), target);
+    return console.log(`not running (${target.name}'s own daemon is stopped)`);
+  }
   refuseIfWorktreesAreRunning(target);
 
   const relays = ownRelayNames(target);
@@ -1138,7 +1336,13 @@ function stopTarget(target: Target): void {
   ingressFiles.withdraw(ports.load(target), target);
   const id = devcontainerId(target.dir);
   if (id) {
-    shutdown.devcontainer(docker, id, desolog);
+    // On a project daemon the devcontainer holds a docker CLI and NO daemon of
+    // its own -- shutdown.ts's quiesce, which reads "has a CLI" as "has a
+    // daemon", would stop every sibling on the project's dind, this container
+    // and its relays included. Only a legacy shared-daemon container, with a
+    // nested dockerd, still needs it (docs/dind/HANDOFF.md section 6).
+    if (daemons.saved(target) === "project") docker.container.stop(id);
+    else shutdown.devcontainer(docker, id, desolog);
     // Say that the container is KEPT. Stopping and starting again looks like it
     // should pick up an edited devcontainer.json, and it does not -- `up`
     // restarts the existing container rather than rebuilding from the spec.
@@ -1335,7 +1539,9 @@ async function runTarget(
   populateWorktree(target);
   config ??= dieOnError(() => snapshot(target, { specs: DIRECT_SPEC_DIR }));
 
-  const project = readProjectConfig(resolveOrDie(target, config));
+  const resolved = resolveOrDie(target, config);
+  const project = readProjectConfig(resolved);
+  const daemon = daemonOf(resolved);
   if (project.hadLegacyAppPort)
     return die(`devcontainer.json still contains "appPort".
       desolate allocates host ports itself, and an appPort publish occupies the
@@ -1343,16 +1549,28 @@ async function runTarget(
       Fix: delete the appPort entry and declare container-side ports instead:
         "customizations": { "desolate": { "ports": [5173] } }`);
 
+  // Before leaving the shared daemon: a container this target already has
+  // THERE is either the pre-v2 shape (privileged, a nested daemon) or simply
+  // the one it had before it moved to a daemon of its own.
+  daemons.use(target, "shared");
+  migrateOffTheSharedDaemon(target, daemon, rebuild);
+
+  // From here on, every docker call is to the daemon this target runs on.
+  if (daemon === "project") await useProjectDaemon(target);
+  else daemons.use(target, "shared");
+  daemons.save(target, daemon);
+
   // fingerprint before deriving
   const fingerprint = spec.fingerprint(dir, config);
 
-  config = deriveRunConfig(target, config, project);
+  config = deriveRunConfig(target, config, project, daemon);
 
   try {
     enforcePolicy(
       target,
       resolveOrDie(target, config),
       listTargets(WORKSPACES),
+      daemon,
     );
   } catch (err: any) {
     die(`the spec desolate derived for ${name} does not pass the policy
@@ -1380,7 +1598,7 @@ async function runTarget(
   const willCreate = rebuild || !existing;
 
   const previousPorts = ports.load(target);
-  const map = ports.allocate(target, project.appPorts);
+  const map = ports.allocate(target, project.appPorts, ingressFiles.dindOf(target, daemon));
   const editorPort = map.get("editor")!;
   const token = connectionToken(target);
 
@@ -1393,7 +1611,8 @@ async function runTarget(
   publishExternalPorts(target, external);
   startEditor(target, project, token, config, external);
   recreateRelays(target, map);
-  ingressFiles.publish(previousPorts, map, target);
+  ingressFiles.publish(previousPorts, map, target, ingressFiles.dindOf(target, daemon));
+  if (daemon === "project") joinProjectNetworks(target);
 
   if (!probeEditor(target, editorPort))
     return die(`editor did not answer through the relay on :${editorPort} -- check the log:
@@ -1502,10 +1721,22 @@ async function main(): Promise<void> {
   }
 
   const target = targetOf(args);
-  if (args.command === "remove-worktree") return removeWorktree(target, args.force);
-  if (args.command === "ports" && args.move) movePorts(target, args.move);
-  else if (args.command === "ports") showPorts(target);
-  else if (args.command === "purge") purgeTarget(target);
+  if (args.command === "remove-worktree") {
+    // Its purge has to reach the target's containers and volumes, as
+    // --purge's does, so its own daemon is brought up for it.
+    if (daemons.saved(target) === "project") await useProjectDaemon(target);
+    return removeWorktree(target, args.force);
+  }
+  if (args.command === "ports" && args.move) {
+    driveSaved(target);
+    movePorts(target, args.move);
+  } else if (args.command === "ports") showPorts(target);
+  else if (args.command === "purge") {
+    // A purge has to reach the target's containers and volumes, so its own
+    // daemon is brought up for it.
+    if (daemons.saved(target) === "project") await useProjectDaemon(target);
+    purgeTarget(target);
+  }
   else if (args.command === "uncommitted") reportUncommitted(target);
   else if (args.command === "populate") populateWorktree(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);

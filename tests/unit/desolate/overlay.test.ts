@@ -92,6 +92,7 @@ describe("the volumes a view is made of", () => {
         named(project),
         { configuration, mergedConfiguration: { ...configuration } },
         [named(project)],
+        "shared",
       );
     }
   });
@@ -110,6 +111,7 @@ describe("the volumes a view is made of", () => {
           named("web"),
           { configuration, mergedConfiguration: { ...configuration } },
           [named("web"), named("web-vscode-server")],
+          "shared",
         ),
       /belongs to project 'web-vscode-server'/,
     );

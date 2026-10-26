@@ -14,6 +14,7 @@ import {
   createDocker,
   parseMounts,
   parseWorktreeChanges,
+  relayWithFallback,
   parseNetworkAttachments,
   parseWorkspaceCandidates,
   selectWorkspaceContainer,
@@ -664,5 +665,35 @@ describe("a project dind's create argv", () => {
   test("is labelled so a sweep that knows no targets finds it", () => {
     const argv = argvFor();
     assert.equal(argv[argv.indexOf("--label") + 1], "desolate.dind=acme/widgets");
+  });
+});
+
+describe("a relay that falls back to the project's dind", () => {
+  test("tries the devcontainer, then the dind, at the same port -- quoted for socat's parser", () => {
+    assert.equal(
+      relayWithFallback("172.17.0.5", "172.17.0.1", 8000),
+      'system:"socat - TCP:172.17.0.5:8000,connect-timeout=2 || exec socat - TCP:172.17.0.1:8000"',
+    );
+  });
+
+  test("nothing but addresses and a port reaches the shell it runs in", () => {
+    for (const [first, then, port] of [
+      ["172.17.0.5; rm -rf /", "172.17.0.1", 8000],
+      ["172.17.0.5", "$(id)", 8000],
+      ["172.17.0.5", "172.17.0.1", 0],
+      ["172.17.0.5", "172.17.0.1", 8000.5],
+      ["999.1.1.1", "172.17.0.1", 8000],
+    ] as const)
+      assert.throws(() => relayWithFallback(first, then, port), /refusing/, JSON.stringify([first, then, port]));
+  });
+
+  test("relay.start uses it only when asked", () => {
+    const base = { image: "alpine/socat", name: "r", label: "l", network: "bridge", hostPort: 8082, targetIp: "172.17.0.5", targetPort: 8000 };
+    const { runner, calls } = recorder();
+    const docker = createDocker(runner);
+    docker.relay.start(base);
+    docker.relay.start({ ...base, fallbackIp: "172.17.0.1" });
+    assert.equal(calls[0].at(-1), "tcp:172.17.0.5:8000");
+    assert.match(calls[1].at(-1)!, /^system:"socat - TCP:172\.17\.0\.5:8000.* TCP:172\.17\.0\.1:8000"$/);
   });
 });

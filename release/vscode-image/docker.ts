@@ -292,6 +292,17 @@ const dindRunArgv = (spec: DindSpec) => [
   "--default-ulimit=nofile=65536:524288",
 ];
 
+const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+
+/** socat's SYSTEM address, double-quoted for socat's own parser (which would
+ *  otherwise split the command on its colons). Only addresses and a port reach
+ *  it, each checked first: this string is run by a shell. */
+export const relayWithFallback = (first: string, then: string, port: number) => {
+  if (!IPV4.test(first) || !IPV4.test(then) || !Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error(`refusing to build a relay command from '${first}', '${then}', '${port}'`);
+  return `system:"socat - TCP:${first}:${port},connect-timeout=2 || exec socat - TCP:${then}:${port}"`;
+};
+
 export const createDocker = (run: Runner) => {
   const query = (...argv: string[]) => run.output(argv);
   const effect = (...argv: string[]) => run.status(argv);
@@ -367,6 +378,11 @@ export const createDocker = (run: Runner) => {
      *  names, but `cli.sh desolate` is a direct path where a quote in a path
      *  would break the template open -- so the whole table is read and matched
      *  in TypeScript instead. */
+    /** Was it started --privileged (a pre-v2 docker-in-docker devcontainer)? */
+    isPrivileged: (cid: string) => query("inspect", "-f", "{{.HostConfig.Privileged}}", cid) === "true",
+    /** The NAMES of the volumes it mounts. */
+    volumeNames: (cid: string) =>
+      nonEmptyLines(query("inspect", "-f", '{{range .Mounts}}{{if .Name}}{{.Name}}{{"\\n"}}{{end}}{{end}}', cid)),
     mounts: (cid: string) =>
       parseMounts(query("inspect", "-f", MOUNTS_TEMPLATE, cid)),
     remove: (names: string[]) =>
@@ -515,6 +531,13 @@ export const createDocker = (run: Runner) => {
       ]),
     /** How many CPUs the daemon's machine has; 0 when it will not say. */
     cpus: () => Number(query("info", "--format", "{{.NCPU}}")) || 0,
+    /** Networks someone made on this daemon (compose's, a project's own), as
+     *  opposed to docker's bridge/host/none. */
+    /** The gateway of a network: from a container on it, the daemon's own host. */
+    networkGateway: (network: string) =>
+      query("network", "inspect", "-f", "{{range .IPAM.Config}}{{.Gateway}}{{end}}", network),
+    userNetworks: () => nonEmptyLines(query("network", "ls", "--filter", "type=custom", "--format", "{{.Name}}")),
+    connectNetwork: (network: string, cid: string) => effect("network", "connect", network, cid),
     /** The daemon's own version, for a refusal that may be about it. */
     version: () => query("version", "--format", "{{.Server.Version}}") || "unknown",
     /** A project's own daemon (supervisor.ts is the only caller). */
@@ -619,6 +642,14 @@ export const createDocker = (run: Runner) => {
         hostPort: number;
         targetIp: string;
         targetPort: number;
+        /** On a project daemon a dev server may be a compose SIBLING publishing
+         *  on the dind rather than a process in the devcontainer. With this
+         *  set, a connection the devcontainer REFUSES goes on to this address
+         *  (the dind itself, from the relay's network) at the same port --
+         *  decided at connect, before any byte is read, so nothing is lost.
+         *  Measured: refused-then-sibling in ~45 ms, a serving devcontainer
+         *  wins, a request body survives. */
+        fallbackIp?: string;
       }) =>
         effect(
           "run",
@@ -633,7 +664,9 @@ export const createDocker = (run: Runner) => {
           `${spec.hostPort}:${spec.hostPort}`,
           spec.image,
           `tcp-listen:${spec.hostPort},fork,reuseaddr`,
-          `tcp:${spec.targetIp}:${spec.targetPort}`,
+          spec.fallbackIp === undefined
+            ? `tcp:${spec.targetIp}:${spec.targetPort}`
+            : relayWithFallback(spec.targetIp, spec.fallbackIp, spec.targetPort),
         ),
 
       /** True when something answers through this relay's own listener.
