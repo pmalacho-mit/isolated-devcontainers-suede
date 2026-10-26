@@ -475,15 +475,40 @@ the rules would go stale again each time.
 ./cli.sh worktree add owner/repo wip     # a second branch, in its own devcontainer
 ./cli.sh worktree list owner/repo
 ./cli.sh worktree remove owner/repo wip
+./cli.sh export owner/repo [path]        # copy files out to ./<name> (a tar when piped)
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
 ./cli.sh reset-inner            # the inner daemon is wedged: report, then recover
 ./cli.sh down                   # stop (down -v also deletes volumes; confirms)
 ```
 
-**Getting code in and out:** use the browser editor directly -- drag a folder
-into the file explorer to add it, and right-click -> Download to pull files
-out. There is no separate copy tool.
+**Getting code in:** drag a folder into the browser editor's file explorer.
+
+### Getting files out
+
+Three cases, by where the file lives:
+
+- **In the workspace** (`/workspaces/<project>/...`) -- `./cli.sh export`, on
+  your Mac. `/workspaces` is one volume the editor container mounts, and that
+  container runs on the daemon your Mac's docker CLI already talks to, so this
+  is a plain `docker cp` of the bytes every devcontainer sees:
+
+  ```bash
+  ./cli.sh export acme/widgets dist            # -> ./dist (refuses to overwrite)
+  ./cli.sh export acme/widgets > widgets.tar   # piped: a tar stream of the project
+  ```
+
+  The path is resolved inside the editor with symlinks followed, and refused
+  if it lands outside that project -- a link a project planted cannot turn an
+  export of its own files into a copy of another project's.
+- **Inside a devcontainer but outside the workspace** (its `/home`, a cache, a
+  build output in a container) -- through the inner daemon:
+  `./cli.sh observe docker cp <container>:<path> - > out.tar`. `observe ps`
+  names the containers.
+- **One file, from the browser** -- right-click -> Download in the editor. A
+  folder download uses the browser's File System Access API, and Chrome refuses
+  some destinations (your home directory's root, `~/Library`, a volume root)
+  with a message about system files: pick a fresh empty folder instead.
 
 ## Privilege separation (why the editor can't touch the daemon)
 

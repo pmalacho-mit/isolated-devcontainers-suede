@@ -151,4 +151,47 @@ V6=$(printf '%s' "$GH_FIXTURE" | jq -r '.git[] | select(contains(":"))' | tr '\n
 assert_not_contains "the v4 filter excludes IPv6 ranges" "$V4" ":"
 assert_contains "the v6 filter keeps IPv6 ranges" "$V6" "2a0a"
 
+group "the 'export' path check"
+
+# Extracted, not retyped, and run against a real directory tree: the claim is
+# about what realpath does with a planted symlink, which only running it shows.
+RESOLVE=$(awk "/^EXPORT_RESOLVE_SH='/{p=1; sub(/^EXPORT_RESOLVE_SH='/, \"\")} p{ if (sub(/'\$/, \"\")) { print; exit } print }" "$RELEASE/cli.sh")
+if [ -z "$RESOLVE" ]; then
+  fail "found EXPORT_RESOLVE_SH in cli.sh" "awk matched nothing -- was it renamed or reformatted?"
+else
+  pass "found EXPORT_RESOLVE_SH in cli.sh"
+  WS=$(mktemp -d)
+  mkdir -p "$WS/acme/widgets/dist" "$WS/acme/gadgets"
+  echo built > "$WS/acme/widgets/dist/app.js"
+  echo private > "$WS/acme/gadgets/secret.txt"
+  ln -s ../gadgets "$WS/acme/widgets/escape"
+  ln -s dist "$WS/acme/widgets/inside"
+  resolve() { sh -c "$RESOLVE" sh "$WS" "$@"; }
+
+  OUT=$(resolve acme/widgets dist); RC=$?
+  if [ "$RC" = 0 ] && [ "$OUT" = "$WS/acme/widgets/dist" ]; then pass "a path in the project resolves to itself"
+  else fail "a path in the project resolves to itself" "rc=$RC out=$OUT"; fi
+  OUT=$(resolve acme/widgets); RC=$?
+  if [ "$RC" = 0 ] && [ "$OUT" = "$WS/acme/widgets" ]; then pass "no path means the whole project"
+  else fail "no path means the whole project" "rc=$RC out=$OUT"; fi
+  OUT=$(resolve acme/widgets inside); RC=$?
+  if [ "$RC" = 0 ] && [ "$OUT" = "$WS/acme/widgets/dist" ]; then pass "a symlink that stays inside is followed"
+  else fail "a symlink that stays inside is followed" "rc=$RC out=$OUT"; fi
+  resolve acme/widgets escape >/dev/null; RC=$?
+  if [ "$RC" = 4 ]; then pass "a symlink into another project is refused"
+  else fail "a symlink into another project is refused" "rc=$RC"; fi
+  resolve acme/widgets ../gadgets/secret.txt >/dev/null; RC=$?
+  if [ "$RC" = 4 ]; then pass "'..' out of the project is refused"
+  else fail "'..' out of the project is refused" "rc=$RC"; fi
+  resolve acme/widgets nope >/dev/null; RC=$?
+  if [ "$RC" = 3 ]; then pass "a missing path is its own refusal"
+  else fail "a missing path is its own refusal" "rc=$RC"; fi
+  for project in .. . "" /etc acme/widgets/../gadgets/.. acme/ acme/widgets/dist .hidden nosuch; do
+    resolve "$project" . >/dev/null; RC=$?
+    if [ "$RC" = 2 ]; then pass "'$project' is not a project"
+    else fail "'$project' is not a project" "rc=$RC"; fi
+  done
+  rm -rf "$WS"
+fi
+
 summary

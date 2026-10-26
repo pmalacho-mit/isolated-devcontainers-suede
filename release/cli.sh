@@ -11,6 +11,7 @@
 #   ./isolated-devcontainers-suede/cli.sh repo add owner/repo       # per-repo deploy key + clone
 #   ./isolated-devcontainers-suede/cli.sh worktree add owner/repo wip   # a branch in its own devcontainer
 #   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
+#   ./isolated-devcontainers-suede/cli.sh export owner/repo [path]  # copy files out (tar when piped)
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
@@ -96,6 +97,21 @@ EOF
 # formatting on the Mac leaves the remote side nothing to misparse.
 # tests/static/05-cli-queries.sh executes this against a fixture.
 SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
+
+# `export`'s path check, run INSIDE the editor where the files are:
+#   sh -c "$EXPORT_RESOLVE_SH" sh <workspaces> <project> <relative-path>
+# prints the resolved source, or exits 2 (no such project), 3 (no such path) or
+# 4 (resolves outside the project). A project is one or two segments, neither
+# starting with a dot, as everywhere else. Symlinks are FOLLOWED before the check: a
+# link a project planted must not turn an export of its own files into a copy
+# of another project's. tests/static/05-cli-queries.sh executes it on a fixture.
+EXPORT_RESOLVE_SH='
+  case "$2" in ""|/*|*/|*//*|*/*/*|.*|*/.*) exit 2 ;; esac
+  root=$(realpath -e "$1/$2" 2>/dev/null) || exit 2
+  base=$(realpath -e "$1") || exit 2
+  case "$root" in "$base"/?*) ;; *) exit 2 ;; esac
+  path=$(realpath -e "$root/$3" 2>/dev/null) || exit 3
+  case "$path" in "$root"|"$root"/*) printf "%s" "$path" ;; *) exit 4 ;; esac'
 
 # Existing placeholders that OVERLAP the one being added ($n): either contains
 # the other. Same quoting discipline as SECRET_LIST_JQ -- it travels as a bare
@@ -976,6 +992,35 @@ case "$CMD" in
                  exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" worktree remove "$PROJ" "$NAME" ;;
                *) echo "usage: cli.sh worktree {list <project>|add <project> <name> [<branch>]|remove <project> <name>}" >&2; exit 1 ;;
              esac ;;
+
+  export)    ensure_running
+             # Getting files out (#13). /workspaces is one volume the editor
+             # mounts, and the editor runs on the daemon this Mac's docker CLI
+             # already talks to -- so `docker cp` from it reads the same bytes
+             # every devcontainer sees, with no inner daemon involved.
+             PROJ="${1:?usage: cli.sh export <project> [<path inside it>]}"
+             REL="${2:-.}"
+             set +e
+             SRC=$(docker exec "$CONTAINER" with-ca sh -c "$EXPORT_RESOLVE_SH" sh /workspaces "$PROJ" "$REL")
+             WHY=$?
+             set -e
+             case "$WHY" in
+               0) ;;
+               2) echo "cli.sh: no such project: $PROJ" >&2; exit 1 ;;
+               3) echo "cli.sh: no such path in $PROJ: $REL" >&2; exit 1 ;;
+               4) echo "cli.sh: '$REL' resolves outside $PROJ (a symlink?); refusing" >&2; exit 1 ;;
+               *) echo "cli.sh: could not resolve '$REL' in the editor container" >&2; exit 1 ;;
+             esac
+             if [ -t 1 ]; then
+               DEST="./$(basename "$SRC")"
+               [ -e "$DEST" ] && { echo "cli.sh: $DEST already exists; refusing to overwrite it" >&2; exit 1; }
+               docker cp "$CONTAINER:$SRC" "$DEST"
+               echo "cli.sh: exported $PROJ/${REL#./} to $DEST"
+             else
+               # A tar stream, so a pipe or a redirect gets something binary-clean:
+               #   ./cli.sh export acme/widgets dist > dist.tar
+               exec docker cp "$CONTAINER:$SRC" -
+             fi ;;
 
   desolate)  ensure_running
              # From the Mac we use the DIRECT runner in the orchestrator (the
