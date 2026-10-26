@@ -48,6 +48,7 @@ if ! command -v git >/dev/null 2>&1; then
   printf '  skip: needs git\n'
 else
   bash "$ROOT/tests/integration/factory/run.sh" || RC=1
+  bash "$ROOT/tests/integration/factory/github.sh" </dev/null || RC=1
 fi
 
 printf '\n\033[1m-- proxy (transparent mitmproxy + nftables) --\033[0m\n'

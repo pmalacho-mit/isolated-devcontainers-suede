@@ -1428,6 +1428,33 @@ None of it runs until you enable it:
 ./cli.sh work verify acme/widgets        # every message an append by its writer, or exit 1
 ```
 
+**Work from GitHub issues, with GitHub reached from your Mac.** The `github`
+adapter never talks to GitHub itself: `./cli.sh forge` does, on your Mac, with
+your own `gh` login, and feeds the editor what it saw. No forge token is in the
+VM, the proxy or any container.
+
+```bash
+./cli.sh forge add acme/widgets acme/widgets   # project, then repo; creates the `desolate:run` label
+./cli.sh forge run                             # leave it running: polls every 60 s (--interval, --once)
+./cli.sh forge status acme/widgets             # each issue's worktree, branch, state and PR
+```
+
+Label an issue `desolate:run` (`--label` picks another) and the next poll asks
+for a worktree `issue-<n>` on `<prefix>issue-<n>`; the watcher opens it, and the
+project's main tree sees the request on its refs as soon as it is running. As
+the work moves, `forge run` comments on the issue (`--no-comments` to stop it):
+opened, refused, closed. When desolate pushes the branch, it opens a **draft**
+PR that closes the issue. When that PR is merged or closed, or the issue is
+closed, the worktree's close is asked for -- and, as always, refused while it
+holds uncommitted work. Nothing is lost while `forge run` is stopped; it picks
+up where GitHub is when it starts. It polls rather than listening for
+webhooks, because receiving one would mean listening somewhere other than
+loopback.
+
+Anyone who can label an issue can ask for a worktree; the cap, the requesters
+and `on_done` in your policy still decide what happens. An issue's title is
+kept as one printable line and never used as a name.
+
 **Agents' credentials are placeholders.** Claude Code sends whatever token it
 is given as the bearer, with no local check of its shape (measured:
 `tests/probes/agent-token-placeholder.sh`), so the real token stays in the VM

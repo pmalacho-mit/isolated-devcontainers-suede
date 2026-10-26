@@ -55,9 +55,18 @@ export interface Policy {
   /** Where pushes go, when not the project's own deploy-key alias
    *  (work-watcher.ts pushUrl). Set by a human; never read from the repo. */
   remote: string;
+  /** The `github` adapter's repository and the label that makes an issue a
+   *  work item. GitHub itself is reached from the Mac (release/forge.sh), with
+   *  the human's own `gh` credentials: no forge token enters the stack. */
+  github: { repo: string; label: string } | null;
 }
 
-export const KNOWN_ADAPTERS = ["file"] as const;
+export const KNOWN_ADAPTERS = ["file", "github"] as const;
+
+/** `owner/name`, as GitHub spells a repository. */
+export const GITHUB_REPO = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\/[A-Za-z0-9._-]{1,100}$/;
+/** A label: printable, no comma (gh's list separator), not blank. */
+export const GITHUB_LABEL = /^[^\u0000-\u001f\u007f,]{1,50}$/;
 
 /** A remote a push may go to: GitHub-style ssh -- the host may be a deploy
  *  key's alias, `github.com-acme__widgets` -- or https. Not a local path
@@ -78,6 +87,7 @@ export const DEFAULT_POLICY: Policy = {
   allow_hooks: false,
   adapters: [],
   remote: "",
+  github: null,
 };
 
 export class PolicyFileError extends Error {}
@@ -112,13 +122,30 @@ export const parsePolicy = (text: string): Policy => {
     throw new PolicyFileError(`adapters must be among: ${KNOWN_ADAPTERS.join(", ")}`);
   if (typeof policy.remote !== "string" || (policy.remote !== "" && !isSafeRemote(policy.remote)))
     throw new PolicyFileError("remote must be empty or a plain ssh or https remote");
+  if (policy.github !== null) {
+    const github = policy.github;
+    if (typeof github !== "object" || Array.isArray(github) || Object.keys(github).sort().join() !== "label,repo")
+      throw new PolicyFileError("github must be null or { repo, label }");
+    if (typeof github.repo !== "string" || !GITHUB_REPO.test(github.repo) || github.repo.split("/")[1].startsWith("."))
+      throw new PolicyFileError("github.repo must be owner/name");
+    if (typeof github.label !== "string" || !GITHUB_LABEL.test(github.label.trim()) || github.label !== github.label.trim())
+      throw new PolicyFileError("github.label must be a label: printable, no comma, no surrounding space");
+  }
+  if (policy.adapters.includes("github") && policy.github === null)
+    throw new PolicyFileError("the github adapter needs github: { repo, label } (work github <project> enable)");
   return policy;
 };
 
-/** The three files of one project's factory. */
+/** The files of one project's factory. */
 export const factoryFiles = (workspaces: string, project: string) => {
   const base = join(FACTORY_DIRECTORY(workspaces), volumeNamespace(project));
-  return { policy: `${base}.json`, approved: `${base}.approved`, handled: `${base}.handled` };
+  return {
+    policy: `${base}.json`,
+    approved: `${base}.approved`,
+    handled: `${base}.handled`,
+    /** What the Mac's forge agent last saw on GitHub (work-forge.ts). */
+    github: `${base}.github.json`,
+  };
 };
 
 /** The policy, undefined when the project has no factory; throws a

@@ -14,6 +14,7 @@
 #   ./isolated-devcontainers-suede/cli.sh export owner/repo [path]  # copy files out (tar when piped)
 #   ./isolated-devcontainers-suede/cli.sh reclaim owner/repo [path] # give root-owned files back to the editor
 #   ./isolated-devcontainers-suede/cli.sh work init|log|requests|verify|approve|push|close owner/repo   # a factory
+#   ./isolated-devcontainers-suede/cli.sh forge add owner/repo owner/repo | run   # its GitHub side, polled from this Mac
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
@@ -1015,6 +1016,9 @@ case "$CMD" in
   ps)        compose ps ;;
   preflight) exec "$SCRIPT_DIR/preflight.sh" ;;
   observe)   exec "$SCRIPT_DIR/observe.sh" "$@" ;;
+  forge)     # A factory's GitHub side, on this Mac with your own gh: polls the
+             # enabled projects' issues, feeds the editor, opens draft PRs.
+             exec "$SCRIPT_DIR/forge.sh" "$@" ;;
   url)       editor_url ;;
 
   secret)    # Secrets live ONLY in the Colima VM, below the sysbox boundary.

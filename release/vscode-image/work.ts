@@ -11,6 +11,9 @@
  *   work push <project> <worktree>             push its branch now, whatever on_done says
  *   work close <project> <worktree>            close it now (refused if it holds uncommitted work)
  *   work say <project> <type> <body> [--to t]  a message on the human's own outbox, as @human
+ *   work github <project> enable <owner/repo> [--label l]   the github adapter, fed from the Mac
+ *   work github <project> sync | status | pr <n> <url>       what release/forge.sh calls
+ *   work github-projects                       every project with it: project, repo, label
  *
  * Runs in the editor, where git already runs, hardened as the watcher's is
  * (work-git.ts). What only a human may do -- enable a factory, approve, push
@@ -20,7 +23,8 @@
  */
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { target as resolveTarget, validName, worktreesOf } from "./projects.ts";
+import { list as listTargets, target as resolveTarget, validName, worktreesOf } from "./projects.ts";
+import { forgeStatus, githubItem, parseGithubSnapshot, recordPr, writeGithubSnapshot } from "./work-forge.ts";
 import { isEntryPoint } from "./utils.ts";
 import * as workGit from "./work-git.ts";
 import {
@@ -28,6 +32,8 @@ import {
   DEFAULT_POLICY,
   factoryFiles,
   handled,
+  GITHUB_LABEL,
+  GITHUB_REPO,
   parsePolicy,
   readPolicy,
   recordApproval,
@@ -55,7 +61,9 @@ class UsageError extends Error {}
 const USAGE = `usage: work init <project> [--max N] [--on-done push|hold] [--prefix p/] [--requesters a,b] [--adapter file] [--remote url] [--allow-hooks] [--force]
        work policy <project> | log <project> [--target t] [--type t] | requests <project> | verify <project>
        work approve <project> <request-id> | push <project> <worktree> | close <project> <worktree>
-       work say <project> <type> <body> [--to t,...]`;
+       work say <project> <type> <body> [--to t,...]
+       work github <project> enable <owner/repo> [--label l] | sync | status | pr <number> <url>
+       work github-projects`;
 const usage = (): never => {
   throw new UsageError(USAGE);
 };
@@ -179,11 +187,27 @@ const reflogProblems = (projectDir: string, ref: string, writtenOnce: boolean) =
 
 // --------------------------------------------------------------- the verbs --
 
-export const main = (argv: string[], out: (line: string) => void = console.log): number => {
+export const main = (
+  argv: string[],
+  out: (line: string) => void = console.log,
+  input: () => string = () => readFileSync(0, "utf8"),
+): number => {
   const [verb, name, ...rest] = argv;
   if (!verb || verb === "--help" || verb === "-h") {
     out(USAGE);
     return verb ? 0 : 2;
+  }
+  // Every project with the github adapter, for the Mac's forge agent: one
+  // line each, tab-separated, every field a name the policy already checked.
+  if (verb === "github-projects") {
+    for (const target of listTargets(WORKSPACES)) {
+      if (target.worktree) continue;
+      let policy: Policy | undefined;
+      try { policy = readPolicy(WORKSPACES, target.project); } catch { continue; }
+      if (policy?.github && policy.adapters.includes("github"))
+        out(`${target.project}\t${policy.github.repo}\t${policy.github.label}`);
+    }
+    return 0;
   }
   const root = projectOf(name);
   const say = (line: string) => out(line);
@@ -301,8 +325,72 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
       out(humanSays(root.projectDir, type, body, to).slice(0, 12));
       return 0;
     }
+    case "github":
+      return github(root, rest, out, input);
     default:
       return usage();
+  }
+};
+
+/** The `github` adapter's verbs (work-forge.ts): what the Mac's agent,
+ *  release/forge.sh, calls with what it saw on GitHub. */
+const github = (root: ReturnType<typeof resolveTarget>, argv: string[], out: (line: string) => void, input: () => string) => {
+  const [sub, ...rest] = argv;
+  const files = factoryFiles(WORKSPACES, root.project);
+  const policy = readPolicy(WORKSPACES, root.project);
+  if (!policy) throw new UsageError(`${root.project} has no factory (work init ${root.project})`);
+
+  if (sub === "enable") {
+    const { found, rest: words } = options(rest, ["--label"]);
+    const [repo] = words;
+    if (!repo || !GITHUB_REPO.test(repo) || words.length !== 1) throw new UsageError("enable takes owner/repo");
+    const label = found["--label"] ?? "desolate:run";
+    if (!GITHUB_LABEL.test(label)) throw new UsageError(`'${label}' is not a usable label`);
+    const next: Policy = parsePolicy(JSON.stringify({
+      ...policy,
+      github: { repo, label },
+      adapters: [...new Set([...policy.adapters, "github"])],
+      requesters: [...new Set([...policy.requesters, "forge/github"])],
+    }));
+    writeFileSync(files.policy, `${JSON.stringify(next, null, 2)}\n`);
+    humanSays(root.projectDir, "status", `github adapter enabled: ${repo}, label '${label}'`);
+    out(`work: ${root.project} takes issues labelled '${label}' in ${repo}, once release/forge.sh runs on the Mac`);
+    return 0;
+  }
+  if (!policy.github || !policy.adapters.includes("github"))
+    throw new UsageError(`${root.project} has no github adapter (work github ${root.project} enable <owner/repo>)`);
+  const repo = policy.github.repo;
+
+  switch (sub) {
+    case "sync": {
+      const snapshot = parseGithubSnapshot(input());
+      writeGithubSnapshot(WORKSPACES, root.project, snapshot);
+      out(`work: ${snapshot.open.length} open, ${snapshot.finished.length} finished`);
+      return 0;
+    }
+    case "status": {
+      // Tab-separated for a shell on the Mac: number, worktree, branch, state,
+      // PR (or -). Every field is a name the protocol validated.
+      const prefix = `github:${repo}#`;
+      for (const row of forgeStatus(root.projectDir, "github", policy.branch_prefix)) {
+        if (!row.item.startsWith(prefix)) continue;
+        out([row.item.slice(prefix.length), row.worktree, row.branch, row.state, row.pr ?? "-"].join("\t"));
+      }
+      return 0;
+    }
+    case "pr": {
+      const [number, url] = rest;
+      if (!/^[1-9][0-9]{0,8}$/.test(number ?? "") || !url) throw new UsageError("pr takes an issue number and the PR's URL");
+      const item = githubItem(repo, Number(number));
+      if (!forgeStatus(root.projectDir, "github", policy.branch_prefix).some((row) => row.item === item))
+        throw new UsageError(`${item} was never requested`);
+      if (!url.startsWith(`https://github.com/${repo}/pull/`)) throw new UsageError(`'${url}' is not a pull request of ${repo}`);
+      recordPr(root.projectDir, "github", item, url);
+      out(`work: ${item} -> ${url}`);
+      return 0;
+    }
+    default:
+      throw new UsageError("github takes enable, sync, status or pr");
   }
 };
 
