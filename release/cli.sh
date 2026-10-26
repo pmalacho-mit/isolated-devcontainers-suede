@@ -279,7 +279,7 @@ ensure_vm_proxy() {
     why="both networks resolve to '$live' -- the editor/container split is gone"
   elif ! vm sudo nft list table inet desolate >/dev/null 2>&1; then
     why="the nftables ruleset is not loaded"
-  elif ! vm systemctl is-active --quiet desolate-proxy desolate-nft desolate-proxy-ca desolate-dnsmasq; then
+  elif ! vm systemctl is-active --quiet desolate-proxy desolate-nft desolate-proxy-ca desolate-dnsmasq desolate-ingress; then
     why="a VM proxy unit is not active"
   fi
 
@@ -570,11 +570,6 @@ editor_url() {
   fi
 }
 
-# VSCODE_PORT must not land inside the range dind publishes: both are published on
-# 127.0.0.1 on the same daemon, so they would fight over the same address. dind
-# starts first (vscode depends_on it), so the loser is the EDITOR -- and the
-# symptom is "the editor container is not running" long after the port numbers
-# have gone out of mind. Refuse before starting instead.
 # Before a start: does THIS Mac already listen on a port the target had last
 # time? Lima then forwards nothing for it, and never retries once the Mac lets
 # go (tests/probes/vm-loopback-forward.sh L6) -- so the URL would just not
@@ -607,6 +602,27 @@ warn_if_the_mac_holds_saved_ports() {
       done
 }
 
+# The stack bind-mounts the ingress's two directories out of the VM, so they
+# must exist BEFORE compose runs -- or `up` dies with "bind source path does not
+# exist" and says nothing about why. They come with desolate-ingress, which a
+# VM provisioned before it does not have: install it first (--proxy-only, so
+# docker is not restarted), and refuse if that does not take.
+require_vm_ingress() {
+  [ "${DESOLATE_SKIP_VM_CHECK:-0}" = 1 ] && return 0
+  if vm test -d /run/desolate-ingress/ports && vm test -d /run/desolate-ingress/dinds \
+     && vm systemctl is-active --quiet desolate-ingress; then
+    return 0
+  fi
+  echo "cli.sh: the VM has no desolate-ingress yet (dev-server ports reach the Mac through it)."
+  echo "cli.sh: installing the VM proxy layer, which carries it..."
+  vm_install --proxy-only && vm test -d /run/desolate-ingress/ports \
+    && vm systemctl is-active --quiet desolate-ingress && return 0
+  echo "cli.sh: FAILED to install desolate-ingress -- see the installer output above." >&2
+  echo "        Fix it, then:  ./cli.sh vm install --proxy-only && ./cli.sh up" >&2
+  return 1
+}
+
+# A malformed VSCODE_PORT fails here, in words, rather than as a compose error.
 require_free_vscode_port() {
   local port
   port=$(vscode_port)
@@ -708,6 +724,7 @@ case "$CMD" in
              require_matching_vm || exit 1
              require_sysbox
              require_free_vscode_port
+             require_vm_ingress || exit 1
              compose up -d --build "$@"
              ensure_vm_proxy || exit 1
              if [ -x "$SCRIPT_DIR/preflight.sh" ]; then "$SCRIPT_DIR/preflight.sh" || true; fi
