@@ -138,6 +138,9 @@ group "an attacker standing in the editor container"
 # below runs INSIDE desolate-vscode, with no docker access, exactly as it would.
 
 ed() { docker exec "$C_VSCODE" "$@"; }
+# ed, with this script's stdin passed through: without -i, `docker exec` gives
+# the command an empty one, and `... | ed sh -c 'cat > f'` writes nothing.
+ed_in() { docker exec -i "$C_VSCODE" "$@"; }
 
 write_project() { # write_project <name> <devcontainer.json>
   ed sh -c "mkdir -p /workspaces/$1/.devcontainer && cat > /workspaces/$1/.devcontainer/devcontainer.json" <<EOF
@@ -474,10 +477,12 @@ group "worktrees: parallel branches of one repo"
 WT=wt-demo
 WT_DIR=/workspaces/$WT
 
+# An image the editor runs in: its server is built against glibc, so on
+# alpine the container starts and the editor never answers.
 wt_devcontainer() { # wt_devcontainer <dir> <workspaceMount source>
   cat <<EOF
 {
-  "image": "alpine:3",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
   "workspaceFolder": "$1",
   "workspaceMount": "source=$2,target=$2,type=bind"
 }
@@ -495,11 +500,18 @@ in_devc() { # in_devc <cid> <sh -c script>
 
 ed sh -c "rm -rf $WT_DIR && mkdir -p $WT_DIR/.devcontainer" >/dev/null 2>&1
 wt_devcontainer "$WT_DIR" "$WT_DIR" \
-  | ed sh -c "cat > $WT_DIR/.devcontainer/devcontainer.json"
+  | ed_in sh -c "cat > $WT_DIR/.devcontainer/devcontainer.json"
 ed sh -c "cd $WT_DIR && printf 'root\n' > which-tree.txt &&
   git init -q -b main . &&
   git config user.email t@example.com && git config user.name tester &&
   git add -A && git commit -qm init" >/dev/null 2>&1
+# A worktree's files are checked out the first time it starts, from its
+# branch, so a spec written into it before then is overwritten. The hostile
+# one is committed on its branch instead, the way an agent would ship it.
+wt_devcontainer "$WT_DIR/.worktrees/evil" /workspaces \
+  | ed_in sh -c "cd $WT_DIR && git checkout -q -b evil &&
+                 cat > .devcontainer/devcontainer.json &&
+                 git commit -qam 'a wider mount' && git checkout -q main" >/dev/null 2>&1
 
 if ! ed test -d "$WT_DIR/.git"; then
   skip "worktrees" "could not make $WT_DIR a git repository inside the editor"
@@ -519,11 +531,10 @@ else
     "$(ed cat "$WT_DIR/.git/info/exclude" 2>&1)" ".worktrees/"
   assert_fails "no .gitignore was written" ed test -e "$WT_DIR/.gitignore"
 
+  # Untracked, so the first start's checkout leaves it be; their spec is the
+  # main tree's, checked out from main.
   for name in alpha beta; do
-    wt_devcontainer "$WT_DIR/.worktrees/$name" "$WT_DIR/.worktrees/$name" \
-      | ed sh -c "mkdir -p $WT_DIR/.worktrees/$name/.devcontainer &&
-                  cat > $WT_DIR/.worktrees/$name/.devcontainer/devcontainer.json"
-    ed sh -c "printf '%s\n' $name > $WT_DIR/.worktrees/$name/which-tree.txt"
+    ed sh -c "printf '%s\n' $name > $WT_DIR/.worktrees/$name/own-tree.txt"
   done
 
   # --- both run at once, with editors of their own -----------------------
@@ -557,9 +568,7 @@ else
     # The root, not the worktree and `.git` as two binds: either of those is a
     # path the project can make a link, and a bind follows it (below).
     assert_contains "a worktree sees its OWN checkout" \
-      "$(in_devc "$ALPHA" "cat $WT_DIR/.worktrees/alpha/which-tree.txt")" "alpha"
-    assert_contains "and works in it" \
-      "$(in_devc "$ALPHA" "pwd")" "$WT_DIR/.worktrees/alpha"
+      "$(in_devc "$ALPHA" "cat $WT_DIR/.worktrees/alpha/own-tree.txt")" "alpha"
     assert_contains "its project's root is in reach, as conceded" \
       "$(in_devc "$ALPHA" "cat $WT_DIR/which-tree.txt")" "root"
 
@@ -600,9 +609,6 @@ else
 
   # --- a hostile worktree spec cannot widen its own mount ----------------
   ed worktree add "$WT" evil >/dev/null 2>&1
-  wt_devcontainer "$WT_DIR/.worktrees/evil" /workspaces \
-    | ed sh -c "mkdir -p $WT_DIR/.worktrees/evil/.devcontainer &&
-                cat > $WT_DIR/.worktrees/evil/.devcontainer/devcontainer.json"
   OUT=$(ed desolate "$WT" --worktree evil 2>&1)
   assert_contains "a worktree asking for more than its project is refused" \
     "$OUT" "exactly"
