@@ -130,7 +130,11 @@ start_proxy() {
   for _ in $(seq 1 60); do grep -q "listening at" "$STATE/proxy.log" 2>/dev/null && break; sleep 0.5; done
   grep -q "listening at" "$STATE/proxy.log" 2>/dev/null && alive "$STATE/proxy.pid" \
     || { tail -5 "$STATE/proxy.log"; die "the proxy did not come up"; }
-  grep -qi "error" "$STATE/proxy.log" && { tail -5 "$STATE/proxy.log"; die "the proxy logged an error while starting"; }
+  # While STARTING: up to its listening line. A proxy that has been carrying
+  # traffic for hours has logged upstream errors of its own, and those say
+  # nothing about whether it started.
+  awk '/listening at/ {exit} {print}' "$STATE/proxy.log" | grep -qi "error" \
+    && { tail -5 "$STATE/proxy.log"; die "the proxy logged an error while starting"; }
   ok "mitmproxy + addon.py on :18080 as $PROXY_USER ($mitmdump)"
 
   # desolate-proxy-ca.service: the cert and the two scripts, never the key.
