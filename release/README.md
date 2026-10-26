@@ -1510,7 +1510,14 @@ allowlisted host is refused (403, `verdict=DENY-SCOPE`), not passed on: it was
 headed somewhere the real value would be accepted, by someone it was not meant
 for. A secret without `--projects` behaves as before. A `network` rule in
 `settings.json` may carry `"projects": [...]` the same way; without it, it
-applies to everyone.
+applies to everyone. Scoped rules fail closed. An `allow` with `projects`
+admits only those projects. A `deny` with `projects` also catches traffic
+no project can be named for -- the shared daemon and the editor -- because a
+project picks its daemon in its own spec, and on the shared one it is
+unattributed: a deny that ignored that traffic would be one it could step
+around. Its cost: a deny scoped to one project also stops every project on
+the shared daemon from reaching that host. A `projects` that is not a list
+makes an allow apply to no one, and a deny apply to everyone.
 
 ### The one entry that is not a secret
 

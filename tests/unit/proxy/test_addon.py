@@ -1323,6 +1323,40 @@ def test_a_network_rule_naming_projects_is_theirs_alone(tmp_path):
     assert blocked(denied) and not blocked(allowed)
 
 
+def test_a_scoped_deny_also_stops_traffic_no_project_is_named_for(tmp_path):
+    # A project moved onto the shared daemon -- its own spec decides that --
+    # is unattributed there. A deny that skipped it was a deny it could walk
+    # around (found in review).
+    _, addon = scoped_addon(tmp_path, network=[
+        {"action": "deny", "host": "example.com", "projects": ["solo"]},
+        {"action": "allow", "host": "*"},
+    ])
+    unattributed = from_(SHARED_ADDRESS, sni="example.com", dest="93.184.216.34")
+    addon.request(unattributed)
+    assert blocked(unattributed)
+
+
+def test_a_deny_whose_scope_cannot_be_read_applies_to_everyone(tmp_path):
+    _, addon = scoped_addon(tmp_path, network=[
+        {"action": "deny", "host": "example.com", "projects": "solo"},
+        {"action": "allow", "host": "*"},
+    ])
+    f = from_(A_ADDRESS, sni="example.com", dest="93.184.216.34")
+    addon.request(f)
+    assert blocked(f)
+
+
+def test_a_scoped_allow_admits_no_unattributed_traffic(tmp_path):
+    _, addon = scoped_addon(tmp_path, network=[
+        {"action": "allow", "host": "example.com", "projects": ["solo"]},
+    ])
+    f = from_(SHARED_ADDRESS, sni="example.com", dest="93.184.216.34")
+    addon._maybe_reload()
+    addon.default_action = "deny"
+    addon.request(f)
+    assert blocked(f)
+
+
 def test_a_network_rule_whose_scope_cannot_be_read_applies_to_no_one(tmp_path):
     _, addon = scoped_addon(tmp_path, network=[
         {"action": "allow", "host": "example.com", "projects": "solo"},

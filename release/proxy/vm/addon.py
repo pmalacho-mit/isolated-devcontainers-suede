@@ -602,11 +602,22 @@ class DesolateProxy:
         for rule in self.network:
             if not self._host_matches(host, [str(rule.get("host", "*")).lower()]):
                 continue
-            # A rule naming projects is theirs alone. Not a list is a rule that
-            # cannot be read, and it applies to no one rather than to everyone.
+            # A rule naming projects is theirs -- read so that it fails closed.
+            # An ALLOW is theirs alone, and one whose scope cannot be read
+            # applies to no one. A DENY also applies to traffic no project can
+            # be named for: a project chooses its daemon in its own spec, and
+            # on the shared one it is unattributed, so a deny that skipped
+            # unattributed traffic would be one it could step around. A deny
+            # whose scope cannot be read applies to everyone.
             scope = rule.get("projects")
-            if scope is not None and (not isinstance(scope, list) or project not in scope):
-                continue
+            if scope is not None:
+                deny = rule.get("action", "deny") != "allow"
+                readable = isinstance(scope, list)
+                if deny:
+                    if readable and project is not None and project not in scope:
+                        continue
+                elif not readable or project not in scope:
+                    continue
             m = rule.get("method")
             if m and m.upper() != method.upper():
                 continue
