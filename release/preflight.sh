@@ -16,7 +16,7 @@ vm_ssh() { colima ssh -p "${COLIMA_PROFILE:-desolate}" -- "$@"; }
 
 echo
 echo "== 1. containers =="
-for c in desolate-dind desolate-orchestrator desolate-vscode; do
+for c in desolate-dind desolate-orchestrator desolate-vscode desolate-supervisor; do
   st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null) || { bad "$c not found"; continue; }
   rc=$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null)
   if [ "$st" = running ] && [ "${rc:-0}" -lt 3 ]; then ok "$c running (restarts: $rc)"
@@ -153,11 +153,24 @@ fi
 
 echo
 echo "== 5. security invariants =="
-if docker inspect desolate-vscode desolate-orchestrator 2>/dev/null \
-     | grep -q '"Source": "/var/run/docker.sock"'; then
-  bad "HOST docker socket is mounted somewhere -- this breaks the design"
+# The VM's docker socket is held by the supervisor and NOTHING else -- asked of
+# every running desolate-* container, not of a list someone has to remember to
+# extend (the compose file says the same in tests/static/02-compose-invariants.sh;
+# this is the running stack, which an old container can contradict).
+holders=""
+for c in $(docker ps --format '{{.Names}}' | grep '^desolate-'); do
+  docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$c" 2>/dev/null \
+    | grep -qw /var/run/docker.sock && holders="$holders $c"
+done
+case "$holders" in
+  " desolate-supervisor") ok "the VM docker socket is held by the supervisor alone" ;;
+  "") bad "nothing holds the VM docker socket -- the supervisor is not up, so no project dind can start" ;;
+  *)  bad "the VM docker socket is mounted by:$holders -- only desolate-supervisor may hold it" ;;
+esac
+if [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' desolate-supervisor 2>/dev/null)" = none ]; then
+  ok "the supervisor has no network"
 else
-  ok "host docker socket not mounted into the stack"
+  bad "the supervisor is on a network -- it holds the VM socket and needs none"
 fi
 # Ask the RUNNING container where the editor is published, rather than assuming
 # 3000: VSCODE_PORT moves it, and a container that predates an .env edit is still
