@@ -12,6 +12,7 @@
 #   ./isolated-devcontainers-suede/cli.sh worktree add owner/repo wip   # a branch in its own devcontainer
 #   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
 #   ./isolated-devcontainers-suede/cli.sh export owner/repo [path]  # copy files out (tar when piped)
+#   ./isolated-devcontainers-suede/cli.sh reclaim owner/repo [path] # give root-owned files back to the editor
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
@@ -28,7 +29,9 @@ COLIMA_PROFILE="${COLIMA_PROFILE:-desolate}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 usage() {
-  sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # The header comment, however long it grows: every line after the shebang
+  # up to the first that is not a comment.
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
   exit "${1:-0}"
 }
 
@@ -1246,11 +1249,26 @@ case "$CMD" in
                    --force) REMOVE=(--remove-worktree --force) ;;
                    *) echo "usage: cli.sh worktree remove <project> <name> [--force]" >&2; exit 1 ;;
                  esac
+                 # Root-owned output first (#15): neither the check below nor
+                 # git can read or delete what a container left as root. Its
+                 # failure is said, not fatal -- the removal then says why.
+                 docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim --worktree "$NAME" "$PROJ" \
+                   || echo "cli.sh: could not reclaim root-owned files in $PROJ@$NAME; the removal may refuse them" >&2
                  # Refused if anything in it would be lost (asked in its
                  # sandbox) unless --force; then purged, then removed.
                  exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run "${REMOVE[@]}" --worktree "$NAME" "$PROJ" ;;
                *) echo "usage: cli.sh worktree {list <project>|add <project> <name> [<branch>]|remove <project> <name> [--force]}" >&2; exit 1 ;;
              esac ;;
+
+  reclaim)   ensure_running
+             # Files a container wrote as root, given back to the editor (#15).
+             # The path is relative to the project and refused if it leaves it
+             # (args.ts, then desolate.ts against the real directory).
+             PROJ="${1:?usage: cli.sh reclaim <project> [<path inside it>]}"
+             if [ -n "${2:-}" ]; then
+               exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim --path "$2" "$PROJ"
+             fi
+             exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim "$PROJ" ;;
 
   export)    ensure_running
              # Getting files out (#13). /workspaces is one volume the editor

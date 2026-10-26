@@ -54,7 +54,7 @@ import {
 import { directory as stateDirectory, stateFile } from "./state.ts";
 import * as worktrees from "./worktrees.ts";
 import { parse as parseJsonc } from "./jsonc.ts";
-import { isEntryPoint, run, sha16, type JSONValue } from "./utils.ts";
+import { isEntryPoint, isWithin, run, sha16, type JSONValue } from "./utils.ts";
 import { parseArgs, USAGE, type Args } from "./args.ts";
 import { hint } from "./hints.ts";
 import {
@@ -1511,6 +1511,36 @@ function removeWorktree(target: Target, force: boolean): void {
   console.log(`worktree: removed ${target.name}`);
 }
 
+/** The editor's user, which owns /workspaces and is the only one there. */
+const EDITOR_UID = 1000;
+
+/**
+ * Give the editor back what a container wrote as someone else (#15).
+ *
+ * A compose service running as its image's root leaves root-owned files on
+ * /workspaces, and the editor -- uid 1000, no sudo -- can then neither delete
+ * them nor remove the worktree they are in. This chowns them back, as root in
+ * a helper on the target's own daemon. The helper mounts the PROJECT's root,
+ * which no container can swap for a link, and reaches `path` inside it there
+ * (docker.reclaimArgv), so neither a `..` nor a planted symlink can turn this
+ * into a chown of somebody else's tree.
+ */
+async function reclaimTarget(target: Target, relative = ""): Promise<void> {
+  const within = path.join(target.dir, relative);
+  if (!isWithin(target.dir, within))
+    return die(`'${relative}' is not inside ${target.name}`);
+  if (daemons.saved(target) === "project") await useProjectDaemon(target);
+  else daemons.use(target, "shared");
+  const inProject = path.relative(target.projectDir, within) || ".";
+  const changed = docker.reclaim(worktrees.CHECKOUT_IMAGE, target.projectDir, inProject, EDITOR_UID);
+  if (changed === null)
+    return die(`could not reclaim ${path.join(target.name, relative)}: the helper did not finish
+      (its image is ${worktrees.CHECKOUT_IMAGE})`);
+  console.log(changed === 0
+    ? `nothing to reclaim under ${within}: the editor owns all of it`
+    : `reclaimed ${changed} entr${changed === 1 ? "y" : "ies"} under ${within} for the editor (uid ${EDITOR_UID})`);
+}
+
 /**
  * Remove everything desolate created for this target: its container, its
  * relays, the copy-on-write views it was given, and its saved ports, token and
@@ -1777,6 +1807,7 @@ async function main(): Promise<void> {
     if (daemon === "project") await purgeProjectDaemon(target);
   }
   else if (args.command === "uncommitted") reportUncommitted(target);
+  else if (args.command === "reclaim") await reclaimTarget(target, args.path);
   else if (args.command === "populate") populateWorktree(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }

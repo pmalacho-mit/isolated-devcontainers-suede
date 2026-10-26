@@ -130,6 +130,7 @@ Environment variables may contain **placeholders** (e.g. `MYAPP-OPENAI-KEY`) rat
 - Volumes must be named `<project>` or `<project>-*`. For a nested repo, `owner/repo` encodes as `owner__repo`, so the namespace is `owner__repo-*`.
 - `${localWorkspaceFolderBasename}` in a `mounts` entry drops the owner segment and gets refused — name volumes explicitly.
 - Never `COPY .env` or `ARG` a real credential into an image; layers are permanent.
+- Files you cannot delete because a container wrote them as root: with a daemon of your own, reclaim them yourself (the Docker section above). Without one, ask the human to run `./cli.sh reclaim <project> [<path>]` on the Mac. `./cli.sh worktree remove` does it before it removes anything.
 
 ## When to stop and ask
 

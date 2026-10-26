@@ -294,6 +294,26 @@ const dindRunArgv = (spec: DindSpec) => [
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 
+/** What `reclaim` reports once it has run: the count of entries it changed.
+ *  Absent, the reclaim did not finish -- which every caller must say. */
+export const RECLAIMED = "desolate-reclaimed";
+
+/** Hand back to `uid` everything under `inProject` (relative to the project's
+ *  root), as root in a helper with no network and only the capabilities a
+ *  chown needs. The PROJECT root is the mount, never the path asked about: a
+ *  symlink in the tree then resolves inside this container, never onto
+ *  another project's files, and -h changes links rather than what they name. */
+export const reclaimArgv = (image: string, projectDir: string, inProject: string, uid: number) => [
+  "run", "--rm", "--network", "none", "--user", "0:0",
+  "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--cap-add", "DAC_READ_SEARCH",
+  "--security-opt", "no-new-privileges",
+  "--mount", `type=bind,source=${projectDir},target=/w`,
+  "--entrypoint", "sh", image, "-c",
+  `n=$(find "$1" \( ! -user ${uid} -o ! -group ${uid} \) | wc -l) && ` +
+    `chown -R -h ${uid}:${uid} -- "$1" && echo ${RECLAIMED} "$n"`,
+  "reclaim", `/w/${inProject}`,
+];
+
 /** socat's SYSTEM address, double-quoted for socat's own parser (which would
  *  otherwise split the command on its colons). Only addresses and a port reach
  *  it, each checked first: this string is run by a shell. */
@@ -512,6 +532,13 @@ export const createDocker = (run: Runner) => {
         "desolate-worktree",
         ...args,
       ]),
+    /** `reclaimArgv`, run: the number of entries it changed, or null when
+     *  it did not finish. */
+    reclaim: (image: string, projectDir: string, inProject: string, uid: number) => {
+      const out = query(...reclaimArgv(image, projectDir, inProject, uid));
+      const match = new RegExp(`^${RECLAIMED} (\\d+)$`, "m").exec(out);
+      return match ? Number(match[1]) : null;
+    },
     /** `git status --porcelain` of a worktree, asked in its sandbox: the one
      *  question about content the editor must not ask itself. Read it with
      *  `parseWorktreeChanges`; untracked files count and ignored ones do not,

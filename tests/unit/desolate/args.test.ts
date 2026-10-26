@@ -200,3 +200,24 @@ describe("--move", () => {
     assert.equal("move" in parseArgs(["--ports", "x"]), false);
   });
 });
+
+describe("--reclaim (#15)", () => {
+  test("reclaims a whole target, or one path inside it", () => {
+    assert.equal(parse("--reclaim", "acme/widgets").command, "reclaim");
+    assert.equal(parse("--reclaim", "acme/widgets").path, undefined);
+    assert.equal(parse("--reclaim", "--path", "build/out", "acme/widgets").path, "build/out");
+    assert.equal(parse("--reclaim", "--worktree", "wip", "acme/widgets").worktree, "wip");
+  });
+
+  for (const [why, path] of [
+    ["an absolute path", "/etc"],
+    ["a path out of the target", "../other"],
+    ["a .. anywhere in it", "a/../../b"],
+    ["nothing at all", ""],
+    ["a comma, which a mount option reads", "a,b"],
+    ["a newline", "a\nb"],
+  ] as const)
+    test(`refuses ${why}`, () => refuses(["--reclaim", "--path", path, "acme/widgets"], /--path/));
+
+  test("--path means nothing without --reclaim", () => refuses(["--path", "x", "acme/widgets"], /only means something with --reclaim/));
+});

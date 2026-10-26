@@ -42,7 +42,11 @@ export type Command =
   /** Remove a worktree -- once nothing would be lost, or `--force` -- in its
    *  sandbox, after purging what desolate made for it. What `worktree remove`
    *  asks for, from the editor or the Mac. */
-  | "remove-worktree";
+  | "remove-worktree"
+  /** Give the editor's uid back everything under the target -- or under
+   *  `path` inside it -- that a container left owned by someone else (#15).
+   *  What `cli.sh reclaim` and `cli.sh worktree remove` run. */
+  | "reclaim";
 
 export type Args = {
   command: Command;
@@ -81,6 +85,9 @@ export type Args = {
   /** `--ports <p> --move <label> <port>`: give one label a different host
    *  port -- for when the Mac already holds it, which Lima never forwards. */
   move?: { label: string; port: number };
+  /** `--reclaim --path <relative>`: where under the target to reclaim. Relative
+   *  to the target's directory, and refused if it leaves it. */
+  path?: string;
 };
 
 /** The wire form the broker spawns desolate with. */
@@ -116,6 +123,15 @@ export class UsageError extends Error {
     super(preamble ? `${preamble}\n${USAGE}` : USAGE);
   }
 }
+
+/** A path under a target, as written: relative, no `..` segment, nothing a
+ *  shell or a mount option would read twice. Checked again against the real
+ *  directory where it is used; this is the grammar's half. */
+const relativeWithin = (raw: string) =>
+  raw !== "" &&
+  !raw.startsWith("/") &&
+  !/[\0\n,]/.test(raw) &&
+  raw.split("/").every((segment) => segment !== "..");
 
 /** A project argument may be written as a bare name, an `owner/name`, or the
  *  absolute path the shell's tab-completion produces. All three denote the same
@@ -154,6 +170,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let branch: string | undefined;
   let force = false;
   let move: Args["move"];
+  let reclaimPath: string | undefined;
   const positional: string[] = [];
   const queue = [...argv];
 
@@ -193,6 +210,12 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--force":
         force = true;
         break;
+      case "--reclaim":
+        command = "reclaim";
+        break;
+      case "--path":
+        reclaimPath = queue.shift() ?? "";
+        break;
       case "--list":
         command = "list";
         break;
@@ -230,6 +253,10 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     throw new UsageError(`--${command} acts on a worktree; name it with --worktree`);
   if (move && command !== "ports")
     throw new UsageError("--move only means something with --ports");
+  if (reclaimPath !== undefined && command !== "reclaim")
+    throw new UsageError("--path only means something with --reclaim");
+  if (reclaimPath !== undefined && !relativeWithin(reclaimPath))
+    throw new UsageError(`--path '${reclaimPath}' must be relative, and stay inside the target`);
 
   if (namesNoTarget(command, all)) {
     if (positional.length)
@@ -251,5 +278,6 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     branch,
     force,
     ...(move ? { move } : {}),
+    ...(reclaimPath !== undefined ? { path: reclaimPath } : {}),
   };
 };

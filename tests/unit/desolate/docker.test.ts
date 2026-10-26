@@ -10,8 +10,10 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 
 import {
+  RECLAIMED,
   STATUS_RAN,
   createDocker,
+  reclaimArgv,
   parseMounts,
   parseWorktreeChanges,
   relayWithFallback,
@@ -695,5 +697,35 @@ describe("a relay that falls back to the project's dind", () => {
     docker.relay.start({ ...base, fallbackIp: "172.17.0.1" });
     assert.equal(calls[0].at(-1), "tcp:172.17.0.5:8000");
     assert.match(calls[1].at(-1)!, /^system:"socat - TCP:172\.17\.0\.5:8000.* TCP:172\.17\.0\.1:8000"$/);
+  });
+});
+
+describe("reclaiming root-owned files (#15)", () => {
+  const argv = reclaimArgv("img@sha256:x", "/workspaces/acme/widgets", ".worktrees/wip/out", 1000);
+  const flag = (name: string) => argv.flatMap((arg, i) => (arg === name ? [argv[i + 1]] : []));
+
+  test("mounts the PROJECT root, and reaches the path inside it", () => {
+    assert.deepEqual(flag("--mount"), ["type=bind,source=/workspaces/acme/widgets,target=/w"]);
+    assert.equal(argv.at(-1), "/w/.worktrees/wip/out");
+  });
+
+  test("runs as root with no network and only what a chown needs", () => {
+    assert.deepEqual(flag("--network"), ["none"]);
+    assert.deepEqual(flag("--user"), ["0:0"]);
+    assert.deepEqual(flag("--cap-drop"), ["ALL"]);
+    assert.deepEqual(flag("--cap-add").sort(), ["CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH"]);
+    assert.ok(argv.includes("no-new-privileges"));
+  });
+
+  test("changes links, not what they name, and takes the path as an argument, never as script", () => {
+    const script = argv[argv.indexOf("-c") + 1];
+    assert.match(script, /chown -R -h 1000:1000 -- "\$1"/);
+    assert.doesNotMatch(script, /\.worktrees|widgets/);
+  });
+
+  test("a run that did not finish is null, not zero", () => {
+    assert.equal(recorder([`${RECLAIMED} 3`]).docker.reclaim("i", "/p", ".", 1000), 3);
+    assert.equal(recorder([""]).docker.reclaim("i", "/p", ".", 1000), null);
+    assert.equal(recorder(["chown: /w/x: Operation not permitted"]).docker.reclaim("i", "/p", ".", 1000), null);
   });
 });
