@@ -56,9 +56,16 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- fixtures --------------------------------------------------------------
+# allow_private_destinations: every server here is on a private test bridge,
+# and the addon's wall refuses private destinations before it looks at
+# anything else -- so without it every request is a 403 from that wall, the
+# refusals below pass for the wrong reason, and no secret is ever judged
+# (measured on the VM). The wall has tests of its own; the last group checks
+# it never answered here.
 cat > "$WORK/settings.json" <<EOF
 {
   "default_action": "allow",
+  "allow_private_destinations": true,
   "secrets": { "$PLACEHOLDER": { "value": "$REAL", "hosts": ["$ALLOWED_HOST"] } },
   "network": [ { "action": "allow", "host": "*" } ],
   "scrub_responses": true
@@ -253,5 +260,6 @@ assert_contains "leak attempts are logged" "$LOG" "LEAK"
 assert_contains "the pass-through is audited as a suspect" "$LOG" "verdict=LEAK-SUSPECT"
 assert_contains "substitutions are logged" "$LOG" "SUBST"
 assert_not_contains "the log never contains the real value" "$LOG" "$REAL"
+assert_not_contains "no answer above came from the internal-destination wall" "$LOG" "DENY-INTERNAL"
 
 summary
