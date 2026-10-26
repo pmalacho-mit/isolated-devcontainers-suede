@@ -8,7 +8,9 @@
 #
 # Recreates the nested supervisor with DESOLATE_MAX_DINDS=1 and a one-minute
 # idle period, and restores it on exit. Creates two throwaway projects in the
-# nested workspaces and purges their dinds on exit. APPROXIMATION (runc).
+# nested workspaces and purges their dinds on exit. STOPS every other project
+# dind first (warm: their images stay), since a ceiling of one has no room
+# while another project's dind is running. APPROXIMATION (runc).
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
@@ -24,10 +26,19 @@ compose() {
     -f "$ROOT/release/docker-compose.yml" -f "$HERE/compose.nested.yml" \
     --env-file "$STATE/admission.env" "$@"
 }
-recreate_supervisor() {   # with the env file as it now stands
-  compose up -d --no-deps --force-recreate supervisor >/dev/null 2>&1
-  for _ in $(seq 1 40); do
-    docker logs desolate-supervisor 2>&1 | grep -q "supervisor listening" && return 0
+# With the env file as it now stands -- and PROVED to be: a recreate compose
+# did not finish leaves the old supervisor answering with the old limits, and
+# its old "listening" line satisfies a wait for one. So the running container
+# must carry the grace period this file asks for, and answer.
+recreate_supervisor() {
+  local want
+  want=$(sed -n 's/^DESOLATE_DIND_GRACE=//p' "$STATE/admission.env" | tail -1)
+  compose up -d --no-deps --force-recreate supervisor >"$STATE/admission-compose.log" 2>&1 \
+    || { tail -5 "$STATE/admission-compose.log"; return 1; }
+  for _ in $(seq 1 60); do
+    [ "$(docker exec desolate-supervisor printenv DESOLATE_DIND_GRACE 2>/dev/null)" = "${want:-15}" ] \
+      && docker logs desolate-supervisor 2>&1 | grep -q "supervisor listening" \
+      && [ "$(ok_of "$(ask '{"op":"status"}')")" = true ] && return 0
     sleep 0.25
   done
   return 1
@@ -55,13 +66,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+for other in $(docker ps --filter label=desolate.dind --format '{{.Label "desolate.dind"}}'); do
+  [ "$other" = "$A" ] || [ "$other" = "$B" ] || {
+    echo "  stopping $other's dind first (warm)"
+    ask "{\"op\":\"stop\",\"project\":\"$other\"}" >/dev/null
+  }
+done
+
 docker exec desolate-vscode mkdir -p "/workspaces/$A" "/workspaces/$B"
 { cat "$STATE/.env"; echo "DESOLATE_MAX_DINDS=1"; echo "DESOLATE_DIND_IDLE=1"; echo "DESOLATE_DIND_GRACE=0"; } > "$STATE/admission.env"
 recreate_supervisor || { fail "the supervisor restarts with a ceiling of 1" "it did not come up"; summary; exit $?; }
 pass "the supervisor restarts with a ceiling of 1"
 
 group "an idle dind gives way to a new project"
-assert_eq "ensure $A" "$(ok_of "$(ask "{\"op\":\"ensure\",\"project\":\"$A\"}")")" "true"
+R=$(ask "{\"op\":\"ensure\",\"project\":\"$A\"}"); assert_eq "ensure $A" "$(ok_of "$R")" "true" || echo "       $(error_of "$R")"
 assert_eq "ensure $B" "$(ok_of "$(ask "{\"op\":\"ensure\",\"project\":\"$B\"}")")" "true"
 assert_eq "$A was stopped to make room, not removed" "$(state "$A")" "exited"
 assert_eq "$B is running" "$(state "$B")" "running"

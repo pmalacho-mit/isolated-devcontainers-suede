@@ -168,6 +168,14 @@ start_ingress() {
   # (root), ports/ the orchestrator's (uid 1000).
   sudo install -d -m 0755 -o root -g root "$INGRESS_ROOT" "$INGRESS_ROOT/dinds"
   sudo install -d -m 0755 -o 1000 -g 1000 "$INGRESS_ROOT/ports"
+  # A running ingress keeps the code it started with, so a changed file is a
+  # restart: otherwise `up` verifies yesterday's ingress against today's tree.
+  if alive "$STATE/ingress.pid" && ! sudo cmp -s "$RELEASE/proxy/vm/ingress.py" "$STATE/ingress.py"; then
+    sudo kill "$(cat "$STATE/ingress.pid")"
+    for _ in $(seq 1 20); do alive "$STATE/ingress.pid" || break; sleep 0.25; done
+    sudo truncate -s 0 "$STATE/ingress.log"
+    ok "ingress.py changed: restarting the ingress"
+  fi
   sudo install -m 0644 "$RELEASE/proxy/vm/ingress.py" "$STATE/ingress.py"
   if ! alive "$STATE/ingress.pid"; then
     as_user "$INGRESS_USER" "$STATE/ingress.log" "$python" "$STATE/ingress.py" > "$STATE/ingress.pid"
