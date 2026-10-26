@@ -33,7 +33,9 @@ describe("parseArgs", () => {
       noCache: false,
       all: false,
       branch: undefined,
+      from: undefined,
       force: false,
+      json: false,
     });
   });
 
@@ -220,4 +222,12 @@ describe("--reclaim (#15)", () => {
     test(`refuses ${why}`, () => refuses(["--reclaim", "--path", path, "acme/widgets"], /--path/));
 
   test("--path means nothing without --reclaim", () => refuses(["--path", "x", "acme/widgets"], /only means something with --reclaim/));
+});
+
+describe("--json (F2)", () => {
+  test("list and ports take it", () => {
+    assert.equal(parse("--list", "--json").json, true);
+    assert.equal(parse("--ports", "--json", "acme/widgets").json, true);
+  });
+  test("anything else refuses it", () => refuses(["--json", "acme/widgets"], /only means something with --list or --ports/));
 });

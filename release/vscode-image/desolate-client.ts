@@ -10,6 +10,8 @@
 //   desolate --stop all             (or --stop --all)
 //   desolate --ports myproject
 //   desolate --list                 what is running right now
+//   desolate --purge --worktree wip myproject   what a worktree's removal runs here
+//   desolate --list --json | desolate --ports myproject --json   for programs
 //
 // The broker validates both the project name and the project's
 // devcontainer.json spec before acting -- see broker.ts.
@@ -74,12 +76,12 @@ if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") usage();
 // already refuses unknown options; this side has to agree, or the two disagree
 // about what the same command line means.
 const OPS: Record<string, string> = {
-  "--list": "list", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild",
+  "--list": "list", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild", "--purge": "purge",
 };
 /** Flags that consume the next argument. */
 const VALUES = ["--worktree", "--branch"] as const;
 /** Flags that qualify an op rather than being one. */
-const MODIFIERS = ["--all"] as const;
+const MODIFIERS = ["--all", "--json"] as const;
 
 let op = "start";
 let move: { label: string; port: number } | undefined;
@@ -121,6 +123,9 @@ if (value["--branch"] !== undefined && worktree === undefined)
 
 if (modifier.has("--all") && op !== "stop") refuse("--all only means something with --stop");
 if (move && op !== "ports") refuse("--move only means something with --ports");
+if (modifier.has("--json") && op !== "list" && op !== "ports") refuse("--json only means something with --list or --ports");
+if (op === "purge" && value["--worktree"] === undefined)
+  refuse("--purge here is a worktree's: name it with --worktree (a project's purge is the Mac's: ./cli.sh desolate --purge <project>)");
 
 // The two spellings of "everything". `--all` says so outright; the bare word
 // only widens when no project of that name is there to be meant instead, which
@@ -139,7 +144,7 @@ if (op === "list" || stopsEverything) {
     refuse(`${spelling} acts on every target, so it takes no project`,
            `got '${unaccountedFor.join(" ")}'`);
   if (worktree !== undefined) refuse(`${spelling} takes no worktree`);
-  request = { op: op === "list" ? "list" : "stop-all" };
+  request = { op: op === "list" ? "list" : "stop-all", ...(modifier.has("--json") && op === "list" ? { json: true } : {}) };
 } else {
   if (rest.length !== 1) {
     console.error(rest.length === 0
@@ -147,7 +152,7 @@ if (op === "list" || stopsEverything) {
       : `desolate: '${op}' takes ONE project, got ${rest.length}: ${rest.join(" ")}`);
     usage(1);
   }
-  request = { op, project: rest[0], worktree, ...(move ? { move } : {}) };
+  request = { op, project: rest[0], worktree, ...(move ? { move } : {}), ...(modifier.has("--json") ? { json: true } : {}) };
 }
 
 // Created before the broker is asked to start it -- by the broker as well, in

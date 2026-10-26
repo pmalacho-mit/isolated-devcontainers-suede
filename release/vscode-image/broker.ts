@@ -91,6 +91,7 @@ const operations = [
   "stop",
   "ports",
   ...worktreeOperations,
+  "purge",
   ...globalOperations,
 ] as const;
 type Operation = (typeof operations)[number];
@@ -106,14 +107,16 @@ const globalArgv: Record<GlobalOperation, string[]> = {
 
 type Request = {
   [op in Operation]: op extends GlobalOperation
-    ? { op: op }
+    ? { op: op; json?: boolean }
     : op extends "worktree-add"
-      ? { op: op; project: string; worktree: string; branch?: string }
+      ? { op: op; project: string; worktree: string; branch?: string; from?: string }
       : op extends "worktree-remove"
         ? { op: op; project: string; worktree: string; force?: boolean }
         : op extends "ports"
-          ? { op: op; project: string; worktree?: string; move?: { label: string; port: number } }
-          : { op: op; project: string; worktree?: string };
+          ? { op: op; project: string; worktree?: string; move?: { label: string; port: number }; json?: boolean }
+          : op extends "purge"
+            ? { op: op; project: string; worktree: string }
+            : { op: op; project: string; worktree?: string };
 }[Operation];
 
 /** Absent, or of this type. */
@@ -166,6 +169,10 @@ const request = {
     "op" in query &&
     typeof query.op === "string" &&
     operations.includes(query["op"] as Operation) &&
+    (!("json" in query) || ((query.op === "list" || query.op === "ports") && typeof query.json === "boolean")) &&
+    // A purge is a worktree's, never a project's: a project's purge takes its
+    // daemon's image store with it, and that is the Mac's to ask for.
+    (query.op !== "purge" || ("worktree" in query && typeof query.worktree === "string")) &&
     (isGlobalOperation(query.op) ||
       ("project" in query &&
         typeof query.project === "string" &&
@@ -174,6 +181,7 @@ const request = {
           ? "worktree" in query && typeof query.worktree === "string"
           : true) &&
         (query.op === "worktree-add" ? optional(query, "branch", "string") : !("branch" in query)) &&
+        (query.op === "worktree-add" ? optional(query, "from", "string") : !("from" in query)) &&
         (query.op === "worktree-remove" ? optional(query, "force", "boolean") : !("force" in query)) &&
         (!("move" in query) || (query.op === "ports" && isMove(query.move))))),
 };
@@ -269,7 +277,8 @@ async function handle(req: unknown, send: Send) {
     // and nothing it could widen: the runner reads /workspaces itself, under
     // the same rules it applies to a named one.
     if (namesNoTarget(req)) {
-      const code = await spawnDesolate(globalArgv[req.op], send);
+      const argv = req.op === "list" && req.json ? [...globalArgv.list, "--json"] : globalArgv[req.op];
+      const code = await spawnDesolate(argv, send);
       return send({ ok: code === 0, exit: code });
     }
 
@@ -281,8 +290,12 @@ async function handle(req: unknown, send: Send) {
         throw new Error(`invalid worktree name: ONE path segment, starting with a letter or digit`);
       const branch = req.branch ?? req.worktree;
       if (!validBranch(branch)) throw new Error(`invalid branch name`);
+      // Where a new branch starts: a ref git will resolve, held to the same
+      // rule so it cannot reach git as an option.
+      if (req.from !== undefined && !validBranch(req.from)) throw new Error(`invalid start point`);
       const target = resolveTarget(config.workspaces, req.project, req.worktree);
-      const code = await spawnDesolate(targetArgv(target, ["--create-worktree", ["--branch", branch]]), send);
+      const from: Flags[] = req.from !== undefined ? [["--from", req.from]] : [];
+      const code = await spawnDesolate(targetArgv(target, ["--create-worktree", ["--branch", branch], ...from]), send);
       return send({ ok: code === 0, exit: code });
     }
 
@@ -314,7 +327,21 @@ async function handle(req: unknown, send: Send) {
       case "ports":
         flags = ["--ports"];
         if (req.move) flags.push(["--move", req.move.label, String(req.move.port)]);
+        if (req.json) flags.push("--json");
         break;
+      case "purge": {
+        // What `cli.sh worktree remove` runs on this side, in its order: give
+        // root-owned files back first (so the check can read them), refuse a
+        // worktree holding anything uncommitted (exit 3, said), then purge --
+        // which itself refuses a running target. The editor removes the
+        // worktree only once this says ok.
+        for (const step of ["--reclaim", "--uncommitted"] as Flags[]) {
+          const code = await spawnDesolate(targetArgv(target, [step]), send);
+          if (code !== 0) return send({ ok: false, exit: code, step });
+        }
+        flags = ["--purge"];
+        break;
+      }
     }
 
     const code = await spawnDesolate(targetArgv(target, flags), send);

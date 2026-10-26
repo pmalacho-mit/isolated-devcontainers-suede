@@ -1192,8 +1192,13 @@ function movePorts(target: Target, move: { label: string; port: number }, reacha
   showPorts(target);
 }
 
-function showPorts(target: Target): void {
+function showPorts(target: Target, json = false): void {
   const map = ports.load(target);
+  if (json)
+    return console.log(JSON.stringify({
+      target: target.name, project: target.project, worktree: target.worktree ?? null,
+      ports: Object.fromEntries(map),
+    }));
   if (map.size === 0)
     return console.log(`no ports allocated for ${target.name}`);
 
@@ -1268,8 +1273,19 @@ const editorUrl = (target: Target): string => {
  * is answered by tab-completion the moment it is asked, whereas "what did I
  * leave up, and where is it" has no other answer at all.
  */
-function showRunning(): void {
+function showRunning(json = false): void {
   const running = runningTargets();
+  if (json) {
+    const rows = running.map((target) => {
+      driveSaved(target);
+      return {
+        target: target.name, project: target.project, worktree: target.worktree ?? null,
+        daemon: daemons.saved(target), url: editorUrl(target) || null,
+        ports: Object.fromEntries(ports.load(target)),
+      };
+    });
+    return console.log(JSON.stringify(rows));
+  }
   if (!running.length)
     return console.log(
       `nothing is running.  Start something:  ${hint.desolate("<project>")}`,
@@ -1469,16 +1485,18 @@ const projectSandbox = (target: Target) => ({
  * another project, git there wrote into THAT project (measured). The sandbox
  * mounts the project's root alone, so those links resolve to nothing.
  */
-function createWorktree(target: Target, branch: string): void {
+function createWorktree(target: Target, branch: string, from?: string): void {
   if (!worktrees.validBranch(branch)) return die(`'${branch}' is not a usable branch name`);
+  if (from !== undefined && !worktrees.validBranch(from)) return die(`'${from}' is not a usable start point`);
   refuseUnlessItsOwnPath(target);
   const code = docker.worktreeScript(
     projectSandbox(target),
     worktrees.createScript,
-    worktrees.createArguments(target, branch),
+    worktrees.createArguments(target, branch, from),
   );
   const { CREATE_EXIT } = worktrees;
   if (code === CREATE_EXIT.exists) die(`${target.dir} already exists`);
+  if (code === CREATE_EXIT.start) die(`'${from}' is not a commit in ${target.projectDir}`);
   if (code === CREATE_EXIT.lock)
     die(`the worktree was created but could not be LOCKED. Unlocked, a prune in
       a container that cannot see it destroys it, and no part of that is
@@ -1787,12 +1805,12 @@ async function main(): Promise<void> {
 
   const args = dieOnError(() => parseArgs(process.argv.slice(2), WORKSPACES));
 
-  if (args.command === "list") return showRunning();
+  if (args.command === "list") return showRunning(args.json);
   if (args.command === "stop") return stopFromArguments(args);
 
   if (args.command === "create-worktree") {
     const target = targetFromArguments(args.project!, args.worktree, /* absent */ true);
-    return createWorktree(target, args.branch ?? args.worktree!);
+    return createWorktree(target, args.branch ?? args.worktree!, args.from);
   }
 
   const target = targetOf(args);
@@ -1804,7 +1822,7 @@ async function main(): Promise<void> {
   }
   if (args.command === "ports" && args.move) {
     movePorts(target, args.move, driveSaved(target));
-  } else if (args.command === "ports") showPorts(target);
+  } else if (args.command === "ports") showPorts(target, args.json);
   else if (args.command === "purge") {
     // A purge has to reach the target's containers and volumes, so its own
     // daemon is brought up for it.

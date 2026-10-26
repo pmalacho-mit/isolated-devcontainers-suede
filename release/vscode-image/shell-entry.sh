@@ -84,4 +84,12 @@ JSON
     echo "shell-entry: seeded editor security defaults at $SETTINGS" >&2
 fi
 
+# The factory's watcher (work-watcher.ts). Here because this is the container
+# that already runs git against project content and holds the broker socket;
+# it acts only on projects a human enabled in /workspaces/.desolate/factory/,
+# and is idle otherwise. Its lines go to this container's log.
+if [ -f /usr/local/lib/desolate/work-watcher.ts ]; then
+    tsx /usr/local/lib/desolate/work-watcher.ts &
+fi
+
 exec "$@"

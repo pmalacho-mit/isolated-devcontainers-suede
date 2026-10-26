@@ -126,6 +126,7 @@ before(async () => {
       `import { execFileSync } from "node:child_process";\n` +
       `const argv = process.argv.slice(2);\n` +
       `fs.appendFileSync(${JSON.stringify(runnerLog)}, JSON.stringify(argv) + "\\n");\n` +
+      `if (argv[0] === "--uncommitted" && argv.at(-1) === "dirty") process.exit(3);\n` +
       `if (argv[0] === "--populate") {\n` +
       `  const project = argv.at(-1), worktree = argv[argv.indexOf("--worktree") + 1];\n` +
       `  if (project === "populate-fails") process.exit(7);\n` +
@@ -1138,4 +1139,62 @@ describe("--ports --move reaches the runner only in its one shape", () => {
     assert.equal(result(msgs).ok, false);
     assert.deepEqual(runnerInvocations(), []);
   });
+});
+
+describe("purge: what a worktree's removal runs on this side (F2)", () => {
+  // ===========================================================================
+  const worktree = (projectName: string, name: string) => {
+    project(projectName, JSON.stringify({ image: "alpine:3" }));
+    fs.mkdirSync(path.join(workspaces, projectName, ".worktrees", name), { recursive: true });
+  };
+
+  test("reclaim, then the uncommitted check, then purge -- each naming the worktree", async () => {
+    worktree("factory-p", "issue-1");
+    resetRunner();
+    const msgs = await ask({ op: "purge", project: "factory-p", worktree: "issue-1" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    assert.deepEqual(runnerInvocations(), [
+      ["--reclaim", "--worktree", "issue-1", "factory-p"],
+      ["--uncommitted", "--worktree", "issue-1", "factory-p"],
+      ["--purge", "--worktree", "issue-1", "factory-p"],
+    ]);
+  });
+
+  test("a worktree holding uncommitted work is never purged, and the answer says which step refused", async () => {
+    worktree("dirty", "wip");
+    resetRunner();
+    const answer = result(await ask({ op: "purge", project: "dirty", worktree: "wip" }));
+    assert.equal(answer.ok, false);
+    assert.equal(answer.exit, 3);
+    assert.equal(answer.step, "--uncommitted");
+    assert.ok(!runnerInvocations().some((argv) => argv[0] === "--purge"), "it purged anyway");
+  });
+
+  test("a project's own purge is not the editor's to ask for", async () => {
+    resetRunner();
+    const msgs = await ask({ op: "purge", project: "factory-p" });
+    assert.equal(result(msgs).ok, false);
+    assert.deepEqual(runnerInvocations(), []);
+  });
+});
+
+describe("--json, for programs (F2)", () => {
+  // ===========================================================================
+  test("list and ports pass it to the runner", async () => {
+    project("json-p", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
+    assert.equal(result(await ask({ op: "list", json: true })).ok, true);
+    assert.equal(result(await ask({ op: "ports", project: "json-p", json: true })).ok, true);
+    assert.deepEqual(runnerInvocations(), [["--list", "--json"], ["--ports", "--json", "json-p"]]);
+  });
+
+  for (const [why, req] of [
+    ["on an op that prints nothing to parse", { op: "start", project: "json-p", json: true }],
+    ["as anything but a boolean", { op: "list", json: "--rebuild" }],
+  ] as const)
+    test(`is refused ${why}, before the runner`, async () => {
+      resetRunner();
+      assert.equal(result(await ask(req)).ok, false);
+      assert.deepEqual(runnerInvocations(), []);
+    });
 });

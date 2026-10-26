@@ -80,6 +80,9 @@ export type Args = {
   /** The branch `create-worktree` checks out, made if it is not there. Absent
    *  is the worktree's own name. */
   branch?: string;
+  /** Where `create-worktree` starts a branch it makes: a commit, or a ref to
+   *  one. Absent is the project's HEAD. */
+  from?: string;
   /** `remove-worktree` without asking whether anything would be lost. */
   force: boolean;
   /** `--ports <p> --move <label> <port>`: give one label a different host
@@ -88,6 +91,9 @@ export type Args = {
   /** `--reclaim --path <relative>`: where under the target to reclaim. Relative
    *  to the target's directory, and refused if it leaves it. */
   path?: string;
+  /** `--json`: `list` and `ports` print one JSON document instead of prose,
+   *  for programs -- the factory's watcher, the editor extension. */
+  json: boolean;
 };
 
 /** The wire form the broker spawns desolate with. */
@@ -99,6 +105,11 @@ export type Flags =
   | ["--branch", string]
   | "--remove-worktree"
   | "--force"
+  | ["--from", string]
+  | "--purge"
+  | "--reclaim"
+  | "--uncommitted"
+  | "--json"
   | ["--config", string]
   | ["--worktree", string]
   | ["--move", string, string]
@@ -168,9 +179,11 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let noCache = false;
   let all = false;
   let branch: string | undefined;
+  let from: string | undefined;
   let force = false;
   let move: Args["move"];
   let reclaimPath: string | undefined;
+  let json = false;
   const positional: string[] = [];
   const queue = [...argv];
 
@@ -207,6 +220,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--branch":
         branch = queue.shift() ?? "";
         break;
+      case "--from":
+        from = queue.shift() ?? "";
+        break;
       case "--force":
         force = true;
         break;
@@ -221,6 +237,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--all":
         all = true;
+        break;
+      case "--json":
+        json = true;
         break;
       case "--move": {
         const label = queue.shift() ?? "";
@@ -247,12 +266,16 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     throw new UsageError("--all only means something with --stop");
   if (branch !== undefined && command !== "create-worktree")
     throw new UsageError("--branch only means something with --create-worktree");
+  if (from !== undefined && command !== "create-worktree")
+    throw new UsageError("--from only means something with --create-worktree");
   if (force && command !== "remove-worktree")
     throw new UsageError("--force only means something with --remove-worktree");
   if ((command === "create-worktree" || command === "remove-worktree") && worktree === undefined)
     throw new UsageError(`--${command} acts on a worktree; name it with --worktree`);
   if (move && command !== "ports")
     throw new UsageError("--move only means something with --ports");
+  if (json && command !== "list" && command !== "ports")
+    throw new UsageError("--json only means something with --list or --ports");
   if (reclaimPath !== undefined && command !== "reclaim")
     throw new UsageError("--path only means something with --reclaim");
   if (reclaimPath !== undefined && !relativeWithin(reclaimPath))
@@ -264,7 +287,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         `'${all ? "--all" : "--list"}' acts on every target, so it takes no ` +
           `project (got '${positional.join(" ")}')`,
       );
-    return { command, worktree, config, rebuild, noCache, all, branch, force };
+    return { command, worktree, config, rebuild, noCache, all, branch, from, force, json };
   }
 
   return {
@@ -276,7 +299,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     noCache,
     all,
     branch,
+    from,
     force,
+    json,
     ...(move ? { move } : {}),
     ...(reclaimPath !== undefined ? { path: reclaimPath } : {}),
   };

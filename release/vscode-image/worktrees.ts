@@ -256,12 +256,16 @@ export const validBranch = (branch: unknown): branch is string =>
   !/[\s\x00-\x1f\x7f]/.test(branch);
 
 /** What `createScript` exits with, beyond git's own failures. */
-export const CREATE_EXIT = { exists: 3, git: 4, lock: 5, exclude: 6 } as const;
+export const CREATE_EXIT = { exists: 3, git: 4, lock: 5, exclude: 6, start: 7 } as const;
 
 /**
  * Create a worktree with nothing checked out, lock it, and keep `.worktrees`
  * out of the repository's status -- run in its sandbox, with its arguments as
  * positional parameters rather than spliced into the script.
+ *
+ * A branch that is not there yet starts at `$5` when it is given -- checked
+ * to be a commit first, so it reaches `worktree add` as nothing else -- and
+ * at the project's HEAD when it is empty. An existing branch ignores it.
  *
  * `--no-checkout`, because a checkout runs the repository's hooks, filters and
  * fsmonitor, and does so at first start instead (desolate.ts populateWorktree).
@@ -269,14 +273,15 @@ export const CREATE_EXIT = { exists: 3, git: 4, lock: 5, exclude: 6 } as const;
  * tool's layout has no business in the user's next commit.
  */
 export const createScript = [
-  'p=$1 dir=$2 branch=$3 reason=$4',
+  'p=$1 dir=$2 branch=$3 reason=$4 from=$5',
   SANDBOX_GIT,
   `if [ -e "$dir" ] || [ -L "$dir" ]; then echo "worktree: $dir already exists" >&2; exit ${CREATE_EXIT.exists}; fi`,
+  `if [ -n "$from" ] && ! g rev-parse --verify --quiet "$from^{commit}" >/dev/null; then echo "worktree: '$from' is not a commit in $p" >&2; exit ${CREATE_EXIT.start}; fi`,
   // git's own refusals here are better than anything worth wrapping them in --
   // "fatal: 'main' is already used by worktree at ..." says precisely why.
   'if g show-ref --verify --quiet "refs/heads/$branch"',
   `then g worktree add --no-checkout "$dir" "$branch" || exit ${CREATE_EXIT.git}`,
-  `else g worktree add --no-checkout -b "$branch" "$dir" || exit ${CREATE_EXIT.git}`,
+  `else g worktree add --no-checkout -b "$branch" "$dir" \${from:+"$from"} || exit ${CREATE_EXIT.git}`,
   'fi',
   `g worktree lock --reason "$reason" "$dir" || exit ${CREATE_EXIT.lock}`,
   `exclude="$p/.git/info/exclude"`,
@@ -284,12 +289,14 @@ export const createScript = [
   `grep -qxF '${WORKTREES_DIRECTORY}/' "$exclude" 2>/dev/null || printf '%s\\n' '${WORKTREES_DIRECTORY}/' >> "$exclude" || exit ${CREATE_EXIT.exclude}`,
 ].join("\n");
 
-/** `createScript`'s positional parameters, for this worktree on `branch`. */
-export const createArguments = (target: Target, branch: string) => [
+/** `createScript`'s positional parameters, for this worktree on `branch`,
+ *  started at `from` if that branch is new. */
+export const createArguments = (target: Target, branch: string, from = "") => [
   target.projectDir,
   target.dir,
   branch,
   LOCK_REASON,
+  from,
 ];
 
 /** What `removeScript` exits with when git did not remove it. */
@@ -365,7 +372,7 @@ const git = (target: Target, ...args: string[]) =>
 
 const USAGE = [
   "usage: worktree list   <project>",
-  "       worktree add    <project> <name> [<branch>]   (<branch> defaults to <name>)",
+  "       worktree add    <project> <name> [<branch> [<start>]]   (<branch> defaults to <name>; a new one starts at <start>)",
   "       worktree remove <project> <name> [--force]   (checked for uncommitted work first)",
 ].join("\n");
 
@@ -387,9 +394,13 @@ const targetFrom = (project: string, worktree?: string) => {
 
 /** Ask the orchestrator to create this worktree, in its sandbox. The exit
  *  status the broker relayed: 0 when it was made. */
-const add = (target: Target, branch: string) => {
+const add = (target: Target, branch: string, from?: string) => {
   if (!validBranch(branch)) return die(`'${branch}' is not a usable branch name`);
-  return ask({ op: "worktree-add", project: target.project, worktree: target.worktree, branch });
+  if (from !== undefined && !validBranch(from)) return die(`'${from}' is not a usable start point`);
+  return ask({
+    op: "worktree-add", project: target.project, worktree: target.worktree, branch,
+    ...(from !== undefined ? { from } : {}),
+  });
 };
 
 /** Create this worktree unless it is already there.
@@ -412,7 +423,7 @@ const forcedBy = (flag: string | undefined): boolean => {
   return die(`unknown option '${flag}' for remove\n${USAGE}`);
 };
 
-const main = async ([command, project, name, branch]: string[]): Promise<number> => {
+const main = async ([command, project, name, branch, start]: string[]): Promise<number> => {
   if (!project) return die(`no project given\n${USAGE}`);
 
   switch (command) {
@@ -420,7 +431,7 @@ const main = async ([command, project, name, branch]: string[]): Promise<number>
       return git(targetFrom(project), "worktree", "list");
     case "add": {
       if (!name) return die(`'add' needs a worktree name\n${USAGE}`);
-      const code = await add(targetFrom(project, name), branch || name);
+      const code = await add(targetFrom(project, name), branch || name, start);
       if (code === 0)
         console.log(
           `          start it with:  ${hint.desolate(`${project} --worktree ${name}`)}`,
