@@ -21,9 +21,19 @@ const DOCKER_OUTSIDE =
   "ghcr.io/devcontainers/features/docker-outside-of-docker:1";
 
 describe("which specs need a daemon of their own", () => {
-  test("the two docker features do", () => {
-    assert.equal(dind.isRequiredBy([DOCKER_IN_DOCKER]), true);
+  test("docker-outside-of-docker does", () => {
     assert.equal(dind.isRequiredBy([DOCKER_OUTSIDE]), true);
+  });
+
+  test("docker-in-docker does NOT -- it is refused, not provisioned for", () => {
+    // A daemon inside the devcontainer is the --privileged shape v2 removes.
+    // Provisioning a project dind for it as well would hand a socket to a
+    // container that is about to be refused anyway.
+    assert.equal(dind.isRequiredBy([DOCKER_IN_DOCKER]), false);
+    assert.equal(
+      dind.isRequiredBy(["ghcr.io/devcontainers/features/docker-in-docker"]),
+      false,
+    );
   });
 
   test("it is found among the features a real project declares", () => {
@@ -39,11 +49,11 @@ describe("which specs need a daemon of their own", () => {
 
   test("a version is optional, and a digest is accepted in its place", () => {
     assert.equal(
-      dind.isRequiredBy(["ghcr.io/devcontainers/features/docker-in-docker"]),
+      dind.isRequiredBy(["ghcr.io/devcontainers/features/docker-outside-of-docker"]),
       true,
     );
     assert.equal(
-      dind.isRequiredBy([`${DOCKER_IN_DOCKER.split(":")[0]}@sha256:${"a".repeat(64)}`]),
+      dind.isRequiredBy([`${DOCKER_OUTSIDE.split(":")[0]}@sha256:${"a".repeat(64)}`]),
       true,
     );
   });
@@ -64,6 +74,7 @@ describe("which specs need a daemon of their own", () => {
       "evil.io/devcontainers/features/docker-in-docker:2",
       "ghcr.io/attacker/features/docker-outside-of-docker:1",
       "ghcr.io/devcontainers/features/docker-in-docker-plus:1",
+      "ghcr.io/devcontainers/features/docker-outside-of-docker-plus:1",
       "https://example.com/docker-in-docker.tgz",
       "./docker-in-docker",
     ])

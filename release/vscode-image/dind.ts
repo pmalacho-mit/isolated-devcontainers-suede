@@ -82,15 +82,20 @@ export const socket = {
 };
 
 /**
- * Feature ids that put a docker client or daemon into a project.
+ * Feature ids that get a project a daemon of its own.
  *
- * An allowlist, and deliberately narrow. A feature this does not recognise
- * yields NO dedicated daemon, which leaves a project without docker -- the
- * failure a user reports in a minute -- rather than a project quietly sharing
- * everyone else's, which is the failure nobody sees.
+ * ONE, and deliberately: `docker-outside-of-docker` is a client that expects a
+ * socket, which is exactly what a project dind hands it. `docker-in-docker`
+ * puts a second daemon INSIDE the devcontainer, which is the `--privileged`
+ * shape this whole design removes -- policy refuses it with a migration
+ * message rather than provisioning for it (docs/dind, v2.1).
+ *
+ * An allowlist. A feature this does not recognise yields NO dedicated daemon,
+ * which leaves a project without docker -- the failure a user reports in a
+ * minute -- rather than a project quietly sharing everyone else's, which is
+ * the failure nobody sees.
  */
 const DAEMON_FEATURES = [
-  /^ghcr\.io\/devcontainers\/features\/docker-in-docker(?:[:@]|$)/i,
   /^ghcr\.io\/devcontainers\/features\/docker-outside-of-docker(?:[:@]|$)/i,
 ];
 
