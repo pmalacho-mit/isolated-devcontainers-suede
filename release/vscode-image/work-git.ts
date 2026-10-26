@@ -64,16 +64,33 @@ export const refsUnder = (repo: string, prefix: string): { ref: string; commit: 
   }) : [];
 };
 
+export interface CommitRead {
+  commit: string;
+  authorName: string;
+  parents: string[];
+  json: string;
+}
+
+/** A commit is immutable, so a read of one is kept by its sha: the watcher
+ *  rereads every outbox each tick, and without this a conversation's length
+ *  is the number of git processes it costs every fifteen seconds. */
+const reads = new Map<string, CommitRead>();
+
 /** One message: its commit, its author's name, its parents, and its
  *  message.json, raw -- the commit read as an object, not through `log`. */
-export const readCommit = (repo: string, commit: string) => {
+export const readCommit = (repo: string, commit: string): CommitRead => {
+  const key = `${repo}\0${commit}`;
+  const known = reads.get(key);
+  if (known) return known;
   const header = git(repo, ["cat-file", "commit", commit]).split("\n\n")[0];
-  return {
+  const read = {
     commit,
     authorName: /^author (.*) <[^>]*> \d+ [+-]\d{4}$/m.exec(header)?.[1] ?? "",
     parents: [...header.matchAll(/^parent ([0-9a-f]+)$/gm)].map((match) => match[1]),
     json: git(repo, ["cat-file", "-p", `${commit}:message.json`]),
   };
+  reads.set(key, read);
+  return read;
 };
 
 /** A ref's history, newest first: commit shas. */

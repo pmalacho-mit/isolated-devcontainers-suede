@@ -124,9 +124,14 @@ export const decide = (
 
 type Say = (line: string) => void;
 
+/** How long one command may take. A first start builds images, which is
+ *  minutes; a broker that never answers must not hold every project behind it. */
+const COMMAND_MS = 60 * 60 * 1000;
+
 /** A command a person would type, run to completion; its output is logged. */
 const command = (argv: string[], say: Say) => {
-  const run = spawnSync(argv[0], argv.slice(1), { encoding: "utf8", env: process.env });
+  const run = spawnSync(argv[0], argv.slice(1), { encoding: "utf8", env: process.env, timeout: COMMAND_MS, killSignal: "SIGKILL" });
+  if (run.error) say(`  ${argv[0]} ${argv[1] ?? ""}: ${run.error.message}`);
   for (const line of `${run.stdout ?? ""}${run.stderr ?? ""}`.split("\n")) if (line.trim()) say(`  ${line}`);
   return { status: run.status ?? 1, output: `${run.stdout ?? ""}${run.stderr ?? ""}` };
 };
