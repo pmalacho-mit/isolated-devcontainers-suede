@@ -129,6 +129,8 @@ export const settingsFrom = (env: Record<string, string | undefined>): Settings 
       // Outside every subnet the VM's daemon hands out (dind.ts).
       bip: dind.INNER_BRIDGE_IP,
       "default-address-pools": [dind.INNER_POOL],
+      // Where --shadow serves its derivatives from (dind.ts MIRROR).
+      "registry-mirrors": [`http://${dind.MIRROR.address}`],
     }),
     idleMs: minutes * 60_000,
     bootSeconds: Number(env.DESOLATE_DIND_BOOT_SECONDS ?? "120"),

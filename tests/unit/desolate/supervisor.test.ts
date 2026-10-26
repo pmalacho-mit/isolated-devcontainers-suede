@@ -89,6 +89,7 @@ describe("what the supervisor builds", () => {
     const json = JSON.parse(specFor(targetOf("x"), settingsFrom({})).daemonJson);
     assert.equal(json.bip, "10.234.255.1/24");
     assert.deepEqual(json["default-address-pools"], [{ base: "10.234.0.0/17", size: 24 }]);
+    assert.deepEqual(json["registry-mirrors"], ["http://127.0.0.1:5995"], "--shadow's mirror (#11)");
     // docker's default pools, which the VM's daemon draws every bridge from.
     for (const subnet of [json.bip, json["default-address-pools"][0].base])
       assert.ok(!/^(172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(subnet), subnet);

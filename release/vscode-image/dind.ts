@@ -40,6 +40,21 @@ export const name = (target: Target) => `${PREFIX}-${projectNamespace(target)}`;
 export const INNER_BRIDGE_IP = "10.234.255.1/24";
 export const INNER_POOL = { base: "10.234.0.0/17", size: 24 } as const;
 
+/**
+ * A project dind's mirror (#11): a registry that trust-proxy-in-builds.sh
+ * --shadow starts in the dind on first use, on its loopback, and pushes the
+ * CA-trusting derivative to under the base's own name. Listed in every
+ * project dind's daemon.json, where the containerd image store makes BuildKit
+ * honour it -- so a build posted to the Engine API gets the derivative too
+ * (T5.3, S7). A dind that never shadows has nothing listening there, and its
+ * pulls fall through to Docker Hub. An odd port, so a project's own `:5000`
+ * is not taken from it; tests/static/14 holds the script to the same values.
+ */
+export const MIRROR = {
+  address: "127.0.0.1:5995",
+  image: "registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373",
+} as const;
+
 /** Matches EVERY project dind, for sweeps that know no targets. */
 export const LABEL_KEY = "desolate.dind";
 

@@ -1075,10 +1075,11 @@ not all of them:
 | ---------------------------------------------- | ------ | ------------------------------------------------------------------- |
 | `docker build`, `docker compose build`         | binds  | the CLI asks BuildKit to prefer a local image                       |
 | `POST /build?version=1` (classic builder)      | binds  | the classic builder reads the local store and nothing else          |
-| `POST /build?version=2` (BuildKit, Engine API) | **no** | resolves the tag at the registry, pins `FROM ...@sha256:<upstream>` |
+| `POST /build?version=2` (BuildKit, Engine API) | on a project's own daemon, for Docker Hub images | it resolves the tag at a registry -- the project dind's mirror first, which `--shadow` filled (below); on the shared daemon, or for another registry, **no** |
 
-That last row is the one that bites, because it is what part of the SDK world
+That last row is the one that bit, because it is what part of the SDK world
 posts by default -- `dockerode` with `version: "2"`, and tools built on it.
+Where it still does -- the shared daemon, or a base from another registry --
 BuildKit is handed a tag, asks the registry what it points to, and builds from
 the digest it gets back. The local tag is never consulted, so the build gets the
 pristine base: it downloads an image you already have a derivative of, then
@@ -1107,9 +1108,16 @@ and is not, any more: pointing the daemon's `registry-mirrors` at a registry
 serving the derivatives. On the classic image store BuildKit ignored those
 mirrors; on the containerd store -- docker 29's default, and every project
 daemon's -- a `version=2` build honours them and builds on the mirror's
-derivative (measured: `tests/probes/buildkit-shadow.sh`, S7). Docker Hub images
-only: `registry-mirrors` covers no other registry. desolate does not run such a
-mirror for you yet.
+derivative (measured: `tests/probes/buildkit-shadow.sh`, S7). So a project
+dind lists one at `127.0.0.1:5995` in its own namespace, and `--shadow` starts
+it there on first use (`desolate-mirror`, a pinned `registry:2`) and pushes the
+derivative to it under the base's own name; `--unshadow` takes it out again.
+Its daemon then gets the derivative for every builder, and for `docker pull` --
+so on a project's own daemon a pull no longer undoes the shadow. Docker Hub
+images only: `registry-mirrors` covers no other registry. A dind that never
+shadows has nothing listening there, and its pulls go straight on to Docker Hub
+(measured: `tests/environments/mirror/run.sh`). The mirror is loopback inside
+the dind: no other project reaches it.
 
 To stop doing this by hand, a project can declare the images once:
 
