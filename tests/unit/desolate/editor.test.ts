@@ -14,6 +14,8 @@ import {
   SERVER_BIN,
   editorCustomizations,
   editorStartScript,
+  externalEnvironment,
+  externalProfile,
   isValidExtensionId,
   isValidToken,
   mintToken,
@@ -265,5 +267,41 @@ describe("reading customizations out of a spec", () => {
   test("a spec with no customizations at all is not a crash", () => {
     assert.deepEqual(editorCustomizations(), { extensions: [], settings: {} });
     assert.deepEqual(editorCustomizations({}), { extensions: [], settings: {} });
+  });
+});
+
+describe("DESOLATE_EXTERNAL_<port> (#17)", () => {
+  test("each dev-server port is exported with its host port and a URL; the editor is not", () => {
+    assert.deepEqual(externalEnvironment(new Map([["editor", 8080], ["5173", 8081]])), [
+      ["DESOLATE_EXTERNAL_5173", "8081"],
+      ["DESOLATE_EXTERNAL_5173_URL", "http://127.0.0.1:8081"],
+    ]);
+  });
+
+  test("anything that is not a port pair never reaches a shell", () => {
+    for (const bad of [[["5173;rm -rf /", 8081]], [["web", 8081]], [["5173", 0]], [["5173", 8081.5]], [["0", 8081]]] as [string, number][][])
+      assert.throws(() => externalEnvironment(new Map(bad)), EditorScriptError, JSON.stringify(bad));
+  });
+
+  test("the profile exports them for login shells", () => {
+    const profile = externalProfile(externalEnvironment(new Map([["5173", 8081]])));
+    assert.match(profile, /^export DESOLATE_EXTERNAL_5173=8081$/m);
+    assert.match(profile, /^export DESOLATE_EXTERNAL_5173_URL=http:\/\/127\.0\.0\.1:8081$/m);
+  });
+
+  test("the start script exports them BEFORE the server starts, so its terminals inherit them", () => {
+    const external = externalEnvironment(new Map([["5173", 8081]]));
+    const script = editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48), external);
+    const exported = script.indexOf("export DESOLATE_EXTERNAL_5173=8081");
+    assert.ok(exported >= 0, "not exported");
+    assert.ok(exported < script.indexOf("setsid nohup"), "exported after the server starts");
+  });
+
+  test("a server running with a different map is restarted rather than kept", () => {
+    const script = editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48),
+      externalEnvironment(new Map([["5173", 8081]])));
+    assert.match(script, /WANT='DESOLATE_EXTERNAL_5173=8081 DESOLATE_EXTERNAL_5173_URL=http:\/\/127\.0\.0\.1:8081'/);
+    assert.match(script, /if listening && \[ "\$HAVE" != "\$WANT" \]; then/);
+    assert.match(script, /printf '%s' "\$WANT" > "\$DATA\/desolate-external"/);
   });
 });

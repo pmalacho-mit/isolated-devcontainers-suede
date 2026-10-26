@@ -184,10 +184,43 @@ export const editorCustomizations = (
  *  @throws EditorScriptError if the token or any extension id could reach the
  *  shell unvalidated. Callers filter ids first; this is the backstop that makes
  *  the interpolation below safe to read. */
+/**
+ * DESOLATE_EXTERNAL_<container-port>=<host-port>, and `_URL` beside it (#17):
+ * the address a HUMAN opens for a dev server, which an agent inside the
+ * container cannot otherwise know -- it sees 5173, the Mac sees 8081. The
+ * editor's own port is not among them: its URL carries the connection token.
+ *
+ * Both halves are checked as digits before they go anywhere near a shell.
+ *
+ * @throws EditorScriptError for a label or port that is not a port number. */
+export const externalEnvironment = (map: Iterable<[string, number]>): [string, string][] => {
+  const env: [string, string][] = [];
+  for (const [label, hostPort] of map) {
+    if (label === "editor") continue;
+    if (!/^[1-9][0-9]{0,4}$/.test(label) || !Number.isInteger(hostPort) || hostPort < 1 || hostPort > 65535)
+      throw new EditorScriptError(`refusing to export '${label}' -> '${hostPort}': not a port pair`);
+    env.push(
+      [`DESOLATE_EXTERNAL_${label}`, String(hostPort)],
+      [`DESOLATE_EXTERNAL_${label}_URL`, `http://127.0.0.1:${hostPort}`],
+    );
+  }
+  return env;
+};
+
+/** /etc/profile.d/desolate-ports.sh: the same variables for login shells --
+ *  an agent's `bash -l`, a `docker exec ... bash -lc`. */
+export const externalProfile = (env: [string, string][]) =>
+  [
+    "# written by desolate at every start: the host ports a human opens (#17)",
+    ...env.map(([name, value]) => `export ${name}=${value}`),
+    "",
+  ].join("\n");
+
 export const editorStartScript = (
   serverDir: string,
   { extensions, settings }: EditorCustomizations,
   token: string,
+  external: [string, string][] = [],
 ) => {
   if (!isValidToken(token))
     throw new EditorScriptError(
@@ -200,11 +233,19 @@ export const editorStartScript = (
       `refusing to build the editor script: malformed extension ids ${rejected.join(", ")}`,
     );
 
+  // The server's environment is what its terminals inherit, so these are
+  // exported before it starts -- and a server already running with a
+  // DIFFERENT map is restarted, or its terminals would keep the old one.
+  const exports = external.map(([name, value]) => `export ${name}=${value}`).join("\n");
+  const fingerprint = external.map(([name, value]) => `${name}=${value}`).join(" ");
   return `
 set -e
 SRV=${serverDir}/bin/${SERVER_BIN}
 DATA="$HOME/${EDITOR_DATA_DIR}"
 mkdir -p "$DATA/extensions"
+${exports}
+WANT='${fingerprint}'
+HAVE=$(cat "$DATA/desolate-external" 2>/dev/null || true)
 if [ ! -x "$SRV" ]; then
   echo 'desolate: server not found in container -- is the base image glibc (Debian/Ubuntu)?' >&2
   exit 1
@@ -215,8 +256,23 @@ for e in ${extensions.map((e) => `'${e}'`).join(" ")}; do
       --extensions-dir "$DATA/extensions" --server-data-dir "$DATA" \\
       >/dev/null 2>&1 || echo "desolate: extension unavailable on Open VSX: $e" >&2
 done
-if (exec 3<>/dev/tcp/127.0.0.1/${EDITOR_INTERNAL_PORT}) 2>/dev/null; then
-  exec 3>&- 3<&-
+listening() { (exec 3<>/dev/tcp/127.0.0.1/${EDITOR_INTERNAL_PORT}) 2>/dev/null; }
+if listening && [ "$HAVE" != "$WANT" ]; then
+  echo 'desolate: the port map changed -- restarting the editor so its terminals see it'
+  # The PROCESS GROUP, not the pid: codium-server is a launcher script whose
+  # node child holds the port, and killing the launcher alone leaves that
+  # child listening with the old environment. setsid made the launcher the
+  # group's leader, so the group is the server. The pattern is the backstop
+  # for a server started before the pid was kept.
+  [ -s "$DATA/server.pid" ] && kill -- "-$(cat "$DATA/server.pid")" 2>/dev/null || true
+  for _ in $(seq 1 40); do listening || break; sleep 0.25; done
+  if listening; then
+    pkill -f "server-main.js --host 0.0.0.0 --port ${EDITOR_INTERNAL_PORT}" 2>/dev/null || true
+    for _ in $(seq 1 40); do listening || break; sleep 0.25; done
+  fi
+  listening && { echo 'desolate: the old editor would not stop; its terminals keep the old ports' >&2; }
+fi
+if listening; then
   echo 'desolate: editor already listening'
 else
   setsid nohup "$SRV" \\
@@ -224,6 +280,8 @@ else
     --connection-token '${token}' \\
     --extensions-dir "$DATA/extensions" --server-data-dir "$DATA" \\
     >${EDITOR_LOG} 2>&1 < /dev/null &
+  echo $! > "$DATA/server.pid"
+  printf '%s' "$WANT" > "$DATA/desolate-external"
   sleep 2
 fi`;
 };

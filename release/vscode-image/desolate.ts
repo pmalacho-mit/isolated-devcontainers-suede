@@ -76,6 +76,8 @@ import {
   EDITOR_LOG,
   editorCustomizations,
   editorStartScript,
+  externalEnvironment,
+  externalProfile,
   type EditorCustomizations,
   isValidToken,
   mintToken,
@@ -825,14 +827,33 @@ function shadowBaseImages(dir: string, images: string[]): void {
     console.log(trustMessage.shadowingUnfinished(images));
 }
 
+/** Where a dev server is, as a human reaches it (#17): written as root, for
+ *  login shells, before the editor starts -- whose own environment, and so its
+ *  terminals', carries the same variables (editorStartScript). */
+function publishExternalPorts(target: Target, external: [string, string][]): void {
+  const id = devcontainerId(target.dir);
+  if (!id) return;
+  const wrote = docker.container.execAsRoot(id, [
+    "sh",
+    "-c",
+    'printf "%s" "$1" > /etc/profile.d/desolate-ports.sh && chmod 0644 /etc/profile.d/desolate-ports.sh',
+    "sh",
+    externalProfile(external),
+  ]);
+  if (wrote !== 0)
+    desolog(`could not write /etc/profile.d/desolate-ports.sh; DESOLATE_EXTERNAL_* reaches
+      the editor's terminals only`);
+}
+
 function startEditor(
   target: Target,
   cfg: ProjectConfig,
   token: string,
   config: string,
+  external: [string, string][] = [],
 ): void {
   const dir = target.dir;
-  const script = editorStartScript(SERVER_DST, cfg, token);
+  const script = editorStartScript(SERVER_DST, cfg, token, external);
   const code = run.status("devcontainer", [
     "exec",
     "--workspace-folder",
@@ -992,6 +1013,9 @@ function movePorts(target: Target, move: { label: string; port: number }): void 
       die(`${move.port} was taken by ${ingressFiles.ownerOf(move.port) || "another target"} just now; pick another`);
     recreateRelays(target, map);
     ingressFiles.publish(world.previous, map, target);
+    publishExternalPorts(target, dieOnError(() => externalEnvironment(map)));
+    console.log(`  login shells see the new DESOLATE_EXTERNAL_* now; the editor's terminals on its
+  next start:  ${hint.desolate(invocation(target))}`);
   }
   showPorts(target);
 }
@@ -1365,7 +1389,9 @@ async function runTarget(
   if (willCreate) spec.save(target, fingerprint);
   installProxyCa(dir);
   shadowBaseImages(dir, project.shadowImages);
-  startEditor(target, project, token, config);
+  const external = dieOnError(() => externalEnvironment(map));
+  publishExternalPorts(target, external);
+  startEditor(target, project, token, config, external);
   recreateRelays(target, map);
   ingressFiles.publish(previousPorts, map, target);
 
