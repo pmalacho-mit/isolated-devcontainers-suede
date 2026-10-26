@@ -96,8 +96,9 @@ services:
       volume-init:
         condition: service_completed_successfully
     # Runs UNPRIVILEGED under the sysbox runtime: container-root maps to an
-    # unprivileged VM user, so a compromised dind cannot reach the VM/host, and
-    # the docker-in-docker feature works nested without privilege.
+    # unprivileged VM user, so a compromised dind cannot reach the VM/host. A
+    # project that uses Docker gets a dind of its own, run the same way by the
+    # supervisor (below); the docker-in-docker feature is refused (policy.ts).
     runtime: sysbox-runc
     # Install the proxy CA before dockerd starts: image pulls traverse the
     # intercepting proxy, so the daemon must trust it. No-op if not installed.
