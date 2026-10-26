@@ -309,7 +309,7 @@ export const reclaimArgv = (image: string, projectDir: string, inProject: string
   "--security-opt", "no-new-privileges",
   "--mount", `type=bind,source=${projectDir},target=/w`,
   "--entrypoint", "sh", image, "-c",
-  `n=$(find "$1" \( ! -user ${uid} -o ! -group ${uid} \) | wc -l) && ` +
+  `n=$(find "$1" \\( ! -user ${uid} -o ! -group ${uid} \\) | wc -l) && ` +
     `chown -R -h ${uid}:${uid} -- "$1" && echo ${RECLAIMED} "$n"`,
   "reclaim", `/w/${inProject}`,
 ];

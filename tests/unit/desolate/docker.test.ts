@@ -8,6 +8,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import {
   RECLAIMED,
@@ -721,6 +724,21 @@ describe("reclaiming root-owned files (#15)", () => {
     const script = argv[argv.indexOf("-c") + 1];
     assert.match(script, /chown -R -h 1000:1000 -- "\$1"/);
     assert.doesNotMatch(script, /\.worktrees|widgets/);
+  });
+
+  // The script is a program in another language inside this one: run it, on a
+  // tree this process owns (a chown to one's own uid needs no privilege).
+  test("the script runs, and counts what it changed", () => {
+    const tree = fs.mkdtempSync(path.join(os.tmpdir(), "reclaim-"));
+    fs.mkdirSync(path.join(tree, "a/b"), { recursive: true });
+    fs.writeFileSync(path.join(tree, "a/b/f"), "x");
+    const uid = process.getuid!();
+    const own = reclaimArgv("i", "/p", ".", uid);
+    const script = own[own.indexOf("-c") + 1];
+    const out = execFileSync("sh", ["-c", script, "reclaim", tree], { encoding: "utf8" });
+    // Everything already ours, unless this runs with a gid that differs from its uid.
+    assert.match(out, new RegExp(`^${RECLAIMED} \\d+$`, "m"));
+    fs.rmSync(tree, { recursive: true, force: true });
   });
 
   test("a run that did not finish is null, not zero", () => {
