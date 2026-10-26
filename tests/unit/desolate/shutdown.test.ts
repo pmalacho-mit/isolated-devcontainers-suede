@@ -122,3 +122,23 @@ describe("stopping a devcontainer whose daemon is already hung", () => {
     assert.deepEqual(joined(calls).at(-1), "stop cid");
   });
 });
+
+describe("stopping a project dind (the supervisor's)", () => {
+  // dockerd is the dind's own workload: stopping it from inside ends the
+  // container under the exec that asked, which then reads as a failure.
+  test("its containers first, then the dind -- and never its daemon from inside", () => {
+    const calls: string[][] = [];
+    const said: string[] = [];
+    const runner: Runner = {
+      output: () => "",
+      status: (argv) => (calls.push(argv), 0),
+      build: () => ({ ok: true, output: "" }),
+    };
+    shutdown.dind(createDocker(runner), "desolate-dind-x", (message) => said.push(message));
+    const containers = indexOfCall(calls, STOPPED_CONTAINERS);
+    const stopped = indexOfCall(calls, "stop desolate-dind-x");
+    assert.ok(containers >= 0 && stopped > containers, `out of order: ${joined(calls)}`);
+    assert.equal(indexOfCall(calls, STOPPED_DAEMON), -1, `the daemon was stopped from inside: ${joined(calls)}`);
+    assert.deepEqual(said, []);
+  });
+});

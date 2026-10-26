@@ -257,7 +257,7 @@ const daemons = {
   stop: (name: string, say: Say, purging = false) => {
     if (docker.dind.state(name) !== "running") return;
     say(`${name}: quiescing, then stopping${purging ? "" : " (its images stay)"}`);
-    shutdown.devcontainer(docker, name, say);
+    shutdown.dind(docker, name, say);
   },
 };
 
