@@ -338,6 +338,22 @@ down() {
   local volumes=()
   [ "${1:-}" = "-v" ] && volumes=(-v)
   echo "== down =="
+  # Project dinds are the supervisor's, not compose's -- and they hold the
+  # compose volumes, so compose cannot remove those until they are gone. The
+  # same sweep cli.sh down makes.
+  local dinds
+  dinds=$(docker ps -aq --filter label=desolate.dind)
+  if [ -n "$dinds" ]; then
+    # shellcheck disable=SC2086
+    docker rm -f $dinds >/dev/null && ok "removed $(echo "$dinds" | wc -w | tr -d ' ') project dind(s)"
+  fi
+  for net in $(docker network ls -q --filter label=desolate.dind); do
+    docker network rm "$net" >/dev/null 2>&1 || bad "network $net still in use"
+  done
+  if [ ${#volumes[@]} -gt 0 ]; then
+    # shellcheck disable=SC2046
+    docker volume rm $(docker volume ls -q --filter name='^dind-data-') >/dev/null 2>&1 && ok "removed the project dinds' image stores"
+  fi
   if [ -f "$STATE/.env" ]; then
     compose down "${volumes[@]}" >"$STATE/compose-down.log" 2>&1 && ok "compose down ${volumes[*]}" \
       || { tail -5 "$STATE/compose-down.log"; bad "compose down failed"; }
