@@ -17,8 +17,9 @@ WHAT IT READS. Two directories, written by others, polled:
 
     <root>/dinds/<dind-name>   one line: that dind's address on its bridge
                                (written by the supervisor, which creates them)
-    <root>/ports/<host-port>   one line: <dind-name>:<port>
-                               (written by desolate.ts once a relay is up)
+    <root>/ports/<host-port>   one line: <dind-name>:<port> [<owner>]
+                               (claimed by desolate.ts when it allocates the
+                               port, the owner being the target that did)
 
 A file appearing opens a listener; a file vanishing closes it and drops its
 connections; a file REWRITTEN closes and reopens it. The reopen is load-bearing:
@@ -114,11 +115,16 @@ def parse_host_port(filename):
     return port
 
 
+# The target that wrote a ports/ file, so its writers can tell their own files
+# from another's (desolate.ts); the forward does not depend on it.
+OWNER = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
+
+
 def parse_target(content):
-    """`<dind-name>:<port>` -> (dind, port)."""
-    match = re.fullmatch(r"([^:\s]+):([0-9]{1,5})\s*", content)
+    """`<dind-name>:<port> [<owner>]` -> (dind, port)."""
+    match = re.fullmatch(rf"([^:\s]+):([0-9]{{1,5}})(?:[ \t]+{OWNER})?\s*", content)
     if not match:
-        raise Refused(f"content {content.strip()[:60]!r} is not <dind-name>:<port>")
+        raise Refused(f"content {content.strip()[:60]!r} is not <dind-name>:<port> [<owner>]")
     dind, port = match.group(1), int(match.group(2))
     if not DIND_NAME.match(dind):
         raise Refused(f"{dind!r} is not a dind name")
@@ -216,9 +222,13 @@ async def _pump(reader, writer):
 class Listener:
     """One host port: its servers, its target, and its live connections."""
 
+    # How long a close waits for its servers: on 3.12.1+ wait_closed() waits
+    # for every connection too, and the aborts below should make that instant.
+    CLOSE_SECONDS = 2
+
     def __init__(self, host_port, target):
         self.host_port, self.target = host_port, target
-        self.servers, self.connections = [], set()
+        self.servers, self.connections, self.transports = [], set(), set()
 
     async def open(self, addresses):
         for address in addresses:
@@ -227,6 +237,7 @@ class Listener:
     async def _accept(self, client_reader, client_writer):
         task = asyncio.current_task()
         self.connections.add(task)
+        self.transports.add(client_writer.transport)
         address, port = self.target
         try:
             upstream_reader, upstream_writer = await asyncio.wait_for(
@@ -235,20 +246,32 @@ class Listener:
             log.info("ports/%s: %s:%s did not answer (%s)", self.host_port, address, port, err)
             client_writer.close()
             self.connections.discard(task)
+            self.transports.discard(client_writer.transport)
             return
+        self.transports.add(upstream_writer.transport)
         try:
             await asyncio.gather(_pump(client_reader, upstream_writer),
                                  _pump(upstream_reader, client_writer))
         finally:
             self.connections.discard(task)
+            self.transports.discard(client_writer.transport)
+            self.transports.discard(upstream_writer.transport)
 
     async def close(self):
+        """Closed, and every connection with it -- ABORTED, not closed: a close
+        flushes first, so a peer that stopped reading would hold it, and with
+        it wait_closed() and every port behind it in reconcile(), for ever."""
         for server in self.servers:
             server.close()
+        for transport in list(self.transports):
+            transport.abort()
         for task in list(self.connections):
             task.cancel()
         for server in self.servers:
-            await server.wait_closed()
+            try:
+                await asyncio.wait_for(server.wait_closed(), self.CLOSE_SECONDS)
+            except asyncio.TimeoutError:
+                log.warning("ports/%s: closed without waiting for its connections", self.host_port)
         self.servers.clear()
 
 
@@ -263,6 +286,7 @@ class Ingress:
         self.clock = clock or time.monotonic
         self.listeners = {}
         self._last_refusals = set()
+        self._cannot_listen = {}
         self._fingerprints = {}
         self._dinds_seen = None
         self._subnets, self._subnets_at = [], None
@@ -302,8 +326,12 @@ class Ingress:
                 await listener.open(self.addresses)
             except OSError as err:
                 await listener.close()
-                log.warning("REFUSED ports/%s: cannot listen (%s)", host_port, err)
+                # Retried every poll, said once per rewrite of the file.
+                if self._cannot_listen.get(host_port) != fingerprints.get(str(host_port)):
+                    log.warning("REFUSED ports/%s: cannot listen (%s)", host_port, err)
+                self._cannot_listen[host_port] = fingerprints.get(str(host_port))
                 continue
+            self._cannot_listen.pop(host_port, None)
             self.listeners[host_port] = listener
             log.info("OPEN  127.0.0.1:%s -> %s:%s", host_port, *target)
 

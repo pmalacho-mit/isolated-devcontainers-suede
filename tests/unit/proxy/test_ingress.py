@@ -83,6 +83,18 @@ class TestTarget:
         assert ingress.parse_target("desolate-dind-acme__widgets:5173\n") == ("desolate-dind-acme__widgets", 5173)
         assert ingress.parse_target("desolate-dind:8080") == ("desolate-dind", 8080)
 
+    def test_an_owner_may_follow(self):
+        # desolate.ts names the target that claimed the port, so a withdraw can
+        # tell its own files from another's; the forward ignores it.
+        assert ingress.parse_target("desolate-dind:8080 acme__widgets--wt--wip\n") == ("desolate-dind", 8080)
+
+    @pytest.mark.parametrize("content", [
+        "desolate-dind:8080 ../x", "desolate-dind:8080 a b", "desolate-dind:8080 -x", "desolate-dind:8080 a;b",
+    ])
+    def test_a_malformed_owner_is_refused(self, content):
+        with pytest.raises(ingress.Refused):
+            ingress.parse_target(content)
+
     @pytest.mark.parametrize("content", [
         "", "desolate-dind", "desolate-dind:", ":8080", "desolate-dind:0", "desolate-dind:70000",
         "desolate-dind:8080:1", "evil:8080", "desolate-dind-x 8080", "../dinds/x:80",
@@ -276,4 +288,59 @@ def test_a_symlinked_file_is_not_read(root, tmp_path):
         forwarder = ingress.Ingress(str(root), subnets_source=loopback_as_bridge)
         await forwarder.reconcile()
         assert forwarder.listeners == {}
+    asyncio.run(scenario())
+
+
+def test_a_peer_that_stopped_reading_cannot_hold_a_close(root):
+    # A close flushes before it lets go; with a client that reads nothing and an
+    # upstream that keeps sending, the buffer never drains, and on 3.12.1+
+    # wait_closed() waits for that connection -- so reconcile() would never
+    # return, and no port would open or close again.
+    async def scenario():
+        async def flood(reader, writer):
+            try:
+                while True:
+                    writer.write(b"x" * 65536)
+                    await writer.drain()
+            except (ConnectionError, asyncio.CancelledError):
+                pass
+        target = await asyncio.start_server(flood, "127.0.0.1", 0)
+        target_port = target.sockets[0].getsockname()[1]
+        host_port = free_port()
+        forwarder = ingress.Ingress(str(root), subnets_source=loopback_as_bridge)
+        write(root / "dinds" / "desolate-dind-acme", "127.0.0.1\n")
+        write(root / "ports" / str(host_port), f"desolate-dind-acme:{target_port}\n")
+        await forwarder.reconcile()
+
+        import socket
+        stalled = socket.create_connection(("127.0.0.1", host_port))
+        stalled.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        await asyncio.sleep(0.5)   # long enough for every buffer on the way to fill
+
+        os.remove(root / "ports" / str(host_port))
+        await asyncio.wait_for(forwarder.reconcile(), 5)
+        assert forwarder.listeners == {}
+        stalled.close()
+        target.close()
+    asyncio.run(scenario())
+
+
+def test_a_port_it_cannot_listen_on_is_said_once(root, caplog):
+    async def scenario():
+        import socket
+        held = socket.socket()
+        held.bind(("127.0.0.1", 0))
+        held.listen()
+        host_port = held.getsockname()[1]
+        forwarder = ingress.Ingress(str(root), subnets_source=loopback_as_bridge)
+        write(root / "dinds" / "desolate-dind-acme", "127.0.0.1\n")
+        write(root / "ports" / str(host_port), "desolate-dind-acme:8080\n")
+        with caplog.at_level("WARNING"):
+            for _ in range(4):
+                await forwarder.reconcile()
+            assert sum("cannot listen" in r.message for r in caplog.records) == 1
+            write(root / "ports" / str(host_port), "desolate-dind-acme:8080\n")
+            await forwarder.reconcile()
+            assert sum("cannot listen" in r.message for r in caplog.records) == 2, "a rewrite is said again"
+        held.close()
     asyncio.run(scenario())
