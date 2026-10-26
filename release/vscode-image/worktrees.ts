@@ -7,9 +7,9 @@
  * FILE holding an absolute path into the project's `.git/worktrees/<name>`,
  * and that directory's `commondir` points back at the project's real `.git`.
  * Hide the project and git stops dead. So a worktree's container gets the
- * project's `.git` bound at the path it had when the worktree was created --
- * and nothing else from the project, because git never reads another
- * worktree's checkout on a linked worktree's behalf.
+ * project's ROOT, at the path it had when the worktree was created, with the
+ * worktree as its folder -- never `.git` on its own, which its project can
+ * make a link (projectRoot, below).
  *
  * Worktrees share `.git/config` and `.git/hooks`. `git config --local` run
  * inside a worktree writes the PROJECT's config, and both of those are
@@ -155,37 +155,33 @@ export const isLocked = (worktree: Target) => {
 };
 
 /**
- * A worktree's container has to see the project's `.git` at one absolute path,
- * inside and out, and writable: commits write objects, refs and the index.
+ * What a worktree's container is given, and its sandboxes: the PROJECT ROOT,
+ * at its own path -- which holds the worktree and the project's `.git` both.
+ *
+ * Not the worktree and `.git` as two binds, which is what it was. A bind's
+ * source is resolved on the daemon, following symlinks, and the project's own
+ * agent can replace its `.git` (or a worktree's directory) with a link to
+ * another project's: on the shared daemon, which sees all of /workspaces, the
+ * next worktree start then mounted THAT project's `.git`, writable (measured
+ * in the nested stack). A project cannot replace its own root -- it is the
+ * mount point it works in -- so binding the root and nothing below it leaves
+ * every link inside to resolve within the container, where no other project
+ * is. The cost: a worktree's container sees its project's other worktrees and
+ * main tree, which share its `.git`, and so its trust, already.
  */
-const sharedGitDirectory = (target: Target) => {
-  const git = gitDirectory(target);
-  return `type=bind,source=${git},target=${git}`;
-};
+export const projectRoot = (target: Target) =>
+  `type=bind,source=${target.projectDir},target=${target.projectDir}`;
 
 /**
- * What this target's container needs beyond its own workspace folder.
- *
- * Handed to `devcontainer up` as `--mount`, never written into a spec. A
- * project must not be able to declare this itself -- that is how
- * `/workspaces/other/.git` would get mounted -- and policy.ts refuses every
- * bind a project writes, which is exactly the rule that keeps that true.
- *
- * The CLI parses `--mount` with a strict
- * `type=<bind|volume>,source=,target=` regex and REFUSES anything else, which
- * is why the mask below is a runArg rather than a fourth mount.
+ * What this target's container needs beyond its workspace mount: nothing.
+ * A worktree's workspace mount IS the project root (desolate.ts), so its
+ * `.git` comes with it. Kept as the one place a future injected mount goes:
+ * handed to `devcontainer up` as `--mount`, never written into a spec.
  */
-export const mounts = (target: Target): string[] =>
-  target.worktree ? [sharedGitDirectory(target)] : [];
+export const mounts = (_target: Target): string[] => [];
 
-/**
- * What a worktree's sandbox is given: its own directory and the project's
- * `.git` -- exactly what its devcontainer will get, and nothing else.
- */
-export const sandboxMounts = (target: Target): string[] => [
-  `type=bind,source=${target.dir},target=${target.dir}`,
-  ...mounts(target),
-];
+/** What a worktree's sandbox is given: exactly what its devcontainer gets. */
+export const sandboxMounts = (target: Target): string[] => [projectRoot(target)];
 
 /**
  * The checkout's sandbox, which also gets the proxy CA, read-only, for

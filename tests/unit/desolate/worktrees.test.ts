@@ -21,6 +21,7 @@ import {
   awaitsCheckout,
   checkoutMounts,
   hardenedGit,
+  projectRoot,
   sandboxMounts,
   isLocked,
   isPopulated,
@@ -78,37 +79,43 @@ const sandbox = () => {
 };
 
 describe("a worktree's container", () => {
-  test("gets the project's .git at one absolute path, and nothing else", () => {
-    // Its own `.git` is a FILE naming a path inside this directory, and that
-    // path's `commondir` names another. Both are absolute, so the bind's source
-    // and destination have to be the same string.
+  test("is given no bind beyond its workspace mount -- never the project's .git", () => {
+    // A bind's source is resolved on the daemon, following symlinks, and the
+    // project's own agent can make its `.git` a link to another project's.
+    // The worktree's `.git` arrives inside the project root instead, which is
+    // its workspace mount (projectRoot, below).
     const box = sandbox();
     box.project("acme/widgets");
     const feature = box.worktree("acme/widgets", "feature123");
+    assert.deepEqual(mounts(feature), []);
+  });
 
-    const git = join(box.workspaces, "acme/widgets", ".git");
-    assert.deepEqual(mounts(feature), [
-      `type=bind,source=${git},target=${git}`,
-    ]);
+  test("is mounted as its project's root, at that root's own path", () => {
+    // Its own `.git` is a FILE naming an absolute path inside the project's
+    // `.git`, so the root has to sit at the same path inside and out.
+    const box = sandbox();
+    box.project("acme/widgets");
+    const feature = box.worktree("acme/widgets", "feature123");
+    const project = join(box.workspaces, "acme/widgets");
+    assert.equal(projectRoot(feature), `type=bind,source=${project},target=${project}`);
+    assert.ok(feature.dir.startsWith(`${project}/`), feature.dir);
   });
 
   test("in the only shape the devcontainer CLI will parse", () => {
     const box = sandbox();
     box.project("acme/widgets");
-    for (const mount of mounts(box.worktree("acme/widgets", "feature123")))
+    const feature = box.worktree("acme/widgets", "feature123");
+    for (const mount of [...mounts(feature), projectRoot(feature)])
       assert.match(mount, CLI_MOUNT, mount);
   });
 
-  test("does not reach a SIBLING worktree's directory", () => {
+  test("masks nothing", () => {
+    // Its siblings and main tree are in its project root, and so in reach:
+    // they share its `.git`, and so its trust, already (the header).
     const box = sandbox();
     box.project("acme/widgets");
     box.worktree("acme/widgets", "other");
-    const feature = box.worktree("acme/widgets", "feature123");
-
-    for (const mount of mounts(feature))
-      assert.ok(!mount.includes("other"), `sibling reachable via ${mount}`);
-    // and a worktree never masks anything -- there is nothing below it to hide
-    assert.deepEqual(runArgs(feature), []);
+    assert.deepEqual(runArgs(box.worktree("acme/widgets", "feature123")), []);
   });
 });
 
@@ -245,28 +252,28 @@ describe("whether a worktree has been checked out", () => {
 });
 
 describe("the checkout sandbox's reach", () => {
-  test("is the worktree's own: its directory, the project .git, the CA read-only", () => {
+  test("is its devcontainer's: the project root, and the CA read-only", () => {
     const box = sandbox();
     const feature = box.worktree("acme/widgets", "feature123");
     const project = join(box.workspaces, "acme/widgets");
-    assert.deepEqual(sandboxMounts(feature), checkoutMounts(feature, "x", "/x").slice(0, 2));
+    assert.deepEqual(sandboxMounts(feature), [projectRoot(feature)]);
     assert.deepEqual(checkoutMounts(feature, "acme__widgets--wt--feature123-desolate-ca", "/desolate-ca"), [
-      `type=bind,source=${feature.dir},target=${feature.dir}`,
-      `type=bind,source=${project}/.git,target=${project}/.git`,
+      `type=bind,source=${project},target=${project}`,
       "type=volume,source=acme__widgets--wt--feature123-desolate-ca,target=/desolate-ca,readonly",
     ]);
   });
 
-  test("never the project directory itself, nor a sibling worktree", () => {
+  test("binds no path below the project root, which its project could make a link", () => {
+    // The attack, measured on the shared daemon: `/workspaces/p/.git` made a
+    // link to `/workspaces/victim/.git`, and a bind of it mounted the
+    // victim's. Every bind source here must be the root, which the project
+    // works inside and so cannot replace.
     const box = sandbox();
     box.worktree("acme/widgets", "other");
     const feature = box.worktree("acme/widgets", "feature123");
-    const sources = checkoutMounts(feature, "ca", "/desolate-ca").map(
-      (mount) => /source=([^,]+)/.exec(mount)![1],
-    );
     const project = join(box.workspaces, "acme/widgets");
-    assert.ok(!sources.includes(project), `${sources}`);
-    assert.ok(!sources.some((source) => source.endsWith("/other")), `${sources}`);
+    const binds = checkoutMounts(feature, "ca", "/desolate-ca").filter((m) => m.startsWith("type=bind,"));
+    assert.deepEqual(binds.map((mount) => /source=([^,]+)/.exec(mount)![1]), [project]);
   });
 });
 

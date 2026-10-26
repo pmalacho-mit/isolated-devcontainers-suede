@@ -752,6 +752,17 @@ const checks = {
 
     const mounted = mount.normalize(declared);
 
+    // A worktree is mounted as its project root, the worktree inside it
+    // (worktrees.ts projectRoot): that root, at its own path, is the one
+    // other shape its workspace may take.
+    if (target.worktree !== undefined && posix.resolve(mounted.source) === target.projectDir) {
+      if (posix.resolve(mounted.target) === target.projectDir) return;
+      return fail`
+        workspaceMount target must be ${target.projectDir} when its source is
+        the project's root (got target='${mounted.target}'): the worktree's
+        \`.git\` names absolute paths inside it`;
+    }
+
     if (posix.resolve(mounted.source) !== target.dir)
       return fail`
         workspaceMount must have source=${target.dir} exactly (got

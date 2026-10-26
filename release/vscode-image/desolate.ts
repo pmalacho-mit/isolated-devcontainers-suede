@@ -534,8 +534,14 @@ function deriveRunConfig(
 
   if (mustMirrorItsOwnPath(target, spec)) {
     spec.workspaceFolder = dir;
-    spec.workspaceMount = `source=${dir},target=${dir},type=bind`;
-    applied.push(`workspace mounted at ${dir}, mirroring its path outside`);
+    // A worktree's mount is its project's root, the worktree inside it:
+    // never a bind of a path its project could have made a link
+    // (worktrees.ts projectRoot).
+    const source = target.worktree ? target.projectDir : dir;
+    spec.workspaceMount = `source=${source},target=${source},type=bind`;
+    applied.push(target.worktree
+      ? `workspace: ${dir}, inside its project mounted at ${source}`
+      : `workspace mounted at ${dir}, mirroring its path outside`);
   }
 
   const mask = worktrees.runArgs(target);
@@ -621,7 +627,8 @@ function connectionToken(target: Target): string {
  * They are passed as `--mount` flags rather than written into the spec, and
  * that is what keeps them out of a project's reach: policy.ts refuses every
  * bind a spec declares, so a project cannot name `/workspaces/other/.git` --
- * or its own -- however it spells it.
+ * or its own -- however it spells it. None of them is a bind of a path under
+ * /workspaces: the project could have made it a link (worktrees.ts).
  */
 const injectedMounts = (target: Target) => [
   ...SHARED_DIRECTORIES.map(

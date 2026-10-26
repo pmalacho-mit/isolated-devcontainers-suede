@@ -553,14 +553,15 @@ else
   else
     pass "both worktree containers are running"
 
-    # --- the mount shape: its own tree, plus .git, and nothing else ------
+    # --- the mount shape: its project's root, the worktree as its folder --
+    # The root, not the worktree and `.git` as two binds: either of those is a
+    # path the project can make a link, and a bind follows it (below).
     assert_contains "a worktree sees its OWN checkout" \
       "$(in_devc "$ALPHA" "cat $WT_DIR/.worktrees/alpha/which-tree.txt")" "alpha"
-    assert_fails "and not a sibling's files" \
-      docker exec "$C_ORCH" docker exec "$ALPHA" \
-        test -e "$WT_DIR/.worktrees/beta/which-tree.txt"
-    assert_fails "and not the main tree's files" \
-      docker exec "$C_ORCH" docker exec "$ALPHA" test -e "$WT_DIR/which-tree.txt"
+    assert_contains "and works in it" \
+      "$(in_devc "$ALPHA" "pwd")" "$WT_DIR/.worktrees/alpha"
+    assert_contains "its project's root is in reach, as conceded" \
+      "$(in_devc "$ALPHA" "cat $WT_DIR/which-tree.txt")" "root"
 
     # The boundary that HOLDS: a different project is as unreachable as ever.
     assert_fails "and not another project at all" \
@@ -575,15 +576,35 @@ else
       "printf '\n[desolate]\n\tsiblingReach = yes\n' >> $WT_DIR/.git/config" >/dev/null
     assert_contains "a worktree CAN reach its siblings through the shared .git" \
       "$(in_devc "$BETA" "cat $WT_DIR/.git/config")" "siblingReach"
+
+    # --- a link its project planted is not followed out of it ------------
+    # The project's agent owns everything under its root, `.git` included.
+    # Made a link to another project's `.git`, a bind of it on the shared
+    # daemon mounted THAT project's, writable (measured in the nested stack
+    # when worktrees were given `.git` as a bind of its own). The root can't
+    # be replaced, so the link now resolves inside the container instead.
+    DECOY=/workspaces/wt-decoy
+    ed sh -c "rm -rf $DECOY && mkdir -p $DECOY && cp -a $WT_DIR/.git $DECOY/.git &&
+              touch $DECOY/.git/ANOTHER-PROJECT &&
+              mv $WT_DIR/.git $WT_DIR/.git-real && ln -s $DECOY/.git $WT_DIR/.git" >/dev/null 2>&1
+    OUT=$(ed desolate "$WT" --worktree alpha --rebuild 2>&1)
+    ALPHA=$(wt_container "$WT_DIR/.worktrees/alpha")
+    if printf '%s' "$OUT" | grep -q "is ready:" && [ -n "$ALPHA" ]; then
+      assert_fails "a .git made a link to another project's reaches nothing" \
+        docker exec "$C_ORCH" docker exec "$ALPHA" test -e "$WT_DIR/.git/ANOTHER-PROJECT"
+    else
+      fail "the worktree restarts with its .git made a link" "$(detail "$(printf '%s' "$OUT" | tail -5)")"
+    fi
+    ed sh -c "rm $WT_DIR/.git && mv $WT_DIR/.git-real $WT_DIR/.git && rm -rf $DECOY" >/dev/null 2>&1
   fi
 
   # --- a hostile worktree spec cannot widen its own mount ----------------
   ed worktree add "$WT" evil >/dev/null 2>&1
-  wt_devcontainer "$WT_DIR/.worktrees/evil" "$WT_DIR" \
+  wt_devcontainer "$WT_DIR/.worktrees/evil" /workspaces \
     | ed sh -c "mkdir -p $WT_DIR/.worktrees/evil/.devcontainer &&
                 cat > $WT_DIR/.worktrees/evil/.devcontainer/devcontainer.json"
   OUT=$(ed desolate "$WT" --worktree evil 2>&1)
-  assert_contains "a worktree asking for its PROJECT's folder is refused" \
+  assert_contains "a worktree asking for more than its project is refused" \
     "$OUT" "exactly"
 
   # --- the main tree masks .worktrees, and the lock survives a gc --------

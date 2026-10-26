@@ -750,11 +750,18 @@ describe("a worktree target", () => {
     enforcePolicy(feature, bind(dir), ...family);
   });
 
-  test("may not bind its own PROJECT's folder", () => {
-    // The project root is the root target's mount, and mounting it here would
-    // put a second copy of every filename in this container -- which is the
-    // ergonomic problem worktrees exist to solve.
-    refusedFor(feature, bind("/workspaces/acme/widgets"), /exactly/);
+  test("is mounted as its PROJECT's root, at that root's own path", () => {
+    // What desolate derives for every worktree (worktrees.ts projectRoot): a
+    // bind of anything below the root follows whatever link its project put
+    // there, which on the shared daemon is any other project's directory.
+    enforcePolicy(feature, bind("/workspaces/acme/widgets"), ...family);
+  });
+
+  test("but the root nowhere else, and never for a project that is not a worktree", () => {
+    refusedFor(feature, bind("/workspaces/acme/widgets", "/workspaces/widgets"), /target must be/);
+    refusedFor(feature, bind("/workspaces/acme/widgets", "/workspaces"), /target must be/);
+    refusedFor(feature, bind("/workspaces/acme", "/workspaces/acme"), /exactly/);
+    refusedFor(sibling, bind("/workspaces/acme/widgets/.worktrees", "/workspaces/acme/widgets/.worktrees"), /exactly/);
   });
 
   test("may not bind a SIBLING worktree", () => {

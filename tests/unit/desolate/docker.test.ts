@@ -503,10 +503,7 @@ describe("a worktree's sandbox", () => {
     image: "alpine/git@sha256:abc",
     label: "desolate.worktree-sandbox=acme/widgets@alpha",
     dir: "/workspaces/acme/widgets/.worktrees/alpha",
-    mounts: [
-      "type=bind,source=/workspaces/acme/widgets/.worktrees/alpha,target=/workspaces/acme/widgets/.worktrees/alpha",
-      "type=bind,source=/workspaces/acme/widgets/.git,target=/workspaces/acme/widgets/.git",
-    ],
+    mounts: ["type=bind,source=/workspaces/acme/widgets,target=/workspaces/acme/widgets"],
     seconds: 600,
   };
   const argvFor = (op: "checkout" | "changes") => {

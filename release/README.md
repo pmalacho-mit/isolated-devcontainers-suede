@@ -1346,9 +1346,13 @@ repo twice -- two projects are a real boundary; two worktrees are not.
   listing what it found, if anything would be lost. `--force` skips it. In the
   editor's own terminal `worktree remove` cannot ask, so it refuses unless
   given `--force` (or the worktree was never started and holds nothing).
-- **`git worktree list` inside a worktree names paths that are not there.** Its
-  siblings and the main tree are not mounted in that container. They are locked,
-  so nothing prunes them; the output is just confusing.
+- **A worktree's container holds its whole project.** It is mounted as the
+  project's root, with the worktree as its folder, so the main tree and its
+  siblings are there too (its editor opens only the worktree). Not the
+  worktree and `.git` as two mounts: the project can turn either into a link
+  to another project's directory, and on the shared daemon a mount follows
+  it. A project cannot replace its own root, so every link inside resolves
+  inside the container, where no other project is.
 
 ### Why every desolate worktree is locked
 
