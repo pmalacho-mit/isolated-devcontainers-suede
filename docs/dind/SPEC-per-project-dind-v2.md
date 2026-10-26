@@ -7,6 +7,50 @@ the verdict before the design.
 
 ---
 
+## v2.1 — what the milestone decided (2026-10-25)
+
+The per-project dind milestone plan builds this spec. Where this section and a
+later one disagree, **this section wins**; the later text is kept because the
+reasoning in it still holds. Each decision below is closed unless a probe
+re-opens it.
+
+- **Topology is v2's**: sibling containers through a bind-mounted socket, one
+  dind per project keyed on `projectNamespace`, no nested daemon. Rootless in
+  the shared dind is dead (`rootless-dockerd.sh`, R1:
+  `apparmor_restrict_unprivileged_userns=1`).
+- **Only `docker-outside-of-docker` provisions a daemon.** `docker-in-docker`
+  is refused with a migration message and `allowPrivileged` is removed, not
+  deprecated. `dind.isRequiredBy` names the one feature.
+- **An ingress, not a portal, and no published port range.** A VM-side
+  `desolate-ingress` service opens `127.0.0.1:<port>` listeners on demand and
+  forwards each to `<dind-ip>:<port>`, where the relay already publishes inside
+  the dind; Lima's dynamic forwarding carries the listener to the Mac. No
+  portal container, no per-dind slots. Measured on the VM:
+  - `vm-loopback-forward.sh`: a loopback listener opened at any time, by any
+    uid, reaches the Mac's `127.0.0.1` in ~20–215 ms; twenty at once in ~420 ms.
+    A VM listener on `0.0.0.0`, **and a root listener below 1024 even on
+    127.0.0.1**, reaches the Mac on every interface (the LAN) -- so "loopback
+    only, ports ≥ 1024" is a security bound the ingress and preflight enforce,
+    not hygiene. A port the Mac already holds is never retried by Lima: a
+    collided forward stays dead until the VM listener is reopened.
+  - `dind-reach-from-vm.sh` under sysbox: the VM reaches the inner relay at the
+    dind's `br-d-*` address (also as an unprivileged uid); another `br-d-*`
+    bridge and both stack bridges time out.
+- **No registry cache.** "The shared image cache" below is superseded. Base
+  images are pinned to a digest at freeze time regardless.
+- **Containment is `volume-subpath`**: a project dind's `/workspaces` holds one
+  project. The socket is root over its dind, so the socket is not the boundary.
+- **Admission is headroom, not a count.** Starting a dind is refused when the
+  VM's `MemAvailable` would fall below `DESOLATE_DIND_MEM_FLOOR` (2 GiB) after
+  the evictions `capacity.admit` allows; `DESOLATE_MAX_DINDS` (16) stays as a
+  hard cap. Idle dinds are stopped, never destroyed. "Bounded concurrency"
+  below is superseded where it suggests a fixed small count.
+- **Out of scope here, and not precluded**: remote sessions and mobile. Every
+  listener stays loopback-bound (`DESOLATE_INGRESS_BIND` is the later hook) and
+  nothing assumes Colima beyond the VM boundary itself.
+
+---
+
 ## What v1 got wrong
 
 v1 kept the devcontainer privileged and running its own `dockerd`, and moved it

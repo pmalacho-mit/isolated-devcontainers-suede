@@ -5,7 +5,7 @@
 # QUESTION: can a devcontainer run ROOTLESS dockerd, unprivileged, inside the
 # single shared dind we already have?
 #
-# This is the alternative SPEC-per-project-dind-v2 asks to price alongside the
+# This is the alternative docs/dind/SPEC-per-project-dind-v2.md asks to price alongside the
 # per-project split -- "the same probe day should test both paths and compare".
 # Run it next to tests/probes/sibling-docker.sh; the two answer the same
 # business question ("can allowPrivileged stop meaning host-adjacent privilege")

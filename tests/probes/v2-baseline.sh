@@ -2,7 +2,7 @@
 # PROBE -- not a test. Answers capability questions about the environment so a
 # design decision can be made; it asserts no invariant and gates nothing.
 #
-# QUESTION: five numbers and facts that `SPEC-per-project-dind-v2.md` currently
+# QUESTION: five numbers and facts that `docs/dind/SPEC-per-project-dind-v2.md` currently
 # guesses at, each of which changes what gets built:
 #
 #   B1  SUBPATH   `volume-subpath` is the whole of v2's containment -- it is

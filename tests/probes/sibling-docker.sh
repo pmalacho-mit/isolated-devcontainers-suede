@@ -7,7 +7,7 @@
 # no nested dockerd -- do everything the agents currently need: build images,
 # `compose up`, and bind-mount from /workspaces?
 #
-# This is the assumption SPEC-per-project-dind-v2 rests on, and the spec says so:
+# This is the assumption docs/dind/SPEC-per-project-dind-v2.md rests on, and the spec says so:
 # "This is a day's work and it decides whether v2 exists."
 #
 # Why it matters: today a project that wants docker turns on the
