@@ -10,6 +10,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  cpusFor,
   isRequest,
   memoryUsed,
   settingsFrom,
@@ -77,6 +78,14 @@ describe("what the supervisor builds", () => {
   test("the BuildKit GC policy is in daemon.json, and the env sizes it", () => {
     const json = JSON.parse(specFor(targetOf("x"), settingsFrom({ DESOLATE_DIND_BUILD_CACHE: "8GB" })).daemonJson);
     assert.deepEqual(json, { builder: { gc: { enabled: true, defaultKeepStorage: "8GB" } } });
+  });
+
+  test("the cpu cap is never more than the machine has, which docker would refuse", () => {
+    assert.equal(cpusFor("4", 8), "4");
+    assert.equal(cpusFor("4", 2), "2");
+    assert.equal(cpusFor("1.5", 2), "1.5");
+    assert.equal(cpusFor("4", 0), "4", "a machine that will not say is not clamped to zero");
+    assert.throws(() => cpusFor("all", 8), /positive number/);
   });
 
   test("docker stats memory parses in both unit systems", () => {

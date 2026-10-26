@@ -127,6 +127,16 @@ export const settingsFrom = (env: Record<string, string | undefined>): Settings 
   };
 };
 
+/** `--cpus` above what the daemon has is not a generous cap but a refused
+ *  container ("range of CPUs is from 0.01 to N"), so the cap is the smaller of
+ *  the setting and the machine. Memory needs no such clamp: a limit above the
+ *  VM's size is merely a cap that never binds. */
+export const cpusFor = (setting: string, machineCpus: number) => {
+  const wanted = Number(setting);
+  if (!Number.isFinite(wanted) || wanted <= 0) throw new Error(`DESOLATE_DIND_CPUS must be a positive number, not '${setting}'`);
+  return String(machineCpus > 0 ? Math.min(wanted, machineCpus) : wanted);
+};
+
 export const specFor = (target: Target, settings: Settings): DindSpec => {
   const volume = (name: string) => `${settings.volumePrefix}${name}`;
   return {
@@ -306,7 +316,8 @@ const operations_ = {
     }
 
     if (state === "") {
-      const spec = specFor(target, settings);
+      const base = specFor(target, settings);
+      const spec = { ...base, limits: { ...base.limits, cpus: cpusFor(base.limits.cpus, docker.cpus()) } };
       if (!docker.dind.networkExists(spec.network) &&
           docker.dind.createNetwork(spec.network, spec.network, spec.label) !== 0)
         refuse(`could not create ${spec.network}: ${lastFailure}`);

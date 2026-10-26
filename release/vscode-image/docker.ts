@@ -513,6 +513,8 @@ export const createDocker = (run: Runner) => {
           `> /tmp/changes 2> /tmp/warnings; ran=$?; cat /tmp/warnings; ` +
           `[ "$ran" = 0 ] && [ ! -s /tmp/warnings ] && echo ${STATUS_RAN} && cat /tmp/changes`,
       ]),
+    /** How many CPUs the daemon's machine has; 0 when it will not say. */
+    cpus: () => Number(query("info", "--format", "{{.NCPU}}")) || 0,
     /** The daemon's own version, for a refusal that may be about it. */
     version: () => query("version", "--format", "{{.Server.Version}}") || "unknown",
     /** A project's own daemon (supervisor.ts is the only caller). */
