@@ -56,7 +56,7 @@ cleanup() {
 trap cleanup EXIT
 
 docker exec desolate-vscode mkdir -p "/workspaces/$A" "/workspaces/$B"
-{ cat "$STATE/.env"; echo "DESOLATE_MAX_DINDS=1"; echo "DESOLATE_DIND_IDLE=1"; } > "$STATE/admission.env"
+{ cat "$STATE/.env"; echo "DESOLATE_MAX_DINDS=1"; echo "DESOLATE_DIND_IDLE=1"; echo "DESOLATE_DIND_GRACE=0"; } > "$STATE/admission.env"
 recreate_supervisor || { fail "the supervisor restarts with a ceiling of 1" "it did not come up"; summary; exit $?; }
 pass "the supervisor restarts with a ceiling of 1"
 
@@ -65,6 +65,19 @@ assert_eq "ensure $A" "$(ok_of "$(ask "{\"op\":\"ensure\",\"project\":\"$A\"}")"
 assert_eq "ensure $B" "$(ok_of "$(ask "{\"op\":\"ensure\",\"project\":\"$B\"}")")" "true"
 assert_eq "$A was stopped to make room, not removed" "$(state "$A")" "exited"
 assert_eq "$B is running" "$(state "$B")" "running"
+
+group "nor does one ensured moments ago"
+# ensure returns before its devcontainer exists; the build in between leaves
+# the dind looking idle. DESOLATE_DIND_GRACE (default 15 min) covers it.
+{ cat "$STATE/.env"; echo "DESOLATE_MAX_DINDS=1"; echo "DESOLATE_DIND_IDLE=1"; echo "DESOLATE_DIND_GRACE=10"; } > "$STATE/admission.env"
+recreate_supervisor || fail "the supervisor restarts with a grace period" "it did not come up"
+assert_eq "ensure $B (warm)" "$(ok_of "$(ask "{\"op\":\"ensure\",\"project\":\"$B\"}")")" "true"
+R=$(ask "{\"op\":\"ensure\",\"project\":\"$A\"}")
+assert_eq "ensure $A is refused while $B is within its grace" "$(ok_of "$R")" "false"
+assert_contains "and the refusal says why" "$(error_of "$R")" "DESOLATE_DIND_GRACE"
+assert_eq "$B is still running" "$(state "$B")" "running"
+{ cat "$STATE/.env"; echo "DESOLATE_MAX_DINDS=1"; echo "DESOLATE_DIND_IDLE=1"; echo "DESOLATE_DIND_GRACE=0"; } > "$STATE/admission.env"
+recreate_supervisor || fail "the supervisor restarts without one" "it did not come up"
 
 group "a busy dind never does"
 # A container carrying the devcontainer CLI's identity label is what "in use"

@@ -27,6 +27,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -267,6 +268,19 @@ const ingress = {
     renameSync(`${file}.tmp`, file);
   },
   withdraw: (name: string) => rmSync(join(config.ingressDinds, name), { force: true }),
+  /** Entries for project dinds that are not running: left by a stack that
+   *  went down under them (cli.sh down removes dinds directly), and naming an
+   *  address docker may hand a different dind next. */
+  prune: () => {
+    let names: string[] = [];
+    try {
+      names = readdirSync(config.ingressDinds);
+    } catch {
+      return;
+    }
+    for (const name of names)
+      if (name.startsWith("desolate-dind-") && docker.dind.state(name) !== "running") ingress.withdraw(name);
+  },
   /** The SHARED dind's address too: every target without a daemon of its own
    *  publishes its relays there, and reaches the Mac the same way (T2.4).
    *  Re-read on every tick, so a recreated dind's new address follows it. */
@@ -300,14 +314,16 @@ const operations_ = {
       const admission = capacity.admit(
         daemons.observe(),
         capacity.budget(process.env, readFileSync(config.meminfo, "utf8")),
+        Date.now(),
       );
       if (!admission.admitted)
         return refuse(admission.reason === "memory"
           ? `the VM has no headroom for another dind: starting ${name} would leave less than
-             the floor free, and only busy dinds could make room (${admission.blockedBy.join(", ") || "none"}).
+             the floor free, and only busy or just-started dinds could make room (${admission.blockedBy.join(", ") || "none"}).
              Stop one of their projects, or raise DESOLATE_DIND_MEM_FLOOR.`
-          : `${name} would exceed DESOLATE_MAX_DINDS, and every running dind is in use
-             (${admission.blockedBy.join(", ")}). Stop one of their projects first.`);
+          : `${name} would exceed DESOLATE_MAX_DINDS, and every running dind is in use or
+             started in the last DESOLATE_DIND_GRACE minutes (${admission.blockedBy.join(", ")}).
+             Stop one of their projects first.`);
       for (const evicted of admission.evict) {
         say(`making room: ${evicted} has been idle longest`);
         daemons.stop(evicted, say);
@@ -439,9 +455,11 @@ const serve = (settings: Settings) => {
     console.log(`supervisor listening on ${config.socket} (${settings.runtime})`);
   });
 
+  ingress.prune();
   ingress.publishShared(settings);
   setInterval(() => {
     serially(async () => {
+      ingress.prune();
       ingress.publishShared(settings);
       reap(settings, console.log);
     }).catch((err) => console.error(`reaper: ${err?.message ?? err}`));

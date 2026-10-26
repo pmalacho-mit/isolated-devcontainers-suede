@@ -749,6 +749,11 @@ case "$CMD" in
              for net in $(docker network ls -q --filter label=desolate.dind); do
                docker network rm "$net" >/dev/null 2>&1 || echo "cli.sh: network $net still in use; left"
              done
+             # Nothing the ingress forwards to is left, and a dind's address is
+             # one docker may hand a DIFFERENT dind next time: a stale entry
+             # would forward to it. So both directories go with the stack.
+             vm sudo sh -c 'rm -f /run/desolate-ingress/ports/* /run/desolate-ingress/dinds/*' 2>/dev/null \
+               || echo "cli.sh: could not clear the ingress's files in the VM; the supervisor prunes dinds/ when it starts"
              if [ "${1:-}" = "-v" ]; then
                # shellcheck disable=SC2046
                docker volume rm $(docker volume ls -q --filter name='^dind-data-') >/dev/null 2>&1 || true

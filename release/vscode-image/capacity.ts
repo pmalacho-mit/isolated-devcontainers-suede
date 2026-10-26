@@ -24,6 +24,11 @@ export const DEFAULTS = {
    *  with 15 images, and `docker stats` counts page cache, so this is an
    *  upper bound rather than an RSS (v2-baseline.sh B2). */
   newcomer: 512 * 1024 ** 2,
+  /** How long a daemon counts as wanted after it was last busy or ensured,
+   *  for admission: `ensure` returns before its devcontainer exists -- the
+   *  build that makes one can take minutes -- and a daemon looks idle until
+   *  then. The reaper's own idle period (DESOLATE_DIND_IDLE) already covers it. */
+  grace: 15 * 60_000,
 } as const;
 
 /** What admission is measured against. All memory figures in bytes. */
@@ -34,6 +39,8 @@ export interface Budget {
   available: number;
   floor: number;
   newcomer: number;
+  /** Milliseconds since it was last busy within which a daemon is not evicted. */
+  grace: number;
 }
 
 /** One project daemon, as the supervisor currently sees it. */
@@ -94,14 +101,17 @@ export type Admission =
  *
  * Idle daemons give way longest-idle first, each freeing what it holds, until
  * both limits hold: fewer than `max` running, and `floor` still free once the
- * newcomer has taken its share. A daemon whose devcontainer is UP is never
- * evicted -- stopping it kills whatever is running inside to make room for
- * something else, which is worse than the refusal -- so a budget that only
- * busy daemons could free is a refusal, and `blockedBy` names them.
+ * newcomer has taken its share. A daemon whose devcontainer is UP -- or was,
+ * or that was ensured, within `grace` -- is never evicted: stopping it kills
+ * whatever is running or building inside to make room for something else,
+ * which is worse than the refusal. So a budget that only those daemons could
+ * free is a refusal, and `blockedBy` names them.
  */
-export const admit = (daemons: readonly ProjectDaemon[], budget: Budget): Admission => {
+export const admit = (daemons: readonly ProjectDaemon[], budget: Budget, now: number): Admission => {
   const running = daemons.filter((daemon) => daemon.running);
-  const candidates = running.filter(stoppable).sort(leastRecentlyUsed);
+  const evictable = (daemon: ProjectDaemon) =>
+    stoppable(daemon) && idleLongEnough(now - budget.grace)(daemon);
+  const candidates = running.filter(evictable).sort(leastRecentlyUsed);
   const evict: string[] = [];
   let count = running.length;
   let available = budget.available;
@@ -120,7 +130,7 @@ export const admit = (daemons: readonly ProjectDaemon[], budget: Budget): Admiss
   return {
     admitted: false,
     reason: underCeiling() ? "memory" : "ceiling",
-    blockedBy: running.filter((daemon) => !stoppable(daemon)).map(({ name }) => name),
+    blockedBy: running.filter((daemon) => !evictable(daemon)).map(({ name }) => name),
   };
 };
 
@@ -138,6 +148,13 @@ const positiveInteger = (raw: string | undefined, fallback: number, name: string
   return Number(raw);
 };
 
+/** Minutes, zero allowed, as milliseconds. */
+const minutes = (raw: string | undefined, fallback: number, name: string) => {
+  if (raw === undefined || raw === "") return fallback;
+  if (!/^\d+$/.test(raw)) throw new Error(`${name} must be whole minutes, not '${raw}'`);
+  return Number(raw) * 60_000;
+};
+
 /**
  * The budget from the supervisor's environment and the VM's /proc/meminfo.
  *
@@ -153,5 +170,6 @@ export const budget = (env: Record<string, string | undefined>, meminfo: string)
     available,
     floor: positiveInteger(env.DESOLATE_DIND_MEM_FLOOR, DEFAULTS.memFloor, "DESOLATE_DIND_MEM_FLOOR"),
     newcomer: positiveInteger(env.DESOLATE_DIND_MEM_EXPECTED, DEFAULTS.newcomer, "DESOLATE_DIND_MEM_EXPECTED"),
+    grace: minutes(env.DESOLATE_DIND_GRACE, DEFAULTS.grace, "DESOLATE_DIND_GRACE"),
   };
 };

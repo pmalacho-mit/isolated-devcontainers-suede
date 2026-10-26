@@ -221,6 +221,7 @@ services:
     entrypoint: ["tsx", "/usr/local/lib/desolate/supervisor.ts"]
     environment:
       DESOLATE_DIND_IDLE: ${DESOLATE_DIND_IDLE:-30}
+      DESOLATE_DIND_GRACE: ${DESOLATE_DIND_GRACE:-15}
       DESOLATE_MAX_DINDS: ${DESOLATE_MAX_DINDS:-16}
       DESOLATE_DIND_MEM_FLOOR: ${DESOLATE_DIND_MEM_FLOOR:-2147483648}
       DESOLATE_DIND_MEMORY: ${DESOLATE_DIND_MEMORY:-6g}
