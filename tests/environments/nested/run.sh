@@ -37,7 +37,9 @@ ROOT=$(cd "$HERE/../../.." && pwd)
 RELEASE="$ROOT/release"
 STATE=${DESOLATE_NESTED_STATE:-/tmp/desolate-nested}
 CONFDIR=/var/lib/desolate-proxy        # compose mounts $CONFDIR/public as /desolate-ca
+INGRESS_ROOT=/run/desolate-ingress     # desolate-ingress.tmpfiles
 PROXY_USER=desolate-proxy
+INGRESS_USER=desolate-ingress
 BUILD_BASE=debian:bookworm-slim         # the one FROM in release/vscode-image/Dockerfile
 
 exec > >(sed -u 's/^/APPROXIMATION (runc, no Lima) | /') 2>&1
@@ -54,11 +56,22 @@ compose() {
 }
 
 as_proxy() {   # run a command as the proxy's own uid, detached, logging to $1
-  local log=$1; shift
-  sudo setpriv --reuid="$PROXY_USER" --regid="$PROXY_USER" --init-groups \
+  as_user "$PROXY_USER" "$@"
+}
+
+as_user() {   # <user> <log> <command...>
+  local user=$1 log=$2; shift 2
+  sudo setpriv --reuid="$user" --regid="$user" --init-groups \
     env HOME="$CONFDIR" DESOLATE_SETTINGS="$STATE/settings.json" PYTHONUNBUFFERED=1 \
+    DESOLATE_INGRESS_ROOT="$INGRESS_ROOT" \
     setsid "$@" >"$log" 2>&1 </dev/null &
   echo $!
+}
+
+ensure_user() {   # created here only if missing, and then removed on `down`
+  id "$1" >/dev/null 2>&1 && return
+  sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$1" || die "could not create the $1 user"
+  echo "$1" >> "$STATE/created-users"
 }
 
 alive() { [ -f "$1" ] && sudo kill -0 "$(cat "$1")" 2>/dev/null; }
@@ -87,11 +100,7 @@ start_proxy() {
   mitmdump=$(find_mitmdump)
   [ -n "$mitmdump" ] || die "no mitmdump: set DESOLATE_MITMDUMP, or build the venv tests/README.md describes"
 
-  if ! id "$PROXY_USER" >/dev/null 2>&1; then
-    sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$PROXY_USER" \
-      || die "could not create the $PROXY_USER user"
-    touch "$STATE/created-user"
-  fi
+  ensure_user "$PROXY_USER"
   sudo install -d -m 0750 -o "$PROXY_USER" -g "$PROXY_USER" "$CONFDIR"
   sudo install -d -m 0755 -o "$PROXY_USER" -g "$PROXY_USER" "$CONFDIR/public"
   [ -f "$STATE/settings.json" ] || \
@@ -150,7 +159,26 @@ start_resolver() {
   ok "container resolver (dnsmasq) on :5353"
 }
 
+start_ingress() {
+  local python
+  python="$(dirname "$(find_mitmdump)")/python3"
+  ensure_user "$INGRESS_USER"
+  # desolate-ingress.tmpfiles, applied by hand: dinds/ is the supervisor's
+  # (root), ports/ the orchestrator's (uid 1000).
+  sudo install -d -m 0755 -o root -g root "$INGRESS_ROOT" "$INGRESS_ROOT/dinds"
+  sudo install -d -m 0755 -o 1000 -g 1000 "$INGRESS_ROOT/ports"
+  sudo install -m 0644 "$RELEASE/proxy/vm/ingress.py" "$STATE/ingress.py"
+  if ! alive "$STATE/ingress.pid"; then
+    as_user "$INGRESS_USER" "$STATE/ingress.log" "$python" "$STATE/ingress.py" > "$STATE/ingress.pid"
+  fi
+  for _ in $(seq 1 20); do grep -q "desolate-ingress watching" "$STATE/ingress.log" 2>/dev/null && break; sleep 0.25; done
+  alive "$STATE/ingress.pid" && grep -q "desolate-ingress watching" "$STATE/ingress.log" \
+    || { tail -5 "$STATE/ingress.log"; die "the ingress did not start"; }
+  ok "desolate-ingress watching $INGRESS_ROOT as $INGRESS_USER"
+}
+
 load_ruleset() {
+  ensure_user "$INGRESS_USER"   # the ruleset names it; nft refuses an unknown uid
   # install.sh's substitution, with the names compose pins. iifname is a
   # string match, so the ruleset can load before the bridges exist.
   sed -e 's|define DESOLATE_IF = ".*"|define DESOLATE_IF = "br-desolate"|' \
@@ -177,7 +205,8 @@ up() {
   echo "== VM-side services, as processes =="
   start_proxy
   start_resolver
-  load_ruleset
+  load_ruleset          # names both uids, so after start_proxy made them...
+  start_ingress         # ...and before the ingress dials anything
   shadow_build_base
 
   echo "== the stack, on this container's daemon =="
@@ -191,7 +220,7 @@ up() {
 verify() {
   local failed=0 code line
   echo "== verify =="
-  for pid in proxy ca dnsmasq; do
+  for pid in proxy ca dnsmasq ingress; do
     if alive "$STATE/$pid.pid"; then ok "$pid is running"; else bad "$pid is NOT running"; failed=1; fi
   done
   if sudo nft list table inet desolate >/dev/null 2>&1; then ok "nftables table present"
@@ -209,7 +238,62 @@ verify() {
   line=$(sudo grep -a "AUDIT .* path=/$marker " "$STATE/proxy.log" | tail -n 1)
   if [ -n "$line" ]; then ok "egress from the stack went through addon.py (HTTP $code): ${line#*AUDIT }"
   else bad "a request from the orchestrator (HTTP ${code:-none}) never reached addon.py"; failed=1; fi
+  verify_ingress || failed=1
   return "$failed"
+}
+
+# The forward the Mac will use, minus Lima: a listener on the shared dind's
+# INNER daemon (no outer publish), its address under dinds/, a ports/ file,
+# and a fetch from this container's 127.0.0.1. What preflight's self-test is.
+inner_docker() { docker exec -e DOCKER_HOST=unix:///run/inner/docker.sock desolate-dind docker "$@"; }
+
+verify_ingress() {
+  local dind_ip inner=desolate-nested-ingress-selftest body host_port=18996 port=18997
+  dind_ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "desolate_dindnet").IPAddress}}' desolate-dind 2>/dev/null)
+  [ -n "$dind_ip" ] || { bad "the shared dind has no address on desolate_dindnet"; return 1; }
+  inner_docker rm -f "$inner" >/dev/null 2>&1
+  inner_docker run -d --rm --name "$inner" -p "$port:$port" alpine/socat \
+    "TCP-LISTEN:$port,fork,reuseaddr" "SYSTEM:echo desolate-ingress-selftest" >/dev/null 2>&1 \
+    || { bad "could not start the self-test listener in the shared dind"; return 1; }
+  printf '%s\n' "$dind_ip" | sudo tee "$INGRESS_ROOT/dinds/desolate-dind" >/dev/null
+  printf 'desolate-dind:%s\n' "$port" > "$INGRESS_ROOT/ports/$host_port"
+  for _ in $(seq 1 20); do
+    # --http0.9: the target answers with a bare line, not HTTP.
+    body=$(curl -s --http0.9 -m 1 "http://127.0.0.1:$host_port/" 2>/dev/null) && [ -n "$body" ] && break
+    sleep 0.25
+  done
+  rm -f "$INGRESS_ROOT/ports/$host_port"
+  inner_docker rm -f "$inner" >/dev/null 2>&1
+  case "$body" in
+    *desolate-ingress-selftest*) ok "the ingress forwarded 127.0.0.1:$host_port -> $dind_ip:$port (an inner publish, no outer one)" ;;
+    *) bad "nothing came back through the ingress (got '${body:-nothing}'):"; tail -3 "$STATE/ingress.log"; return 1 ;;
+  esac
+
+  # The second wall, which does not trust ingress.py: as the ingress's own
+  # uid, a NEW connection anywhere but a dind bridge is dropped by nftables.
+  # The VM side of the editor bridge stands in for "the VM's own services".
+  local editor_gw drops_before drops_after
+  editor_gw=$(docker network inspect -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' desolate_devnet 2>/dev/null)
+  ingress_drops() {
+    sudo nft list chain inet desolate output 2>/dev/null \
+      | awk -v uid="$(id -u "$INGRESS_USER")" '$0 ~ "skuid " uid " counter packets" {for (i=1;i<=NF;i++) if ($i=="packets") print $(i+1)}'
+  }
+  drops_before=$(ingress_drops)
+  for destination in "1.1.1.1:80" "${editor_gw:-172.18.0.1}:18080"; do
+    if sudo setpriv --reuid="$INGRESS_USER" --regid="$INGRESS_USER" --init-groups \
+         curl -s -o /dev/null -m 3 "http://$destination/" 2>/dev/null; then
+      bad "as $INGRESS_USER, $destination was REACHABLE -- the output rule is not holding"; return 1
+    fi
+    ok "as $INGRESS_USER, $destination is unreachable"
+  done
+  # Unreachable is not enough: from here 1.1.1.1:80 WOULD answer, through the
+  # outer proxy. The rule's own counter says it was this rule that refused.
+  drops_after=$(ingress_drops)
+  if [ -n "$drops_after" ] && [ "${drops_after:-0}" -gt "${drops_before:-0}" ]; then
+    ok "and the ingress uid's drop counter rose ${drops_before:-0} -> $drops_after: it was the rule"
+  else
+    bad "the ingress uid's drop counter did not move (${drops_before:-?} -> ${drops_after:-?})"; return 1
+  fi
 }
 
 status() {
@@ -226,7 +310,7 @@ down() {
     compose down "${volumes[@]}" >"$STATE/compose-down.log" 2>&1 && ok "compose down ${volumes[*]}" \
       || { tail -5 "$STATE/compose-down.log"; bad "compose down failed"; }
   fi
-  for pid in proxy ca dnsmasq; do
+  for pid in proxy ca dnsmasq ingress; do
     alive "$STATE/$pid.pid" && sudo kill "$(cat "$STATE/$pid.pid")" 2>/dev/null && ok "stopped $pid"
     rm -f "$STATE/$pid.pid"
   done
@@ -235,9 +319,12 @@ down() {
     /desolate-ca/trust-proxy-in-builds.sh --image "$BUILD_BASE" --unshadow >/dev/null 2>&1 \
       && ok "$BUILD_BASE unshadowed" && rm -f "$STATE/shadowed"
   fi
-  if [ -f "$STATE/created-user" ]; then
-    sudo userdel "$PROXY_USER" 2>/dev/null && ok "removed the $PROXY_USER user this harness created"
-    rm -f "$STATE/created-user"
+  sudo rm -rf "$INGRESS_ROOT"
+  if [ -f "$STATE/created-users" ]; then
+    while read -r user; do
+      sudo userdel "$user" 2>/dev/null && ok "removed the $user user this harness created"
+    done < "$STATE/created-users"
+    rm -f "$STATE/created-users"
   fi
   # The CA and the token outlive a plain `down`, as the VM's do across a
   # restart; -v is the clean slate.
