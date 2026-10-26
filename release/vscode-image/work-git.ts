@@ -105,7 +105,9 @@ export const append = (
     if (old && mode === "create") throw new GitError(`${ref} exists already`);
     const commit = git(repo, ["commit-tree", tree, ...(old ? ["-p", old] : [])], { input: `${subject}\n`, env });
     try {
-      git(repo, ["update-ref", "-m", `desolate ${mode}`, ref, commit, old ?? zeroOid(repo)]);
+      // --create-reflog: refs outside refs/heads get no reflog by default, and
+      // the reflog is how `work verify` sees a ref that was rewritten.
+      git(repo, ["update-ref", "--create-reflog", "-m", `desolate ${mode}`, ref, commit, old ?? zeroOid(repo)]);
       return commit;
     } catch {
       /* another writer won the swap: look again */

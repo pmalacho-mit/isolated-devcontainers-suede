@@ -285,7 +285,8 @@ RUN printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/d
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/desolate.ts "$@"\n' > /usr/local/bin/desolate-run \
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/newrepo.ts "$@"\n' > /usr/local/bin/newrepo \
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/worktrees.ts "$@"\n' > /usr/local/bin/worktree \
-  && chmod +x /usr/local/bin/desolate /usr/local/bin/desolate-run /usr/local/bin/newrepo /usr/local/bin/worktree
+  && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/work.ts "$@"\n' > /usr/local/bin/work \
+  && chmod +x /usr/local/bin/desolate /usr/local/bin/desolate-run /usr/local/bin/newrepo /usr/local/bin/worktree /usr/local/bin/work
 
 # Tab completion for the four wrappers above.
 #

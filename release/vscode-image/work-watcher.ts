@@ -185,7 +185,7 @@ export const PUSH_ENV = {
  * editor's own git config, which no devcontainer can reach, still applies:
  * it is where the deploy key's url rewrites live (newrepo.ts).
  */
-const push = (target: Target, policy: Policy, say: Say): { ok: true; branch: string } | { ok: false; reason: string } => {
+export const push = (target: Target, policy: Policy, say: Say): { ok: true; branch: string } | { ok: false; reason: string } => {
   const branch = branchOf(target);
   if (!branch) return { ok: false, reason: `${target.name} has no branch checked out` };
   if (branch === mainBranchOf(target.projectDir)) return { ok: false, reason: `refusing to push '${branch}': it is the project's own branch` };
@@ -231,12 +231,25 @@ const hasHooks = (projectDir: string) => {
 };
 
 /** Desolate's answer, on its own outbox: the requester's, or everyone's. */
-const answer = (projectDir: string, to: string, body: string, fields: Record<string, unknown>) => {
+export const answer = (projectDir: string, to: string, body: string, fields: Record<string, unknown>) => {
   const message: Message = {
     v: 1, from: "desolate", to: [isTarget(to) ? to : "*"], type: "state", body,
     item: null, commit: null, reply_to: null, ...fields,
   };
   workGit.append(projectDir, refs.desolate, "desolate", message, subjectOf(message));
+};
+
+/** A worktree closed the way `cli.sh worktree remove` closes one: stopped,
+ *  purged by the broker (which reclaims root-owned files and refuses
+ *  uncommitted work), then removed here. Its outcome, and why. */
+export const closeWorktree = (project: string, worktree: string, say: Say): { state: "closed" | "refused" | "failed"; body: string } => {
+  command([config.desolate, "--stop", "--worktree", worktree, project], say);
+  const purged = command([config.desolate, "--purge", "--worktree", worktree, project], say);
+  if (purged.status === 3) return { state: "refused", body: `${worktree} holds uncommitted work; it stays` };
+  if (purged.status !== 0) return { state: "failed", body: `the purge failed (exit ${purged.status})` };
+  const removed = command([config.worktree, "remove", project, worktree, "--checked-clean"], say);
+  if (removed.status !== 0) return { state: "failed", body: "purged, but the worktree could not be removed" };
+  return { state: "closed", body: `closed ${worktree}` };
 };
 
 // ------------------------------------------------------------------ the loop --
@@ -299,13 +312,8 @@ export const tickProject = (project: string, say: Say) => {
       if (started.status !== 0) { finish("failed", request.from, `the worktree was created and did not start (exit ${started.status})`, fields); continue; }
       finish("opened", request.from, `opened ${request.worktree} on ${request.branch}`, fields);
     } else if (decision.kind === "close") {
-      command([config.desolate, "--stop", "--worktree", request.worktree, project], say);
-      const purged = command([config.desolate, "--purge", "--worktree", request.worktree, project], say);
-      if (purged.status === 3) { finish("refused", request.from, `${request.worktree} holds uncommitted work; it stays`, fields); continue; }
-      if (purged.status !== 0) { finish("failed", request.from, `the purge failed (exit ${purged.status})`, fields); continue; }
-      const removed = command([config.worktree, "remove", project, request.worktree, "--checked-clean"], say);
-      if (removed.status !== 0) { finish("failed", request.from, `purged, but the worktree could not be removed`, fields); continue; }
-      finish("closed", request.from, `closed ${request.worktree}`, fields);
+      const closed = closeWorktree(project, request.worktree, say);
+      finish(closed.state, request.from, closed.body, fields);
     } else {
       const pushed = push(target, policy, say);
       if (pushed.ok) finish("pushed", request.from, `pushed ${pushed.branch}`, { ...fields, branch: pushed.branch });

@@ -1410,6 +1410,41 @@ decides who owns a volume, so it can only ever refuse itself.
 A project with no worktree is named exactly as it always was. Nothing about an
 existing stack moves.
 
+## A factory: agents across a project's worktrees
+
+One project can run an agent in its main tree and one per worktree, talking
+over the project's `.git` and nothing else. Each writes only its own ref with
+`/desolate-ca/desolate-work` (AGENTS.md, "Working in a factory"); a watcher in
+the editor opens and closes worktrees on request and answers on its own ref.
+None of it runs until you enable it:
+
+```bash
+./cli.sh work init acme/widgets --max 4 --prefix issue/   # pushes held by default
+./cli.sh work requests acme/widgets      # what was asked for, and what became of it
+./cli.sh work log acme/widgets --type ask
+./cli.sh work approve acme/widgets <id>  # act on a request the policy refused
+./cli.sh work push acme/widgets issue-42 # push its branch (never main, never forced)
+./cli.sh work close acme/widgets issue-42
+./cli.sh work verify acme/widgets        # every message an append by its writer, or exit 1
+```
+
+**The policy is not in the repository.** It lives in
+`/workspaces/.desolate/factory/`, with your approvals and the watcher's record,
+where no devcontainer reaches: every agent in the project can commit to its
+branch, so a policy read from there would be whatever they last wrote -- and
+`on_done: push` is the editor's deploy key pushing their branches, which is CI
+with the repository's secrets. Pushes are held until you push, or until you set
+`--on-done push`.
+
+**What is and is not a boundary.** A project's agents share one trust domain:
+any of them can write any ref in `.git`, so who a request claims to be from is
+tamper-evidence (`work verify`), not authority. What bounds a hostile agent is
+what the actions allow -- opens are capped, a close refuses a worktree holding
+uncommitted work, a push goes only to the project's plain ssh/https origin,
+from a throwaway repository that reads none of the project's config. Worktree
+checkouts, and the hooks they run, happen in the worktree's sandbox, never in
+the editor; a repository with hooks is refused unless the policy allows them.
+
 ## Secrets: placeholders in, real values never
 
 Containers never hold credentials. They hold a **placeholder**; the real value

@@ -112,7 +112,9 @@ append() {
       new=$(printf '%s\n' "$subject" | g commit-tree "$tree")
       old=$(zero_oid)
     fi
-    if g update-ref -m "desolate-work $mode" "$ref" "$new" "$old" 2>/dev/null; then
+    # --create-reflog: refs outside refs/heads get no reflog by default, and
+    # the reflog is how `work verify` sees a ref that was rewritten.
+    if g update-ref --create-reflog -m "desolate-work $mode" "$ref" "$new" "$old" 2>/dev/null; then
       printf '%s\n' "$new"
       return 0
     fi

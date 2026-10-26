@@ -13,6 +13,7 @@
 #   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
 #   ./isolated-devcontainers-suede/cli.sh export owner/repo [path]  # copy files out (tar when piped)
 #   ./isolated-devcontainers-suede/cli.sh reclaim owner/repo [path] # give root-owned files back to the editor
+#   ./isolated-devcontainers-suede/cli.sh work init|log|requests|verify|approve|push|close owner/repo   # a factory
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
@@ -1335,6 +1336,12 @@ case "$CMD" in
                exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim --path "$2" "$PROJ"
              fi
              exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim "$PROJ" ;;
+
+  work)      ensure_running
+             # A project's factory (work.ts): enabled, approved, pushed and
+             # verified by a human, in the editor -- where git already runs,
+             # hardened -- never on this Mac against the volume.
+             exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" work "$@" ;;
 
   export)    ensure_running
              # Getting files out (#13). /workspaces is one volume the editor
