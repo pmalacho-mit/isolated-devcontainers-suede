@@ -37,9 +37,21 @@ assert_eq "vscode reaches the broker socket" \
 assert_eq "orchestrator holds the daemon socket" \
   "$(q '[.services.orchestrator.volumes[]? | select(.source == "inner-run")] | length')" "1"
 
-group "the host docker socket is mounted nowhere"
-assert_eq "no /var/run/docker.sock bind anywhere" \
-  "$(q '[.services[].volumes[]? | select(.source == "/var/run/docker.sock")] | length')" "0"
+group "the VM's docker socket is mounted by the supervisor and nothing else"
+# It used to be mounted NOWHERE. The supervisor (supervisor.ts) is the one
+# named exception, and this is what notices a SECOND service gaining it.
+assert_eq "only the supervisor binds /var/run/docker.sock" \
+  "$(q '[.services | to_entries[] | select(.value.volumes[]?.source == "/var/run/docker.sock") | .key] | join(",")')" "supervisor"
+assert_eq "the supervisor has no network at all" \
+  "$(q '.services.supervisor.network_mode // "unset"')" "none"
+assert_eq "the supervisor drops every capability" \
+  "$(q '.services.supervisor.cap_drop | join(",")')" "ALL"
+assert_eq "only the orchestrator (and the supervisor) reach its request socket" \
+  "$(q '[.services | to_entries[] | select(.value.volumes[]?.source == "supervisor-run") | .key] | sort | join(",")')" "orchestrator,supervisor"
+assert_eq "the editor reaches no project dind's socket" \
+  "$(q '[.services.vscode.volumes[]? | select(.source == "dind-sockets")] | length')" "0"
+assert_eq "the supervisor mounts no workspace" \
+  "$(q '[.services.supervisor.volumes[]? | select(.source == "workspaces")] | length')" "0"
 
 group "published ports stay on loopback"
 for svc in dind vscode; do

@@ -199,11 +199,41 @@ services:
       # way to poison the binary every project executes.
       - server-dist:/server-dist:ro
       - broker-run:/run/broker
+      - supervisor-run:/run/supervisor   # the supervisor's request socket -- this service only
+      - dind-sockets:/run/dind-sockets   # every project dind's socket, one directory each
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
     pids_limit: 2048
     networks: [devnet]
+    restart: unless-stopped
+
+  # The ONE holder of the VM's docker socket (supervisor.ts). It creates and
+  # stops project dinds and does nothing else: a fixed vocabulary over a unix
+  # socket in supervisor-run, which only the orchestrator mounts. No network --
+  # it speaks unix sockets only -- and no workspace: a project it is asked for
+  # is a volume-subpath docker resolves, not a directory it reads.
+  supervisor:
+    build: ./vscode-image           # same image; a different entrypoint again
+    container_name: desolate-supervisor
+    user: "0:0"                     # the VM socket is root's
+    entrypoint: ["tsx", "/usr/local/lib/desolate/supervisor.ts"]
+    environment:
+      DESOLATE_DIND_IDLE: ${DESOLATE_DIND_IDLE:-30}
+      DESOLATE_MAX_DINDS: ${DESOLATE_MAX_DINDS:-16}
+      DESOLATE_DIND_MEM_FLOOR: ${DESOLATE_DIND_MEM_FLOOR:-2147483648}
+      DESOLATE_DIND_MEMORY: ${DESOLATE_DIND_MEMORY:-6g}
+      DESOLATE_DIND_CPUS: ${DESOLATE_DIND_CPUS:-4}
+      DESOLATE_DIND_BUILD_CACHE: ${DESOLATE_DIND_BUILD_CACHE:-20GB}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # the VM daemon: THIS SERVICE ONLY
+      - supervisor-run:/run/supervisor
+      - /run/desolate-ingress/dinds:/run/ingress/dinds   # dind addresses, for desolate-ingress
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 512
+    network_mode: none
     restart: unless-stopped
 
   # The ONLY container that holds raw private keys.
@@ -326,6 +356,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  supervisor-run:  # the supervisor's request socket -- supervisor + orchestrator
+  dind-sockets:    # project dind sockets, one subpath each -- dinds + orchestrator
   keyring-keys:   # private keys -- keyring only
   keyring-run:    # agent socket + public keys -- keyring + editor
   inner-run:

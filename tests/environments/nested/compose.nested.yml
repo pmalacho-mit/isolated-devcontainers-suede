@@ -10,3 +10,11 @@ services:
   dind:
     runtime: runc
     privileged: true
+
+  # The same swap for the project dinds the supervisor creates. It takes BOTH
+  # variables -- supervisor.ts refuses runc without the second -- and this file
+  # is the only place either is set.
+  supervisor:
+    environment:
+      DESOLATE_DIND_RUNTIME: runc
+      DESOLATE_NESTED_HARNESS: "1"

@@ -225,7 +225,7 @@ verify() {
   done
   if sudo nft list table inet desolate >/dev/null 2>&1; then ok "nftables table present"
   else bad "nftables table missing"; failed=1; fi
-  for c in desolate-dind desolate-orchestrator desolate-vscode desolate-keyring; do
+  for c in desolate-dind desolate-orchestrator desolate-vscode desolate-keyring desolate-supervisor; do
     state=$(docker inspect -f '{{.State.Status}}{{if .State.Health}}/{{.State.Health.Status}}{{end}}' "$c" 2>/dev/null)
     case "$state" in running|running/healthy) ok "$c $state" ;; *) bad "$c ${state:-absent}"; failed=1 ;; esac
   done
@@ -239,6 +239,15 @@ verify() {
   if [ -n "$line" ]; then ok "egress from the stack went through addon.py (HTTP $code): ${line#*AUDIT }"
   else bad "a request from the orchestrator (HTTP ${code:-none}) never reached addon.py"; failed=1; fi
   verify_ingress || failed=1
+  # The supervisor answers, from the one container allowed to ask it.
+  if docker exec desolate-orchestrator node -e '
+       const s = require("net").createConnection("/run/supervisor/supervisor.sock");
+       s.on("connect", () => s.write(JSON.stringify({ op: "status" }) + "\n"));
+       let out = ""; s.on("data", (d) => (out += d));
+       s.on("end", () => process.exit(JSON.parse(out.trim().split("\n").pop()).ok ? 0 : 1));
+       s.on("error", () => process.exit(1));' 2>/dev/null; then
+    ok "the supervisor answers status from the orchestrator"
+  else bad "the supervisor did not answer status"; failed=1; fi
   return "$failed"
 }
 

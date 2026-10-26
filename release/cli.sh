@@ -703,7 +703,23 @@ case "$CMD" in
                echo "This DELETES all workspaces, settings and inner images."
                read -r -p "Type 'yes' to confirm: " a; [ "$a" = yes ] || exit 1
              fi
-             compose down "$@" ;;
+             compose down "$@"
+             # Project dinds are the supervisor's, not compose's, so compose
+             # cannot see them. Stopped and removed here with their bridges;
+             # their image stores (dind-data-*) stay unless -v, like compose's.
+             DINDS=$(docker ps -aq --filter label=desolate.dind)
+             if [ -n "$DINDS" ]; then
+               echo "cli.sh: removing $(echo "$DINDS" | wc -w | tr -d ' ') project dind(s)"
+               # shellcheck disable=SC2086
+               docker rm -f $DINDS >/dev/null
+             fi
+             for net in $(docker network ls -q --filter label=desolate.dind); do
+               docker network rm "$net" >/dev/null 2>&1 || echo "cli.sh: network $net still in use; left"
+             done
+             if [ "${1:-}" = "-v" ]; then
+               # shellcheck disable=SC2046
+               docker volume rm $(docker volume ls -q --filter name='^dind-data-') >/dev/null 2>&1 || true
+             fi ;;
 
   build)     compose build "$@" ;;
 

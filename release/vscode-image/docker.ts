@@ -513,6 +513,8 @@ export const createDocker = (run: Runner) => {
           `> /tmp/changes 2> /tmp/warnings; ran=$?; cat /tmp/warnings; ` +
           `[ "$ran" = 0 ] && [ ! -s /tmp/warnings ] && echo ${STATUS_RAN} && cat /tmp/changes`,
       ]),
+    /** The daemon's own version, for a refusal that may be about it. */
+    version: () => query("version", "--format", "{{.Server.Version}}") || "unknown",
     /** A project's own daemon (supervisor.ts is the only caller). */
     dind: {
       networkExists: (network: string) =>
@@ -552,6 +554,33 @@ export const createDocker = (run: Runner) => {
       /** Names of every project dind, running or not. */
       all: (labelKey: string) =>
         nonEmptyLines(query("ps", "-a", "--filter", `label=${labelKey}`, "--format", "{{.Names}}")),
+      /** Is a devcontainer up inside it -- somebody's editor, so not idle?
+       *  Asked of the dind's own daemon, through the alias its entrypoint
+       *  links; "" (no answer) reads as in use, which never evicts. */
+      hostsDevcontainer: (name: string) =>
+        // Bounded inside the dind: a wedged daemon must not wedge the supervisor.
+        query(
+          "exec",
+          name,
+          "timeout",
+          "5",
+          "docker",
+          "ps",
+          "-q",
+          "--filter",
+          `label=${IDENTITY_LABELS.workspace}`,
+        ) !== "" ||
+        query("exec", name, "timeout", "5", "docker", "info", "--format", "ok") !== "ok",
+      /** `docker stats` MemUsage per name, e.g. "490.2MiB / 15.6GiB". */
+      memoryUsage: (names: string[]) =>
+        names.length
+          ? nonEmptyLines(
+              query("stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}", ...names),
+            )
+          : [],
+      /** Its address on one network, "" when it has none there. */
+      address: (name: string, network: string) =>
+        query("inspect", "-f", `{{with index .NetworkSettings.Networks "${network}"}}{{.IPAddress}}{{end}}`, name),
     },
     /** Run a throwaway helper container against one volume. */
     inVolume: (
