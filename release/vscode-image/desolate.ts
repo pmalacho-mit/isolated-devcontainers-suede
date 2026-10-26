@@ -256,6 +256,32 @@ function migrateOffTheSharedDaemon(target: Target, daemon: Daemon, rebuild: bool
   desolog(`migrated: removed the old container${nested.length ? ` and its nested daemon's volumes (${nested.join(", ")})` : ""}`);
 }
 
+/**
+ * A target that no longer declares docker-outside-of-docker still has its
+ * container on its own dind, over the same directory -- left running there,
+ * --stop would no longer reach it (the saved daemon is about to say shared)
+ * and the reaper would never stop that dind (it hosts a devcontainer). So it
+ * is removed, on --rebuild like the other migration. A dind that is not up
+ * runs nothing of it; what it keeps goes with that dind's purge.
+ */
+function migrateOffItsOwnDaemon(target: Target, daemon: Daemon, rebuild: boolean): void {
+  if (daemon !== "shared" || daemons.saved(target) !== "project") return;
+  if (!driveSaved(target)) return void daemons.use(target, "shared");
+  const old = devcontainerId(target.dir, true);
+  if (old) {
+    if (!rebuild)
+      die(`${target.name} needs migrating: it no longer uses docker-outside-of-docker, and its
+        existing container is on its own daemon. Recreate it on the shared one -- this discards
+        anything written inside the old container outside /workspaces:
+          ${hint.desolate(`--rebuild ${invocation(target)}`)}`);
+    docker.container.remove(ownRelayNames(target));
+    ingressFiles.withdraw(ports.load(target), target);
+    docker.container.remove([old]);
+    desolog(`migrated: removed the old container from ${dind.name(target)}`);
+  }
+  daemons.use(target, "shared");
+}
+
 /** Drive the daemon this target last ran on. False when that is a project
  *  dind that is not up (the reaper stopped it), in which case nothing of the
  *  target is running and there is nothing to drive. */
@@ -1154,11 +1180,11 @@ function probeEditor(target: Target, port: number): boolean {
 
 /** `--ports <p> --move <label> <port>`. A running target's relays move with
  *  it; a stopped one keeps the new port for its next start. */
-function movePorts(target: Target, move: { label: string; port: number }): void {
+function movePorts(target: Target, move: { label: string; port: number }, reachable: boolean): void {
   const world = ports.world(target);
   const map = dieOnError(() => movePort(world, move.label, move.port));
   ports.save(target, map);
-  if (devcontainerId(target.dir)) {
+  if (reachable && devcontainerId(target.dir)) {
     const dindName = ingressFiles.dindOf(target, daemons.saved(target));
     if (!ingressFiles.claim(move.port, target, dindName))
       die(`${move.port} was taken by ${ingressFiles.ownerOf(move.port) || "another target"} just now; pick another`);
@@ -1255,11 +1281,13 @@ function showRunning(): void {
     );
 
   const width = Math.max(...running.map(({ name }) => name.length));
-  for (const target of running)
+  for (const target of running) {
+    driveSaved(target); // its folder is asked of the daemon it runs on
     console.log(
       `  ${target.name.padEnd(width)}  ` +
         `${target.worktree ? "worktree" : "project "}  ${editorUrl(target)}`,
     );
+  }
 
   console.log(`\n  Ports: ${hint.desolate("--ports <project>")}`);
   console.log(`  Stop:  ${hint.desolate("--stop <project> | --stop all")}`);
@@ -1523,7 +1551,7 @@ function purgeTarget(target: Target): void {
     ),
   );
 
-  for (const kind of ["ports", "spec", "token"] as const)
+  for (const kind of ["ports", "spec", "token", "daemon"] as const)
     fs.rmSync(stateFile(target, kind), { force: true });
 
   console.log(`purged ${target.name} (container, relays, volumes and state)`);
@@ -1555,10 +1583,12 @@ async function runTarget(
   daemons.use(target, "shared");
   migrateOffTheSharedDaemon(target, daemon, rebuild);
 
+  // And the other way: off its own daemon, onto the shared one.
+  migrateOffItsOwnDaemon(target, daemon, rebuild);
+
   // From here on, every docker call is to the daemon this target runs on.
   if (daemon === "project") await useProjectDaemon(target);
   else daemons.use(target, "shared");
-  daemons.save(target, daemon);
 
   // fingerprint before deriving
   const fingerprint = spec.fingerprint(dir, config);
@@ -1577,6 +1607,9 @@ async function runTarget(
       (refusing to start -- this is a desolate bug, not a problem with
       your devcontainer.json): ${err?.message ?? err}`);
   }
+  // Only once it will run: a refused start must not change which daemon
+  // --stop and --purge drive.
+  daemons.save(target, daemon);
 
   const saved = spec.load(target);
   const existing = devcontainerId(dir, true);
@@ -1728,8 +1761,7 @@ async function main(): Promise<void> {
     return removeWorktree(target, args.force);
   }
   if (args.command === "ports" && args.move) {
-    driveSaved(target);
-    movePorts(target, args.move);
+    movePorts(target, args.move, driveSaved(target));
   } else if (args.command === "ports") showPorts(target);
   else if (args.command === "purge") {
     // A purge has to reach the target's containers and volumes, so its own
