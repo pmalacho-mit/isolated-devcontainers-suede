@@ -505,9 +505,11 @@ Three cases, by where the file lives:
   if it lands outside that project -- a link a project planted cannot turn an
   export of its own files into a copy of another project's.
 - **Inside a devcontainer but outside the workspace** (its `/home`, a cache, a
-  build output in a container) -- through the inner daemon:
-  `./cli.sh observe docker cp <container>:<path> - > out.tar`. `observe ps`
-  names the containers.
+  build output in a container) -- through the daemon it runs on:
+  `./cli.sh observe docker cp <container>:<path> - > out.tar`, or for a
+  project with a daemon of its own,
+  `./cli.sh observe --project owner/repo docker cp <container>:<path> - > out.tar`.
+  `observe ps` (with the same `--project`) names the containers.
 - **One file, from the browser** -- right-click -> Download in the editor. A
   folder download uses the browser's File System Access API, and Chrome refuses
   some destinations (your home directory's root, `~/Library`, a volume root)

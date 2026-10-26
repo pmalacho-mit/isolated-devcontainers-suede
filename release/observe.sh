@@ -8,6 +8,7 @@
 #   ./cli.sh observe inspect <container>
 #   ./cli.sh observe raw        # container list as JSON
 #   ./cli.sh observe docker <any docker args...>
+#   ./cli.sh observe --project <p> ...   # any of the above, on that project's own daemon
 #
 # HOW IT GETS THERE, and why there is no port to point a tool at:
 #
@@ -28,7 +29,26 @@ set -euo pipefail
 
 ORCHESTRATOR=desolate-orchestrator
 INNER_SOCK=unix:///run/inner/docker.sock
+# The volume the socket is in, as the throwaway CLI below mounts it, and where.
+SOCKET_VOLUME=desolate_inner-run
+SOCKET_MOUNT=/run/inner
 FALLBACK_IMAGE=docker:29-cli
+
+# `--project <p>` (or `-p`): a project's own daemon instead (dind.ts). Its
+# socket is one directory of the dind-sockets volume, which the orchestrator
+# mounts whole. The name is held to projects.ts's rules first, since it becomes
+# a path: `name` or `owner/name`, segments starting alphanumeric, no `__`.
+if [ "${1:-}" = --project ] || [ "${1:-}" = -p ]; then
+  PROJECT="${2:?usage: observe --project <project> [ps|stats|logs|inspect|raw|docker ...]}"
+  printf '%s' "$PROJECT" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?' \
+    && case "$PROJECT" in *__*) false ;; esac \
+    || { echo "observe: '$PROJECT' is not a project name (name or owner/name)" >&2; exit 1; }
+  NAMESPACE=${PROJECT//\//__}
+  INNER_SOCK=unix:///run/dind-sockets/$NAMESPACE/docker.sock
+  SOCKET_VOLUME=desolate_dind-sockets
+  SOCKET_MOUNT=/run/dind-sockets
+  shift 2
+fi
 
 # Normal path: the orchestrator has the socket and the CLI already.
 # Fallback: when the ORCHESTRATOR is the thing that is broken, that path is gone
@@ -46,11 +66,11 @@ FALLBACK_IMAGE=docker:29-cli
 inner() {
   local tty=(); [ -t 0 ] && [ -t 1 ] && tty=(-it)
   if docker inspect -f '{{.State.Status}}' "$ORCHESTRATOR" 2>/dev/null | grep -qx running; then
-    docker exec "${tty[@]}" "$ORCHESTRATOR" docker "$@"
+    docker exec "${tty[@]}" "$ORCHESTRATOR" docker -H "$INNER_SOCK" "$@"
   else
     echo "observe: $ORCHESTRATOR is not running -- using a throwaway CLI container" >&2
     docker run --rm "${tty[@]}" \
-      -v desolate_inner-run:/run/inner \
+      -v "$SOCKET_VOLUME:$SOCKET_MOUNT" \
       -e DOCKER_HOST="$INNER_SOCK" \
       "$FALLBACK_IMAGE" docker "$@"
   fi
@@ -75,5 +95,5 @@ case "${1:-ps}" in
   inspect) need_jq inspect; shift; inner inspect "$@" | jq . ;;
   raw)     need_jq raw; inner ps -a --format '{{json .}}' | jq -s . ;;
   docker)  shift; inner "$@" ;;
-  *)       sed -n '5,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 1 ;;
+  *)       sed -n '5,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 1 ;;
 esac
