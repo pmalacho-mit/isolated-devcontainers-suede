@@ -176,6 +176,36 @@ nowhere, so it travels as itself and no value can leave.
     never prevented the thing it was named for.
 
 ---------------------------------------------------------------------------
+WHICH PROJECT A REQUEST CAME FROM (T4.6)
+---------------------------------------------------------------------------
+Every project dind sits on a bridge of its own (br-d-*), so the connection's
+SOURCE address names the dind, and the supervisor publishes each dind's
+address in desolate-ingress's dinds/ directory, the file named for it. That
+is the map: `desolate-dind-acme__widgets` holding 172.30.0.2 means a request
+from 172.30.0.2 is acme/widgets'. The shared dind and the editor's bridge
+are no project's (`project=-`).
+
+A source address is only worth this because it cannot be borrowed. A dind may
+set its own interface to another dind's address, and its packets would arrive
+with that source -- but this proxy's replies route by destination, to the
+OTHER dind's bridge, so the forged connection never completes a handshake and
+never carries a request. An address that maps to nothing is no project's, and
+earns nothing a project scope grants: fail closed.
+
+What the map is used for:
+
+  * every AUDIT line ends `project=<name>` (or `-`);
+  * a `network` rule with `"projects": [...]` applies only to those projects,
+    and one without applies to all, as before;
+  * a secret with `"projects": [...]` is substituted only for requests from
+    those projects. From anywhere else -- another project, the shared daemon,
+    an unmapped address -- the request is refused (403, `verdict=DENY-SCOPE`)
+    rather than passed unsubstituted: unlike a placeholder sent to the wrong
+    HOST, this one is headed to a host that would accept the real value, and
+    the caller is not someone it was meant for. A secret with no `projects`
+    key behaves as it always has.
+
+---------------------------------------------------------------------------
 THE SELF-TEST FIXTURE, AND WHY IT IS MATCHED DIFFERENTLY
 ---------------------------------------------------------------------------
 `preflight.sh` proves leak detection is running by tripping it: it sends a
@@ -213,6 +243,12 @@ import re
 from mitmproxy import http
 
 SETTINGS_PATH = os.environ.get("DESOLATE_SETTINGS", "/etc/desolate-proxy/settings.json")
+# The supervisor's published dind addresses (desolate-ingress.tmpfiles): what a
+# request's source address is attributed by. See "WHICH PROJECT".
+DINDS_DIR = os.environ.get("DESOLATE_DINDS_DIR", "/run/desolate-ingress/dinds")
+PROJECT_DIND = re.compile(r"desolate-dind-([A-Za-z0-9][A-Za-z0-9._-]*)")
+# projects.ts's validName: `name` or `owner/name`.
+PROJECT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?")
 
 # There is deliberately NO size cap on body inspection.
 #
@@ -252,6 +288,55 @@ def host_pattern_problem(pattern):
             "('*foo.com' also matches 'evilfoo.com', and '*.com' is a whole TLD)")
 
 
+def project_of_dind(name):
+    """The project a dind's file name stands for (dind.ts names them for the
+    project's namespace, `/` spelled `__`), or None for anything else -- the
+    shared `desolate-dind`, a writer's temporary file, a stray name."""
+    match = PROJECT_DIND.fullmatch(name)
+    if not match:
+        return None
+    project = match.group(1).replace("__", "/")
+    return project if PROJECT_NAME.fullmatch(project) else None
+
+
+def dinds_fingerprint(directory):
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return None
+    stamp = []
+    for name in names:
+        try:
+            st = os.lstat(os.path.join(directory, name))
+        except OSError:
+            continue
+        stamp.append((name, st.st_ino, st.st_mtime_ns, st.st_size))
+    return tuple(stamp)
+
+
+def read_dind_addresses(directory):
+    """address -> project, from the supervisor's dinds/ files. Symlinks are not
+    read (the ingress does not read them either), and a file that is not one
+    address is skipped: it attributes nothing."""
+    addresses = {}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return addresses
+    for name in names:
+        project = project_of_dind(name)
+        path = os.path.join(directory, name)
+        if project is None or os.path.islink(path):
+            continue
+        try:
+            with open(path) as handle:
+                address = ipaddress.ip_address(handle.read().strip())
+        except (OSError, ValueError):
+            continue
+        addresses[str(address)] = project
+    return addresses
+
+
 def is_selftest_fixture(entry):
     """Whether this entry exists to be TRIPPED rather than to guard a value.
 
@@ -276,6 +361,31 @@ class DesolateProxy:
         self.scrub_responses = True
         self.tls_passthrough = []  # SNI globs to tunnel without interception
         self.allow_private_destinations = False
+        self._dinds_stamp = None
+        self._projects_by_address = {}
+
+    # ---------- attribution ----------
+
+    def project_of(self, flow):
+        """The project this request came from, or None. See "WHICH PROJECT"."""
+        # Each file's inode and mtime, not the directory's: a directory's mtime
+        # is too coarse to see two changes in one tick, and an address docker
+        # hands a new dind after an old one's purge must never be attributed to
+        # the old one's project. The supervisor writes by rename, so every
+        # change is a new inode.
+        stamp = dinds_fingerprint(DINDS_DIR)
+        if stamp != self._dinds_stamp:
+            self._projects_by_address = read_dind_addresses(DINDS_DIR)
+            self._dinds_stamp = stamp
+        peer = getattr(flow.client_conn, "peername", None)
+        if not isinstance(peer, (tuple, list)) or not peer:
+            return None
+        try:
+            address = ipaddress.ip_address(str(peer[0]).strip("[]"))
+        except ValueError:
+            return None
+        address = getattr(address, "ipv4_mapped", None) or address
+        return self._projects_by_address.get(str(address))
 
     # ---------- config ----------
 
@@ -311,8 +421,16 @@ class DesolateProxy:
                     log.error(f"secret {name!r}: host {host!r} {problem}")
                 log.warning(f"secret {name!r} skipping (its allowlist does not pin a destination)")
                 continue
+            projects = entry.get("projects")
+            if projects is not None and (
+                    not isinstance(projects, list) or not projects
+                    or not all(isinstance(p, str) and PROJECT_NAME.fullmatch(p) for p in projects)):
+                log.error(f"secret {name!r}: projects {projects!r} is not a list of project names; "
+                          f"skipping (a scope that cannot be read is not widened to everyone)")
+                continue
             secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts],
-                             "selftest": is_selftest_fixture(entry)}
+                             "selftest": is_selftest_fixture(entry),
+                             "projects": None if projects is None else frozenset(projects)}
 
         for name in self._overlapping(secrets):
             del secrets[name]
@@ -398,7 +516,7 @@ class DesolateProxy:
                 continue
         return None
 
-    def audit(self, flow, verdict, host, route, method, secrets, suspect=()):
+    def audit(self, flow, verdict, host, route, method, secrets, suspect=(), project=None):
         """One machine-readable line per request, for `cli.sh proxy audit`.
 
         Separate from the human log lines above on purpose. Those are prose and
@@ -412,8 +530,9 @@ class DesolateProxy:
         on this VM; writing one into journald would quietly make that false.
 
         `suspect` is the placeholders that passed UNSUBSTITUTED toward a host
-        their allowlist does not cover. Last, so every older field keeps its
-        position for parsers that predate it.
+        their allowlist does not cover, and `project` the project the request
+        came from ("-" for none). Each was appended last, so every older field
+        keeps its position for parsers that predate it.
         """
         try:
             log.info(
@@ -423,7 +542,8 @@ class DesolateProxy:
                 f"host={host or '?'} "
                 f"path={route or '/'} "
                 f"secrets={','.join(secrets) if secrets else '-'} "
-                f"suspect={','.join(suspect) if suspect else '-'}"
+                f"suspect={','.join(suspect) if suspect else '-'} "
+                f"project={project or '-'}"
             )
         except Exception:
             # An audit line must never be the reason a request fails.
@@ -472,9 +592,14 @@ class DesolateProxy:
             raw = raw.rsplit(":", 1)[0]
         return raw.lower()
 
-    def _network_allowed(self, host, method):
+    def _network_allowed(self, host, method, project=None):
         for rule in self.network:
             if not self._host_matches(host, [str(rule.get("host", "*")).lower()]):
+                continue
+            # A rule naming projects is theirs alone. Not a list is a rule that
+            # cannot be read, and it applies to no one rather than to everyone.
+            scope = rule.get("projects")
+            if scope is not None and (not isinstance(scope, list) or project not in scope):
                 continue
             m = rule.get("method")
             if m and m.upper() != method.upper():
@@ -552,6 +677,7 @@ class DesolateProxy:
         method = flow.request.method
         proven = self.proven_host(flow)
         claimed = self.host_header(flow)
+        project = self.project_of(flow)
 
         # 0) destination address -- BEFORE the name is consulted, because the
         # name is the part an attacker chooses. See the module header.
@@ -561,7 +687,7 @@ class DesolateProxy:
                 log.warning(f"DENY  {method} -> {destination} (internal destination; "
                             f"claimed {claimed!r}, sni {proven!r})")
                 self.audit(flow, "DENY-INTERNAL", str(destination),
-                           flow.request.path.split("?", 1)[0], method, [])
+                           flow.request.path.split("?", 1)[0], method, [], project=project)
                 self._block(flow, 403,
                             f"destination {destination} is internal to the host; "
                             f"containers may not reach it through this proxy")
@@ -569,10 +695,10 @@ class DesolateProxy:
 
         # 1) network policy -- on the proven name where we have one.
         policy_host = proven or claimed or flow.request.host
-        if not self._network_allowed(policy_host, method):
+        if not self._network_allowed(policy_host, method, project):
             log.warning(f"DENY  {method} {policy_host}{flow.request.path} (network policy)")
             self.audit(flow, "DENY-POLICY", policy_host,
-                       flow.request.path.split("?", 1)[0], method, [])
+                       flow.request.path.split("?", 1)[0], method, [], project=project)
             self._block(flow, 403, f"network policy denied {method} {policy_host}")
             return
 
@@ -606,6 +732,20 @@ class DesolateProxy:
         # Captured BEFORE substitution and stripped of its query string, for the
         # audit line and the SUBST log below. See the comment at the log call.
         route = flow.request.path.split("?", 1)[0]
+
+        # A secret scoped to projects is refused to anyone else -- including a
+        # source that maps to no project at all. See "WHICH PROJECT".
+        out_of_scope = sorted(name for name in found
+                              if self.secrets[name]["projects"] is not None
+                              and project not in self.secrets[name]["projects"])
+        if out_of_scope:
+            log.warning(f"DENY  {method} {proven}{route}: {out_of_scope} scoped to other projects "
+                        f"(request from {project or 'no project'}) -- blocked")
+            self.audit(flow, "DENY-SCOPE", proven, route, method, [], out_of_scope, project=project)
+            self._block(flow, 403,
+                        f"secret {out_of_scope} is not available to "
+                        f"{project or 'this source, which is no project'}")
+            return
 
         # 3) substitution. Order does not matter here, and that is a property
         # the config check buys: no loaded placeholder contains another (see
@@ -651,7 +791,7 @@ class DesolateProxy:
         if suspect:
             if found:
                 log.info(f"SUBST {method} {proven}{route} <- {sorted(found)}")
-            self.audit(flow, "LEAK-SUSPECT", proven, route, method, sorted(found), suspect)
+            self.audit(flow, "LEAK-SUSPECT", proven, route, method, sorted(found), suspect, project=project)
         elif found:
             # `route` was captured BEFORE the loop above and has its query string
             # stripped. Both halves matter: `flow.request.path` covers path AND
@@ -661,9 +801,9 @@ class DesolateProxy:
             # Secrets are supposed to exist in exactly one place on this VM,
             # 0600 in /etc/desolate-proxy/settings.json, and journald is not it.
             log.info(f"SUBST {method} {proven}{route} <- {sorted(found)}")
-            self.audit(flow, "SUBST", proven, route, method, sorted(found))
+            self.audit(flow, "SUBST", proven, route, method, sorted(found), project=project)
         else:
-            self.audit(flow, "ALLOW", proven or claimed, route, method, [])
+            self.audit(flow, "ALLOW", proven or claimed, route, method, [], project=project)
 
     def response(self, flow: http.HTTPFlow):
         try:

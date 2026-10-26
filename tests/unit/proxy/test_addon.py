@@ -1190,3 +1190,135 @@ def test_a_secret_without_the_flag_keeps_the_substring_rule(tmp_path, caplog):
     caplog.set_level(logging.INFO)
     addon.request(f)
     assert leak_suspected(caplog, FIXTURE_NAME)
+
+
+# ===========================================================================
+# T4.6: which project a request came from, and what that may unlock
+# ===========================================================================
+
+A_ADDRESS, B_ADDRESS, SHARED_ADDRESS = "172.30.0.2", "172.31.0.2", "172.19.0.2"
+SCOPED = "ACME-WIDGETS-DEPLOY-KEY"
+
+
+def dinds_fixture(tmp_path):
+    """The supervisor's dinds/ directory: two project dinds and the shared one."""
+    dinds = tmp_path / "dinds"
+    dinds.mkdir()
+    (dinds / "desolate-dind-acme__widgets").write_text(f"{A_ADDRESS}\n")
+    (dinds / "desolate-dind-solo").write_text(f"{B_ADDRESS}\n")
+    (dinds / "desolate-dind").write_text(f"{SHARED_ADDRESS}\n")
+    (dinds / ".desolate-dind-solo.tmp").write_text("10.0.0.9\n")      # a writer mid-rename
+    return dinds
+
+
+def scoped_addon(tmp_path, network=None):
+    mod, addon, path = load_addon(tmp_path, {
+        "default_action": "allow",
+        "secrets": {
+            SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"]},
+            SCOPED: {"value": "deploy-real-value", "hosts": ["api.github.com"], "projects": ["acme/widgets"]},
+        },
+        "network": network or [{"action": "allow", "host": "*"}],
+    })
+    mod.DINDS_DIR = str(dinds_fixture(tmp_path))
+    return mod, addon
+
+
+def from_(address, **kwargs):
+    flow = make_flow(**kwargs)
+    flow.client_conn.peername = (address, 40000)
+    return flow
+
+
+def audit_fields(caplog):
+    return [dict(f.split("=", 1) for f in line.split()[1:] if "=" in f) for line in _audit_lines(caplog)]
+
+
+def test_attribution_comes_from_the_published_dind_addresses(tmp_path):
+    _, addon = scoped_addon(tmp_path)
+    assert addon.project_of(from_(A_ADDRESS)) == "acme/widgets"
+    assert addon.project_of(from_(B_ADDRESS)) == "solo"
+    assert addon.project_of(from_(SHARED_ADDRESS)) is None, "the shared dind is no project's"
+    assert addon.project_of(from_("10.0.0.9")) is None, "a writer's temporary file attributes nothing"
+    assert addon.project_of(from_(f"::ffff:{A_ADDRESS}")) == "acme/widgets", "the same address, IPv4-mapped"
+
+
+def test_every_audit_line_names_the_project(tmp_path, caplog):
+    _, addon = scoped_addon(tmp_path)
+    with caplog.at_level(logging.INFO):
+        addon.request(from_(A_ADDRESS, sni="example.com", dest="93.184.216.34"))
+        addon.request(from_(SHARED_ADDRESS, sni="example.com", dest="93.184.216.34"))
+    assert [f["project"] for f in audit_fields(caplog)] == ["acme/widgets", "-"]
+
+
+def test_a_scoped_secret_reaches_its_project(tmp_path):
+    _, addon = scoped_addon(tmp_path)
+    f = from_(A_ADDRESS, sni="api.github.com", dest="140.82.112.6", headers={"Authorization": f"token {SCOPED}"})
+    addon.request(f)
+    assert not blocked(f)
+    assert carries_value(f, "deploy-real-value")
+
+
+@pytest.mark.parametrize("source", [B_ADDRESS, SHARED_ADDRESS, "172.29.9.9"],
+                         ids=["another project", "the shared dind", "an unmapped address"])
+def test_a_scoped_secret_is_refused_to_anyone_else(tmp_path, caplog, source):
+    _, addon = scoped_addon(tmp_path)
+    f = from_(source, sni="api.github.com", dest="140.82.112.6", headers={"Authorization": f"token {SCOPED}"})
+    with caplog.at_level(logging.INFO):
+        addon.request(f)
+    assert blocked(f) and f.response.status_code == 403
+    assert not carries_value(f, "deploy-real-value")
+    verdicts = [(x["verdict"], x["suspect"]) for x in audit_fields(caplog)]
+    assert verdicts == [("DENY-SCOPE", SCOPED)]
+
+
+def test_an_unscoped_secret_is_everyones_as_before(tmp_path):
+    _, addon = scoped_addon(tmp_path)
+    for source in (A_ADDRESS, B_ADDRESS, SHARED_ADDRESS):
+        f = from_(source, sni="api.openai.com", dest="104.18.6.1", headers={"Authorization": f"Bearer {SECRET_NAME}"})
+        addon.request(f)
+        assert carries_value(f), source
+
+
+@pytest.mark.parametrize("projects", ["acme/widgets", [], ["a/b/c"], [7]],
+                         ids=["a string", "empty", "not a project name", "not a string"])
+def test_a_scope_that_cannot_be_read_drops_the_secret(tmp_path, projects):
+    mod, addon, _ = load_addon(tmp_path, {"secrets": {
+        SCOPED: {"value": "deploy-real-value", "hosts": ["api.github.com"], "projects": projects}}})
+    addon._maybe_reload()
+    assert SCOPED not in addon.secrets, "an unreadable scope must not be widened to everyone"
+
+
+def test_a_network_rule_naming_projects_is_theirs_alone(tmp_path):
+    _, addon = scoped_addon(tmp_path, network=[
+        {"action": "deny", "host": "example.com", "projects": ["solo"]},
+        {"action": "allow", "host": "*"},
+    ])
+    denied = from_(B_ADDRESS, sni="example.com", dest="93.184.216.34")
+    allowed = from_(A_ADDRESS, sni="example.com", dest="93.184.216.34")
+    addon.request(denied)
+    addon.request(allowed)
+    assert blocked(denied) and not blocked(allowed)
+
+
+def test_a_network_rule_whose_scope_cannot_be_read_applies_to_no_one(tmp_path):
+    _, addon = scoped_addon(tmp_path, network=[
+        {"action": "allow", "host": "example.com", "projects": "solo"},
+    ])
+    addon.default_action = "deny"
+    f = from_(B_ADDRESS, sni="example.com", dest="93.184.216.34")
+    addon._maybe_reload()
+    addon.default_action = "deny"
+    addon.request(f)
+    assert blocked(f)
+
+
+def test_attribution_follows_a_dind_that_moved(tmp_path):
+    mod, addon = scoped_addon(tmp_path)
+    assert addon.project_of(from_(A_ADDRESS)) == "acme/widgets"
+    dinds = Path(mod.DINDS_DIR)
+    (dinds / "desolate-dind-acme__widgets").unlink()
+    (dinds / "desolate-dind-acme__widgets.new").write_text("172.30.0.7\n")
+    os.replace(dinds / "desolate-dind-acme__widgets.new", dinds / "desolate-dind-acme__widgets")
+    assert addon.project_of(from_(A_ADDRESS)) is None, "its old address attributes nothing"
+    assert addon.project_of(from_("172.30.0.7")) == "acme/widgets"

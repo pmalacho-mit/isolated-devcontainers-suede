@@ -99,8 +99,11 @@ EOF
 # escaping its quotes, which made it invalid jq -- \" is not legal inside a
 # \(...) interpolation -- so `secret list` never worked at all. Emitting TSV and
 # formatting on the Mac leaves the remote side nothing to misparse.
+# Each row: the name, how many projects it is scoped to (0: every source), those
+# projects, then its hosts -- a count rather than a joined list, since joining
+# needs a quoted separator.
 # tests/static/05-cli-queries.sh executes this against a fixture.
-SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
+SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length)]+(.value.projects//[])+.value.hosts|@tsv'
 
 # `export`, run INSIDE the editor where the files are:
 #   sh -c "$EXPORT_TAR_SH" sh <workspaces> <project> <relative-path>
@@ -984,11 +987,26 @@ case "$CMD" in
              SUB="${1:-list}"; shift || true
              case "$SUB" in
                add)
-                 NAME="${1:?usage: cli.sh secret add NAME --hosts a.com,b.com}"; shift
-                 HOSTS=""
+                 NAME="${1:?usage: cli.sh secret add NAME --hosts a.com,b.com [--projects owner/repo,other]}"; shift
+                 HOSTS="" PROJECTS=""
                  while [ $# -gt 0 ]; do
-                   case "$1" in --hosts) HOSTS="$2"; shift 2 ;; *) shift ;; esac
+                   case "$1" in
+                     --hosts) HOSTS="$2"; shift 2 ;;
+                     --projects) PROJECTS="${2:?--projects takes a comma-separated list}"; shift 2 ;;
+                     *) shift ;;
+                   esac
                  done
+                 # --projects binds the secret to requests from those projects'
+                 # own daemons (addon.py "WHICH PROJECT"); absent, any source.
+                 PROJECTS_JSON=null
+                 if [ -n "$PROJECTS" ]; then
+                   case ",$PROJECTS," in *,,*)
+                     echo "cli.sh: --projects has an empty entry (a stray comma?)" >&2; exit 1 ;; esac
+                   for P in ${PROJECTS//,/ }; do
+                     valid_project "$P" || { echo "cli.sh: --projects entry '$P' is not a project name (name or owner/name)" >&2; exit 1; }
+                   done
+                   PROJECTS_JSON=$(printf '%s' "$PROJECTS" | awk -F, '{printf "["; for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}; printf "]"}')
+                 fi
                  [ -n "$HOSTS" ] || { echo "cli.sh: --hosts is required (a secret with no allowlist is refused by the proxy)" >&2; exit 1; }
                  case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
                  # HOSTS is interpolated into a remote shell command via `colima ssh`,
@@ -1056,10 +1074,10 @@ case "$CMD" in
                      echo "        value, with the leftover characters glued on. Pick a name that" >&2
                      echo "        neither contains nor is contained by those." >&2
                      exit 1; }
-                   jq --arg n "$1" --arg v "$V" --argjson h "$2" \
-                      ".secrets[\$n] = {value: \$v, hosts: \$h}" "$F" > "$T" \
+                   jq --arg n "$1" --arg v "$V" --argjson h "$2" --argjson p "$4" \
+                      ".secrets[\$n] = ({value: \$v, hosts: \$h} + (if \$p == null then {} else {projects: \$p} end))" "$F" > "$T" \
                      && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" \
-                     && echo "stored"' _ "$NAME" "$HOSTS_JSON" "$SECRET_COLLISION_JQ"
+                     && echo "stored"' _ "$NAME" "$HOSTS_JSON" "$SECRET_COLLISION_JQ" "$PROJECTS_JSON"
                  echo "Use it by putting the PLACEHOLDER in your devcontainer.json:"
                  echo "  \"containerEnv\": { \"YOUR_ENV_VAR\": \"$NAME\" }"
                  ;;
@@ -1082,8 +1100,10 @@ case "$CMD" in
                  else
                    # Formatting happens HERE, on the Mac, where quoting is ours.
                    printf '%s\n' "$OUT" | awk -F'\t' '{
-                     hosts=$2; for (i=3; i<=NF; i++) hosts = hosts ", " $i
-                     printf "  %s  ->  %s\n", $1, hosts
+                     n = $2; scope = ""; hosts = ""
+                     for (i = 3; i < 3 + n; i++) scope = scope (scope == "" ? "" : ", ") $i
+                     for (i = 3 + n; i <= NF; i++) hosts = hosts (hosts == "" ? "" : ", ") $i
+                     printf "  %s  ->  %s%s\n", $1, hosts, (n > 0 ? "   (only for: " scope ")" : "")
                    }'
                  fi
                  ;;
@@ -1102,7 +1122,7 @@ case "$CMD" in
                    jq --arg n "$1" "del(.secrets[\$n])" "$F" > "$T" \
                    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" && echo removed' _ "$NAME"
                  ;;
-               *) echo "usage: cli.sh secret {add NAME --hosts a,b | list | rm NAME [--force]}" >&2; exit 1 ;;
+               *) echo "usage: cli.sh secret {add NAME --hosts a,b [--projects p,q] | list | rm NAME [--force]}" >&2; exit 1 ;;
              esac ;;
 
   vm)        SUB="${1:-status}"; shift || true
@@ -1136,7 +1156,15 @@ case "$CMD" in
   proxy)     SUB="${1:-status}"; shift || true
              case "$SUB" in
                status) colima ssh -p "$COLIMA_PROFILE" -- sudo systemctl --no-pager --plain status desolate-proxy | head -8 ;;
-               logs)   colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${1:-50}" --no-pager ;;
+               logs)   # --project <p>: only the AUDIT lines its own daemon's requests made.
+                       if [ "${1:-}" = --project ]; then
+                         P="${2:?usage: cli.sh proxy logs --project <project> [n]}"
+                         valid_project "$P" || { echo "cli.sh: '$P' is not a project name" >&2; exit 1; }
+                         colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${3:-2000}" --no-pager -o cat \
+                           | grep -a "^AUDIT .* project=$P\$"
+                       else
+                         colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${1:-50}" --no-pager
+                       fi ;;
                audit)  # What was contacted, and whether a secret went with it.
                        #
                        # Reads the AUDIT lines addon.py emits (one per request,
@@ -1148,15 +1176,24 @@ case "$CMD" in
                        # in journald, which is not the 0600 file secrets are
                        # supposed to live in. Names only; that is the point of
                        # the column.
+                       #
+                       # --project <p> keeps the requests that came from that
+                       # project's own daemon (addon.py "WHICH PROJECT").
+                       ONLY=""
+                       if [ "${1:-}" = --project ]; then
+                         ONLY="${2:?usage: cli.sh proxy audit [--project <project>] [n]}"
+                         valid_project "$ONLY" || { echo "cli.sh: '$ONLY' is not a project name" >&2; exit 1; }
+                         shift 2
+                       fi
                        N="${1:-200}"
                        case "$N" in *[!0-9]*) echo "cli.sh: proxy audit takes a line count" >&2; exit 1 ;; esac
                        colima ssh -p "$COLIMA_PROFILE" -- \
                          sudo journalctl -u desolate-proxy -n "$N" --no-pager -o cat \
                        | grep -a "^AUDIT " \
                        | sed -e 's/^AUDIT //' \
-                       | awk '
+                       | awk -v only="$ONLY" '
                            {
-                             verdict=""; method=""; host=""; path=""; secrets=""; suspect="";
+                             verdict=""; method=""; host=""; path=""; secrets=""; suspect=""; project="-";
                              for (i = 1; i <= NF; i++) {
                                split($i, kv, "=");
                                v = substr($i, index($i, "=") + 1);
@@ -1166,10 +1203,12 @@ case "$CMD" in
                                else if (kv[1] == "path")  path = v;
                                else if (kv[1] == "secrets") secrets = v;
                                else if (kv[1] == "suspect") suspect = v;
+                               else if (kv[1] == "project") project = v;
                              }
+                             if (only != "" && project != only) next;
                              if (secrets == "-") secrets = "";
                              if (suspect == "-") suspect = "";
-                             printf "%-14s %-6s %s%s%s%s\n", verdict, method, host, path,
+                             printf "%-14s %-6s %-20s %s%s%s%s\n", verdict, method, project, host, path,
                                     (secrets == "" ? "" : "   <- " secrets),
                                     (suspect == "" ? "" : "   NOT substituted: " suspect);
                            }'
@@ -1196,7 +1235,7 @@ case "$CMD" in
                          sudo journalctl -u desolate-proxy --since -2min --no-pager -o cat \
                        | grep -a "^AUDIT verdict=LEAK-SUSPECT .* path=/$MARK " | tail -n 1 \
                        | sed 's/^/   /' | grep . || echo "   (no LEAK-SUSPECT line -- leak detection is NOT live)" ;;
-               *) echo "usage: cli.sh proxy {status|logs [n]|test}" >&2; exit 1 ;;
+               *) echo "usage: cli.sh proxy {status|logs [--project <p>] [n]|audit [--project <p>] [n]|test}" >&2; exit 1 ;;
              esac ;;
 
   repo)      ensure_running

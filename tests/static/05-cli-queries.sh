@@ -40,6 +40,15 @@ assert_contains "it lists a secret with its allowlist" "$OUT" "MYAPP-OPENAI-KEY"
 assert_contains "it includes every host, not just the first" "$OUT" "*.example.com"
 assert_contains "it lists every secret" "$OUT" "OTHER-KEY"
 
+# A scope travels as a count, then the projects, then the hosts -- so a scoped
+# and an unscoped secret are told apart, and no project reads as a host.
+SCOPED_FIXTURE='{"secrets":{"DEPLOY-KEY":{"value":"x","hosts":["api.github.com"],"projects":["acme/widgets","solo"]},"OPEN-KEY":{"value":"y","hosts":["b.com"]}}}'
+SCOPED_OUT=$(printf '%s' "$SCOPED_FIXTURE" | jq -r "$PROG" 2>&1)
+assert_eq "a scoped secret's row: name, count, projects, hosts" \
+  "$(printf '%s\n' "$SCOPED_OUT" | grep '^DEPLOY-KEY')" "$(printf 'DEPLOY-KEY\t2\tacme/widgets\tsolo\tapi.github.com')"
+assert_eq "an unscoped one's: a zero, then its hosts" \
+  "$(printf '%s\n' "$SCOPED_OUT" | grep '^OPEN-KEY')" "$(printf 'OPEN-KEY\t0\tb.com')"
+
 # The whole point of the TSV shape: nothing for a remote shell to re-parse.
 case "$PROG" in
   *'"'*) fail "the program survives 'colima ssh' re-parsing" \

@@ -1483,6 +1483,28 @@ breaks either is refused rather than stored, or dropped rather than loaded:
 The `network` rules in `settings.json` are a separate list with a separate job
 and still accept `{"host": "*"}` -- see "What this does not give you" below.
 
+### Scoping a secret to projects
+
+A project with a daemon of its own (`docker-outside-of-docker`) reaches the
+proxy from its own bridge address, so the proxy knows which project a request
+came from. Every `./cli.sh proxy audit` line names it (`-` for the shared
+daemon and the editor), and a secret can be bound to the projects that may
+spend it:
+
+```bash
+./cli.sh secret add ACME-DEPLOY-KEY --hosts api.github.com --projects acme/widgets,acme/api
+./cli.sh secret list                        # ... (only for: acme/widgets, acme/api)
+./cli.sh proxy audit --project acme/widgets # its requests alone
+```
+
+From any other source -- another project, the shared daemon, an address the
+proxy cannot attribute -- a request carrying that placeholder toward an
+allowlisted host is refused (403, `verdict=DENY-SCOPE`), not passed on: it was
+headed somewhere the real value would be accepted, by someone it was not meant
+for. A secret without `--projects` behaves as before. A `network` rule in
+`settings.json` may carry `"projects": [...]` the same way; without it, it
+applies to everyone.
+
 ### The one entry that is not a secret
 
 `./cli.sh secret list` shows `DESOLATE-SELFTEST-PLACEHOLDER -> httpbin.org`.
