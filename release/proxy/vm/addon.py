@@ -293,9 +293,15 @@ def project_of_dind(name):
     project's namespace, `/` spelled `__`), or None for anything else -- the
     shared `desolate-dind`, a writer's temporary file, a stray name."""
     match = PROJECT_DIND.fullmatch(name)
-    if not match:
+    if not match or name.endswith(".tmp"):
         return None
-    project = match.group(1).replace("__", "/")
+    # At most one `/`, and a name's second segment starts alphanumeric, so the
+    # `/` is the LAST `__`: owner `a_` with repo `b` is `a___b`, which a
+    # left-to-right replace read as `a/_b`.
+    owner, slash, repo = match.group(1).rpartition("__")
+    project = f"{owner}/{repo}" if slash else repo
+    if "__" in project:
+        return None
     return project if PROJECT_NAME.fullmatch(project) else None
 
 

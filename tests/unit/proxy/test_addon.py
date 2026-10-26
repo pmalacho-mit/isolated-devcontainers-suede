@@ -1243,6 +1243,28 @@ def test_attribution_comes_from_the_published_dind_addresses(tmp_path):
     assert addon.project_of(from_(f"::ffff:{A_ADDRESS}")) == "acme/widgets", "the same address, IPv4-mapped"
 
 
+def test_a_dind_file_name_decodes_to_the_project_that_owns_it(tmp_path):
+    mod, _ = scoped_addon(tmp_path)
+    assert mod.project_of_dind("desolate-dind-solo") == "solo"
+    assert mod.project_of_dind("desolate-dind-acme__widgets") == "acme/widgets"
+    # `/` is the LAST `__`: owner `a_`, repo `b`. Left to right it was `a/_b`,
+    # which is no project, so that project was never attributed at all.
+    assert mod.project_of_dind("desolate-dind-a___b") == "a_/b"
+    # The supervisor's scratch file, as it was once named: attributed to a
+    # project `solo.tmp`, so `solo`'s own scoped secrets met DENY-SCOPE.
+    assert mod.project_of_dind("desolate-dind-solo.tmp") is None
+    assert mod.project_of_dind(".desolate-dind-solo.tmp") is None
+    assert mod.project_of_dind("desolate-dind") is None
+
+
+def test_a_scratch_file_mid_publish_attributes_nothing(tmp_path):
+    # A project's first publish, between write and rename: its address must
+    # not belong, for that moment, to a project called `fresh.tmp`.
+    mod, addon = scoped_addon(tmp_path)
+    (Path(mod.DINDS_DIR) / "desolate-dind-fresh.tmp").write_text("172.29.0.2\n")
+    assert addon.project_of(from_("172.29.0.2")) is None
+
+
 def test_every_audit_line_names_the_project(tmp_path, caplog):
     _, addon = scoped_addon(tmp_path)
     with caplog.at_level(logging.INFO):

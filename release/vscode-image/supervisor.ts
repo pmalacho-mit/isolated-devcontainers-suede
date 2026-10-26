@@ -261,15 +261,19 @@ const daemons = {
   },
 };
 
-/** desolate-ingress forwards only to dinds listed here (T2.2). */
+/** desolate-ingress forwards only to dinds listed here (T2.2). Each file is
+ *  written under a dot-prefixed scratch name and renamed into place: the
+ *  addon reads this directory too, and `desolate-dind-<p>.tmp` was a name it
+ *  attributed to a project `<p>.tmp` while it existed. */
 const ingress = {
   publish: (target: Target) => {
     const name = dind.name(target);
     const address = docker.dind.address(name, dind.network(target));
     if (!address) throw new Error(`${name} is up but has no address on ${dind.network(target)}`);
     const file = join(config.ingressDinds, name);
-    writeFileSync(`${file}.tmp`, `${address}\n`);
-    renameSync(`${file}.tmp`, file);
+    const scratch = join(config.ingressDinds, `.${name}.tmp`);
+    writeFileSync(scratch, `${address}\n`);
+    renameSync(scratch, file);
   },
   withdraw: (name: string) => rmSync(join(config.ingressDinds, name), { force: true }),
   /** Entries for project dinds that are not running: left by a stack that
@@ -284,6 +288,9 @@ const ingress = {
     }
     for (const name of names)
       if (name.startsWith("desolate-dind-") && docker.dind.state(name) !== "running") ingress.withdraw(name);
+      // A crash between write and rename leaves one. This process is the
+      // only writer, and it is not mid-write while it prunes.
+      else if (name.startsWith(".desolate-dind") && name.endsWith(".tmp")) ingress.withdraw(name);
   },
   /** The SHARED dind's address too: every target without a daemon of its own
    *  publishes its relays there, and reaches the Mac the same way (T2.4).
@@ -300,8 +307,9 @@ const ingress = {
       current = readFileSync(file, "utf8").trim();
     } catch {}
     if (current === address) return;
-    writeFileSync(`${file}.tmp`, `${address}\n`);
-    renameSync(`${file}.tmp`, file);
+    const scratch = join(config.ingressDinds, ".desolate-dind.tmp");
+    writeFileSync(scratch, `${address}\n`);
+    renameSync(scratch, file);
   },
 };
 
