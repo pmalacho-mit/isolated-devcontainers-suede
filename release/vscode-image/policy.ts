@@ -836,7 +836,10 @@ const checks = {
     // A worktree is mounted as its project root, the worktree inside it
     // (worktrees.ts projectRoot): that root, at its own path, is the one
     // other shape its workspace may take.
-    if (target.worktree !== undefined && posix.resolve(mounted.source) === target.projectDir) {
+    if (
+      target.worktree !== undefined &&
+      posix.resolve(mounted.source) === target.projectDir
+    ) {
       if (posix.resolve(mounted.target) === target.projectDir) return;
       return fail`
         workspaceMount target must be ${target.projectDir} when its source is
@@ -869,7 +872,7 @@ const checker = (
       acc[key as keyof typeof checks] = check.bind(null, payload);
       return acc;
     },
-    {} as Record<keyof typeof checks, () => void>,
+    {} as { [k in keyof typeof checks]: () => void },
   );
 };
 
