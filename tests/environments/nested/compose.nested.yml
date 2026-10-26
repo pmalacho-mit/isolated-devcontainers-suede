@@ -1,0 +1,12 @@
+# Layered over release/docker-compose.yml by ./run.sh, and ONLY by it.
+#
+# The one thing the nested harness changes about the stack: the shared dind
+# runs --privileged under runc instead of unprivileged under sysbox, because
+# the daemon it runs on (a devcontainer's own) has no sysbox. That swap is the
+# whole difference between this and the real stack, and it is the boundary the
+# design leans on -- so it lives here, in the test tree, where nothing that
+# ships can pick it up, rather than as a switch in the shipped compose file.
+services:
+  dind:
+    runtime: runc
+    privileged: true
