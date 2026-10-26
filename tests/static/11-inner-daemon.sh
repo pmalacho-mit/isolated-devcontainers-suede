@@ -183,6 +183,70 @@ assert_eq "the flag reaches the confirmation, and a refusal stops there" \
 # The stubs shadow the real commands, and the next group needs the real ones.
 unset -f compose docker confirm_data_root_reset
 
+group "a project's dind climbs the same ladder"
+# `dind reset <project>` is the same functions pointed elsewhere, so what is
+# asserted here is the pointing: the names it derives are dind.ts's, a name
+# that would derive a different docker object is refused, and each rung that
+# acts goes through the supervisor rather than past it.
+for fn in valid_project select_project_dind restart_dind delete_data_root; do
+  define_from_cli "$fn"
+done
+for bad in "../etc" "a/b/c" ".hidden" "a__b" "" "a b" "a;rm" "-rf" "acme/widgets@wt"; do
+  if (select_project_dind "$bad") >/dev/null 2>&1; then
+    fail "'$bad' is refused as a project" "it was accepted"
+  else
+    pass "'$bad' is refused as a project"
+  fi
+done
+# In THIS shell, not a subshell: the harness counts failures in variables, and
+# a subshell's would be lost. What it changes is put back at the end.
+select_project_dind acme/widgets
+NAMES=$(node -e '
+  const dind = await import(process.argv[1] + "/vscode-image/dind.ts");
+  const { target } = await import(process.argv[1] + "/vscode-image/projects.ts");
+  const t = target("/workspaces", "acme/widgets");
+  console.log(dind.name(t), dind.volumes(t).data);
+' "$RELEASE" 2>/dev/null || true)
+if [ -z "$NAMES" ]; then
+  skip "cli.sh derives dind.ts's names" "node could not import dind.ts"
+else
+  assert_eq "cli.sh derives dind.ts's names" "$DIND $DIND_DATA_VOLUME" "$NAMES"
+fi
+assert_eq "the health check is pointed at the project dind's socket" \
+  "${INNER_SOCKET#unix://}" "/run/dind-sock/docker.sock"
+
+CALLS=""
+supervisor() { CALLS="$CALLS|$*"; }
+compose()    { CALLS="$CALLS|compose $*"; }
+docker()     { CALLS="$CALLS|docker $*"; }
+restart_dind
+assert_eq "rung 2 restarts it through the supervisor, and nothing else" "$CALLS" "|ask reset acme/widgets"
+CALLS=""
+delete_data_root
+assert_eq "rung 3 is the supervisor's purge, then a fresh ensure" "$CALLS" \
+  "|ask purge acme/widgets|ask ensure acme/widgets"
+
+# The guard is the same function, and still refuses in this mode.
+CALLS=""
+confirm_data_root_reset() { CALLS="$CALLS|prompted"; return 1; }
+reset_data_root "" >/dev/null 2>&1
+assert_eq "rung 3 on a project dind still needs the flag" "${CALLS:-nothing ran}" "nothing ran"
+assert_contains "and the refusal names the project's own command" \
+  "$(explain_data_root_reset 2>&1)" "dind reset acme/widgets $RESET_DATA_ROOT_FLAG"
+assert_contains "and what it would cost: this project's store alone" \
+  "$(explain_data_root_reset 2>&1)" "acme/widgets's own image store"
+unset -f supervisor compose docker confirm_data_root_reset
+define_from_cli_constant DIND_DATA_VOLUME
+
+group "dind is reachable"
+assert_contains "cli.sh help lists it" "$(bash "$CLI" help 2>&1)" "dind list"
+assert_eq "its subcommands complete, and its flags are not mistaken for them" \
+  "$(_desolate_cli_subs dind | tr '\n' ' ')" "list reset df gc "
+COMP_WORDS=(cli.sh dind reset acme ""); COMP_CWORD=4; _desolate_cli
+assert_contains "tab completion offers the reset flag" "${COMPREPLY[*]:-}" "--reset-data-root"
+COMP_WORDS=(cli.sh dind gc ""); COMP_CWORD=3; _desolate_cli
+assert_contains "and gc's" "${COMPREPLY[*]:-}" "--orphans"
+
 group "the volume rung 3 deletes is the one compose declares"
 # cli.sh names it as a string; compose renders it from its project name. They
 # have to be the same volume, and the failure if they are not is a `volume rm`

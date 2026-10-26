@@ -73,6 +73,8 @@ describe("a target with no worktree is named exactly as it was", () => {
       data: "dind-data-acme__widgets",
       socketSubpath: "acme__widgets",
     });
+    assert.equal(dind.dataVolumeOf(dind.name(nested)), dind.volumes(nested).data);
+    assert.throws(() => dind.dataVolumeOf("desolate-relay-x-8080"), /not a project dind/);
   });
 
   test("the state files under /workspaces/.desolate", () => {

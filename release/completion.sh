@@ -181,6 +181,15 @@ _desolate_cli() {
         COMPREPLY=( $(compgen -W "$(_desolate_cli_worktrees "${COMP_WORDS[3]}")" -- "$cur") )
       fi ;;
     "vm install")       COMPREPLY=( $(compgen -W "--proxy-only" -- "$cur") ) ;;
+    "dind reset")
+      if [ "$COMP_CWORD" -eq 3 ]; then
+        COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") )
+      elif [ "$COMP_CWORD" -eq 4 ]; then
+        COMPREPLY=( $(compgen -W "--reset-data-root" -- "$cur") )
+      fi ;;
+    "dind gc")
+      [ "$COMP_CWORD" -eq 3 ] && \
+        COMPREPLY=( $(compgen -W "--all --orphans $(_desolate_cli_projects)" -- "$cur") ) ;;
     "repo add")         : ;;   # owner/repo is remote; nothing local to offer
     *)
       # `cli.sh desolate <project> [flags]` -- desolate-run's grammar, which

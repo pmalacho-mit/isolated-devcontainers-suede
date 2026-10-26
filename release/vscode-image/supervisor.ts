@@ -11,8 +11,11 @@ the orchestrator mounts, never the editor:
                      boot, images intact), created otherwise, admitted against
                      the VM's headroom (capacity.ts) first
   stop   <project>   quiesced (shutdown.ts), then stopped; its images stay
+  reset  <project>   restarted, the container and so its daemon alone, then
+                     waited on: rung 2 of `cli.sh dind reset`
   purge  <project>   stopped, then its container, image store and bridge gone
-  status             every project dind: state, in use, idle since, memory
+  status             every project dind: state, health, in use, idle since,
+                     memory, image-store size; and the VM's headroom
 
 A request names a project, never a docker flag, exactly as the broker's do: a
 compromised orchestrator holding this socket can start and stop daemons and do
@@ -46,11 +49,12 @@ import {
   type Target,
 } from "./projects.ts";
 import * as shutdown from "./shutdown.ts";
+import { ask } from "./supervisor-client.ts";
 import { isEntryPoint } from "./utils.ts";
 
 // ------------------------------------------------------------ the vocabulary --
 
-export const operations = ["ensure", "stop", "purge", "status"] as const;
+export const operations = ["ensure", "stop", "reset", "purge", "status"] as const;
 type Operation = (typeof operations)[number];
 
 export type Request =
@@ -361,6 +365,22 @@ const operations_ = {
     return { dind: name, socket: dind.sockets.forOrchestrator(target) };
   },
 
+  reset: async (target: Target, settings: Settings, say: Say) => {
+    const name = dind.name(target);
+    if (docker.dind.state(name) === "")
+      refuse(`${target.project} has no dind to reset; starting the project creates one`);
+    ingress.withdraw(name);
+    say(`${name}: restarting (nothing else on the VM is touched)`);
+    if (docker.dind.restart(name) !== 0) refuse(`could not restart ${name}: ${lastFailure}`);
+    const health = await daemons.waitHealthy(name, settings, say);
+    if (health !== "healthy")
+      refuse(`${name} is ${health} after a restart. What is left is its image store:
+              cli.sh dind reset ${target.project} --reset-data-root`);
+    ingress.publish(target);
+    lastBusy.set(name, Date.now());
+    return { dind: name, health };
+  },
+
   stop: async (target: Target, _settings: Settings, say: Say) => {
     const name = dind.name(target);
     ingress.withdraw(name);
@@ -382,8 +402,29 @@ const operations_ = {
     return { dind: spec.name, state: "absent" };
   },
 
-  status: () => ({ dinds: daemons.observe() }),
+  status: () => {
+    const observed = daemons.observe();
+    const budget = capacity.budget(process.env, readFileSync(config.meminfo, "utf8"));
+    return {
+      dinds: observed.map((daemon) => ({
+        ...daemon,
+        project: docker.dind.projectOf(daemon.name, dind.LABEL_KEY),
+        health: daemon.running ? healthOf(docker.dind.health(daemon.name)) : "stopped",
+        imageStoreKib: docker.volumeKib(HELPER_IMAGE, dind.dataVolumeOf(daemon.name)),
+      })),
+      headroom: {
+        running: observed.filter(({ running }) => running).length,
+        max: budget.max,
+        available: budget.available,
+        floor: budget.floor,
+      },
+    };
+  },
 };
+
+/** inner-health.sh's exit status, as a word. */
+const HEALTH: Record<number, string> = { 0: "healthy", 1: "booting", 2: "wedged" };
+const healthOf = (status: number) => HEALTH[status] ?? `unknown (inner-health.sh exited ${status})`;
 
 /** Reap on a timer what capacity.reapable says has been idle long enough. */
 const reap = (settings: Settings, say: Say) => {
@@ -466,9 +507,61 @@ const serve = (settings: Settings) => {
   }, Math.min(settings.idleMs, 60_000)).unref?.();
 };
 
+// -------------------------------------------------------------- the client --
+// `cli.sh dind` runs these with `docker exec desolate-supervisor`: the one
+// container that mounts this socket besides the orchestrator, and the Mac's
+// docker context reaches it without a network.
+
+const USAGE = `usage: supervisor.ts                         serve
+       supervisor.ts ask <op> [<project>]      one request: its log on stderr, its answer on stdout
+       supervisor.ts list                      every project dind, and the VM's headroom`;
+
+const GIB = 1024 ** 3;
+const gib = (bytes?: number) => (bytes === undefined ? "?" : `${(bytes / GIB).toFixed(1)} GiB`);
+const ago = (since: number | undefined, now: number) =>
+  since === undefined ? "-" : `${Math.round((now - since) / 60_000)} min`;
+
+/** `status`'s answer as the table `cli.sh dind list` prints. */
+export const formatStatus = (answer: Record<string, any>, now = Date.now()) => {
+  const rows = [["PROJECT", "STATE", "IN USE", "IDLE FOR", "MEMORY", "IMAGE STORE"]];
+  for (const d of answer.dinds ?? [])
+    rows.push([
+      d.project || d.name,
+      d.health,
+      d.running ? (d.inUse ? "yes" : "no") : "-",
+      d.running && !d.inUse ? ago(d.idleSince, now) : "-",
+      d.running ? gib(d.memory) : "-",
+      d.imageStoreKib === undefined ? "?" : gib(d.imageStoreKib * 1024),
+    ]);
+  const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => row[column].length)));
+  const table = rows.map((row) => row.map((cell, column) => cell.padEnd(widths[column])).join("  ").trimEnd());
+  const { running, max, available, floor } = answer.headroom ?? {};
+  return [
+    ...(rows.length > 1 ? table : ["no project dinds"]),
+    "",
+    `headroom: ${running} of ${max} dinds running; ${gib(available)} free, ${gib(floor)} of it kept back`,
+  ].join("\n");
+};
+
+const client = async ([verb, op, project, ...rest]: string[]) => {
+  const say = (line: string) => console.error(line);
+  if (verb === "list" && op === undefined) {
+    const answer = await ask(config.socket, { op: "status" }, say);
+    if (answer.ok !== true) throw new Error(answer.error);
+    return console.log(formatStatus(answer));
+  }
+  const request = project === undefined ? { op } : { op, project };
+  if (verb !== "ask" || rest.length || !isRequest(request)) throw new Error(USAGE);
+  const answer = await ask(config.socket, request as Record<string, string>, say);
+  if (answer.ok !== true) throw new Error(answer.error);
+  console.log(JSON.stringify(answer));
+};
+
 if (isEntryPoint(import.meta.url)) {
+  const argv = process.argv.slice(2);
   try {
-    serve(settingsFrom(process.env));
+    if (argv.length) await client(argv);
+    else serve(settingsFrom(process.env));
   } catch (err: any) {
     console.error(`supervisor: ${err?.message ?? err}`);
     process.exit(1);

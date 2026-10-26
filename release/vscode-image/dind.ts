@@ -46,9 +46,18 @@ export const label = ({ project }: Target) => `${LABEL_KEY}=${project}`;
  *  container's mounts are fixed at creation, so a volume per project could
  *  never reach an orchestrator that is already running. */
 export const volumes = (target: Target) => ({
-  data: `dind-data-${projectNamespace(target)}`,
+  data: dataVolume(projectNamespace(target)),
   socketSubpath: projectNamespace(target),
 });
+
+const dataVolume = (namespace: string) => `dind-data-${namespace}`;
+
+/** A dind's image store from its container name alone, for callers that list
+ *  containers and hold no target: both are named for the same namespace. */
+export const dataVolumeOf = (containerName: string) => {
+  if (!containerName.startsWith(`${PREFIX}-`)) throw new Error(`${containerName} is not a project dind`);
+  return dataVolume(containerName.slice(PREFIX.length + 1));
+};
 
 /** Where the shared sockets volume lives, from each side of it. */
 export const sockets = {

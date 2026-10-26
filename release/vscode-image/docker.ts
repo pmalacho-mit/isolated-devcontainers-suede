@@ -560,6 +560,11 @@ export const createDocker = (run: Runner) => {
       /** Created AND started: `run -d`. */
       create: (spec: DindSpec) => effect(...dindRunArgv(spec)),
       start: (name: string) => effect("start", name),
+      /** The container, and so its daemon, alone: rung 2 of `cli.sh dind reset`. */
+      restart: (name: string) => effect("restart", "-t", "10", name),
+      /** The project a dind serves, from its label: "" for any other container. */
+      projectOf: (name: string, labelKey: string) =>
+        query("inspect", "-f", `{{index .Config.Labels "${labelKey}"}}`, name),
       /** "" when there is no such container. */
       state: (name: string) => query("inspect", "-f", "{{.State.Status}}", name),
       /** The same verdict the shared dind's healthcheck gives -- one script,
@@ -606,6 +611,15 @@ export const createDocker = (run: Runner) => {
       /** Its address on one network, "" when it has none there. */
       address: (name: string, network: string) =>
         query("inspect", "-f", `{{with index .NetworkSettings.Networks "${network}"}}{{.IPAddress}}{{end}}`, name),
+    },
+    /** KiB a volume holds, read by a helper with no network; undefined when
+     *  it could not be read (no such volume, or no helper image). */
+    volumeKib: (helperImage: string, volumeName: string) => {
+      const kib = Number.parseInt(
+        query("run", "--rm", "--network", "none", "-v", `${volumeName}:/v:ro`, helperImage, "du", "-sk", "/v"),
+        10,
+      );
+      return Number.isFinite(kib) ? kib : undefined;
     },
     /** Run a throwaway helper container against one volume. */
     inVolume: (

@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 
 import {
   cpusFor,
+  formatStatus,
   isRequest,
   memoryUsed,
   settingsFrom,
@@ -19,14 +20,15 @@ import {
 } from "../../../release/vscode-image/supervisor.ts";
 
 describe("what the supervisor accepts", () => {
-  test("the four ops, in their exact shapes", () => {
+  test("the five ops, in their exact shapes", () => {
     assert.ok(isRequest({ op: "status" }));
-    for (const op of ["ensure", "stop", "purge"]) assert.ok(isRequest({ op, project: "acme/widgets" }), op);
+    for (const op of ["ensure", "stop", "reset", "purge"]) assert.ok(isRequest({ op, project: "acme/widgets" }), op);
   });
 
   for (const [why, query] of [
     ["an unknown op", { op: "run", project: "x" }],
     ["a project-taking op with no project", { op: "ensure" }],
+    ["a reset that asks for more than a restart", { op: "reset", project: "x", data: true }],
     ["a project that is not a string", { op: "ensure", project: ["x"] }],
     ["status with a project", { op: "status", project: "x" }],
     ["an extra field a later reader might honour", { op: "ensure", project: "x", runtime: "runc" }],
@@ -94,5 +96,43 @@ describe("what the supervisor builds", () => {
     assert.equal(memoryUsed("12kB / 1GB"), 12_000);
     assert.equal(memoryUsed("-- / --"), undefined);
     assert.equal(memoryUsed(""), undefined);
+  });
+});
+
+describe("what `cli.sh dind list` prints", () => {
+  const now = 10 * 60_000;
+  const answer = {
+    ok: true,
+    dinds: [
+      { name: "desolate-dind-acme__widgets", project: "acme/widgets", running: true, inUse: false,
+        idleSince: now - 7 * 60_000, memory: 512 * 1024 ** 2, health: "healthy", imageStoreKib: 3 * 1024 ** 2 },
+      { name: "desolate-dind-solo", project: "solo", running: true, inUse: true,
+        idleSince: undefined, memory: undefined, health: "wedged", imageStoreKib: undefined },
+      { name: "desolate-dind-old", project: "", running: false, inUse: false,
+        idleSince: 0, memory: undefined, health: "stopped", imageStoreKib: 1024 },
+    ],
+    headroom: { running: 2, max: 16, available: 6 * 1024 ** 3, floor: 2 * 1024 ** 3 },
+  };
+  const [header, widgets, solo, old, , headroom] = formatStatus(answer, now).split("\n");
+
+  test("one row per dind, under a header", () => {
+    assert.match(header, /^PROJECT\s+STATE\s+IN USE\s+IDLE FOR\s+MEMORY\s+IMAGE STORE$/);
+    assert.match(widgets, /^acme\/widgets\s+healthy\s+no\s+7 min\s+0\.5 GiB\s+3\.0 GiB$/);
+  });
+
+  test("a wedged dind says so, and what could not be measured is '?' rather than zero", () => {
+    assert.match(solo, /^solo\s+wedged\s+yes\s+-\s+\?\s+\?$/);
+  });
+
+  test("a stopped dind keeps its image store, and a missing label falls back to the name", () => {
+    assert.match(old, /^desolate-dind-old\s+stopped\s+-\s+-\s+-\s+0\.0 GiB$/);
+  });
+
+  test("the VM's headroom closes it", () => {
+    assert.equal(headroom, "headroom: 2 of 16 dinds running; 6.0 GiB free, 2.0 GiB of it kept back");
+  });
+
+  test("no dinds is said, not left blank", () => {
+    assert.match(formatStatus({ dinds: [], headroom: answer.headroom }, now), /^no project dinds\n/);
   });
 });

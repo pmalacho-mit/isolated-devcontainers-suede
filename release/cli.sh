@@ -15,6 +15,7 @@
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
+#   ./isolated-devcontainers-suede/cli.sh dind list | reset <project> | df | gc   # project daemons
 #   ./isolated-devcontainers-suede/cli.sh <any command...>          # runs in the editor container
 #
 # Requires Colima + sysbox (see README "Setup"). `up` refuses to start if the
@@ -27,7 +28,7 @@ COLIMA_PROFILE="${COLIMA_PROFILE:-desolate}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -355,6 +356,47 @@ INNER_PATIENCE=20
 SETTLE_SECONDS=60
 RESET_DATA_ROOT_FLAG=--reset-data-root
 
+# The ladder below acts on whichever daemon these name. They start out naming
+# the shared one, for `reset-inner`; `dind reset <project>` points them at that
+# project's own (select_project_dind), and every rung is the same code for both.
+DIND_KIND=shared
+DIND_PROJECT=""
+RESET_COMMAND=reset-inner
+DIND_DATA_SCOPE="the image store shared by every project"
+
+SUPERVISOR=desolate-supervisor
+# Run where the supervisor's socket is: the supervisor's own container.
+supervisor() { docker exec "$SUPERVISOR" tsx /usr/local/lib/desolate/supervisor.ts "$@"; }
+
+require_supervisor() {
+  docker inspect -f '{{.State.Status}}' "$SUPERVISOR" 2>/dev/null | grep -qx running && return 0
+  echo "cli.sh: $SUPERVISOR is not running -- project dinds are its to drive. Start the stack:  $0 up" >&2
+  exit 1
+}
+
+# What projects.ts accepts, closely enough to refuse anything that would make
+# a different docker name: `name` or `owner/name`, no leading dot, no `__`.
+# A worktree has no dind of its own; it shares its project's.
+valid_project() {
+  printf '%s' "$1" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)?' \
+    && case "$1" in *__*) false ;; esac
+}
+
+# Point the ladder at one project's dind (dind.ts names; supervisor.ts drives).
+select_project_dind() {
+  valid_project "$1" || {
+    echo "cli.sh: '$1' is not a project name (name or owner/name; a worktree uses its project's dind)" >&2
+    exit 1
+  }
+  DIND_KIND=project
+  DIND_PROJECT=$1
+  DIND=desolate-dind-${1//\//__}
+  DIND_DATA_VOLUME=dind-data-${1//\//__}
+  INNER_SOCKET=unix:///run/dind-sock/docker.sock
+  RESET_COMMAND="dind reset $1"
+  DIND_DATA_SCOPE="$1's own image store (no other project's)"
+}
+
 dind_running() {
   docker inspect -f '{{.State.Status}}' "$DIND" 2>/dev/null | grep -qx running
 }
@@ -362,7 +404,11 @@ dind_running() {
 require_dind() {
   docker inspect "$DIND" >/dev/null 2>&1 && return 0
   echo "cli.sh: $DIND does not exist -- there is no inner daemon to recover." >&2
-  echo "        Start the stack first:  $0 up" >&2
+  if [ "$DIND_KIND" = shared ]; then
+    echo "        Start the stack first:  $0 up" >&2
+  else
+    echo "        $DIND_PROJECT gets one the first time it starts:  $0 desolate $DIND_PROJECT" >&2
+  fi
   exit 1
 }
 
@@ -381,7 +427,7 @@ require_classifier() {
 # One line, and the classifier's verdict as this function's status.
 inner_health() {
   dind_running || { echo "inner daemon: down -- $DIND is not running"; return 1; }
-  docker exec "$DIND" sh "$INNER_HEALTH"
+  docker exec -e "DESOLATE_INNER_SOCKET=${INNER_SOCKET#unix://}" "$DIND" sh "$INNER_HEALTH"
 }
 
 # Inner-daemon queries go through dind and NOT through the orchestrator that
@@ -439,10 +485,20 @@ sweep_inner() {
   inner_docker rm -f $ids >/dev/null 2>&1 || echo "  ...some of them would not go"
 }
 
+# The daemon's container alone. A project dind is the supervisor's: it
+# withdraws the dind from the ingress first and republishes it once healthy.
+restart_dind() {
+  if [ "$DIND_KIND" = shared ]; then
+    compose restart "$DIND_SERVICE"
+  else
+    supervisor ask reset "$DIND_PROJECT" >/dev/null
+  fi
+}
+
 # Rung 2. Remove what reconciliation is choking on, then restart the daemon
 # alone -- the editor, the keyring and every other project stay up.
 sweep_and_restart_dind() {
-  echo "-- rung 2: sweeping stale objects, then restarting $DIND_SERVICE --"
+  echo "-- rung 2: sweeping stale objects, then restarting $DIND --"
   sweep_inner "relays that are no longer running" \
     "$(inner_ids desolate.relay created exited dead restarting)"
   # `dead` only. A STOPPED devcontainer is one `desolate --stop` deliberately
@@ -450,8 +506,8 @@ sweep_and_restart_dind() {
   # could not finish removing one, and that is the object reconciliation trips on.
   sweep_inner "devcontainers the daemon could not finish removing" \
     "$(inner_ids devcontainer.local_folder dead)"
-  echo "  restarting $DIND_SERVICE (nothing else in the stack is touched)"
-  compose restart "$DIND_SERVICE" || echo "cli.sh: the restart itself failed" >&2
+  echo "  restarting $DIND (nothing else in the stack is touched)"
+  restart_dind || echo "cli.sh: the restart itself failed" >&2
 }
 
 data_root_reset_requested() { [ "${1:-}" = "$RESET_DATA_ROOT_FLAG" ]; }
@@ -460,19 +516,18 @@ explain_data_root_reset() {
   cat >&2 <<EOF
 cli.sh: the sweep did not bring the inner daemon back.
 
-What is left is deleting its data root, $DIND_DATA_VOLUME -- the image store
-shared by every project. That is not something to arrive at by falling through,
-so ask for it:
-  $0 reset-inner $RESET_DATA_ROOT_FLAG
+What is left is deleting its data root, $DIND_DATA_VOLUME -- $DIND_DATA_SCOPE.
+That is not something to arrive at by falling through, so ask for it:
+  $0 $RESET_COMMAND $RESET_DATA_ROOT_FLAG
 EOF
 }
 
 confirm_data_root_reset() {
   cat <<EOF
-This DELETES $DIND_DATA_VOLUME. Every base image is pulled again and every build
-cache is gone, for every project; every devcontainer inside it is recreated from
-its spec on the next start, so anything written in one outside /workspaces goes
-with it. /workspaces is a separate volume and is NOT touched.
+This DELETES $DIND_DATA_VOLUME, $DIND_DATA_SCOPE. Every base image in it is
+pulled again and its build cache is gone; every devcontainer inside it is
+recreated from its spec on the next start, so anything written in one outside
+/workspaces goes with it. /workspaces is a separate volume and is NOT touched.
 EOF
   local answer
   read -r -p "Type 'yes' to confirm: " answer
@@ -486,11 +541,100 @@ reset_data_root() {
   data_root_reset_requested "${1:-}" || { explain_data_root_reset; return 1; }
   confirm_data_root_reset || return 1
   echo "-- rung 3: resetting the inner daemon's data root --"
+  delete_data_root
+}
+
+delete_data_root() {
+  if [ "$DIND_KIND" = project ]; then
+    # purge: container, image store and bridge; ensure: a new one, admitted
+    # and healthy, exactly as the project's next start would make it.
+    supervisor ask purge "$DIND_PROJECT" >/dev/null || return 1
+    supervisor ask ensure "$DIND_PROJECT" >/dev/null
+    return
+  fi
   # Removed, not stopped: a volume with a container still referencing it cannot
   # be deleted, and a half-done rung 3 is the worst state of all.
   compose rm -sf "$DIND_SERVICE" || return 1
   docker volume rm "$DIND_DATA_VOLUME" || return 1
   compose up -d "$DIND_SERVICE"
+}
+
+# ── dind df | gc: what the daemons hold, and giving it back (#14) ──────────
+
+# Every daemon a project can be on, running, one per line: "<container> <socket>".
+running_daemons() {
+  dind_running && echo "$DIND /run/inner/docker.sock"
+  docker ps --filter "label=desolate.dind" --filter status=running --format '{{.Names}}' \
+    | sort | sed 's|$| /run/dind-sock/docker.sock|'
+}
+
+stopped_project_dinds() {
+  docker ps -a --filter "label=desolate.dind" --filter status=exited --filter status=created \
+    --format '{{.Names}}' | sort
+}
+
+# On ONE daemon, by its container: the docker CLI each dind image carries,
+# pointed at the socket that daemon listens on.
+daemon_docker() {
+  local name=$1 socket=$2
+  shift 2
+  docker exec "$name" docker -H "unix://$socket" "$@"
+}
+
+dind_df() {
+  local name socket usage
+  printf '%-40s %-14s %-10s %s\n' DAEMON TYPE SIZE RECLAIMABLE
+  while read -r name socket; do
+    [ -n "$name" ] || continue
+    # Bounded, like every query here: one wedged daemon must not hide the rest.
+    if ! usage=$(docker exec "$name" timeout "$INNER_PATIENCE" docker -H "unix://$socket" \
+                   system df --format '{{.Type}}\t{{.Size}}\t{{.Reclaimable}}' 2>/dev/null); then
+      printf '%-40s %s\n' "$name" "(did not answer -- see: $0 dind list)"
+      continue
+    fi
+    printf '%s\n' "$usage" | while IFS=$'\t' read -r type size reclaimable; do
+      printf '%-40s %-14s %-10s %s\n' "$name" "$type" "$size" "$reclaimable"
+    done
+  done < <(running_daemons)
+  for name in $(stopped_project_dinds); do
+    printf '%-40s %s\n' "$name" "(stopped -- its image store size is in: $0 dind list)"
+  done
+}
+
+# Build cache, then dangling images, then ANONYMOUS volumes nothing uses.
+# `volume prune` without -a has left named volumes alone since docker 23, and
+# the dinds run 29: a project's declared volumes survive this, and /workspaces
+# is not a volume on any of these daemons at all.
+gc_daemon() {
+  local name=$1 socket=$2
+  echo "-- $name --"
+  daemon_docker "$name" "$socket" builder prune -af | tail -n 1
+  daemon_docker "$name" "$socket" image prune -f | tail -n 1
+  daemon_docker "$name" "$socket" volume prune -f | tail -n 1
+}
+
+# The nested daemons docker-in-docker used to start kept their state in these,
+# on the SHARED daemon. No project can start one any more (policy.ts refuses
+# the feature), so every one left is an orphan; one still referenced by a
+# container -- a stopped devcontainer from before -- is refused by docker
+# itself, and said so, rather than forced.
+gc_orphans() {
+  local volumes volume
+  volumes=$(inner_docker volume ls -q 2>/dev/null | grep -E '^dind-var-lib-(docker|containerd)-' || true)
+  if [ -z "$volumes" ]; then
+    echo "cli.sh: no docker-in-docker volumes are left on $DIND."
+    return 0
+  fi
+  echo "These are the volumes docker-in-docker features kept on $DIND, the shared daemon:"
+  printf '%s\n' "$volumes" | sed 's/^/  /'
+  local answer
+  read -r -p "Type 'yes' to delete them: " answer
+  [ "$answer" = yes ] || { echo "cli.sh: nothing deleted."; return 1; }
+  for volume in $volumes; do
+    inner_docker volume rm "$volume" >/dev/null 2>&1 \
+      && echo "  removed $volume" \
+      || echo "  kept $volume: something still uses it ($(inner_docker ps -aq --filter "volume=$volume" | paste -sd, -))"
+  done
 }
 
 # Poll quietly, then print the verdict once -- a line per probe would bury it.
@@ -523,7 +667,11 @@ reset_inner() {
   fi
 
   echo "cli.sh: the inner daemon is still not answering after a full reset." >&2
-  echo "        Its own log is the next thing to read:  $0 logs $DIND_SERVICE" >&2
+  if [ "$DIND_KIND" = shared ]; then
+    echo "        Its own log is the next thing to read:  $0 logs $DIND_SERVICE" >&2
+  else
+    echo "        Its own log is the next thing to read:  docker logs $DIND" >&2
+  fi
   return 1
 }
 
@@ -773,6 +921,47 @@ case "$CMD" in
                exit 1
              fi
              reset_inner "$FLAG" ;;
+
+  dind)      # Project dinds (supervisor.ts drives them; this asks it). The
+             # shared daemon keeps its own commands: reset-inner, and --all.
+             SUB="${1:-list}"; shift || true
+             case "$SUB" in
+               list)
+                 require_supervisor
+                 supervisor list ;;
+               reset)
+                 require_supervisor
+                 select_project_dind "${1:?usage: cli.sh dind reset <project> [$RESET_DATA_ROOT_FLAG]}"
+                 FLAG="${2:-}"
+                 if [ -n "$FLAG" ] && ! data_root_reset_requested "$FLAG"; then
+                   echo "usage: cli.sh dind reset <project> [$RESET_DATA_ROOT_FLAG]" >&2
+                   exit 1
+                 fi
+                 require_dind
+                 require_classifier
+                 reset_inner "$FLAG" ;;
+               df)
+                 dind_df ;;
+               gc)
+                 # An if-chain, not a case: completion reads this dispatch's
+                 # case labels as subcommands, and these are flags.
+                 GC="${1:-}"
+                 if [ "$GC" = --orphans ]; then
+                   dind_running || { echo "cli.sh: $DIND is not running" >&2; exit 1; }
+                   gc_orphans
+                 elif [ "$GC" = --all ]; then
+                   while read -r NAME SOCKET; do
+                     [ -n "$NAME" ] && gc_daemon "$NAME" "$SOCKET"
+                   done < <(running_daemons)
+                 elif [ -z "$GC" ] || [ "${GC#-}" != "$GC" ]; then
+                   echo "usage: cli.sh dind gc {<project>|--all|--orphans}" >&2; exit 1
+                 else
+                   select_project_dind "$GC"
+                   dind_running || { echo "cli.sh: $DIND is not running; gc reads a running daemon" >&2; exit 1; }
+                   gc_daemon "$DIND" "${INNER_SOCKET#unix://}"
+                 fi ;;
+               *) echo "usage: cli.sh dind {list|reset <project> [$RESET_DATA_ROOT_FLAG]|df|gc {<project>|--all|--orphans}}" >&2; exit 1 ;;
+             esac ;;
 
   logs)      compose logs "${@:--f --tail=100}" ;;
   ps)        compose ps ;;

@@ -479,6 +479,9 @@ the rules would go stale again each time.
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
 ./cli.sh reset-inner            # the inner daemon is wedged: report, then recover
+./cli.sh dind list              # project daemons: state, idle time, image store, headroom
+./cli.sh dind reset owner/repo  # one project's daemon is wedged: the same ladder, for it alone
+./cli.sh dind df                # disk, per daemon; `dind gc` gives build cache back
 ./cli.sh down                   # stop (down -v also deletes volumes; confirms)
 ```
 
@@ -1841,6 +1844,12 @@ machine.
 | `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
 | `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. The port allocator is told it and never hands it to a dev server.                                                      |
 | `DESOLATE_PORT_BASE`         | `8080`          | Where project editor and dev-server host ports are allocated from (>= 1024). No upper bound: each is a listener `desolate-ingress` opens on demand.                      |
+| `DESOLATE_DIND_IDLE`         | `30`            | Minutes a project daemon may sit with no devcontainer running before it is stopped. Its images stay; the next start is warm.                                             |
+| `DESOLATE_MAX_DINDS`         | `16`            | Project daemons running at once. A newcomer past it stops the longest-idle one; a daemon with a devcontainer running is never stopped for it.                            |
+| `DESOLATE_DIND_MEM_FLOOR`    | `2147483648`    | Bytes of VM memory kept free. A project daemon that would start below it is refused, naming the busy daemons in the way, after idle ones have been stopped.              |
+| `DESOLATE_DIND_MEMORY`       | `6g`            | Memory ceiling of each project daemon, everything it runs included.                                                                                                     |
+| `DESOLATE_DIND_CPUS`         | `4`             | CPU ceiling of each project daemon (never more than the VM has).                                                                                                        |
+| `DESOLATE_DIND_BUILD_CACHE`  | `20GB`          | BuildKit's garbage-collection target in every project daemon: build cache above it is collected as builds run. `./cli.sh dind gc` collects all of it now.                  |
 | `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |
 | `DESOLATE_SKIP_VM_CHECK`     | unset           | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
 
@@ -1879,6 +1888,30 @@ which recreates the affected containers.
   for **every** project, so every base image is pulled again and every build
   cache is gone. It confirms before doing it. `/workspaces` is a separate volume
   and is never touched by any rung.
+
+- **One project's builds hang, or its daemon is wedged** -- a project that uses
+  `docker-outside-of-docker` runs on a daemon of its own, and recovering it is
+  the same ladder pointed at that daemon alone. No other project, and not the
+  editor, is touched by any rung:
+
+  ```bash
+  ./cli.sh dind list                                  # which state is it in?
+  ./cli.sh dind reset owner/repo                      # report; sweep and restart it
+  ./cli.sh dind reset owner/repo --reset-data-root    # last rung: ITS image store only
+  ```
+
+- **The VM's disk is filling up** -- see where it went, then give it back:
+
+  ```bash
+  ./cli.sh dind df                  # images, containers, volumes, build cache, per daemon
+  ./cli.sh dind gc owner/repo       # or --all: build cache, dangling images, unused anonymous volumes
+  ./cli.sh dind gc --orphans        # once: the docker-in-docker volumes left on the shared daemon
+  ```
+
+  `gc` never removes a named volume -- what a project's compose file declares
+  survives it -- and `/workspaces` is not a volume on any of these daemons. A
+  project's own image store goes when the project is purged
+  (`desolate --purge owner/repo`), unless it still has worktrees, which share it.
 
 - **`cli.sh up` says sysbox is missing** -- you're either not on the Colima
   context (`docker context use colima-desolate`) or sysbox isn't installed/

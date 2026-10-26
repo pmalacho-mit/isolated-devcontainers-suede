@@ -36,7 +36,6 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as net from "node:net";
 import * as dind from "./dind.ts";
 import { daemonOf, enforcePolicy, type Daemon } from "./policy.ts";
 import {
@@ -87,6 +86,7 @@ import {
 import * as relay from "./relays.ts";
 import * as shutdown from "./shutdown.ts";
 import { ingressDirectory, IngressMissingError, ownedForwards } from "./ingress-files.ts";
+import { ask as askSupervisor } from "./supervisor-client.ts";
 import { snapshotDirectory, snapshot, initDirectory } from "./snapshot.ts";
 import {
   allocatePorts,
@@ -198,28 +198,8 @@ const daemons = {
 /** The supervisor (supervisor.ts), over its socket in supervisor-run. */
 const supervisor = {
   socket: process.env.DESOLATE_SUPERVISOR ?? "/run/supervisor/supervisor.sock",
-  ask: (request: Record<string, string>): Promise<Record<string, any>> =>
-    new Promise((resolve) => {
-      const connection = net.createConnection(supervisor.socket);
-      let buffer = "";
-      let last: Record<string, any> = { ok: false, error: "the supervisor closed without an answer" };
-      connection.on("connect", () => connection.write(JSON.stringify(request) + "\n"));
-      connection.on("data", (chunk) => {
-        buffer += chunk.toString();
-        let at: number;
-        while ((at = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, at).trim();
-          buffer = buffer.slice(at + 1);
-          if (!line) continue;
-          const message = JSON.parse(line);
-          if (typeof message.log === "string") desolog(message.log);
-          else last = message;
-        }
-      });
-      connection.on("close", () => resolve(last));
-      connection.on("error", (err) =>
-        resolve({ ok: false, error: `the supervisor is not reachable at ${supervisor.socket} (${err.message})` }));
-    }),
+  ask: (request: Record<string, string>) =>
+    askSupervisor(supervisor.socket, request, (line) => desolog(line)),
 };
 
 /**
@@ -1557,6 +1537,23 @@ function purgeTarget(target: Target): void {
   console.log(`purged ${target.name} (container, relays, volumes and state)`);
 }
 
+/**
+ * A project's purge takes its daemon's image store with it -- but only the
+ * PROJECT's purge, and only once nothing else of it is left: its worktrees run
+ * on the same daemon, and a worktree's purge must not cost its siblings their
+ * images. Refused, not skipped, so the store left behind is never a surprise.
+ */
+async function purgeProjectDaemon(target: Target): Promise<void> {
+  if (target.worktree) return;
+  const remaining = worktreesOf(target).map(({ name }) => name);
+  if (remaining.length)
+    return void desolog(`kept ${dind.volumes(target).data}, this project's image store: its worktrees`,
+      `still use it (${remaining.join(", ")}). Remove them, then purge ${target.name} again.`);
+  const answer = await supervisor.ask({ op: "purge", project: target.project });
+  if (answer.ok !== true)
+    die(`could not purge ${dind.name(target)}: ${answer.error ?? "the supervisor said nothing"}`);
+}
+
 async function runTarget(
   target: Target,
   config?: string,
@@ -1766,8 +1763,10 @@ async function main(): Promise<void> {
   else if (args.command === "purge") {
     // A purge has to reach the target's containers and volumes, so its own
     // daemon is brought up for it.
-    if (daemons.saved(target) === "project") await useProjectDaemon(target);
+    const daemon = daemons.saved(target);
+    if (daemon === "project") await useProjectDaemon(target);
     purgeTarget(target);
+    if (daemon === "project") await purgeProjectDaemon(target);
   }
   else if (args.command === "uncommitted") reportUncommitted(target);
   else if (args.command === "populate") populateWorktree(target);
