@@ -1106,3 +1106,36 @@ describe("worktree add and remove: the editor asks, the runner runs git in a san
     }
   });
 });
+
+// ===========================================================================
+describe("--ports --move reaches the runner only in its one shape", () => {
+  // ===========================================================================
+  test("a label and a port arrive as exactly three argv words", async () => {
+    project("move-me", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
+    const msgs = await ask({ op: "ports", project: "move-me", move: { label: "editor", port: 8095 } });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    assert.deepEqual(runnerInvocations()[0], ["--ports", "--move", "editor", "8095", "move-me"]);
+  });
+
+  for (const [why, move] of [
+    ["a flag smuggled as the label", { label: "--rebuild", port: 8095 }],
+    ["a port that is a string", { label: "editor", port: "8095" }],
+    ["a port that is not an integer", { label: "editor", port: 8095.5 }],
+    ["an extra field", { label: "editor", port: 8095, also: "--purge" }],
+    ["a label that is no label", { label: "web", port: 8095 }],
+  ] as const)
+    test(`refuses ${why}, before the runner`, async () => {
+      resetRunner();
+      const msgs = await ask({ op: "ports", project: "move-me", move });
+      assert.equal(result(msgs).ok, false);
+      assert.deepEqual(runnerInvocations(), []);
+    });
+
+  test("move on any op but ports is refused, before the runner", async () => {
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "move-me", move: { label: "editor", port: 8095 } });
+    assert.equal(result(msgs).ok, false);
+    assert.deepEqual(runnerInvocations(), []);
+  });
+});

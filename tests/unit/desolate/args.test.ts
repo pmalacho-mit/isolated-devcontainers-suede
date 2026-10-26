@@ -177,3 +177,26 @@ describe("every flag shape `Flags` declares round-trips", () => {
       assert.equal(parsed.project, "myapp");
     });
 });
+
+describe("--move", () => {
+  test("is a label and a port, with --ports", () => {
+    const args = parseArgs(["--ports", "acme/widgets", "--move", "editor", "8095"]);
+    assert.equal(args.command, "ports");
+    assert.deepEqual(args.move, { label: "editor", port: 8095 });
+    assert.deepEqual(parseArgs(["--ports", "--move", "5173", "8096", "x"]).move, { label: "5173", port: 8096 });
+  });
+
+  test("means nothing without --ports", () => {
+    assert.throws(() => parseArgs(["acme/widgets", "--move", "editor", "8095"]), /only means something with --ports/);
+    assert.throws(() => parseArgs(["--stop", "x", "--move", "editor", "8095"]), /only means something with --ports/);
+  });
+
+  for (const bad of [["editor"], ["editor", "eighty"], ["web", "8095"], ["editor", "0"], ["--all", "8095"], ["5173", "-1"]])
+    test(`refuses ${JSON.stringify(bad)}`, () => {
+      assert.throws(() => parseArgs(["--ports", "x", "--move", ...bad]));
+    });
+
+  test("is absent when not given, rather than an empty object", () => {
+    assert.equal("move" in parseArgs(["--ports", "x"]), false);
+  });
+});
