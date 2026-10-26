@@ -28,10 +28,10 @@
  * other: nothing a request says can stop the loop.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { target as resolveTarget, worktreesOf, type Target } from "./projects.ts";
+import { target as resolveTarget, volumeNamespace, worktreesOf, type Target } from "./projects.ts";
 import { isEntryPoint } from "./utils.ts";
 import * as workGit from "./work-git.ts";
 import {
@@ -136,16 +136,6 @@ const command = (argv: string[], say: Say) => {
   return { status: run.status ?? 1, output: `${run.stdout ?? ""}${run.stderr ?? ""}` };
 };
 
-/** The branch a worktree has checked out, read without checking anything. */
-const branchOf = (target: Target) => {
-  try {
-    const ref = workGit.git(target.dir, ["symbolic-ref", "-q", "HEAD"]);
-    return ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
 /** The project tree's own branch: the one a push must never be. */
 const mainBranchOf = (projectDir: string) => {
   try {
@@ -155,24 +145,19 @@ const mainBranchOf = (projectDir: string) => {
   }
 };
 
-/** A remote a push may go to: GitHub-style ssh -- the host may be a deploy
- *  key's alias, `github.com-acme__widgets` -- or https. Not a local path
- *  (a repository there could carry a receive hook, which would run HERE), not
- *  `<transport>::` (a remote helper; `ext::` is a shell), nothing that starts
- *  like an option. */
-export const SAFE_REMOTE =
-  /^(?:git@[A-Za-z0-9._-]+:|ssh:\/\/git@[A-Za-z0-9._-]+(?::[0-9]+)?\/|https:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?\/)[A-Za-z0-9._~\/-]+$/;
-export const isSafeRemote = (url: string) =>
-  SAFE_REMOTE.test(url) && !url.includes("::") && !url.split(/[/:]/).includes("..");
+export { isSafeRemote, SAFE_REMOTE } from "./work-policy.ts";
 
 /** The exact, unforced refspec, and no hook. */
 export const pushArguments = (url: string, branch: string) =>
   ["push", "--no-verify", url, `refs/heads/${branch}:refs/heads/${branch}`];
 
-/** The ssh newrepo.ts sets for each repository it clones -- the deploy key's
- *  host alias lives in that config -- given here rather than read back from
- *  the repository's own `core.sshCommand`. */
+/** No config but the push's own: the URL is already the one to use (pushUrl),
+ *  so neither the editor's url rewrites nor anything else is wanted. The ssh
+ *  is newrepo.ts's, given here rather than read back from the repository. */
 export const PUSH_ENV = {
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
   GIT_SSH_COMMAND: `ssh -F ${homedir()}/.ssh/config`,
   GIT_ASKPASS: "/bin/false",
   SSH_ASKPASS: "/bin/false",
@@ -180,47 +165,71 @@ export const PUSH_ENV = {
 } as const;
 
 /**
- * Push one branch, and nothing the REPOSITORY's config could turn into a
- * command. A push reads far more of that config than plumbing does, and git
- * gives the repository's values precedence where a reader might expect the
- * command line to win -- `remote.origin.receivepack` is first-value-wins, so a
- * repository's own beats a `-c` (measured: tests/unit/work/watcher.test.ts),
- * and `protocol.<name>.allow` or `url.*.pushInsteadOf` reopen whatever was
- * pinned. So the push is not made from the project at all: a throwaway bare
- * repository, with no hooks and no config, borrows the project's objects
- * (alternates), holds the one ref, and pushes it to the project's origin URL
- * -- read, checked as a plain ssh or https remote, and given explicitly. The
- * editor's own git config, which no devcontainer can reach, still applies:
- * it is where the deploy key's url rewrites live (newrepo.ts).
+ * Where a project's branches are pushed. Never simply its origin: a devcontainer
+ * writes `.git/config`, and an origin naming another repository -- under the
+ * canonical name the editor's url rewrites map to THAT repository's deploy key
+ * -- would push with that key. So the host is always this project's own key
+ * alias, `github.com-<namespace>` (newrepo.ts names it so, and its ssh block
+ * pins the one key, IdentitiesOnly): a deploy key writes only its own
+ * repository on GitHub, so a path naming any other one is refused there. Only
+ * the path is taken from origin. A human can name the remote outright in the
+ * policy (`work init --remote`), which is never read from the repository.
+ */
+export const pushUrl = (projectDir: string, project: string, policy: Policy): string | undefined => {
+  if (policy.remote) return policy.remote;
+  let origin = "";
+  try {
+    origin = workGit.git(projectDir, ["config", "--get", "remote.origin.url"]);
+  } catch {
+    return undefined;
+  }
+  const path = /^(?:git@[^:/]+:|ssh:\/\/git@[^/]+\/)([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+?)(?:\.git)?$/.exec(origin)?.[1];
+  if (!path || path.split("/").some((segment) => segment === "." || segment === "..")) return undefined;
+  return `git@github.com-${volumeNamespace(project)}:${path}.git`;
+};
+
+/** A branch name as the factory will push one. */
+const BRANCH = /^[A-Za-z0-9._/-]{1,200}$/;
+const isBranch = (name: string) => BRANCH.test(name) && !/(^|\/)\.|\.\.|\/\/|\/$|^\/|\.lock(\/|$)|@\{/.test(name);
+
+/**
+ * Push a worktree's branch -- read where the project cannot point outside
+ * itself, and sent where only its own key can write.
+ *
+ * The branch is bundled on the orchestrator's side by a sandbox that sees the
+ * project and nothing else of /workspaces (desolate.ts bundleWorktree): the
+ * editor's own git would follow a symlinked ref or alternates into any
+ * project. The bundle is imported into a throwaway bare repository with no
+ * hooks and no config, and pushed from there, unforced, to pushUrl.
  */
 export const push = (target: Target, policy: Policy, say: Say): { ok: true; branch: string } | { ok: false; reason: string } => {
-  const branch = branchOf(target);
-  if (!branch) return { ok: false, reason: `${target.name} has no branch checked out` };
+  const made = command([config.desolate, "--bundle", "--worktree", target.worktree!, target.project], say);
+  const said = /^BUNDLED (\S+) ([0-9a-f]{40,64}) /m.exec(made.output);
+  if (made.status !== 0 || !said) return { ok: false, reason: `${target.name}'s branch could not be bundled (exit ${made.status})` };
+  const [, branch, commit] = said;
+  if (!isBranch(branch)) return { ok: false, reason: `refusing to push '${branch}': not a branch name` };
   if (branch === mainBranchOf(target.projectDir)) return { ok: false, reason: `refusing to push '${branch}': it is the project's own branch` };
   if (!branch.startsWith(policy.branch_prefix))
     return { ok: false, reason: `refusing to push '${branch}': not under the policy's prefix '${policy.branch_prefix}'` };
-  let url: string;
-  try {
-    url = workGit.git(target.projectDir, ["config", "--get", "remote.origin.url"]);
-  } catch {
-    return { ok: false, reason: "the project has no origin to push to" };
-  }
-  if (!isSafeRemote(url)) return { ok: false, reason: `refusing to push to '${url}': not a plain ssh or https remote` };
-  const commit = workGit.resolve(target.projectDir, `refs/heads/${branch}`);
-  if (!commit) return { ok: false, reason: `${branch} does not resolve` };
+  const url = pushUrl(target.projectDir, target.project, policy);
+  if (!url) return { ok: false, reason: "no remote to push to: origin is not an ssh remote this can follow, and the policy names none" };
+  // Where desolate.ts wrote it, computed here rather than read from its output.
+  const bundle = join(config.workspaces, ".desolate", "factory", "push", target.namespace, "branch.bundle");
 
   const bare = mkdtempSync(join(tmpdir(), "desolate-push-"));
-  const inBare = (args: string[], env: Record<string, string> = {}) =>
+  const inBare = (args: string[]) =>
     execFileSync("git", ["--git-dir", bare, ...args], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", ...env },
+      env: { ...process.env, ...PUSH_ENV },
+      timeout: COMMAND_MS,
     });
   try {
     inBare(["init", "--bare", "--quiet", "--template="]);
-    writeFileSync(join(bare, "objects", "info", "alternates"), `${join(target.projectDir, ".git", "objects")}\n`);
-    inBare(["update-ref", `refs/heads/${branch}`, commit]);
-    inBare(pushArguments(url, branch), PUSH_ENV);
+    inBare(["fetch", "--quiet", "--no-tags", bundle, `refs/heads/${branch}:refs/heads/${branch}`]);
+    if (inBare(["rev-parse", `refs/heads/${branch}`]).trim() !== commit)
+      return { ok: false, reason: `the bundle of ${branch} is not the commit the sandbox reported` };
+    inBare(pushArguments(url, branch));
     say(`  pushed ${branch} to ${url}`);
     return { ok: true, branch };
   } catch (err: any) {
@@ -231,8 +240,13 @@ export const push = (target: Target, policy: Policy, say: Say): { ok: true; bran
 };
 
 const hasHooks = (projectDir: string) => {
+  // Every scope the repository has -- its config, what that includes, and
+  // config.worktree -- with the system and global ones off (HARDENED_ENV).
+  // Not the command line's own core.hooksPath=/dev/null (HARDENED), which
+  // `--show-scope` names as such.
   try {
-    if (workGit.git(projectDir, ["config", "--local", "--get", "core.hooksPath"])) return true;
+    const set = workGit.git(projectDir, ["config", "--includes", "--show-scope", "--get-all", "core.hooksPath"]);
+    if (set.split("\n").some((line) => line && !line.startsWith("command\t"))) return true;
   } catch { /* unset */ }
   const hooks = join(projectDir, ".git", "hooks");
   return existsSync(hooks) && readdirSync(hooks).some((name) => !name.endsWith(".sample"));
@@ -271,6 +285,8 @@ export const tickProject = (project: string, say: Say) => {
     return say(`${project}: the factory policy cannot be read (${err?.message ?? err}); doing nothing`);
   }
   if (!policy || !existsSync(join(root.projectDir, ".git"))) return;
+  const outside = workGit.containment(root.projectDir);
+  if (outside) return say(`${project}: refusing to read its repository: ${outside}`);
   // New work items become requests first, so they are acted on this tick.
   tickForge(project, config.workspaces, policy, say, ulid);
   const done = handled(config.workspaces, project);

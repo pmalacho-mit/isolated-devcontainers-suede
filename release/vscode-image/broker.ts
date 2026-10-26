@@ -92,6 +92,7 @@ const operations = [
   "ports",
   ...worktreeOperations,
   "purge",
+  "bundle",
   ...globalOperations,
 ] as const;
 type Operation = (typeof operations)[number];
@@ -114,7 +115,7 @@ type Request = {
         ? { op: op; project: string; worktree: string; force?: boolean }
         : op extends "ports"
           ? { op: op; project: string; worktree?: string; move?: { label: string; port: number }; json?: boolean }
-          : op extends "purge"
+          : op extends "purge" | "bundle"
             ? { op: op; project: string; worktree: string }
             : { op: op; project: string; worktree?: string };
 }[Operation];
@@ -172,7 +173,7 @@ const request = {
     (!("json" in query) || ((query.op === "list" || query.op === "ports") && typeof query.json === "boolean")) &&
     // A purge is a worktree's, never a project's: a project's purge takes its
     // daemon's image store with it, and that is the Mac's to ask for.
-    (query.op !== "purge" || ("worktree" in query && typeof query.worktree === "string")) &&
+    ((query.op !== "purge" && query.op !== "bundle") || ("worktree" in query && typeof query.worktree === "string")) &&
     (isGlobalOperation(query.op) ||
       ("project" in query &&
         typeof query.project === "string" &&
@@ -342,6 +343,9 @@ async function handle(req: unknown, send: Send) {
         flags = ["--purge"];
         break;
       }
+      case "bundle":
+        flags = ["--bundle"];
+        break;
     }
 
     const code = await spawnDesolate(targetArgv(target, flags), send);

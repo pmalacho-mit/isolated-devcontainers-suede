@@ -1536,6 +1536,37 @@ function removeWorktree(target: Target, force: boolean): void {
   console.log(`worktree: removed ${target.name}`);
 }
 
+/** Where a worktree's branch is handed to the editor to push: one directory
+ *  per target, so a sandbox sees only its own. Under /workspaces/.desolate,
+ *  which no devcontainer mounts. */
+const PUSH_DIRECTORY = path.join(WORKSPACES, ".desolate", "factory", "push");
+
+/**
+ * Bundle a worktree's branch for the factory's push (work-watcher.ts).
+ *
+ * The editor pushes, because the deploy key's agent is there; but git in the
+ * editor follows whatever the project's `.git` points at -- a ref that is a
+ * symlink, alternates naming another project's objects -- and the editor can
+ * read every project. So the branch is read HERE instead, in a sandbox that
+ * mounts the project root (read-only) and its own output directory, and
+ * nothing else of /workspaces: whatever the project points at outside itself
+ * resolves to nothing. The editor then imports the bundle into a repository
+ * of its own and pushes that.
+ */
+function bundleWorktree(target: Target): void {
+  if (!target.worktree) return die("--bundle bundles a worktree's branch; name one with --worktree");
+  const out = path.join(PUSH_DIRECTORY, target.namespace);
+  fs.rmSync(out, { recursive: true, force: true });
+  fs.mkdirSync(out, { recursive: true });
+  const bundled = docker.bundleBranch(
+    worktreeSandbox(target, worktrees.bundleMounts(target, out)),
+    target.dir,
+    "/out/branch.bundle",
+  );
+  if (!bundled) return die(`could not bundle ${target.name}'s branch in its sandbox (no branch checked out, or git failed)`);
+  console.log(`BUNDLED ${bundled.branch} ${bundled.commit} ${path.join(out, "branch.bundle")}`);
+}
+
 /** The editor's user, which owns /workspaces and is the only one there. */
 const EDITOR_UID = 1000;
 
@@ -1833,6 +1864,7 @@ async function main(): Promise<void> {
   }
   else if (args.command === "uncommitted") reportUncommitted(target);
   else if (args.command === "reclaim") await reclaimTarget(target, args.path);
+  else if (args.command === "bundle") bundleWorktree(target);
   else if (args.command === "populate") populateWorktree(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }

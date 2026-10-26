@@ -18,7 +18,7 @@
  * (work-policy.ts), never as a request an agent could have forged. What the
  * human did is said on their own outbox, `refs/desolate/agents/@human/outbox`.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { target as resolveTarget, validName, worktreesOf } from "./projects.ts";
 import { isEntryPoint } from "./utils.ts";
@@ -52,7 +52,7 @@ import { answer, closeWorktree, push } from "./work-watcher.ts";
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
 class UsageError extends Error {}
-const USAGE = `usage: work init <project> [--max N] [--on-done push|hold] [--prefix p/] [--requesters a,b] [--adapter file] [--allow-hooks] [--force]
+const USAGE = `usage: work init <project> [--max N] [--on-done push|hold] [--prefix p/] [--requesters a,b] [--adapter file] [--remote url] [--allow-hooks] [--force]
        work policy <project> | log <project> [--target t] [--type t] | requests <project> | verify <project>
        work approve <project> <request-id> | push <project> <worktree> | close <project> <worktree>
        work say <project> <type> <body> [--to t,...]`;
@@ -82,6 +82,10 @@ const options = (argv: string[], values: string[], flags: string[] = []) => {
   }
   return { found, set, rest };
 };
+
+/** What a message says, made safe for a terminal: a writer chooses every byte
+ *  of it, escape sequences included. */
+const printable = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
 
 const humanSays = (projectDir: string, type: string, body: string, to: string[] = ["*"]) => {
   const message: Message = { v: 1, from: HUMAN, to, type, body, item: null, commit: null, reply_to: null };
@@ -144,7 +148,15 @@ export const verify = (projectDir: string) => {
 /** The moves a ref's reflog recorded: each one an append (or the creation). */
 const reflogProblems = (projectDir: string, ref: string, writtenOnce: boolean) => {
   const logs = workGit.git(projectDir, ["rev-parse", "--path-format=absolute", "--git-path", `logs/${ref}`]);
-  if (!existsSync(logs)) return [];
+  // Every writer of the protocol creates its ref's reflog (--create-reflog), so
+  // a ref without one was written some other way -- or its log was removed.
+  let stat;
+  try {
+    stat = lstatSync(logs);
+  } catch {
+    return [`${ref}: has no reflog -- written outside the protocol, or its log was removed`];
+  }
+  if (!stat.isFile()) return [`${ref}: its reflog is not a regular file`];
   const problems: string[] = [];
   let previous: string | undefined;
   for (const line of readFileSync(logs, "utf8").split("\n").filter(Boolean)) {
@@ -178,7 +190,7 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
 
   switch (verb) {
     case "init": {
-      const { found, set, rest: extra } = options(rest, ["--max", "--on-done", "--prefix", "--requesters", "--adapter"], ["--allow-hooks", "--force"]);
+      const { found, set, rest: extra } = options(rest, ["--max", "--on-done", "--prefix", "--requesters", "--adapter", "--remote"], ["--allow-hooks", "--force"]);
       if (extra.length) throw new UsageError(`unexpected '${extra.join(" ")}'`);
       const files = factoryFiles(WORKSPACES, root.project);
       if (existsSync(files.policy) && !set.has("--force")) throw new UsageError(`${root.project} already has a factory (${files.policy}); --force replaces its policy`);
@@ -189,6 +201,7 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
         ...(found["--prefix"] !== undefined ? { branch_prefix: found["--prefix"] } : {}),
         ...(found["--requesters"] ? { requesters: found["--requesters"].split(",") } : {}),
         ...(set.has("--allow-hooks") ? { allow_hooks: true } : {}),
+        ...(found["--remote"] ? { remote: found["--remote"] } : {}),
       }));
       // An adapter's opens are honoured only from a requester it is among.
       if (found["--adapter"]) {
@@ -221,7 +234,7 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
           if (found["--target"] && message.from !== found["--target"]) continue;
           if (found["--type"] && message.type !== found["--type"]) continue;
           const time = timeOf(root.projectDir, commit);
-          rows.push({ time, line: `${commit.slice(0, 12)}  ${time}  ${message.from.padEnd(16)} ${subjectOf(message)}` });
+          rows.push({ time, line: `${commit.slice(0, 12)}  ${time}  ${printable(message.from).padEnd(16)} ${printable(subjectOf(message))}` });
         }
       // Newest first; a stable sort keeps a ref's own order within a second.
       for (const { line } of rows.sort((a, b) => (a.time === b.time ? 0 : a.time < b.time ? 1 : -1))) out(line);
@@ -241,13 +254,13 @@ export const main = (argv: string[], out: (line: string) => void = console.log):
         }
         const recorded = outcomes.get(id);
         const outcome = recorded && recorded !== REOPENED ? recorded : outcomes.has(`wait:${id}`) ? "waiting" : "pending";
-        out(`${id}  ${what}  -- ${outcome}${approved.has(id) ? " (approved)" : ""}`);
+        out(printable(`${id}  ${what}  -- ${outcome}${approved.has(id) ? " (approved)" : ""}`));
       }
       return 0;
     }
     case "verify": {
       const { checked, problems } = verify(root.projectDir);
-      for (const problem of problems) out(`  ${problem}`);
+      for (const problem of problems) out(`  ${printable(problem)}`);
       out(problems.length ? `work: ${problems.length} problem(s) in ${checked} message(s)` : `work: ${checked} message(s), every one an append by its writer`);
       return problems.length ? 1 : 0;
     }

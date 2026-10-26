@@ -1170,6 +1170,16 @@ describe("purge: what a worktree's removal runs on this side (F2)", () => {
     assert.ok(!runnerInvocations().some((argv) => argv[0] === "--purge"), "it purged anyway");
   });
 
+  test("bundle is a worktree's too, and reaches the runner as --bundle", async () => {
+    worktree("factory-b", "issue-2");
+    resetRunner();
+    assert.equal(result(await ask({ op: "bundle", project: "factory-b", worktree: "issue-2" })).ok, true);
+    assert.deepEqual(runnerInvocations(), [["--bundle", "--worktree", "issue-2", "factory-b"]]);
+    resetRunner();
+    assert.equal(result(await ask({ op: "bundle", project: "factory-b" })).ok, false);
+    assert.deepEqual(runnerInvocations(), []);
+  });
+
   test("a project's own purge is not the editor's to ask for", async () => {
     resetRunner();
     const msgs = await ask({ op: "purge", project: "factory-p" });

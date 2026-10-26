@@ -76,7 +76,7 @@ if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") usage();
 // already refuses unknown options; this side has to agree, or the two disagree
 // about what the same command line means.
 const OPS: Record<string, string> = {
-  "--list": "list", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild", "--purge": "purge",
+  "--list": "list", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild", "--purge": "purge", "--bundle": "bundle",
 };
 /** Flags that consume the next argument. */
 const VALUES = ["--worktree", "--branch"] as const;
@@ -124,6 +124,7 @@ if (value["--branch"] !== undefined && worktree === undefined)
 if (modifier.has("--all") && op !== "stop") refuse("--all only means something with --stop");
 if (move && op !== "ports") refuse("--move only means something with --ports");
 if (modifier.has("--json") && op !== "list" && op !== "ports") refuse("--json only means something with --list or --ports");
+if (op === "bundle" && value["--worktree"] === undefined) refuse("--bundle bundles a worktree's branch: name it with --worktree");
 if (op === "purge" && value["--worktree"] === undefined)
   refuse("--purge here is a worktree's: name it with --worktree (a project's purge is the Mac's: ./cli.sh desolate --purge <project>)");
 

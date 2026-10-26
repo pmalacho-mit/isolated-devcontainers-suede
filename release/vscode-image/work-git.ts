@@ -11,6 +11,8 @@
  * and the index is never read. tests/static/13 asserts the flags.
  */
 import { execFileSync } from "node:child_process";
+import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { author, type Message } from "./work-protocol.ts";
 
 /** Prepended to every git this module runs. */
@@ -29,7 +31,15 @@ export const HARDENED_ENV = {
   GIT_CONFIG_SYSTEM: "/dev/null",
   GIT_CONFIG_NOSYSTEM: "1",
   GIT_TERMINAL_PROMPT: "0",
+  // refs/replace/* would let a writer change what a known sha reads as,
+  // without moving any ref or reflog `work verify` watches.
+  GIT_NO_REPLACE_OBJECTS: "1",
 } as const;
+
+/** One git call's ceiling. A repository can make one hang -- a FIFO where
+ *  `packed-refs` belongs blocks `for-each-ref` for ever -- and the watcher
+ *  walks every project in turn, so one project must not stall the rest. */
+const GIT_MS = 30_000;
 
 export class GitError extends Error {}
 
@@ -40,6 +50,9 @@ export const git = (repo: string, args: string[], options: { input?: string; env
       input: options.input,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...HARDENED_ENV, ...options.env },
+      timeout: GIT_MS,
+      killSignal: "SIGKILL",
+      maxBuffer: 64 * 1024 * 1024,
     }).trimEnd();
   } catch (err: any) {
     throw new GitError(String(err?.stderr || err?.message || err).trim().split("\n").slice(-2).join(" / "));
@@ -131,6 +144,56 @@ export const append = (
     }
   }
   throw new GitError(`could not append to ${ref}: another writer kept winning`);
+};
+
+/**
+ * Whether a project's repository is wholly its own, as far as the editor's git
+ * would follow it: `.git` a real directory inside the project; HEAD,
+ * packed-refs and everything under refs/ regular files and directories (no
+ * symlink -- one could name another project's ref -- and no FIFO, which would
+ * hang git); no alternates naming some other object store. The editor reads
+ * every project, so a repository that points outside itself would have it
+ * read, and copy into messages, what is not this project's. Refused, every
+ * tick, before anything is read. (What remains is a race: a link created
+ * between this check and the read. The push does not depend on this -- its
+ * branch is read in a sandbox that sees only the project, desolate.ts
+ * bundleWorktree.)
+ */
+export const containment = (projectDir: string): string | undefined => {
+  const gitDir = join(projectDir, ".git");
+  let real: string;
+  try {
+    if (!lstatSync(gitDir).isDirectory()) return ".git is not a directory";
+    real = realpathSync(gitDir);
+  } catch {
+    return "there is no .git";
+  }
+  if (real !== join(realpathSync(projectDir), ".git")) return ".git resolves outside the project";
+  for (const alternates of ["objects/info/alternates", "objects/info/http-alternates"])
+    if (existsSync(join(gitDir, alternates))) return `it has ${alternates}`;
+  for (const file of ["HEAD", "packed-refs"]) {
+    const path = join(gitDir, file);
+    if (existsSync(path) || isLink(path)) if (!lstatSync(path).isFile()) return `${file} is not a regular file`;
+  }
+  const walk = (dir: string): string | undefined => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const below = walk(path);
+        if (below) return below;
+      } else if (!entry.isFile()) return `${path.slice(gitDir.length + 1)} is not a regular file`;
+    }
+    return undefined;
+  };
+  return existsSync(join(gitDir, "refs")) ? walk(join(gitDir, "refs")) : undefined;
+};
+
+const isLink = (path: string) => {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 };
 
 /** A file at a ref, read without checking anything out, or undefined. */

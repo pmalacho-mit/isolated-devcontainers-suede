@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { fileAdapter, fileItems, worktreeName, WORK_FILE } from "../../../release/vscode-image/work-forge.ts";
 import { validWorktree } from "../../../release/vscode-image/projects.ts";
@@ -41,6 +42,40 @@ describe("marking an item done", () => {
     fs.writeFileSync(path.join(dir, WORK_FILE), before);
     fileAdapter.complete(dir, fileItems(before)[0]);
     assert.equal(fs.readFileSync(path.join(dir, WORK_FILE), "utf8"), "- [x] One\n- [ ] Two\n- [ ] One more\n");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("the file adapter touches the project's own file and nothing else", () => {
+  const setup = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-contained-"));
+    const project = path.join(dir, "acme"), victim = path.join(dir, "victim");
+    for (const d of [project, victim]) fs.mkdirSync(path.join(d, ".desolate"), { recursive: true });
+    fs.writeFileSync(path.join(victim, WORK_FILE), "- [ ] Victim's secret plan\n");
+    return { dir, project, victim };
+  };
+
+  test("a work.md that is a link to another project's is neither read nor ticked", () => {
+    const { dir, project, victim } = setup();
+    fs.symlinkSync(path.join(victim, WORK_FILE), path.join(project, WORK_FILE));
+    assert.deepEqual(fileAdapter.poll(project), []);
+    fileAdapter.complete(project, fileItems("- [ ] Victim's secret plan")[0]);
+    assert.equal(fs.readFileSync(path.join(victim, WORK_FILE), "utf8"), "- [ ] Victim's secret plan\n");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("nor through a .desolate that is a link", () => {
+    const { dir, project, victim } = setup();
+    fs.rmSync(path.join(project, ".desolate"), { recursive: true });
+    fs.symlinkSync(path.join(victim, ".desolate"), path.join(project, ".desolate"));
+    assert.deepEqual(fileAdapter.poll(project), []);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("and a FIFO there does not hang it", async () => {
+    const { dir, project } = setup();
+    execFileSync("mkfifo", [path.join(project, WORK_FILE)]);
+    assert.deepEqual(fileAdapter.poll(project), []);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

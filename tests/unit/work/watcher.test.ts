@@ -148,7 +148,18 @@ case "$1" in
   remove) git -C ${repo} worktree remove --force ${repo}/.worktrees/"$3" ;;
 esac
 `, { mode: 0o755 });
-  fs.writeFileSync(path.join(tmp, "bin/desolate"), `#!/bin/sh\necho "desolate $*" >> ${calls}\n`, { mode: 0o755 });
+  // `desolate --bundle` does here what desolate.ts does, minus the sandbox
+  // (the nested harness runs the real one): the worktree's branch, bundled
+  // where the watcher will look for it, and the line it parses.
+  fs.writeFileSync(path.join(tmp, "bin/desolate"), `#!/bin/sh
+echo "desolate $*" >> ${calls}
+if [ "$1" = --bundle ]; then
+  out=${workspaces}/.desolate/factory/push/$(echo "$4" | sed 's#/#__#g')--wt--$3
+  mkdir -p "$out"; b=$(git -C ${repo}/.worktrees/$3 symbolic-ref --short HEAD)
+  git -C ${repo}/.worktrees/$3 bundle create -q "$out/branch.bundle" "refs/heads/$b"
+  echo "BUNDLED $b $(git -C ${repo} rev-parse "refs/heads/$b") $out/branch.bundle"
+fi
+`, { mode: 0o755 });
   fs.writeFileSync(path.join(tmp, "bin/ssh"), `#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n`, { mode: 0o755 });
 });
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -244,7 +255,7 @@ describe("pushing, on a policy that pushes", () => {
   test("an agent's done pushes its branch -- and a hostile receivepack runs nothing", () => {
     const marker = path.join(tmp, "receivepack-ran");
     git(repo, "config", "remote.origin.receivepack", `touch ${marker}; git-receive-pack`);
-    writePolicy({ max_open_worktrees: 4, requesters: ["main", "forge/file"], on_done: "push" });
+    writePolicy({ max_open_worktrees: 4, requesters: ["main", "forge/file"], on_done: "push", remote: `git@localhost:${remote}` });
     const wt = path.join(repo, ".worktrees", "second");
     execFileSync("git", ["-C", wt, "-c", "user.name=a", "-c", "user.email=a@a", "commit", "-q", "--allow-empty", "-m", "work"]);
     work("second", "done", "ready");
@@ -254,5 +265,58 @@ describe("pushing, on a policy that pushes", () => {
     assert.ok(states().some((s) => /^state: pushed factory\/second/.test(s)), states().join("\n"));
     tick();
     assert.equal(states().filter((s) => /pushed factory\/second/.test(s)).length, 1, "a done is pushed once");
+  });
+});
+
+describe("where a push goes, and what the editor will read", () => {
+  test("never simply origin: the host is the project's own deploy-key alias", async () => {
+    const { pushUrl } = await import("../../../release/vscode-image/work-watcher.ts");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pushurl-"));
+    execFileSync("git", ["init", "-q", dir]);
+    for (const [origin, expected] of [
+      // newrepo's own clone URL: unchanged
+      ["git@github.com-acme__widgets:acme/widgets.git", "git@github.com-acme__widgets:acme/widgets.git"],
+      // the canonical name of ANOTHER repository, which the editor's rewrites
+      // would map to that repository's key: the host is forced back to ours
+      ["git@github.com:victim/repo.git", "git@github.com-acme__widgets:victim/repo.git"],
+      ["git@github.com-victim__repo:victim/repo.git", "git@github.com-acme__widgets:victim/repo.git"],
+      ["ssh://git@github.com/victim/repo", "git@github.com-acme__widgets:victim/repo.git"],
+    ]) {
+      execFileSync("git", ["-C", dir, "config", "remote.origin.url", origin]);
+      assert.equal(pushUrl(dir, "acme/widgets", { ...DEFAULT_POLICY }), expected, origin);
+    }
+    for (const origin of ["/workspaces/x.git", "ext::sh -c x", "git@github.com:../../x.git", "https://github.com/a/b"]) {
+      execFileSync("git", ["-C", dir, "config", "remote.origin.url", origin]);
+      assert.equal(pushUrl(dir, "acme/widgets", { ...DEFAULT_POLICY }), undefined, origin);
+    }
+    assert.equal(pushUrl(dir, "acme/widgets", { ...DEFAULT_POLICY, remote: "git@example.com:a/b.git" }), "git@example.com:a/b.git",
+      "a remote a human named in the policy is used as named");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a repository that points outside itself is not read at all", async () => {
+    const { containment } = await import("../../../release/vscode-image/work-git.ts");
+    const make = () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "contained-"));
+      execFileSync("git", ["init", "-q", "-b", "main", dir]);
+      execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"]);
+      return dir;
+    };
+    const clean = make();
+    assert.equal(containment(clean), undefined);
+    const cases: [string, (dir: string) => void, RegExp][] = [
+      ["a ref that is a symlink", (d) => { fs.rmSync(path.join(d, ".git/refs/heads/main")); fs.symlinkSync("/etc/hostname", path.join(d, ".git/refs/heads/main")); }, /refs\/heads\/main is not a regular file/],
+      ["alternates", (d) => fs.writeFileSync(path.join(d, ".git/objects/info/alternates"), "/workspaces/victim/.git/objects\n"), /alternates/],
+      ["a FIFO for packed-refs", (d) => execFileSync("mkfifo", [path.join(d, ".git/packed-refs")]), /packed-refs is not a regular file/],
+      ["a .git that is a file", (d) => { fs.rmSync(path.join(d, ".git"), { recursive: true }); fs.writeFileSync(path.join(d, ".git"), "gitdir: /workspaces/victim/.git\n"); }, /not a directory/],
+      ["a .git that is a link", (d) => { fs.renameSync(path.join(d, ".git"), path.join(d, "real")); fs.symlinkSync(path.join(d, "real"), path.join(d, ".git")); }, /not a directory/],
+    ];
+    for (const [why, plant, reason] of cases) {
+      const dir = make();
+      plant(dir);
+      assert.match(containment(dir) ?? "(contained)", reason, why);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    fs.rmSync(clean, { recursive: true, force: true });
   });
 });

@@ -39,7 +39,15 @@ before(() => {
   git("remote", "add", "origin", `git@localhost:${remote}`);
   fs.mkdirSync(path.join(tmp, "bin"));
   fs.writeFileSync(path.join(tmp, "bin/ssh"), `#!/bin/sh\nfor last; do :; done\nexec sh -c "$last"\n`, { mode: 0o755 });
-  fs.writeFileSync(path.join(tmp, "bin/desolate"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(tmp, "bin/desolate"), `#!/bin/sh
+if [ "$1" = --bundle ]; then
+  out=${workspaces}/.desolate/factory/push/$(echo "$4" | sed 's#/#__#g')--wt--$3
+  mkdir -p "$out"; b=$(git -C ${repo}/.worktrees/$3 symbolic-ref --short HEAD)
+  git -C ${repo}/.worktrees/$3 bundle create -q "$out/branch.bundle" "refs/heads/$b"
+  echo "BUNDLED $b $(git -C ${repo} rev-parse "refs/heads/$b") $out/branch.bundle"
+fi
+exit 0
+`, { mode: 0o755 });
   fs.writeFileSync(path.join(tmp, "bin/worktree"),
     `#!/bin/sh\n[ "$1" = remove ] && git -C ${repo} worktree remove --force ${repo}/.worktrees/"$3"\nexit 0\n`, { mode: 0o755 });
 });
@@ -47,7 +55,7 @@ after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 describe("enabling a factory is a human act, outside the repository", () => {
   test("init writes the policy under /workspaces/.desolate and says so on the human's outbox", () => {
-    const { status, out } = work("init", "acme", "--max", "3", "--prefix", "issue/");
+    const { status, out } = work("init", "acme", "--max", "3", "--prefix", "issue/", "--remote", `git@localhost:${path.join(tmp, "remote.git")}`);
     assert.equal(status, 0, out);
     const policy = JSON.parse(fs.readFileSync(path.join(workspaces, ".desolate/factory/acme.json"), "utf8"));
     assert.equal(policy.max_open_worktrees, 3);
@@ -153,5 +161,23 @@ describe("the rest of the verbs", () => {
     // test above made and undid -- which the reflog keeps, as it should.
     const problems = work("verify", "acme").out.split("\n").filter((line) => line.startsWith("  refs/"));
     assert.ok(problems.length > 0 && problems.every((line) => line.startsWith("  refs/desolate/agents/main/outbox:")), problems.join("\n"));
+  });
+});
+
+describe("what reaches the human's terminal", () => {
+  test("a message's escape sequences do not", () => {
+    agent("main", "say", "status", "\u001b]0;pwned\u0007\u001b[2Jcleared");
+    const shown = work("log", "acme", "--target", "main").out;
+    assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f]/.test(shown), JSON.stringify(shown.slice(0, 200)));
+    assert.match(shown, /\?\]0;pwned\?\?\[2Jcleared/);
+  });
+
+  test("a ref with no reflog fails verify", () => {
+    const commit = git("rev-parse", "refs/desolate/agents/main/outbox");
+    git("update-ref", "refs/desolate/agents/stray/outbox", commit);   // no --create-reflog
+    const { status, out } = work("verify", "acme");
+    assert.equal(status, 1);
+    assert.match(out, /stray\/outbox: has no reflog/);
+    git("update-ref", "-d", "refs/desolate/agents/stray/outbox");
   });
 });

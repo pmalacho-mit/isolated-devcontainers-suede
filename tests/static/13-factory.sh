@@ -23,13 +23,19 @@ group "it runs plumbing, and the one porcelain it needs is isolated"
 # that reads content or a work tree would run filters and hooks.
 CALLED=$(grep -ohE '(workGit\.git\([^,]+, |git\(repo, |inBare\()(pushArguments|\["[a-z-]+")' "$GIT_TS" "$WATCHER" \
   | sed -E 's/.*\["//; s/.*\(//; s/"$//; s/pushArguments/push/' | sort -u | tr '\n' ' ')
-ALLOWED=" cat-file commit-tree config for-each-ref hash-object init mktree push rev-list rev-parse symbolic-ref update-ref "
+ALLOWED=" cat-file commit-tree config fetch for-each-ref hash-object init mktree push rev-list rev-parse symbolic-ref update-ref "
 assert_ok "found the call sites" test -n "$CALLED"
 for sub in $CALLED; do
   case "$ALLOWED" in *" $sub "*) pass "git $sub is plumbing (or the isolated push)" ;;
     *) fail "git $sub is plumbing (or the isolated push)" "it is not on the allowed list" ;; esac
 done
 assert_ok "the push is made from a throwaway repository, not the project" grep -q '"--git-dir", bare' "$WATCHER"
+assert_eq "fetch and push run only there, never against a project" \
+  "$(grep -oE '(workGit\.git\([^,]+, |git\(repo, )\["(fetch|push)"' "$GIT_TS" "$WATCHER" | wc -l | tr -d ' ')" "0"
+assert_eq "and the branch comes from the sandbox's bundle: no alternates into a project's store" \
+  "$(grep -c 'alternates"), `' "$WATCHER")" "0"
+assert_ok "which desolate.ts writes, in a sandbox mounting the project root read-only" \
+  grep -q 'type=bind,source=${target.projectDir},target=${target.projectDir},readonly' "$RELEASE/vscode-image/worktrees.ts"
 assert_ok "with no template (so no hooks) and --no-verify" grep -q '"--template="' "$WATCHER"
 
 group "it runs in the editor and nowhere else"

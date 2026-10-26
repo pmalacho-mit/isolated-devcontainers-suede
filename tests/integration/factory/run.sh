@@ -8,7 +8,8 @@
 # for real -- desolate-work in the worktrees, the watcher, the file adapter,
 # `work verify` -- on a real repository, pushing to a bare remote over an ssh
 # that runs here. What needs the stack is stubbed: `desolate` (the broker's
-# start, stop and purge) succeeds, and `worktree` is real `git worktree`.
+# start, stop and purge) succeeds and bundles as desolate.ts does, minus its
+# sandbox; `worktree` is real `git worktree`.
 # tests/integration/broker covers what the broker does with those requests,
 # and the nested harness runs the watcher in the editor itself.
 #
@@ -46,7 +47,18 @@ case "\$1" in
   remove) exec git -C "$REPO" worktree remove --force "$REPO/.worktrees/\$3" ;;
 esac
 EOF
-printf '#!/bin/sh\nexit 0\n' > "$BIN/desolate"
+# `desolate --bundle` as desolate.ts answers it, minus the sandbox (the nested
+# harness runs the real one).
+cat > "$BIN/desolate" <<EOF
+#!/bin/sh
+if [ "\$1" = --bundle ]; then
+  out="$WORKSPACES/.desolate/factory/push/acme--wt--\$3"; mkdir -p "\$out"
+  b=\$(git -C "$REPO/.worktrees/\$3" symbolic-ref --short HEAD)
+  git -C "$REPO/.worktrees/\$3" bundle create -q "\$out/branch.bundle" "refs/heads/\$b"
+  echo "BUNDLED \$b \$(git -C "$REPO" rev-parse "refs/heads/\$b") \$out/branch.bundle"
+fi
+exit 0
+EOF
 chmod +x "$BIN/ssh" "$BIN/worktree" "$BIN/desolate"
 
 tick() { node "$RELEASE/vscode-image/work-watcher.ts" --once >> "$TMP/watcher.log" 2>&1; }
@@ -61,7 +73,7 @@ title_of() {
 }
 
 group "a human enables it"
-assert_ok "work init" work init acme --max 2 --on-done push --prefix factory/ --adapter file
+assert_ok "work init" work init acme --max 2 --on-done push --prefix factory/ --adapter file --remote "git@localhost:$REMOTE"
 assert_contains "the policy names the adapter as a requester" "$(cat "$WORKSPACES/.desolate/factory/acme.json")" '"forge/file"'
 
 group "three items, a cap of two"

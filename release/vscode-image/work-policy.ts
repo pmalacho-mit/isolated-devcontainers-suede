@@ -52,9 +52,22 @@ export interface Policy {
   /** Where work items come from (work-forge.ts). Each also needs
    *  `forge/<adapter>` among the requesters for its opens to be honoured. */
   adapters: string[];
+  /** Where pushes go, when not the project's own deploy-key alias
+   *  (work-watcher.ts pushUrl). Set by a human; never read from the repo. */
+  remote: string;
 }
 
 export const KNOWN_ADAPTERS = ["file"] as const;
+
+/** A remote a push may go to: GitHub-style ssh -- the host may be a deploy
+ *  key's alias, `github.com-acme__widgets` -- or https. Not a local path
+ *  (a repository there could carry a receive hook, which would run in the
+ *  editor), not `<transport>::` (a remote helper; `ext::` is a shell),
+ *  nothing that starts like an option. */
+export const SAFE_REMOTE =
+  /^(?:git@[A-Za-z0-9._-]+:|ssh:\/\/git@[A-Za-z0-9._-]+(?::[0-9]+)?\/|https:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?\/)[A-Za-z0-9._~\/-]+$/;
+export const isSafeRemote = (url: string) =>
+  SAFE_REMOTE.test(url) && !url.includes("::") && !url.split(/[/:]/).includes("..");
 
 export const DEFAULT_POLICY: Policy = {
   v: 1,
@@ -64,6 +77,7 @@ export const DEFAULT_POLICY: Policy = {
   on_done: "hold",
   allow_hooks: false,
   adapters: [],
+  remote: "",
 };
 
 export class PolicyFileError extends Error {}
@@ -96,6 +110,8 @@ export const parsePolicy = (text: string): Policy => {
   if (typeof policy.allow_hooks !== "boolean") throw new PolicyFileError("allow_hooks must be true or false");
   if (!Array.isArray(policy.adapters) || !policy.adapters.every((a: unknown) => (KNOWN_ADAPTERS as readonly unknown[]).includes(a)))
     throw new PolicyFileError(`adapters must be among: ${KNOWN_ADAPTERS.join(", ")}`);
+  if (typeof policy.remote !== "string" || (policy.remote !== "" && !isSafeRemote(policy.remote)))
+    throw new PolicyFileError("remote must be empty or a plain ssh or https remote");
   return policy;
 };
 

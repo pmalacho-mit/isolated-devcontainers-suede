@@ -14,10 +14,10 @@
  *
  * `file` is the reference adapter -- the acceptance harness, and the proof
  * that nothing in the core knows GitHub: unchecked lines in the project's
- * `.desolate/work.md`, read from HEAD with cat-file, never checked out.
+ * `.desolate/work.md`, read from its working copy (openContained).
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, ftruncateSync, openSync, readFileSync, readlinkSync, realpathSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { target as resolveTarget, validWorktree } from "./projects.ts";
 import * as workGit from "./work-git.ts";
@@ -61,25 +61,59 @@ export const fileItems = (text: string): (WorkItem & { done: boolean })[] =>
     return [{ item: `file:${id}`, title, worktree: worktreeName(title, id), done: match[2] !== " " }];
   });
 
+/**
+ * A file of the project's, opened only if it IS one: a final symlink is not
+ * followed, a FIFO does not block (and is refused), and where the open
+ * actually landed -- /proc/self/fd, the kernel's answer, not a path checked
+ * beforehand -- must be inside the project. The editor reaches every project,
+ * so a `.desolate` that is a link must not make it read or tick another's.
+ */
+export const openContained = (projectDir: string, relative: string, flags: number) => {
+  let fd: number;
+  try {
+    fd = openSync(join(projectDir, relative), flags | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    return undefined;
+  }
+  const inside = `${realpathSync(projectDir)}/`;
+  if (fstatSync(fd).isFile() && readlinkSync(`/proc/self/fd/${fd}`).startsWith(inside)) return fd;
+  closeSync(fd);
+  return undefined;
+};
+
 export const fileAdapter: Adapter = {
   name: "file",
+  // The working copy, not HEAD: git in the editor would follow a ref the
+  // project made a link (work-git.ts containment), and a file read through
+  // openContained cannot be anything but the project's own.
   poll: (projectDir) => {
-    const text = workGit.fileAt(projectDir, "HEAD", WORK_FILE);
-    return text === undefined ? [] : fileItems(text).filter((item) => !item.done);
+    const fd = openContained(projectDir, WORK_FILE, constants.O_RDONLY);
+    if (fd === undefined) return [];
+    try {
+      return fileItems(readFileSync(fd, "utf8")).filter((item) => !item.done);
+    } finally {
+      closeSync(fd);
+    }
   },
-  // The box is ticked in the project's working copy, as a person would tick
-  // it: a plain file write, for them to commit -- never a commit made here.
+  // The box is ticked in the working copy, as a person would tick it: a
+  // write, for them to commit -- never a commit made here.
   complete: (projectDir, item) => {
-    const file = join(projectDir, WORK_FILE);
-    if (!existsSync(file)) return;
-    const lines = readFileSync(file, "utf8").split("\n");
-    const at = lines.findIndex((line) => {
-      const match = LINE.exec(line);
-      return match !== null && match[2] === " " && match[4] === item.title;
-    });
-    if (at < 0) return;
-    lines[at] = lines[at].replace(LINE, "$1x$3$4");
-    writeFileSync(file, lines.join("\n"));
+    const fd = openContained(projectDir, WORK_FILE, constants.O_RDWR);
+    if (fd === undefined) return;
+    try {
+      const lines = readFileSync(fd, "utf8").split("\n");
+      const at = lines.findIndex((line) => {
+        const match = LINE.exec(line);
+        return match !== null && match[2] === " " && match[4] === item.title;
+      });
+      if (at < 0) return;
+      lines[at] = lines[at].replace(LINE, "$1x$3$4");
+      const text = Buffer.from(lines.join("\n"));
+      ftruncateSync(fd, 0);
+      writeSync(fd, text, 0, text.length, 0);
+    } finally {
+      closeSync(fd);
+    }
   },
 };
 

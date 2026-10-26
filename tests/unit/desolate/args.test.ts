@@ -231,3 +231,8 @@ describe("--json (F2)", () => {
   });
   test("anything else refuses it", () => refuses(["--json", "acme/widgets"], /only means something with --list or --ports/));
 });
+
+describe("--bundle (F2)", () => {
+  test("names a worktree's branch for the factory's push", () =>
+    assert.equal(parse("--bundle", "--worktree", "w", "acme/widgets").command, "bundle"));
+});

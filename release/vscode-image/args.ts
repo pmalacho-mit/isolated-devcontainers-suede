@@ -46,7 +46,10 @@ export type Command =
   /** Give the editor's uid back everything under the target -- or under
    *  `path` inside it -- that a container left owned by someone else (#15).
    *  What `cli.sh reclaim` and `cli.sh worktree remove` run. */
-  | "reclaim";
+  | "reclaim"
+  /** A worktree's branch, written as a git bundle by a sandbox that sees only
+   *  its project -- what the factory pushes from (work-watcher.ts). */
+  | "bundle";
 
 export type Args = {
   command: Command;
@@ -110,6 +113,7 @@ export type Flags =
   | "--reclaim"
   | "--uncommitted"
   | "--json"
+  | "--bundle"
   | ["--config", string]
   | ["--worktree", string]
   | ["--move", string, string]
@@ -228,6 +232,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--reclaim":
         command = "reclaim";
+        break;
+      case "--bundle":
+        command = "bundle";
         break;
       case "--path":
         reclaimPath = queue.shift() ?? "";
