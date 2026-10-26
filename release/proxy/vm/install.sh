@@ -27,6 +27,10 @@ apt-get install -y -qq python3-venv nftables dnsmasq jq
 
 echo "==> service user"
 id desolate-proxy >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin desolate-proxy
+# The ingress (ingress.py) has a uid of its own for the same reason the proxy
+# does: the nftables output chain keys on it, so it can dial dind bridges and
+# nothing else. Created here, before the ruleset that names it is loaded.
+id desolate-ingress >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin desolate-ingress
 
 echo "==> mitmproxy venv"
 # PINNED. The addon is the entire secrets boundary and mitmproxy answers an
@@ -47,6 +51,7 @@ if [ "$NEED_INSTALL" = 1 ]; then
     /opt/desolate-proxy/venv/bin/pip install --quiet "mitmproxy==${MITMPROXY_VERSION}"
 fi
 install -m 0644 addon.py /opt/desolate-proxy/addon.py
+install -m 0644 ingress.py /opt/desolate-proxy/ingress.py
 install -m 0755 ../container/install-ca.sh /opt/desolate-proxy/install-ca.sh
 
 echo "==> config (0600, proxy-owned, VM disk only -- never under a Colima mount)"
@@ -231,12 +236,14 @@ echo "==> nftables"
 # otherwise looks installed. The account is created at the top of this script;
 # say so plainly if that has somehow not happened rather than letting nft
 # report a syntax error about a line that is not wrong.
-id desolate-proxy >/dev/null 2>&1 || {
-    echo "ERROR: the desolate-proxy account does not exist, so the nftables" >&2
-    echo "       ruleset cannot resolve 'meta skuid desolate-proxy' and NOTHING" >&2
+for account in desolate-proxy desolate-ingress; do
+  id "$account" >/dev/null 2>&1 || {
+    echo "ERROR: the $account account does not exist, so the nftables" >&2
+    echo "       ruleset cannot resolve 'meta skuid $account' and NOTHING" >&2
     echo "       would be applied. Re-run this installer from the top." >&2
     exit 1
-}
+  }
+done
 nft -f /etc/desolate-proxy/nftables-desolate.conf
 
 echo "==> git-over-ssh allowlist"
@@ -260,9 +267,24 @@ ExecStartPost=/opt/desolate-proxy/ssh-allow.sh
 WantedBy=multi-user.target
 EOF
 
+echo "==> ingress directories (/run is a tmpfs; tmpfiles.d recreates them at boot)"
+install -m 0644 desolate-ingress.tmpfiles /etc/tmpfiles.d/desolate-ingress.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/desolate-ingress.conf
+# Measured, not assumed: a directory that came out owned by the wrong uid is a
+# writer that cannot write, which looks like a forwarder that does nothing.
+for dir in dinds:root ports:1000; do
+  name=${dir%%:*} want=${dir#*:}
+  have=$(stat -c %U "/run/desolate-ingress/$name" 2>/dev/null || echo missing)
+  [ "$have" = "$want" ] || [ "$(stat -c %u "/run/desolate-ingress/$name" 2>/dev/null)" = "$want" ] || {
+    echo "ERROR: /run/desolate-ingress/$name is owned by '$have', not '$want'" >&2
+    exit 1
+  }
+done
+
 echo "==> systemd units"
 install -m 0644 desolate-proxy.service /etc/systemd/system/
 install -m 0644 desolate-proxy-ca.service /etc/systemd/system/
+install -m 0644 desolate-ingress.service /etc/systemd/system/
 systemctl daemon-reload
 # mitmproxy loads addon.py ONCE, at startup. `enable --now` starts a stopped
 # unit but does not restart a running one, so on an upgrade the new addon.py
@@ -271,12 +293,12 @@ systemctl daemon-reload
 # exactly how a fixture carrying "selftest" gets judged as a real secret and
 # 403s every request that names it. try-restart is a no-op when the unit is
 # stopped, so a fresh install still starts exactly once, below.
-systemctl try-restart desolate-proxy
-systemctl enable -q --now desolate-nft desolate-proxy desolate-proxy-ca
+systemctl try-restart desolate-proxy desolate-ingress
+systemctl enable -q --now desolate-nft desolate-proxy desolate-proxy-ca desolate-ingress
 
 echo "==> done"
 systemctl --no-pager --plain status desolate-proxy | head -5
 echo
 echo "Interfaces: $BRIDGE (editor), $DIND_BRIDGE (containers)"
-echo "Proxy: :18080   CA: :18081   DNS: :5353"
+echo "Proxy: :18080   CA: :18081   DNS: :5353   Ingress: /run/desolate-ingress"
 echo "Add secrets from your Mac:  ./cli.sh secret add NAME --hosts api.example.com"

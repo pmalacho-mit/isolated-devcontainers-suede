@@ -1,0 +1,8 @@
+# /run is a tmpfs: these are recreated at every boot, before the units start.
+#   dinds/  written by the supervisor (root in its container): one file per
+#           running dind, holding its bridge address.
+#   ports/  written by the orchestrator (uid 1000): one file per host port.
+# desolate-ingress reads both and writes neither.
+d /run/desolate-ingress        0755 root root -
+d /run/desolate-ingress/dinds  0755 root root -
+d /run/desolate-ingress/ports  0755 1000 1000 -
