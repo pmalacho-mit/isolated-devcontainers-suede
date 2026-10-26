@@ -1081,11 +1081,15 @@ Or ask that build for the **classic builder** -- `version: "1"` in `dockerode`,
 `DOCKER_BUILDKIT=0` for anything shelling out to the CLI -- which reads the
 local store and nothing else.
 
-Two fixes that look right and are not: a CA in `buildkitd.toml` (that is
-BuildKit's registry client, not your `RUN` steps' HTTPS), and pointing the
-daemon's `registry-mirrors` at a registry serving the derivatives. `docker pull`
-honours those mirrors; the BuildKit inside the same daemon ignores them, so the
-build resolves upstream exactly as before.
+A fix that looks right and is not: a CA in `buildkitd.toml` (that is
+BuildKit's registry client, not your `RUN` steps' HTTPS). One that looked wrong
+and is not, any more: pointing the daemon's `registry-mirrors` at a registry
+serving the derivatives. On the classic image store BuildKit ignored those
+mirrors; on the containerd store -- docker 29's default, and every project
+daemon's -- a `version=2` build honours them and builds on the mirror's
+derivative (measured: `tests/probes/buildkit-shadow.sh`, S7). Docker Hub images
+only: `registry-mirrors` covers no other registry. desolate does not run such a
+mirror for you yet.
 
 To stop doing this by hand, a project can declare the images once:
 
