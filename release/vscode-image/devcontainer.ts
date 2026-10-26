@@ -27,14 +27,27 @@ export interface ResolvedSpec {
  * @throws if the devcontainer CLI errors out, or if cannot retrieve both
  * `ResolvedSpec.configuration` and `ResolvedSpec.mergedConfiguration`
  */
+/** Why `read-configuration` failed, from what execFileSync threw. A timeout
+ *  leaves only what the CLI printed before it was killed -- its version
+ *  banner, often -- so it is named as a timeout rather than quoted as an error. */
+export const describeResolveFailure = (err: any, timeoutMs: number) => {
+  /** How much of a failed CLI invocation's output to quote back to the caller */
+  const tailChars = 400;
+  const timedOut = err?.code === "ETIMEDOUT" || err?.signal === "SIGTERM";
+  const detail = String(err?.stderr || err?.stdout || err?.message || err).trim().slice(-tailChars);
+  return `could not resolve devcontainer.json (refusing to start)${
+    timedOut ? `: it did not finish in ${timeoutMs / 1000}s (resolving features fetches them; try again)` : ""
+  }: ${detail}`;
+};
+
 export const resolveSpec = (
   workspace: string,
   config: string,
 ): ResolvedSpec => {
   let stdout: string;
+  /** Generous: resolving features is a NETWORK operation. */
+  const timeoutMs = 120000;
   try {
-    /** Generous: resolving features is a NETWORK operation. */
-    const timeoutMs = 120000;
     stdout = run(
       "devcontainer",
       [
@@ -52,14 +65,7 @@ export const resolveSpec = (
       },
     );
   } catch (err: any) {
-    /** How much of a failed CLI invocation's output to quote back to the caller */
-    const tailChars = 400;
-    const detail = String(
-      err?.stderr || err?.stdout || err?.message || err,
-    ).slice(-tailChars);
-    throw new Error(
-      `could not resolve devcontainer.json (refusing to start): ${detail}`,
-    );
+    throw new Error(describeResolveFailure(err, timeoutMs));
   }
 
   // The CLI interleaves progress lines with its JSON result, so take the LAST
