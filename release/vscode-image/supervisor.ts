@@ -126,6 +126,9 @@ export const settingsFrom = (env: Record<string, string | undefined>): Settings 
     },
     daemonJson: JSON.stringify({
       builder: { gc: { enabled: true, defaultKeepStorage: env.DESOLATE_DIND_BUILD_CACHE ?? "20GB" } },
+      // Outside every subnet the VM's daemon hands out (dind.ts).
+      bip: dind.INNER_BRIDGE_IP,
+      "default-address-pools": [dind.INNER_POOL],
     }),
     idleMs: minutes * 60_000,
     bootSeconds: Number(env.DESOLATE_DIND_BOOT_SECONDS ?? "120"),

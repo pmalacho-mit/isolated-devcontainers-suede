@@ -120,6 +120,12 @@ services:
       # soft limit, which one language server + bundler + watcher would exhaust.
       # 524288 is sysbox's ceiling for dind and cannot be exceeded.
       - --default-ulimit=nofile=65536:524288
+      # Its own docker0 and networks, outside every subnet the VM's daemon hands
+      # out: unpinned, a `down`/`up` once gave dindnet the very subnet docker0
+      # held, and the VM could no longer reach this dind (dind.ts INNER_POOL,
+      # which project dinds get too; tests/static/02 holds the two equal).
+      - --bip=10.234.255.1/24
+      - --default-address-pool=base=10.234.0.0/17,size=24
     # The daemon's OWN limits, which are NOT the flag above: dockerd and
     # containerd hold fds for every container at once, so they get the full
     # ceiling rather than one container's allowance.

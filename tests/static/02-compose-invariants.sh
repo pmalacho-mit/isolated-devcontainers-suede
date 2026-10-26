@@ -167,4 +167,19 @@ for svc in dind orchestrator vscode; do
     "$(q "[.services.\"$svc\".volumes[]? | select(.source == \"/var/lib/desolate-proxy/public\") | .read_only] | first")" "true"
 done
 
+group "the shared dind's own daemon hands out what the project dinds' do"
+# One range for every inner daemon, outside docker's default pools (dind.ts
+# INNER_BRIDGE_IP, INNER_POOL). The shared dind gets it as flags, project dinds
+# in daemon.json; the two must not drift.
+DIND_TS="$RELEASE/vscode-image/dind.ts"
+BIP=$(sed -n 's/^export const INNER_BRIDGE_IP = "\(.*\)";$/\1/p' "$DIND_TS")
+POOL=$(sed -n 's/^export const INNER_POOL = { base: "\(.*\)", size: \([0-9]*\) } as const;$/base=\1,size=\2/p' "$DIND_TS")
+DIND_CMD=$(q '.services.dind.command | join(" ")')
+if [ -z "$BIP" ] || [ -z "$POOL" ]; then
+  fail "found INNER_BRIDGE_IP and INNER_POOL in dind.ts" "sed matched nothing -- renamed or reformatted?"
+else
+  assert_contains "the shared dind's docker0 is INNER_BRIDGE_IP" "$DIND_CMD" "--bip=$BIP"
+  assert_contains "its networks come from INNER_POOL" "$DIND_CMD" "--default-address-pool=$POOL"
+fi
+
 summary

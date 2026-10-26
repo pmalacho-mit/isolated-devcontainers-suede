@@ -676,6 +676,20 @@ elif [ -n "$uncovered" ]; then
 else
   ok "every br-* interface on the VM is matched by the desolate ruleset"
 fi
+# A dind's own daemon must not hold the subnet its link to the VM is on: then
+# two routes claim it, the dind answers the VM on the wrong interface, and
+# every forward into it is dead (measured, 2026-10-26: docker0 had kept
+# 172.18.0.0/16 from its first start, and a later `up` gave dindnet the same).
+# dind.ts pins inner daemons to 10.234.0.0/16; a dind made before that, or an
+# inner network made before it, can still hold an old subnet.
+shadowed=""
+for dind in desolate-dind $(docker ps --filter label=desolate.dind --format '{{.Names}}'); do
+  dup=$(docker exec "$dind" ip route 2>/dev/null | awk '{print $1}' | grep -v '^default$' | sort | uniq -d | tr '\n' ' ')
+  [ -n "$dup" ] && shadowed="$shadowed $dind($dup)"
+done
+[ -z "$shadowed" ] && ok "no dind's own networks shadow its link to the VM" \
+  || { bad "a dind's own network holds the subnet of its link to the VM:$shadowed -- the ingress cannot reach it"
+       note "recreate it so its daemon takes the pinned range: ./cli.sh down && ./cli.sh up (project dinds are recreated from their spec, their images kept)"; }
 published=""
 for dind in $(docker ps --filter label=desolate.dind --format '{{.Names}}'); do
   [ -n "$(docker port "$dind" 2>/dev/null)" ] && published="$published $dind"

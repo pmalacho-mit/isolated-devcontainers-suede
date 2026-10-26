@@ -24,6 +24,22 @@ const PREFIX = "desolate-dind";
 
 export const name = (target: Target) => `${PREFIX}-${projectNamespace(target)}`;
 
+/**
+ * The addresses a dind's OWN daemon hands out: its `docker0`, and the pool its
+ * networks are cut from. Pinned outside docker's default pools, which the VM's
+ * daemon draws its bridges from too (172.17-172.31, then 192.168).
+ *
+ * Unpinned, the two daemons chose independently, and the inner one remembers
+ * its choice in its data volume. Measured on the VM (2026-10-26): a `down` and
+ * `up` gave `desolate_dindnet` 172.18.0.0/16 -- the subnet the shared dind's
+ * `docker0` had held since its first start, at the very address the VM's
+ * gateway now had. The dind then answered the VM's ARP on the wrong interface:
+ * the ingress could reach nothing on it, and its route out was its own bridge.
+ * Every dind is a namespace of its own, so they can all share this range.
+ */
+export const INNER_BRIDGE_IP = "10.234.255.1/24";
+export const INNER_POOL = { base: "10.234.0.0/17", size: 24 } as const;
+
 /** Matches EVERY project dind, for sweeps that know no targets. */
 export const LABEL_KEY = "desolate.dind";
 

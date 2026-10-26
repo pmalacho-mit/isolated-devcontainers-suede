@@ -79,7 +79,19 @@ describe("what the supervisor builds", () => {
 
   test("the BuildKit GC policy is in daemon.json, and the env sizes it", () => {
     const json = JSON.parse(specFor(targetOf("x"), settingsFrom({ DESOLATE_DIND_BUILD_CACHE: "8GB" })).daemonJson);
-    assert.deepEqual(json, { builder: { gc: { enabled: true, defaultKeepStorage: "8GB" } } });
+    assert.deepEqual(json.builder, { gc: { enabled: true, defaultKeepStorage: "8GB" } });
+  });
+
+  test("its own daemon hands out addresses no VM bridge can have", () => {
+    // Unpinned, the inner docker0 kept the subnet it chose at first start, and
+    // a later `up` gave the dind's own VM network that same subnet: the VM
+    // could no longer reach it (measured on the VM, 2026-10-26).
+    const json = JSON.parse(specFor(targetOf("x"), settingsFrom({})).daemonJson);
+    assert.equal(json.bip, "10.234.255.1/24");
+    assert.deepEqual(json["default-address-pools"], [{ base: "10.234.0.0/17", size: 24 }]);
+    // docker's default pools, which the VM's daemon draws every bridge from.
+    for (const subnet of [json.bip, json["default-address-pools"][0].base])
+      assert.ok(!/^(172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(subnet), subnet);
   });
 
   test("the cpu cap is never more than the machine has, which docker would refuse", () => {
