@@ -27,6 +27,8 @@
 #
 # start  Starts `claude` in a detached tmux session in the running target, as
 #        its user, in its workspace folder, with the task as its first prompt.
+#        In auto permission mode (it judges what is safe, and asks for the
+#        rest), unless `-- --permission-mode <mode>` says otherwise.
 #        No tmux or claude there: installs them (tmux with the image's package
 #        manager, as root or through passwordless sudo; claude with its native
 #        installer, into ~/.local/bin), and tells the agent, in its task, that
@@ -324,6 +326,11 @@ start() {
   local others; others=$(others_at_anthropic | paste -sd, -)
   [ -z "$others" ] || echo "claude-helper: note: $PROJECT can also send $others to api.anthropic.com; Claude's auth is kept off them ('verify' to see)" >&2
   if [ -n "$RESUME" ] && [ -z "$HAS_TASK" ]; then TASK="Your login was renewed; carry on where you left off."; HAS_TASK=1; fi
+  # Auto mode unless told otherwise: Claude decides what is safe to run and
+  # asks for the rest. `-- --permission-mode manual` (or any other) overrides.
+  local mode_given="" arg
+  for arg in ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}; do case "$arg" in --permission-mode|--permission-mode=*) mode_given=1 ;; esac; done
+  [ -n "$mode_given" ] || CLAUDE_ARGS=(--permission-mode auto ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"})
   local remote=(bash -c "$REMOTE" claude-helper "$SESSION" "$name" "$STATUS_HELPER" "${HAS_TASK:-0}" "${RESUME:-0}" "${CLAUDE_VERSION:-}" ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"})
   if [ -n "$HAS_TASK" ]; then
     printf '%s' "$TASK" | "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- "${remote[@]}"
