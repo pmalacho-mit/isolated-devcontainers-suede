@@ -271,7 +271,7 @@ describe("reading customizations out of a spec", () => {
   });
 });
 
-describe("DESOLATE_TARGET: who a container is, to the factory", () => {
+describe("DESOLATE_TARGET: who a container is, to its agent", () => {
   test("the project's own tree is main; a worktree is its name", () => {
     assert.deepEqual(targetEnvironment({ project: "acme/widgets" }),
       [["DESOLATE_TARGET", "main"], ["DESOLATE_PROJECT", "acme/widgets"]]);

@@ -51,9 +51,14 @@ export type Command =
    *  `path` inside it -- that a container left owned by someone else (#15).
    *  What `cli.sh reclaim` and `cli.sh worktree remove` run. */
   | "reclaim"
-  /** A worktree's branch, written as a git bundle by a sandbox that sees only
-   *  its project -- what the factory pushes from (work-watcher.ts). */
-  | "bundle";
+  /** A target's current branch, written as a git bundle by a sandbox that
+   *  sees only its project -- how a branch leaves the stack for the Mac to push
+   *  (`cli.sh bundle`, docs/agents.md). */
+  | "bundle"
+  /** Run a command inside a running target's devcontainer, as its user, in its
+   *  folder -- how a harness starts an agent (`cli.sh exec`, docs/agents.md).
+   *  The Mac's alone: the editor has no daemon, and gets no way into one. */
+  | "exec";
 
 export type Args = {
   command: Command;
@@ -99,8 +104,10 @@ export type Args = {
    *  to the target's directory, and refused if it leaves it. */
   path?: string;
   /** `--json`: `list` and `ports` print one JSON document instead of prose,
-   *  for programs -- the factory's watcher, the editor extension. */
+   *  for programs -- the editor's extension, a harness. */
   json: boolean;
+  /** `exec`'s command line: everything after `--`. */
+  execArgv?: string[];
 };
 
 /** The wire form the broker spawns desolate with. */
@@ -113,11 +120,7 @@ export type Flags =
   | "--remove-worktree"
   | "--force"
   | ["--from", string]
-  | "--purge"
-  | "--reclaim"
-  | "--uncommitted"
   | "--json"
-  | "--bundle"
   | ["--config", string]
   | ["--worktree", string]
   | ["--move", string, string]
@@ -194,9 +197,15 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let json = false;
   const positional: string[] = [];
   const queue = [...argv];
+  let execArgv: string[] | undefined;
 
   while (queue.length) {
     const arg = queue.shift()!;
+    // Everything after `--` is a command line, never desolate's flags.
+    if (arg === "--") {
+      execArgv = queue.splice(0);
+      break;
+    }
     switch (arg) {
       case "--config":
         config = queue.shift() ?? "";
@@ -239,6 +248,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--bundle":
         command = "bundle";
+        break;
+      case "--exec":
+        command = "exec";
         break;
       case "--path":
         reclaimPath = queue.shift() ?? "";
@@ -290,6 +302,10 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     throw new UsageError("--move only means something with --ports");
   if (json && command !== "list" && command !== "ports")
     throw new UsageError("--json only means something with --list or --ports");
+  if (execArgv !== undefined && command !== "exec")
+    throw new UsageError("'--' only means something with --exec");
+  if (command === "exec" && !execArgv?.length)
+    throw new UsageError("--exec takes a command after '--'");
   if (reclaimPath !== undefined && command !== "reclaim")
     throw new UsageError("--path only means something with --reclaim");
   if (reclaimPath !== undefined && !relativeWithin(reclaimPath))
@@ -318,5 +334,6 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     json,
     ...(move ? { move } : {}),
     ...(reclaimPath !== undefined ? { path: reclaimPath } : {}),
+    ...(execArgv !== undefined ? { execArgv } : {}),
   };
 };

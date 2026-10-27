@@ -154,7 +154,7 @@ _desolate_cli() {
   # `worktree list` take a project here instead.
   if [ "$COMP_CWORD" -eq 2 ]; then
     case "$verb" in
-      desolate) COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
+      desolate|exec|bundle) COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
       logs)     COMPREPLY=( $(compgen -W "$(_desolate_cli_services)" -- "$cur") ) ;;
       # A flag rather than a subcommand, so the grammar extraction above does
       # not see it -- and it is the one flag in this CLI that deletes something.

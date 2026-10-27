@@ -6,8 +6,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  dindsTree, factoryTree, jsonLines, lastJson, needsAnswer, projectsTree, redactTokens,
-  type MessageRow, type Node, type RequestRow,
+  dindsTree, lastJson, projectsTree, redactTokens, targetKey, type Node,
 } from "../../../release/vscode-image/extension/model.mts";
 
 const find = (nodes: Node[], id: string): Node | undefined => {
@@ -23,7 +22,6 @@ describe("reading what the editor's commands print", () => {
   test("the last JSON line, past the broker's prose", () => {
     assert.deepEqual(lastJson("desolate: driving acme's daemon\n[{\"a\":1}]\n"), [{ a: 1 }]);
     assert.equal(lastJson("no json here\n"), undefined);
-    assert.deepEqual(jsonLines('{"a":1}\nprose\n{"b":2}\n{broken\n'), [{ a: 1 }, { b: 2 }]);
   });
 
   test("an editor token never reaches the log", () => {
@@ -64,6 +62,23 @@ describe("the Projects view", () => {
     assert.equal(app.target?.url, "http://127.0.0.1:8093/");
     assert.equal(find(tree, "target:acme/widgets@wip")!.actions, "worktree.stopped");
   });
+
+  test("a status shows as the icon's colour and the message beside the state", () => {
+    const statuses = new Map([
+      [targetKey({ project: "acme/widgets", worktree: "wip" }), { color: "orange" as const, message: "needs a human", updated: "2026-10-27T12:00:00Z" }],
+      [targetKey({ project: "acme/widgets", worktree: null }), { color: "green" as const, message: "", updated: "2026-10-27T12:00:00Z" }],
+    ]);
+    const shown = projectsTree(known, running, statuses);
+    const wip = find(shown, "target:acme/widgets@wip")!;
+    assert.equal(wip.iconColor, "charts.orange");
+    assert.equal(wip.description, "needs a human · stopped");
+    assert.match(wip.tooltip!, /^orange: needs a human -- 2026-10-27T12:00:00Z/);
+    // A running row's key (worktree null) finds the same status as a known one's.
+    const main = find(shown, "target:acme/widgets@")!;
+    assert.equal(main.iconColor, "charts.green");
+    assert.equal(main.description, "running · own dind");
+    assert.equal(find(shown, "target:solo@")!.iconColor, undefined);
+  });
 });
 
 describe("the Dinds view", () => {
@@ -84,47 +99,5 @@ describe("the Dinds view", () => {
 
   test("none is said, not shown as an empty view", () => {
     assert.equal(dindsTree({ dinds: [], headroom: null })[0].label, "no project dinds");
-  });
-});
-
-describe("the Factory view", () => {
-  const requests: RequestRow[] = [
-    { id: "01J0", action: "open", worktree: "issue-42", from: "forge/github", outcome: "refused: hooks", approved: false },
-    { id: "01J1", action: "open", worktree: "issue-43", from: "main", outcome: "waiting", approved: false },
-    { id: "01J2", action: "open", worktree: "issue-44", from: "main", outcome: "opened", approved: false },
-    { id: "01J3", action: "open", worktree: "issue-45", from: "main", outcome: "refused: cap", approved: true },
-  ];
-  const message = (fields: Partial<MessageRow>): MessageRow =>
-    ({ commit: "c".repeat(40), time: "2026-10-26T12:00:00Z", from: "issue-42", to: ["*"], type: "status", body: "", ...fields });
-  const messages = [
-    message({ commit: "a".repeat(40), type: "ask", to: ["main"], body: "Which API version?\u001b[31m" }),
-    message({ commit: "b".repeat(40), type: "ask", to: ["issue-43"], body: "not for a person" }),
-    message({ commit: "d".repeat(40), type: "done", body: "ready" }),
-  ];
-  const node = factoryTree("acme", { max_open_worktrees: 2 }, requests, messages, ["issue-44"]);
-
-  test("an ask to the main tree or the human is waiting on you, and can be answered", () => {
-    assert.equal(node.description, "1 ask waiting");
-    const waiting = find([node], "factory:acme:asks")!;
-    assert.equal(waiting.children!.length, 1);
-    assert.equal(waiting.children![0].actions, "message.ask");
-    assert.equal(waiting.children![0].target?.from, "issue-42");
-    assert.ok(needsAnswer(message({ type: "ask", to: ["@human"] })));
-    assert.ok(!needsAnswer(message({ type: "ask", to: ["issue-43"] })));
-  });
-
-  test("a writer's text is shown as one plain line, its escapes gone", () => {
-    const shown = find([node], "factory:acme:asks")!.children![0];
-    assert.equal(shown.label, "ask: Which API version? [31m");
-  });
-
-  test("only a refused or waiting request, not yet approved, can be approved", () => {
-    const actions = (id: string) => find([node], `factory:acme:request:${id}`)!.actions;
-    assert.deepEqual(["01J0", "01J1", "01J2", "01J3"].map(actions),
-      ["request.approvable", "request.approvable", "request", "request"]);
-  });
-
-  test("an open worktree can be pushed or closed from here", () => {
-    assert.equal(find([node], "factory:acme:worktree:issue-44")!.actions, "factory.worktree");
   });
 });

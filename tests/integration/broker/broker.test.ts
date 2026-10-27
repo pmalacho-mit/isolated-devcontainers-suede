@@ -566,11 +566,14 @@ describe("request-level validation", () => {
     assert.equal(result(msgs).ok, false);
   });
 
-  test("list returns project names only", async () => {
+  test("list names no target: it reaches the runner as --list alone", async () => {
+    // The runner reads /workspaces itself (projects.ts, its names tested in
+    // tests/unit/desolate/projects.test.ts); the broker only relays.
     project("ok-project", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
     const msgs = await ask({ op: "list" });
     assert.equal(result(msgs).ok, true);
-    assert.ok(result(msgs).projects.includes("ok-project"));
+    assert.deepEqual(runnerInvocations(), [["--list"]]);
   });
 });
 
@@ -678,15 +681,6 @@ describe("worktrees are targets of their own", () => {
     assert.deepEqual(runnerInvocations(), []);
   });
 
-  test("list names worktrees in the form you would type back", async () => {
-    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
-    worktreeSpec("feature123");
-    const msgs = await ask({ op: "list" });
-    assert.ok(
-      result(msgs).projects.includes("acme/widgets@feature123"),
-      `${result(msgs).projects}`,
-    );
-  });
 });
 
 // ===========================================================================
@@ -1141,50 +1135,21 @@ describe("--ports --move reaches the runner only in its one shape", () => {
   });
 });
 
-describe("purge: what a worktree's removal runs on this side (F2)", () => {
+describe("purge and bundle are not the editor's (docs/agents.md)", () => {
   // ===========================================================================
-  const worktree = (projectName: string, name: string) => {
-    project(projectName, JSON.stringify({ image: "alpine:3" }));
-    fs.mkdirSync(path.join(workspaces, projectName, ".worktrees", name), { recursive: true });
-  };
-
-  test("reclaim, then the uncommitted check, then purge -- each naming the worktree", async () => {
-    worktree("factory-p", "issue-1");
-    resetRunner();
-    const msgs = await ask({ op: "purge", project: "factory-p", worktree: "issue-1" });
-    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
-    assert.deepEqual(runnerInvocations(), [
-      ["--reclaim", "--worktree", "issue-1", "factory-p"],
-      ["--uncommitted", "--worktree", "issue-1", "factory-p"],
-      ["--purge", "--worktree", "issue-1", "factory-p"],
-    ]);
-  });
-
-  test("a worktree holding uncommitted work is never purged, and the answer says which step refused", async () => {
-    worktree("dirty", "wip");
-    resetRunner();
-    const answer = result(await ask({ op: "purge", project: "dirty", worktree: "wip" }));
-    assert.equal(answer.ok, false);
-    assert.equal(answer.exit, 3);
-    assert.equal(answer.step, "--uncommitted");
-    assert.ok(!runnerInvocations().some((argv) => argv[0] === "--purge"), "it purged anyway");
-  });
-
-  test("bundle is a worktree's too, and reaches the runner as --bundle", async () => {
-    worktree("factory-b", "issue-2");
-    resetRunner();
-    assert.equal(result(await ask({ op: "bundle", project: "factory-b", worktree: "issue-2" })).ok, true);
-    assert.deepEqual(runnerInvocations(), [["--bundle", "--worktree", "issue-2", "factory-b"]]);
-    resetRunner();
-    assert.equal(result(await ask({ op: "bundle", project: "factory-b" })).ok, false);
-    assert.deepEqual(runnerInvocations(), []);
-  });
-
-  test("a project's own purge is not the editor's to ask for", async () => {
-    resetRunner();
-    const msgs = await ask({ op: "purge", project: "factory-p" });
-    assert.equal(result(msgs).ok, false);
-    assert.deepEqual(runnerInvocations(), []);
+  // The first factory let the editor purge a worktree and bundle its branch.
+  // Both are the Mac's now (`cli.sh worktree remove`, `cli.sh bundle`), so the
+  // broker -- the editor's only way in -- must not speak either.
+  test("neither op reaches the runner, for a project or a worktree", async () => {
+    project("no-factory", JSON.stringify({ image: "alpine:3" }));
+    fs.mkdirSync(path.join(workspaces, "no-factory", ".worktrees", "issue-1"), { recursive: true });
+    for (const op of ["purge", "bundle"])
+      for (const at of [{}, { worktree: "issue-1" }]) {
+        resetRunner();
+        const msgs = await ask({ op, project: "no-factory", ...at });
+        assert.equal(result(msgs).ok, false, `${op} ${JSON.stringify(at)}: ${JSON.stringify(msgs)}`);
+        assert.deepEqual(runnerInvocations(), []);
+      }
   });
 });
 

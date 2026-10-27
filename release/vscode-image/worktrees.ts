@@ -197,7 +197,7 @@ export const checkoutMounts = (
 ];
 
 /**
- * The bundle's sandbox (desolate.ts bundleWorktree): the PROJECT ROOT,
+ * The bundle's sandbox (desolate.ts bundleTarget): the PROJECT ROOT,
  * read-only, and an output directory of this target's own -- and nothing else
  * of /workspaces. The root, not `.git`: a project cannot replace its own root
  * the way it can swap `.git` for a link, so whatever its repository points at

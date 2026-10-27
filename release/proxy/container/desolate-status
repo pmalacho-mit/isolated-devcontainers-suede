@@ -1,0 +1,70 @@
+#!/bin/sh
+# desolate-status -- say how this target's work is going: a colour and a line.
+#
+#   /desolate-ca/desolate-status set <color> <message...>
+#   /desolate-ca/desolate-status clear
+#   /desolate-ca/desolate-status show
+#   /desolate-ca/desolate-status path
+#
+# Colours: gray, blue, green, yellow, orange, red. What they mean is up to
+# whoever reads them; a useful convention is blue working, orange needs a
+# human, red failed, green done.
+#
+# desolate SHOWS it -- in the editor's panel beside this project or worktree,
+# in `desolate --status`, and to a harness on the Mac through
+# `./cli.sh desolate --status --json` -- and never acts on it (docs/agents.md).
+#
+# It lives in this target's git dir (`git rev-parse --git-dir`): `.git` for the
+# project's own tree, `.git/worktrees/<name>` for a worktree. So it is this
+# target's alone, never committed, never in `git status`, never pushed, and
+# seen by exactly the containers of this project. Written whole and renamed
+# into place, so a reader never sees half of one.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+die() { echo "desolate-status: $*" >&2; exit 1; }
+
+command -v git >/dev/null 2>&1 || die "no git here"
+GIT_DIR_=$(git -c core.hooksPath=/dev/null -c core.fsmonitor=false rev-parse --absolute-git-dir 2>/dev/null) \
+  || die "not inside a git repository"
+FILE="$GIT_DIR_/desolate-status.json"
+
+# One JSON string: backslash, quote and control characters escaped, anything
+# else (UTF-8 included) as itself.
+json_str() {
+  printf '%s' "$1" | awk '
+    BEGIN { ORS = ""; for (i = 1; i < 32; i++) ctl[sprintf("%c", i)] = sprintf("\\u%04x", i); printf "\"" }
+    { out = ""
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (c == "\\") out = out "\\\\"; else if (c == "\"") out = out "\\\""
+        else if (c in ctl) out = out ctl[c]; else out = out c
+      }
+      # The newline between lines, escaped AFTER the line is: put in first, its
+      # backslash would have been escaped again.
+      print (NR > 1 ? "\\n" : "") out }
+    END { printf "\"" }'
+}
+
+case "${1:-}" in
+  set)
+    [ $# -ge 3 ] || die "usage: desolate-status set <color> <message...>"
+    shift; color=$1; shift
+    case "$color" in gray|blue|green|yellow|orange|red) ;; *) die "'$color' is not a colour (gray, blue, green, yellow, orange, red)" ;; esac
+    message="$*"
+    [ "${#message}" -le 200 ] || echo "desolate-status: the message is over 200 characters; it is shown cut" >&2
+    tmp="$FILE.$$"
+    printf '{"color":"%s","message":%s,"updated":"%s"}\n' \
+      "$color" "$(json_str "$message")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
+    mv -f "$tmp" "$FILE" ;;
+  clear)
+    rm -f "$FILE" ;;
+  show)
+    [ -f "$FILE" ] && cat "$FILE" || echo "no status" ;;
+  path)
+    echo "$FILE" ;;
+  *)
+    sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2 ;;
+esac

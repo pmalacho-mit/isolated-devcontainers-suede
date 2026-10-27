@@ -1,7 +1,7 @@
 {
   "name": "desolate",
   "displayName": "desolate",
-  "description": "Projects, their dinds and their factories, in the outer editor. Built in; talks only to the commands this editor already has.",
+  "description": "Projects, their worktrees and dinds, and each one's status, in the outer editor. Built in; talks only to the commands this editor already has.",
   "version": "0.1.0",
   "publisher": "desolate",
   "license": "MIT",
@@ -37,10 +37,6 @@
         {
           "id": "desolate.dinds",
           "name": "Dinds"
-        },
-        {
-          "id": "desolate.factory",
-          "name": "Factory"
         }
       ]
     },
@@ -86,24 +82,6 @@
       {
         "command": "desolate.worktreeRemove",
         "title": "Remove worktree\u2026"
-      },
-      {
-        "command": "desolate.approve",
-        "title": "Approve",
-        "icon": "$(check)"
-      },
-      {
-        "command": "desolate.push",
-        "title": "Push its branch"
-      },
-      {
-        "command": "desolate.close",
-        "title": "Close worktree"
-      },
-      {
-        "command": "desolate.reply",
-        "title": "Answer\u2026",
-        "icon": "$(reply)"
       }
     ],
     "menus": {
@@ -151,24 +129,6 @@
         {
           "command": "desolate.worktreeRemove",
           "when": "viewItem == worktree.stopped"
-        },
-        {
-          "command": "desolate.approve",
-          "when": "viewItem == request.approvable",
-          "group": "inline"
-        },
-        {
-          "command": "desolate.push",
-          "when": "viewItem == factory.worktree"
-        },
-        {
-          "command": "desolate.close",
-          "when": "viewItem == factory.worktree"
-        },
-        {
-          "command": "desolate.reply",
-          "when": "viewItem == message.ask",
-          "group": "inline"
         }
       ],
       "commandPalette": [
@@ -198,22 +158,6 @@
         },
         {
           "command": "desolate.worktreeRemove",
-          "when": "false"
-        },
-        {
-          "command": "desolate.approve",
-          "when": "false"
-        },
-        {
-          "command": "desolate.push",
-          "when": "false"
-        },
-        {
-          "command": "desolate.close",
-          "when": "false"
-        },
-        {
-          "command": "desolate.reply",
           "when": "false"
         },
         {

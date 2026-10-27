@@ -297,11 +297,11 @@ const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 /** What a bundle reports once it is written: the branch, and its commit. */
 export const BUNDLED = "desolate-bundled";
 
-/** A worktree's branch as a bundle, read inside a sandbox that mounts the
+/** A target's branch as a bundle, read inside a sandbox that mounts the
  *  PROJECT ROOT and nothing else of /workspaces: a symlinked ref, a `.git`
  *  that is a link, or alternates naming another project's objects all resolve
  *  inside the sandbox, where no other project is. The branch is read there
- *  too, from the worktree's HEAD; both reach the caller as arguments, never
+ *  too, from the target's HEAD; both reach the caller as arguments, never
  *  as script. */
 export const bundleScript = [
   'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }',

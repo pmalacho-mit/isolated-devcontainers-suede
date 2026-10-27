@@ -237,7 +237,26 @@ describe("--json (F2)", () => {
   test("anything else refuses it", () => refuses(["--json", "acme/widgets"], /only means something with --list or --ports/));
 });
 
-describe("--bundle (F2)", () => {
-  test("names a worktree's branch for the factory's push", () =>
-    assert.equal(parse("--bundle", "--worktree", "w", "acme/widgets").command, "bundle"));
+describe("--bundle (docs/agents.md)", () => {
+  test("a worktree's branch, or the project's own", () => {
+    assert.equal(parse("--bundle", "--worktree", "w", "acme/widgets").command, "bundle");
+    assert.equal(parse("--bundle", "acme/widgets").command, "bundle");
+  });
+});
+
+describe("--exec (docs/agents.md)", () => {
+  test("everything after `--` is the command, never desolate's flags", () => {
+    const parsed = parse("--exec", "--worktree", "issue-42", "acme/widgets", "--", "claude", "-p", "--stop", "fix it");
+    assert.equal(parsed.command, "exec");
+    assert.equal(parsed.worktree, "issue-42");
+    assert.equal(parsed.project, "acme/widgets");
+    assert.deepEqual(parsed.execArgv, ["claude", "-p", "--stop", "fix it"]);
+  });
+
+  test("it needs a command, and `--` means nothing without it", () => {
+    refuses(["--exec", "myapp"], /--exec takes a command after '--'/);
+    refuses(["--exec", "myapp", "--"], /--exec takes a command after '--'/);
+    refuses(["myapp", "--", "ls"], /'--' only means something with --exec/);
+    refuses(["--stop", "myapp", "--", "ls"], /'--' only means something with --exec/);
+  });
 });

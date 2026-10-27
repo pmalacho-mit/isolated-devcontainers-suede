@@ -208,11 +208,11 @@ export const externalEnvironment = (map: Iterable<[string, number]>): [string, s
 };
 
 /**
- * DESOLATE_TARGET and DESOLATE_PROJECT: who this container is, in the
- * factory's terms (work-protocol.ts) -- `main` for a project's own tree, the
- * worktree's name otherwise. `desolate-work` writes as DESOLATE_TARGET. Both
- * are names projects.ts has already validated, checked again here, as the
- * ports are, before a shell sees them.
+ * DESOLATE_TARGET and DESOLATE_PROJECT: who this container is -- `main` for
+ * a project's own tree, the worktree's name otherwise -- for an agent, a
+ * harness, or `desolate-status` to say which target it speaks for. Both are
+ * names projects.ts has already validated, checked again here, as the ports
+ * are, before a shell sees them.
  *
  * @throws EditorScriptError for a name with anything a shell would read. */
 export const targetEnvironment = ({ project, worktree }: { project: string; worktree?: string }): [string, string][] => {

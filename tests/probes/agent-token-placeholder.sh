@@ -2,7 +2,7 @@
 # PROBE -- not a test. Answers a capability question so a design decision can
 # be made; it asserts no invariant and gates nothing.
 #
-# QUESTION (factory F5): can Claude Code be handed its credential as a proxy
+# QUESTION (agents on desolate, docs/agents.md): can Claude Code be handed its credential as a proxy
 # PLACEHOLDER -- so every target of a project starts logged in and the real
 # token never enters a container -- or does it check the token's shape
 # locally, or refuse it, before anything is sent?
@@ -32,7 +32,7 @@
 # /api/eval/...), each audited `verdict=SUBST ... project=sample-siblings`, and
 # the upstream's 401 for the fake value came back as "Invalid bearer token" /
 # "Invalid API key" -- the expected answer to a fake value, not to the shape.
-# So the factory's credential is a placeholder secret, scoped to the project
+# So an agent's credential is a placeholder secret, scoped to the project
 # (T4.6), as "Agent credentials across a project's worktrees" proposed; no
 # prefix is needed, and the volume fallback (F5b) is not. Not asked here, and
 # still open: refresh behaviour of a real OAuth token, which `setup-token`'s

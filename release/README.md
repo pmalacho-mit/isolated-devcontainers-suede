@@ -476,6 +476,9 @@ the rules would go stale again each time.
 ./cli.sh worktree list owner/repo
 ./cli.sh worktree remove owner/repo wip
 ./cli.sh export owner/repo [path]        # copy files out to ./<name> (a tar when piped)
+./cli.sh exec owner/repo [--worktree wip] -- cmd...   # run a command (an agent) in its devcontainer
+./cli.sh bundle owner/repo [--worktree wip] out.bundle   # its branch as a git bundle, to push from here
+./cli.sh desolate --status       # each target's status, as its agent last set it
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
 ./cli.sh reset-inner            # the inner daemon is wedged: report, then recover
@@ -521,16 +524,15 @@ The outer editor has a **desolate** view in its activity bar, built into the
 image (nothing is installed from a marketplace):
 
 - **Projects** -- every project and its worktrees, running or stopped, with
-  their ports. Start, stop, rebuild, open its editor in a new tab, copy its
-  URL, add or remove a worktree.
+  their ports, and each one's **status** (its agent's colour on the icon, its
+  message beside it; refreshed every 3 s). Start, stop, rebuild (asked first),
+  open its editor or a port in a new tab, copy its URL, add or remove a
+  worktree.
 - **Dinds** -- each project dind's health, whether it is in use or for how long
   idle, its memory and image store, and the VM's headroom.
-- **Factory** -- for each project with a factory: the asks waiting on you
-  (answer them in place), its worktrees (push, close), its requests (approve
-  one the policy refused) and its messages, and its policy.
 
 It holds no power of its own: each action runs the command you would type in
-the editor's terminal (`desolate`, `worktree`, `work`), and its log is the
+the editor's terminal (`desolate`, `worktree`), and its log is the
 **desolate** output channel, with editor tokens left out. It works in
 Restricted Mode, which is where this editor should stay for a folder of other
 people's code. Resetting a dind stays on the Mac: `./cli.sh dind reset`.
@@ -1438,50 +1440,32 @@ decides who owns a volume, so it can only ever refuse itself.
 A project with no worktree is named exactly as it always was. Nothing about an
 existing stack moves.
 
-## A factory: agents across a project's worktrees
+## Agents, and a factory on top
 
-One project can run an agent in its main tree and one per worktree, talking
-over the project's `.git` and nothing else. Each writes only its own ref with
-`/desolate-ca/desolate-work` (AGENTS.md, "Working in a factory"); a watcher in
-the editor opens and closes worktrees on request and answers on its own ref.
-None of it runs until you enable it:
-
-```bash
-./cli.sh work init acme/widgets --max 4 --prefix issue/   # pushes held by default
-./cli.sh work requests acme/widgets      # what was asked for, and what became of it
-./cli.sh work log acme/widgets --type ask
-./cli.sh work approve acme/widgets <id>  # act on a request the policy refused
-./cli.sh work push acme/widgets issue-42 # push its branch (never main, never forced)
-./cli.sh work close acme/widgets issue-42
-./cli.sh work verify acme/widgets        # every message an append by its writer, or exit 1
-```
-
-**Work from GitHub issues, with GitHub reached from your Mac.** The `github`
-adapter never talks to GitHub itself: `./cli.sh forge` does, on your Mac, with
-your own `gh` login, and feeds the editor what it saw. No forge token is in the
-VM, the proxy or any container.
+desolate runs a repository and its worktrees in isolated devcontainers; what an
+agent does in one, and what decides when it starts, is yours. A software
+factory is a harness on your Mac built on these primitives
+([docs/agents.md](../docs/agents.md), and a sketch in
+[examples/factory/](../examples/factory/)):
 
 ```bash
-./cli.sh forge add acme/widgets acme/widgets   # project, then repo; creates the `desolate:run` label
-./cli.sh forge run                             # leave it running: polls every 60 s (--interval, --once)
-./cli.sh forge status acme/widgets             # each issue's worktree, branch, state and PR
+./cli.sh worktree add acme/widgets issue-42              # a place for one piece of work
+./cli.sh desolate acme/widgets --worktree issue-42       # start it
+./cli.sh exec acme/widgets --worktree issue-42 -- claude -p "..."   # run an agent in it
+./cli.sh desolate --status --json                        # what every agent last said
+./cli.sh bundle acme/widgets --worktree issue-42 out.bundle   # its branch, to push from here
 ```
 
-Label an issue `desolate:run` (`--label` picks another) and the next poll asks
-for a worktree `issue-<n>` on `<prefix>issue-<n>`; the watcher opens it, and the
-project's main tree sees the request on its refs as soon as it is running. As
-the work moves, `forge run` comments on the issue (`--no-comments` to stop it):
-opened, refused, closed. When desolate pushes the branch, it opens a **draft**
-PR that closes the issue. When that PR is merged or closed, or the issue is
-closed, the worktree's close is asked for -- and, as always, refused while it
-holds uncommitted work. Nothing is lost while `forge run` is stopped; it picks
-up where GitHub is when it starts. It polls rather than listening for
-webhooks, because receiving one would mean listening somewhere other than
-loopback.
+**Status, through `.git`.** An agent says how it is going with
+`/desolate-ca/desolate-status set <color> <message>` -- `orange` "needs a
+human", `green` "ready for a PR", `red` "authentication failed". It is a file
+in that target's git dir: never committed, never pushed, seen by exactly that
+project's containers. desolate shows it -- the icon's colour and the message in
+the editor's panel, `desolate --status` -- and never acts on it.
 
-Anyone who can label an issue can ask for a worktree; the cap, the requesters
-and `on_done` in your policy still decide what happens. An issue's title is
-kept as one printable line and never used as a name.
+**No forge credential is in the stack.** Polling GitHub, pushing and opening
+PRs happen on your Mac, with your own `gh` and git: `bundle` hands you the
+branch.
 
 **Agents' credentials are placeholders.** Claude Code sends whatever token it
 is given as the bearer, with no local check of its shape (measured:
@@ -1499,22 +1483,12 @@ and is bound to the one project that may spend it:
 Every target of the project -- `main` and each worktree -- starts logged in; a
 worker in another project cannot spend it.
 
-**The policy is not in the repository.** It lives in
-`/workspaces/.desolate/factory/`, with your approvals and the watcher's record,
-where no devcontainer reaches: every agent in the project can commit to its
-branch, so a policy read from there would be whatever they last wrote -- and
-`on_done: push` is the editor's deploy key pushing their branches, which is CI
-with the repository's secrets. Pushes are held until you push, or until you set
-`--on-done push`.
-
 **What is and is not a boundary.** A project's agents share one trust domain:
-any of them can write any ref in `.git`, so who a request claims to be from is
-tamper-evidence (`work verify`), not authority. What bounds a hostile agent is
-what the actions allow -- opens are capped, a close refuses a worktree holding
-uncommitted work, a push goes only to the project's plain ssh/https origin,
-from a throwaway repository that reads none of the project's config. Worktree
-checkouts, and the hooks they run, happen in the worktree's sandbox, never in
-the editor; a repository with hooks is refused unless the policy allows them.
+any of them can write any target's status, so a status is the agent's claim --
+check what it claims (that a branch builds, say) before acting on it. What
+bounds a hostile agent is what reaches outside the project: `exec` is the
+Mac's alone, a bundle is made in a sandbox that mounts only that project, and
+the push is yours.
 
 ## Secrets: placeholders in, real values never
 

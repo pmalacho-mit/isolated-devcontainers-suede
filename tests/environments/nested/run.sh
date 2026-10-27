@@ -149,7 +149,7 @@ start_proxy() {
   sudo install -m 0755 "$RELEASE/proxy/container/install-ca.sh" "$CONFDIR/public/install-ca.sh"
   sudo install -m 0755 "$RELEASE/proxy/container/trust-proxy-in-builds.sh" "$CONFDIR/public/trust-proxy-in-builds.sh"
   sudo install -m 0755 "$RELEASE/proxy/container/desolate-net" "$CONFDIR/public/desolate-net"
-  sudo install -m 0755 "$RELEASE/proxy/container/desolate-work" "$CONFDIR/public/desolate-work"
+  sudo install -m 0755 "$RELEASE/proxy/container/desolate-status" "$CONFDIR/public/desolate-status"
   if ! alive "$STATE/ca.pid"; then
     as_proxy "$STATE/ca.log" "$(dirname "$mitmdump")/python3" -m http.server 18081 \
       --directory "$CONFDIR/public" > "$STATE/ca.pid"

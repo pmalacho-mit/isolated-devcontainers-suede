@@ -53,6 +53,27 @@ export const describeResolveFailure = (err: any, timeoutMs: number) => {
  */
 export const RESOLVE_ID_LABEL = "desolate.resolve=spec";
 
+/**
+ * The user a devcontainer's tools run as, from the `devcontainer.metadata`
+ * label the CLI stamped it with: the LAST entry naming a `remoteUser` wins
+ * (the spec's own entry comes after its features'), then `containerUser`.
+ * undefined when neither is named -- the image's own user, then.
+ */
+export const remoteUserOf = (metadataLabel: string): string | undefined => {
+  let entries: unknown;
+  try {
+    entries = JSON.parse(metadataLabel);
+  } catch {
+    return undefined;
+  }
+  const list = (Array.isArray(entries) ? entries : [entries]).filter(
+    (entry): entry is Record<string, unknown> => entry !== null && typeof entry === "object");
+  const named = (key: string) =>
+    [...list].reverse().map((entry) => entry[key]).find((value): value is string =>
+      typeof value === "string" && /^[A-Za-z0-9._-][A-Za-z0-9._@-]{0,63}$/.test(value));
+  return named("remoteUser") ?? named("containerUser");
+};
+
 export const resolveSpec = (
   workspace: string,
   config: string,

@@ -2,13 +2,13 @@
  * model.mts -- what the desolate extension shows, decided without VS Code.
  *
  * Everything here is a pure function from what the editor's own commands
- * print -- `desolate --list --json`, `desolate --dinds`, `work requests
- * --json`, `work log --json` -- to the nodes of a tree, so the unit tests read
- * the same decisions the views make. extension.mts only draws them and runs
- * the commands a node's actions name.
+ * print -- `desolate --list --json`, `desolate --dinds` -- and each target's
+ * status (status.ts) to the nodes of a tree, so the unit tests read the same
+ * decisions the views make. extension.mts only draws them and runs the
+ * commands a node's actions name.
  *
- * Text that came from a project -- an agent's message, a request's title -- is
- * shown as plain text, never as markdown: a writer chooses every byte of it.
+ * Text that came from a project -- a status's message -- is shown as plain
+ * text, never as markdown: a writer chooses every byte of it.
  */
 
 /** One node of a view. `actions` is VS Code's contextValue, the set of
@@ -19,10 +19,12 @@ export interface Node {
   description?: string;
   tooltip?: string;
   icon?: string;
+  /** A theme colour id for the icon: a target's status colour. */
+  iconColor?: string;
   actions?: string;
   children?: Node[];
   /** What the node's actions act on. */
-  target?: { project: string; worktree?: string; url?: string; request?: string; from?: string };
+  target?: { project: string; worktree?: string; url?: string };
 }
 
 /** `desolate --list --json`: one row per target that is up. */
@@ -41,6 +43,26 @@ export interface Known {
   worktree?: string;
 }
 
+/** A target's status (status.ts): what its agent said, in a colour. */
+export interface Status {
+  color: string;
+  message: string;
+  updated: string;
+}
+
+/** A status colour, as the theme names it -- so it reads in light and dark. */
+export const STATUS_THEME_COLOR: Record<string, string> = {
+  gray: "disabledForeground",
+  blue: "charts.blue",
+  green: "charts.green",
+  yellow: "charts.yellow",
+  orange: "charts.orange",
+  red: "charts.red",
+};
+
+/** The key a target's status is found under. */
+export const targetKey = ({ project, worktree }: { project: string; worktree?: string | null }) => `${project}@${worktree ?? ""}`;
+
 /** The last JSON value a command printed: the broker relays the runner's
  *  log lines before it, and those are prose. */
 export const lastJson = <T,>(output: string): T | undefined => {
@@ -53,17 +75,6 @@ export const lastJson = <T,>(output: string): T | undefined => {
   }
   return undefined;
 };
-
-/** Every JSON line a command printed (`work ... --json` prints one per row). */
-export const jsonLines = <T,>(output: string): T[] =>
-  output.split("\n").flatMap((line) => {
-    if (!line.trim().startsWith("{")) return [];
-    try {
-      return [JSON.parse(line) as T];
-    } catch {
-      return [];
-    }
-  });
 
 /** An editor URL carries its connection token; the token belongs in the
  *  link the user opens, never in a log anyone can read over a shoulder. */
@@ -86,20 +97,25 @@ const portNodes = (row: Running, id: string, at: Known): Node[] =>
 
 /**
  * The Projects view: every project, each with its worktrees, and for what is
- * running its ports and the actions that make sense for it.
+ * running its ports and the actions that make sense for it -- and, where its
+ * agent set one, its status: the icon in its colour, its message beside it.
  */
-export const projectsTree = (known: Known[], running: Running[]): Node[] => {
-  const up = new Map(running.map((row) => [`${row.project}@${row.worktree ?? ""}`, row]));
+export const projectsTree = (known: Known[], running: Running[], statuses = new Map<string, Status>()): Node[] => {
+  const up = new Map(running.map((row) => [targetKey(row), row]));
   const node = (target: Known): Node => {
-    const key = `${target.project}@${target.worktree ?? ""}`;
+    const key = targetKey(target);
     const row = up.get(key);
+    const status = statuses.get(key);
     const id = `target:${key}`;
     const kind = target.worktree ? "worktree" : "project";
+    const state = row ? `running${row.daemon === "project" ? " · own dind" : ""}` : "stopped";
     return {
       id,
       label: target.worktree ?? target.project,
-      description: row ? `running${row.daemon === "project" ? " · own dind" : ""}` : "stopped",
+      description: status?.message ? `${status.message} · ${state}` : state,
+      tooltip: status ? `${status.color}: ${status.message || "(no message)"} -- ${status.updated} (${state})` : undefined,
       icon: row ? "vm-running" : "vm-outline",
+      iconColor: status ? STATUS_THEME_COLOR[status.color] ?? STATUS_THEME_COLOR.gray : undefined,
       actions: `${kind}.${row ? "running" : "stopped"}`,
       target: { project: target.project, worktree: target.worktree, url: row?.url ?? undefined },
       children: row ? portNodes(row, id, target) : [],
@@ -146,98 +162,4 @@ export const dindsTree = (status: DindStatus, now = Date.now()): Node[] => {
                 description: `${running} of ${max} running · ${gib(available)} free, ${gib(floor)} kept back` });
   }
   return rows.length ? rows : [{ id: "dind:none", label: "no project dinds", icon: "info" }];
-};
-
-/** `work requests --json`: one row per request. */
-export interface RequestRow {
-  id: string;
-  action?: string;
-  worktree?: string;
-  branch?: string | null;
-  from?: string;
-  title?: string | null;
-  outcome: string;
-  approved: boolean;
-  unreadable?: string;
-}
-
-/** `work log --json`: one row per message, newest first. */
-export interface MessageRow {
-  commit: string;
-  time: string;
-  from: string;
-  to: string[];
-  type: string;
-  body: string;
-  worktree?: string;
-  state?: string;
-}
-
-/** Whether a message is waiting on a person: an `ask` to the main tree, the
- *  human, or everyone. */
-export const needsAnswer = (message: MessageRow) =>
-  message.type === "ask" && message.to.some((to) => to === "main" || to === "@human" || to === "*");
-
-const oneLine = (text: string, max = 120) => {
-  const line = text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
-};
-
-/**
- * The Factory view, for one project with a factory: its policy, its requests
- * (a refused or waiting one can be approved), its open worktrees (pushed or
- * closed by hand), and its messages -- asks to a person first, and marked.
- */
-export const factoryTree = (
-  project: string,
-  policy: Record<string, unknown>,
-  requests: RequestRow[],
-  messages: MessageRow[],
-  openWorktrees: string[],
-): Node => {
-  const id = `factory:${project}`;
-  const asks = messages.filter(needsAnswer);
-  const policyNodes: Node[] = Object.entries(policy).map(([key, value]) => ({
-    id: `${id}:policy:${key}`, label: key, description: oneLine(JSON.stringify(value)), icon: "settings",
-  }));
-  const requestNodes: Node[] = requests.map((request) => {
-    const approvable = !request.approved && (/^refused/.test(request.outcome) || request.outcome === "waiting");
-    return {
-      id: `${id}:request:${request.id}`,
-      label: request.unreadable ? `unreadable request` : `${request.action} ${request.worktree}`,
-      description: oneLine(`${request.outcome}${request.approved ? " (approved)" : ""} · from ${request.from ?? "?"}`),
-      tooltip: oneLine(request.unreadable ?? request.title ?? request.branch ?? "", 400),
-      icon: /^refused/.test(request.outcome) ? "error" : request.outcome === "pending" ? "clock" : "check",
-      actions: approvable ? "request.approvable" : "request",
-      target: { project, request: request.id },
-    };
-  });
-  const worktreeNodes: Node[] = openWorktrees.map((worktree) => ({
-    id: `${id}:worktree:${worktree}`, label: worktree, icon: "git-branch", actions: "factory.worktree",
-    target: { project, worktree },
-  }));
-  const messageNode = (message: MessageRow): Node => ({
-    id: `${id}:message:${message.commit}`,
-    label: `${message.type}: ${oneLine(message.body, 80)}`,
-    description: `${oneLine(message.from, 40)} → ${oneLine(message.to.join(","), 40)} · ${message.time}`,
-    tooltip: oneLine(message.body, 2000),
-    icon: needsAnswer(message) ? "question" : message.type === "done" ? "pass" : message.type === "blocked" ? "error" : "comment",
-    actions: needsAnswer(message) ? "message.ask" : "message",
-    target: { project, from: message.from },
-  });
-  return {
-    id,
-    label: project,
-    description: asks.length ? `${asks.length} ask${asks.length === 1 ? "" : "s"} waiting` : `${requests.length} requests`,
-    icon: asks.length ? "bell-dot" : "organization",
-    actions: "factory.project",
-    target: { project },
-    children: [
-      ...(asks.length ? [{ id: `${id}:asks`, label: "waiting on you", icon: "bell-dot", children: asks.map(messageNode) }] : []),
-      { id: `${id}:worktrees`, label: "worktrees", icon: "git-branch", children: worktreeNodes },
-      { id: `${id}:requests`, label: "requests", icon: "inbox", children: requestNodes },
-      { id: `${id}:messages`, label: "messages", icon: "comment-discussion", children: messages.map(messageNode) },
-      { id: `${id}:policy`, label: "policy", icon: "settings", children: policyNodes },
-    ],
-  };
 };

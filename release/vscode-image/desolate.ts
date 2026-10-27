@@ -33,7 +33,7 @@
 //
 //   Mac 127.0.0.1:8081 -> dind:8081 (relay) -> <devcontainer-ip>:5173
 /// <reference types="node" />
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as dind from "./dind.ts";
@@ -102,6 +102,7 @@ import {
 } from "./ports.ts";
 import {
   labelledConfig,
+  remoteUserOf,
   resolveSpec,
   tryLocateConfig,
   type ResolvedSpec,
@@ -1544,26 +1545,24 @@ function removeWorktree(target: Target, force: boolean): void {
   console.log(`worktree: removed ${target.name}`);
 }
 
-/** Where a worktree's branch is handed to the editor to push: one directory
- *  per target, so a sandbox sees only its own. Under /workspaces/.desolate,
- *  which no devcontainer mounts. */
-const PUSH_DIRECTORY = path.join(WORKSPACES, ".desolate", "factory", "push");
+/** Where a target's branch is handed out -- `cli.sh bundle` copies it to the
+ *  Mac from here: one directory per target, so a sandbox sees only its own.
+ *  Under /workspaces/.desolate, which no devcontainer mounts. */
+const BUNDLE_DIRECTORY = path.join(WORKSPACES, ".desolate", "bundles");
 
 /**
- * Bundle a worktree's branch for the factory's push (work-watcher.ts).
+ * Bundle a target's current branch, for the Mac to push with its own
+ * credentials (`cli.sh bundle`, docs/agents.md).
  *
- * The editor pushes, because the deploy key's agent is there; but git in the
- * editor follows whatever the project's `.git` points at -- a ref that is a
- * symlink, alternates naming another project's objects -- and the editor can
- * read every project. So the branch is read HERE instead, in a sandbox that
- * mounts the project root (read-only) and its own output directory, and
- * nothing else of /workspaces: whatever the project points at outside itself
- * resolves to nothing. The editor then imports the bundle into a repository
- * of its own and pushes that.
+ * Never git in the editor, which can read every project: it would follow
+ * whatever the project's `.git` points at -- a ref that is a symlink,
+ * alternates naming another project's objects. So the branch is read in a
+ * sandbox that mounts the project root (read-only) and its own output
+ * directory, and nothing else of /workspaces: whatever the project points at
+ * outside itself resolves to nothing.
  */
-function bundleWorktree(target: Target): void {
-  if (!target.worktree) return die("--bundle bundles a worktree's branch; name one with --worktree");
-  const out = path.join(PUSH_DIRECTORY, target.namespace);
+function bundleTarget(target: Target): void {
+  const out = path.join(BUNDLE_DIRECTORY, target.namespace);
   fs.rmSync(out, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true });
   const bundled = docker.bundleBranch(
@@ -1573,6 +1572,33 @@ function bundleWorktree(target: Target): void {
   );
   if (!bundled) return die(`could not bundle ${target.name}'s branch in its sandbox (no branch checked out, or git failed)`);
   console.log(`BUNDLED ${bundled.branch} ${bundled.commit} ${path.join(out, "branch.bundle")}`);
+}
+
+/**
+ * Run a command inside a running target's devcontainer -- how a harness starts
+ * an agent in it (`cli.sh exec`, docs/agents.md). As the container's remote
+ * user (its metadata label), in its workspace folder, through a login shell so
+ * the PATH its features set up is there; the container's own environment,
+ * placeholder secrets and all, it has already. stdin, stdout and a TTY are the
+ * caller's. Exits with the command's status.
+ *
+ * `docker exec`, not `devcontainer exec`: that one finds the container by the
+ * config it was STARTED with, and a harness's exec comes later, after the spec
+ * may have moved on.
+ */
+function execTarget(target: Target, argv: string[]): never {
+  if (!driveSaved(target))
+    return die(`${target.name}'s own daemon is not running. Start it: ${hint.desolate(invocation(target))}`);
+  const id = devcontainerId(target.dir);
+  if (!id) return die(`${target.name} is not running. Start it: ${hint.desolate(invocation(target))}`);
+  const user = remoteUserOf(docker.container.metadata(id));
+  const folder = containerWorkspaceFolder(target.dir, id) || target.dir;
+  const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const result = spawnSync("docker", [
+    "exec", "-i", ...(tty ? ["-t"] : []), ...(user ? ["-u", user] : []), "-w", folder, id,
+    "sh", "-lc", 'exec "$@"', "sh", ...argv,
+  ], { stdio: "inherit" });
+  process.exit(result.status ?? 1);
 }
 
 /** The editor's user, which owns /workspaces and is the only one there. */
@@ -1889,7 +1915,8 @@ async function main(): Promise<void> {
   }
   else if (args.command === "uncommitted") reportUncommitted(target);
   else if (args.command === "reclaim") await reclaimTarget(target, args.path);
-  else if (args.command === "bundle") bundleWorktree(target);
+  else if (args.command === "bundle") bundleTarget(target);
+  else if (args.command === "exec") execTarget(target, args.execArgv!);
   else if (args.command === "populate") populateWorktree(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }

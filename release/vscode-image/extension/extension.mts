@@ -1,26 +1,25 @@
 /**
- * extension.mts -- the desolate extension, built into the OUTER editor (T4.7,
- * F6): Projects, Dinds and Factory views, and the actions a person takes from
- * them.
+ * extension.mts -- the desolate extension, built into the OUTER editor (T4.7):
+ * Projects and Dinds views, each target's status, and the actions a person
+ * takes from them.
  *
  * It holds no new power. Every action runs a command the editor's terminal
- * already has -- `desolate` (the broker client), `worktree`, `work` -- with
- * execFile, never a shell, so what it may do is what those commands may do,
- * and they validate their own arguments. It runs no git and no docker itself,
- * and reaches nothing over the network. What it reads directly is the file
- * system the editor already mounts: which projects /workspaces holds
- * (projects.ts), and which have a factory (work-policy.ts).
+ * already has -- `desolate` (the broker client), `worktree` -- with execFile,
+ * never a shell, so what it may do is what those commands may do, and they
+ * validate their own arguments. It runs no git and no docker itself, and
+ * reaches nothing over the network. What it reads directly is the file system
+ * the editor already mounts: which projects /workspaces holds, and each
+ * target's status in its git dir (status.ts).
  *
  * The decisions -- what a node shows, which actions it offers -- are in
  * model.mts, which the unit tests run without VS Code.
  */
 import * as vscode from "vscode";
 import { execFile } from "node:child_process";
-import { list as listTargets } from "../projects.ts";
-import { readPolicy } from "../work-policy.ts";
+import { readStatus, shownTargets } from "../status.ts";
 import {
-  dindsTree, factoryTree, jsonLines, lastJson, projectsTree, redactTokens,
-  type DindStatus, type MessageRow, type Node, type RequestRow, type Running,
+  dindsTree, lastJson, projectsTree, redactTokens, targetKey,
+  type DindStatus, type Node, type Running,
 } from "./model.mts";
 
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
@@ -30,7 +29,7 @@ let log: vscode.OutputChannel;
 
 /** One command, its output to the log as it arrives (tokens redacted), its
  *  exit status and everything it printed back. */
-const run = (command: "desolate" | "worktree" | "work", args: string[], quiet = false) =>
+const run = (command: "desolate" | "worktree", args: string[], quiet = false) =>
   new Promise<{ code: number; output: string }>((resolve) => {
     if (!quiet) log.appendLine(`$ ${command} ${args.join(" ")}`);
     const child = execFile(`${BIN}/${command}`, args, { maxBuffer: 16 * 1024 * 1024, timeout: 60 * 60_000 });
@@ -53,9 +52,10 @@ class Tree implements vscode.TreeDataProvider<Node> {
 
   constructor(private readonly load: () => Promise<Node[]>) {}
 
-  async refresh() {
+  /** `load`, for once, a cheaper read of the same view. */
+  async refresh(load = this.load) {
     try {
-      this.roots = await this.load();
+      this.roots = await load();
     } catch (err: any) {
       this.roots = [{ id: "error", label: "could not read", description: String(err?.message ?? err), icon: "error" }];
     }
@@ -75,25 +75,30 @@ class Tree implements vscode.TreeDataProvider<Node> {
     item.description = node.description;
     item.tooltip = node.tooltip;                 // a string: plain text, never markdown
     item.contextValue = node.actions;
-    if (node.icon) item.iconPath = new vscode.ThemeIcon(node.icon);
+    if (node.icon)
+      item.iconPath = new vscode.ThemeIcon(node.icon, node.iconColor ? new vscode.ThemeColor(node.iconColor) : undefined);
     return item;
   }
 }
 
-/** Projects that can be started -- not an owner directory, which `list` keeps
- *  for namespace claims -- and every worktree of theirs, spec or not: a new
- *  worktree has none until its first checkout. */
-const known = () => {
-  const all = listTargets(WORKSPACES);
-  const projects = new Set(listTargets.startable(WORKSPACES).filter((t) => !t.worktree).map((t) => t.project));
-  return all
-    .filter(({ project }) => projects.has(project))
-    .map(({ project, worktree }) => ({ project, ...(worktree ? { worktree } : {}) }));
-};
+const known = () =>
+  shownTargets(WORKSPACES).map(({ project, worktree }) => ({ project, ...(worktree ? { worktree } : {}) }));
 
-const loadProjects = async () => {
-  const { output } = await run("desolate", ["--list", "--json"], true);
-  return projectsTree(known(), lastJson<Running[]>(output) ?? []);
+/** What is running changes when the broker says so; a status, whenever an
+ *  agent writes one. So the broker is asked every 10 s, and the statuses --
+ *  a file read each, no command -- are read every 3 s against its last answer. */
+let lastRunning: Running[] = [];
+const statuses = () => new Map(shownTargets(WORKSPACES).flatMap((target) => {
+  const status = readStatus(target);
+  return status ? [[targetKey({ project: target.project, worktree: target.worktree }), status] as const] : [];
+}));
+
+const loadProjects = async (ask = true) => {
+  if (ask) {
+    const { output } = await run("desolate", ["--list", "--json"], true);
+    lastRunning = lastJson<Running[]>(output) ?? [];
+  }
+  return projectsTree(known(), lastRunning, statuses());
 };
 
 const loadDinds = async () => {
@@ -103,24 +108,6 @@ const loadDinds = async () => {
   return dindsTree(status);
 };
 
-const loadFactory = async () => {
-  const projects = known().filter((target) => !target.worktree).map(({ project }) => project);
-  const nodes: Node[] = [];
-  for (const project of projects) {
-    let policy;
-    try { policy = readPolicy(WORKSPACES, project); } catch { continue; }
-    if (!policy) continue;
-    const [requests, messages] = await Promise.all([
-      run("work", ["requests", project, "--json"], true),
-      run("work", ["log", project, "--json", "--limit", "50"], true),
-    ]);
-    const open = known().filter((target) => target.project === project && target.worktree).map((t) => t.worktree!);
-    nodes.push(factoryTree(project, policy as unknown as Record<string, unknown>,
-      jsonLines<RequestRow>(requests.output), jsonLines<MessageRow>(messages.output), open));
-  }
-  return nodes.length ? nodes : [{ id: "factory:none", label: "no project has a factory (work init <project>)", icon: "info" }];
-};
-
 const targetArgs = (node: Node) => [
   ...(node.target?.worktree ? ["--worktree", node.target.worktree] : []),
   node.target!.project,
@@ -128,11 +115,11 @@ const targetArgs = (node: Node) => [
 
 export function activate(context: vscode.ExtensionContext) {
   log = vscode.window.createOutputChannel("desolate");
-  const projects = new Tree(loadProjects), dinds = new Tree(loadDinds), factory = new Tree(loadFactory);
-  const refreshAll = () => Promise.all([projects.refresh(), dinds.refresh(), factory.refresh()]);
+  const projects = new Tree(() => loadProjects(true)), dinds = new Tree(loadDinds);
+  const refreshAll = () => Promise.all([projects.refresh(), dinds.refresh()]);
 
   /** An action, with its progress shown and every view refreshed after. */
-  const act = (title: string, command: "desolate" | "worktree" | "work", args: string[]) =>
+  const act = (title: string, command: "desolate" | "worktree", args: string[]) =>
     vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title }, async () => {
       log.show(true);
       const { code } = await run(command, args);
@@ -147,7 +134,6 @@ export function activate(context: vscode.ExtensionContext) {
     log,
     vscode.window.registerTreeDataProvider("desolate.projects", projects),
     vscode.window.registerTreeDataProvider("desolate.dinds", dinds),
-    vscode.window.registerTreeDataProvider("desolate.factory", factory),
   );
   register("refresh", () => refreshAll());
   register("start", (node) => act(`starting ${node.label}`, "desolate", targetArgs(node)));
@@ -180,24 +166,16 @@ export function activate(context: vscode.ExtensionContext) {
       { modal: true }, "Remove");
     if (sure === "Remove") await act(`removing ${node.label}`, "worktree", ["remove", node.target!.project, node.target!.worktree!]);
   });
-  register("approve", (node) => act(`approving ${node.label}`, "work", ["approve", node.target!.project, node.target!.request!]));
-  register("push", (node) => act(`pushing ${node.label}`, "work", ["push", node.target!.project, node.target!.worktree!]));
-  register("close", (node) => act(`closing ${node.label}`, "work", ["close", node.target!.project, node.target!.worktree!]));
-  register("reply", async (node) => {
-    const from = node.target!.from!;
-    const body = await vscode.window.showInputBox({ prompt: `your answer to ${from}` });
-    if (body) await act(`answering ${from}`, "work", ["say", node.target!.project, "answer", body, "--to", from]);
-  });
 
-  // Projects and the factory move on their own; the dinds' sizes cost a `du`
-  // each, so they are read less often.
-  const every = (ms: number, tree: Tree) => {
-    const timer = setInterval(() => void tree.refresh(), ms);
+  // What runs, every 10 s; statuses, every 3 s, without asking the broker;
+  // the dinds' sizes cost a `du` each, so every minute.
+  const every = (ms: number, refresh: () => Promise<void>) => {
+    const timer = setInterval(() => void refresh(), ms);
     context.subscriptions.push({ dispose: () => clearInterval(timer) });
   };
-  every(10_000, projects);
-  every(15_000, factory);
-  every(60_000, dinds);
+  every(10_000, () => projects.refresh());
+  every(3_000, () => projects.refresh(() => loadProjects(false)));
+  every(60_000, () => dinds.refresh());
   void refreshAll();
 }
 

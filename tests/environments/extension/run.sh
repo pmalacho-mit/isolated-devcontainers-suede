@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# The desolate extension (T4.7, F6) in a real browser, against the real editor.
+# The desolate extension (T4.7) in a real browser, against the real editor.
 #
 #   ./tests/environments/extension/run.sh <editor-image> [<out-dir>]
 #
 # Starts the outer editor from <editor-image> (release/vscode-image, built), as
-# compose starts it, with a fixture /workspaces and stand-ins for the three
+# compose starts it, with a fixture /workspaces and stand-ins for the two
 # commands the extension runs (DESOLATE_EXTENSION_BIN): each records its argv
 # and prints what the real one would. Then headless Chromium (Playwright) opens
 # the editor, the desolate views, and drives their actions; the assertions
@@ -35,20 +35,23 @@ docker run -d --name "$EDITOR" --network "$NET" -e DESOLATE_EXTENSION_BIN=/stubs
   /home/.desolate-shell/bin/codium-server --host=0.0.0.0 --port=3000 --connection-token="$TOKEN" >/dev/null \
   || { fail "start the editor from $IMAGE"; summary; exit 1; }
 
-# /workspaces as the extension reads it: two projects, one with a worktree and
-# a factory.
+# /workspaces as the extension reads it: two projects, one with a worktree, and
+# a status for that project and its worktree, where desolate-status writes them.
 docker exec -u 0 "$EDITOR" sh -c '
   set -e
   for p in acme/widgets solo; do mkdir -p /workspaces/$p/.devcontainer /workspaces/$p/.git
     echo "{\"image\":\"alpine:3\"}" > /workspaces/$p/.devcontainer/devcontainer.json; done
   mkdir -p /workspaces/acme/widgets/.worktrees/issue-42/.devcontainer
   echo "{\"image\":\"alpine:3\"}" > /workspaces/acme/widgets/.worktrees/issue-42/.devcontainer/devcontainer.json
-  mkdir -p /workspaces/.desolate/factory /stubs
-  echo "{\"v\":1,\"max_open_worktrees\":2,\"requesters\":[\"main\",\"forge/github\"],\"branch_prefix\":\"factory/\",\"on_done\":\"hold\",\"allow_hooks\":false,\"adapters\":[\"github\"],\"remote\":\"\",\"github\":{\"repo\":\"acme/widgets\",\"label\":\"desolate:run\"}}" \
-    > /workspaces/.desolate/factory/acme__widgets.json
+  mkdir -p /workspaces/acme/widgets/.git/worktrees/issue-42 /stubs
+  echo "gitdir: /workspaces/acme/widgets/.git/worktrees/issue-42" > /workspaces/acme/widgets/.worktrees/issue-42/.git
+  echo "{\"color\":\"orange\",\"message\":\"needs a human: which API version?\",\"updated\":\"2026-10-27T12:00:00Z\"}" \
+    > /workspaces/acme/widgets/.git/desolate-status.json
+  echo "{\"color\":\"green\",\"message\":\"ready for a PR\",\"updated\":\"2026-10-27T12:00:00Z\"}" \
+    > /workspaces/acme/widgets/.git/worktrees/issue-42/desolate-status.json
   chown -R 1000:1000 /workspaces /stubs'
 
-# The three commands, standing in. Each records its argv, one line per call.
+# The two commands, standing in. Each records its argv, one line per call.
 docker exec -i -u 0 "$EDITOR" sh -c 'cat > /stubs/desolate && chmod +x /stubs/desolate' <<'EOF'
 #!/bin/sh
 echo "desolate $*" >> /tmp/calls.log
@@ -61,15 +64,6 @@ case "$*" in
   *) echo "ready: http://127.0.0.1:8094/?tkn=another-secret-token" ;;
 esac
 EOF
-docker exec -i -u 0 "$EDITOR" sh -c 'cat > /stubs/work && chmod +x /stubs/work' <<'EOF'
-#!/bin/sh
-echo "work $*" >> /tmp/calls.log
-case "$1" in
-  requests) echo '{"id":"01JREQ0000000000000000000A","action":"open","worktree":"issue-43","from":"forge/github","outcome":"refused: the repository has hooks","approved":false}' ;;
-  log) echo '{"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","time":"2026-10-26T12:00:00Z","from":"issue-42","to":["main"],"type":"ask","body":"Which API version should I target?"}'
-       echo '{"commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","time":"2026-10-26T11:00:00Z","from":"issue-42","to":["*"],"type":"status","body":"started"}' ;;
-esac
-EOF
 docker exec -i -u 0 "$EDITOR" sh -c 'cat > /stubs/worktree && chmod +x /stubs/worktree' <<'EOF'
 #!/bin/sh
 echo "worktree $*" >> /tmp/calls.log
@@ -79,6 +73,12 @@ for _ in $(seq 1 60); do
   docker exec "$EDITOR" sh -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null && break
   sleep 1
 done
+
+# A status written while the view is open, with nothing clicked after it: once
+# the browser has started 'solo' (its last action), solo's agent speaks.
+docker exec -d -u 1000 "$EDITOR" sh -c '
+  until grep -q "^desolate solo$" /tmp/calls.log 2>/dev/null; do sleep 0.5; done
+  echo "{\"color\":\"red\",\"message\":\"authentication failed\"}" > /workspaces/solo/.git/desolate-status.json'
 
 # The browser: Playwright's own image, with its npm package for the script.
 docker create --name "$BROWSER" --network "$NET" -e NODE_EXTRA_CA_CERTS=/ca.pem \
@@ -143,7 +143,10 @@ const { chromium } = require("playwright");
   const solo = page.locator('.sidebar .monaco-list-row:has-text("solo")').first();
   await solo.hover();
   await solo.locator('[aria-label="Start"]').click();
-  await page.waitForTimeout(3000);
+  // Nothing clicked from here: the status the fixture writes on that start
+  // must reach the view by the extension's own refresh.
+  report.lateStatus = await page.locator('.sidebar .monaco-list-row:has-text("authentication failed")')
+    .first().waitFor({ timeout: 8000 }).then(() => true, () => false);
   // Open the log the action wrote to.
   await page.keyboard.press("Control+Shift+U");
   await page.waitForTimeout(2000);
@@ -169,11 +172,14 @@ group "the views, as the browser shows them"
 [ -z "$(field error)" ] || fail "the browser script finished" "$(field error)"
 SIDEBAR=$(field sidebar)
 assert_not_contains "an owner directory is not a project" "$SIDEBAR" $'\nacmestopped'
-for text in "PROJECTS" "acme/widgets" "issue-42" "solo" "running · own dind" "127.0.0.1:8093" \
-            "DINDS" "healthy · in use" "headroom" "FACTORY" "waiting on you" "Which API version"; do
+for text in "PROJECTS" "acme/widgets" "issue-42" "solo" "127.0.0.1:8093" \
+            "needs a human: which API version? · running · own dind" "ready for a PR · stopped" \
+            "DINDS" "healthy · in use" "headroom"; do
   assert_contains "the sidebar shows '$text'" "$SIDEBAR" "$text"
 done
 assert_not_contains "no editor token is shown" "$SIDEBAR" "secret-token"
+assert_not_contains "and no Factory view" "$SIDEBAR" "FACTORY"
+assert_eq "a status written later shows by itself, within seconds" "$(field lateStatus)" "true"
 
 assert_contains "with Workspace Trust declined" "$(field dialog)" "trust"
 
@@ -188,7 +194,8 @@ PANEL=$(field panel)
 assert_contains "the command reached the desolate log" "$PANEL" "$ desolate solo"
 assert_contains "and so did its output" "$PANEL" "ready: http://127.0.0.1:8094/?tkn="
 assert_not_contains "with the token redacted, all of it" "$PANEL" "secret-token"
-assert_contains "the views read through the commands" "$CALLS" "work requests acme/widgets --json"
+assert_contains "the views read through the commands" "$CALLS" "desolate --list --json"
+assert_not_contains "and statuses through none" "$CALLS" "--status"
 note() { printf '       %s\n' "$1"; }
 note "screenshots: $OUT/views.png $OUT/after-start.png"
 summary

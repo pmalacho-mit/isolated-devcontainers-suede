@@ -101,7 +101,7 @@ Note the path is `/desolate-ca/`, not `/desolate/`. It derives `desolate-ca/<bas
 
 `FROM node:22-bookworm-slim` in this daemon then resolves to the CA-trusting image for every builder that reads the local image store. The Dockerfile stays unmodified and production-clean. `--unshadow` puts the upstream image back. Two things to know: a later `docker pull node:22-bookworm-slim` silently restores the untrusting image (re-run the script), and the tag is lost when the container is rebuilt.
 
-- **A shadow does not bind a BuildKit build posted to the Engine API** (`POST /build?version=2` — `dockerode` with `version: "2"` and tools built on it). That path resolves the tag at the registry and pins `FROM ...@sha256:<upstream>`, so the retag is never consulted and the build silently gets the pristine, non-CA-trusting base: a long download, then a hang on its first HTTPS fetch. `docker build`, `docker compose build` and the classic builder (`version: "1"`, `DOCKER_BUILDKIT=0`) all honour the shadow. For a build stuck on the BuildKit path, either point it at the derivative directly (`FROM desolate-ca/node:22-bookworm-slim`, which exists in no registry so BuildKit falls back to the local store) or ask it for the classic builder. Do not reach for `registry-mirrors` in the daemon: `docker pull` honours them, the BuildKit inside the same daemon does not.
+- **A shadow does not bind a BuildKit build posted to the Engine API** (`POST /build?version=2` — `dockerode` with `version: "2"` and tools built on it). That path resolves the tag at the registry and pins `FROM ...@sha256:<upstream>`, so the retag is never consulted and the build silently gets the pristine, non-CA-trusting base: a long download, then a hang on its first HTTPS fetch. `docker build`, `docker compose build` and the classic builder (`version: "1"`, `DOCKER_BUILDKIT=0`) all honour the shadow. For a build stuck on the BuildKit path, either point it at the derivative directly (`FROM desolate-ca/node:22-bookworm-slim`, which exists in no registry so BuildKit falls back to the local store) or ask it for the classic builder. With a daemon of your own, `--shadow` also fills its registry mirror, and a `version=2` build of a Docker Hub base then gets the derivative from there; on the shared daemon, or for a base from another registry, it still does not.
 
 - **The declare-once form** of that, so it survives rebuilds and needs no manual step — this is a `devcontainer.json` change, so it needs the human and a rebuild:
 
@@ -132,25 +132,22 @@ Environment variables may contain **placeholders** (e.g. `MYAPP-OPENAI-KEY`) rat
 - Never `COPY .env` or `ARG` a real credential into an image; layers are permanent.
 - Files you cannot delete because a container wrote them as root: with a daemon of your own, reclaim them yourself (the Docker section above). Without one, ask the human to run `./cli.sh reclaim <project> [<path>]` on the Mac. `./cli.sh worktree remove` does it before it removes anything.
 
-## Working in a factory
+## Saying how it's going: `/desolate-ca/desolate-status`
 
-When a project runs several agents -- one in its main tree, one per worktree -- they talk over the project's `.git` and nothing else. `/desolate-ca/desolate-work` writes and reads those messages; every message is a commit on your own ref, `refs/desolate/agents/$DESOLATE_TARGET/outbox` (`main` for the project's tree, the worktree's name otherwise).
+Your target -- the project's tree, or this worktree -- has one status, a colour and a one-line message, that the human sees beside it in the editor's panel and a harness reads from the Mac. Set it whenever what you need changes:
 
 ```bash
-/desolate-ca/desolate-work say status "tests green on $(git rev-parse --short HEAD)"
-/desolate-ca/desolate-work ask main "may I change the public schema?"
-/desolate-ca/desolate-work inbox                     # what was said to you, or to everyone
-/desolate-ca/desolate-work answer <sha> "yes, behind a flag"
-/desolate-ca/desolate-work done "ready for review on branch issue/42-headers"
-/desolate-ca/desolate-work request open issue-43 --branch issue/43-x --title "..."   # ask for a worktree
-/desolate-ca/desolate-work log --type ask            # the whole conversation, newest first
+/desolate-ca/desolate-status set blue   "working: issue #42"
+/desolate-ca/desolate-status set orange "needs a human: which API version?"
+/desolate-ca/desolate-status set red    "authentication failed"
+/desolate-ca/desolate-status set green  "ready for a PR on issue/42-headers"
+/desolate-ca/desolate-status clear
 ```
 
-- **Write only through the helper, and only to your own outbox.** Never move another participant's ref, and never rewrite yours: `cli.sh work verify` fails on any history that is not a plain append by its named writer.
-- **Pushing and merging are not yours to do.** Say `done` (or `request push <worktree>`), and a human -- or the policy file they committed, `.desolate/factory.json` -- decides whether the branch is pushed. Merges are always a person's.
-- **A request is a request.** Opening and closing worktrees goes through `request`; whether it happens is decided outside your container, and the answer arrives in your inbox as a `state` message.
-- `refs/desolate/*` are never pushed. Do not add a refspec for them.
-- **Leave your worktree clean when you are done.** It is closed only if it holds nothing uncommitted or untracked. The first start of a project with features writes `.devcontainer/devcontainer-lock.json` if the project has none -- it pins those features: commit it.
+- Colours: `gray`, `blue`, `green`, `yellow`, `orange`, `red`. Unless your task says otherwise: blue working, orange needs a human, red failed, green done.
+- One line, at most 200 characters; it is shown as plain text.
+- It is a file in your git dir (`desolate-status path`), not in the repository: it is never committed or pushed, and nothing needs cleaning up.
+- It is shown, never acted on. Saying `green` pushes nothing: pushing and merging are a human's, from outside this container. Leave the branch committed and the worktree clean.
 
 ## When to stop and ask
 

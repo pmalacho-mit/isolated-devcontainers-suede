@@ -10,7 +10,7 @@
 //   desolate --stop all             (or --stop --all)
 //   desolate --ports myproject
 //   desolate --list                 what is running right now
-//   desolate --purge --worktree wip myproject   what a worktree's removal runs here
+//   desolate --status [--json] [project]     each target's status (status.ts)
 //   desolate --list --json | desolate --ports myproject --json   for programs
 //
 // The broker validates both the project name and the project's
@@ -23,6 +23,7 @@
 import { ask } from "./broker-client.ts";
 import { ensure as ensureWorktree } from "./worktrees.ts";
 import { EVERY_TARGET, meansEveryTarget } from "./projects.ts";
+import { statusRows } from "./status.ts";
 
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
@@ -39,6 +40,7 @@ function usage(code = 0): never {
   out("usage: desolate [--stop|--ports|--rebuild] [--worktree <name>] <project>");
   out("       desolate --list                    what is running right now");
   out("       desolate --dinds                   every project dind and the VM's headroom, as JSON");
+  out("       desolate --status [--json] [<project>]   each target's status (desolate-status, inside)");
   out("       desolate --stop all|--stop --all   stop every running target");
   out("");
   out("  --rebuild  recreate the container from the current devcontainer.json.");
@@ -70,6 +72,28 @@ function refuse(...lines: string[]): never {
 const argv = process.argv.slice(2);
 if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") usage();
 
+// Each target's status, read here: a file in its git dir the editor already
+// sees (status.ts), so no broker, and nothing runs.
+if (argv[0] === "--status") {
+  const rest = argv.slice(1);
+  const json = rest.includes("--json");
+  const words = rest.filter((word) => word !== "--json");
+  if (words.some((word) => word.startsWith("-")) || words.length > 1) refuse("usage: desolate --status [--json] [project]");
+  const only = words[0]?.replace(/\/+$/, "").replace(new RegExp(`^${WORKSPACES}/`), "");
+  const rows = statusRows(WORKSPACES, only);
+  if (json) {
+    console.log(JSON.stringify(rows));
+  } else if (!rows.some((row) => row.status)) {
+    console.log(only ? `no status for ${only}` : "no target has a status");
+  } else {
+    const shown = rows.filter((row) => row.status);
+    const width = Math.max(...shown.map((row) => row.target.length));
+    for (const { target, status } of shown)
+      console.log(`  ${target.padEnd(width)}  ${status!.color.padEnd(6)}  ${status!.message}  (${status!.updated})`);
+  }
+  process.exit(0);
+}
+
 // Order-independent, and an unrecognised --flag is REFUSED rather than dropped.
 // The old parsing only ever looked at argv[0], so `desolate myproj --rebuild`
 // (or a typo like --build) silently became a plain start: you were told the
@@ -77,7 +101,7 @@ if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") usage();
 // already refuses unknown options; this side has to agree, or the two disagree
 // about what the same command line means.
 const OPS: Record<string, string> = {
-  "--list": "list", "--dinds": "dinds", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild", "--purge": "purge", "--bundle": "bundle",
+  "--list": "list", "--dinds": "dinds", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild",
 };
 /** Flags that consume the next argument. */
 const VALUES = ["--worktree", "--branch"] as const;
@@ -125,9 +149,6 @@ if (value["--branch"] !== undefined && worktree === undefined)
 if (modifier.has("--all") && op !== "stop") refuse("--all only means something with --stop");
 if (move && op !== "ports") refuse("--move only means something with --ports");
 if (modifier.has("--json") && op !== "list" && op !== "ports") refuse("--json only means something with --list or --ports");
-if (op === "bundle" && value["--worktree"] === undefined) refuse("--bundle bundles a worktree's branch: name it with --worktree");
-if (op === "purge" && value["--worktree"] === undefined)
-  refuse("--purge here is a worktree's: name it with --worktree (a project's purge is the Mac's: ./cli.sh desolate --purge <project>)");
 
 // The two spellings of "everything". `--all` says so outright; the bare word
 // only widens when no project of that name is there to be meant instead, which

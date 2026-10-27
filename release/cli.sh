@@ -13,8 +13,9 @@
 #   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
 #   ./isolated-devcontainers-suede/cli.sh export owner/repo [path]  # copy files out (tar when piped)
 #   ./isolated-devcontainers-suede/cli.sh reclaim owner/repo [path] # give root-owned files back to the editor
-#   ./isolated-devcontainers-suede/cli.sh work init|log|requests|verify|approve|push|close owner/repo   # a factory
-#   ./isolated-devcontainers-suede/cli.sh forge add owner/repo owner/repo | run   # its GitHub side, polled from this Mac
+#   ./isolated-devcontainers-suede/cli.sh exec owner/repo [--worktree wip] -- cmd...   # run it in the devcontainer
+#   ./isolated-devcontainers-suede/cli.sh bundle owner/repo [--worktree wip] out.bundle  # its branch, to push from here
+#   ./isolated-devcontainers-suede/cli.sh desolate --status [--json] [owner/repo]       # what each agent last said
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
@@ -1016,9 +1017,6 @@ case "$CMD" in
   ps)        compose ps ;;
   preflight) exec "$SCRIPT_DIR/preflight.sh" ;;
   observe)   exec "$SCRIPT_DIR/observe.sh" "$@" ;;
-  forge)     # A factory's GitHub side, on this Mac with your own gh: polls the
-             # enabled projects' issues, feeds the editor, opens draft PRs.
-             exec "$SCRIPT_DIR/forge.sh" "$@" ;;
   url)       editor_url ;;
 
   secret)    # Secrets live ONLY in the Colima VM, below the sysbox boundary.
@@ -1358,11 +1356,33 @@ case "$CMD" in
              fi
              exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim "$PROJ" ;;
 
-  work)      ensure_running
-             # A project's factory (work.ts): enabled, approved, pushed and
-             # verified by a human, in the editor -- where git already runs,
-             # hardened -- never on this Mac against the volume.
-             exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" work "$@" ;;
+  exec|bundle) ensure_running
+             # The primitives a harness on this Mac builds on (docs/agents.md).
+             # exec: a command in a running target's devcontainer, as its user
+             # -- the Mac's alone; the editor has no way into a devcontainer.
+             # bundle: the target's branch, bundled in its sandbox, copied here
+             # -- so pushing it is yours, with your credentials.
+             PROJ="${1:?usage: cli.sh $CMD <project> [--worktree <name>] ...}"; shift
+             WT=()
+             if [ "${1:-}" = --worktree ]; then
+               WT=(--worktree "${2:?--worktree takes a name}"); shift 2
+             fi
+             if [ "$CMD" = exec ]; then
+               [ "${1:-}" = -- ] && shift
+               [ $# -gt 0 ] || { echo "usage: cli.sh exec <project> [--worktree <name>] -- <command...>" >&2; exit 1; }
+               exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --exec ${WT[@]+"${WT[@]}"} "$PROJ" -- "$@"
+             fi
+             DEST="${1:?usage: cli.sh bundle <project> [--worktree <name>] <file>}"
+             [ -e "$DEST" ] && { echo "cli.sh: $DEST already exists; refusing to overwrite it" >&2; exit 1; }
+             OUT=$(docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --bundle ${WT[@]+"${WT[@]}"} "$PROJ") \
+               || { printf '%s\n' "$OUT" >&2; exit 1; }
+             # BUNDLED <branch> <commit> <path in the orchestrator>
+             LINE=$(printf '%s\n' "$OUT" | grep '^BUNDLED ' | tail -n 1)
+             [ -n "$LINE" ] || { printf '%s\n' "$OUT" >&2; echo "cli.sh: the runner said nothing of a bundle" >&2; exit 1; }
+             read -r _ BRANCH COMMIT FROM <<< "$LINE"
+             docker cp "$ORCHESTRATOR:$FROM" "$DEST" >/dev/null
+             echo "cli.sh: $BRANCH at $COMMIT -> $DEST"
+             echo "  git fetch $DEST $BRANCH:$BRANCH && git push origin $BRANCH" ;;
 
   export)    ensure_running
              # Getting files out (#13). /workspaces is one volume the editor
@@ -1406,6 +1426,11 @@ case "$CMD" in
              echo "cli.sh: exported $PROJ/${REL#./} to ./$NAME" ;;
 
   desolate)  ensure_running
+             # Statuses are files in each target's git dir; the editor reads
+             # them (status.ts), strictly, with no more reach than it has.
+             if [ "${1:-}" = --status ]; then
+               exec docker exec -e DESOLATE_PLANE=mac "$CONTAINER" desolate "$@"
+             fi
              warn_if_the_mac_holds_saved_ports "$@"
              # From the Mac we use the DIRECT runner in the orchestrator (the
              # Mac is already trusted). Inside the editor, `desolate` is a
