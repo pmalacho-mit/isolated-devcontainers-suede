@@ -6,7 +6,7 @@ A software factory is a harness *on top*: a script on your Mac that watches a
 forge, opens worktrees, starts agents in them, and acts on what they report.
 
 This page is the contract between the two: what desolate provides so a harness
-needs nothing else. `examples/factory/` is one such harness, as a sketch.
+needs nothing else. `examples/factory/` holds such harnesses, as sketches.
 
 ## The primitives
 
@@ -109,27 +109,52 @@ Those choices belong to the harness, which is where they can change without chan
 
 ## How a harness uses them
 
-The loop `examples/factory/harness.sh` sketches, per labelled issue:
-
-1. If there is no worktree `issue-<n>`: `worktree add` it, then start it.
-2. If no agent is running there, start one with the task and a pointer to `desolate-status`. By default that is `examples/factory/claude-harness.sh start`, below.
-3. Each tick, read `./cli.sh desolate --status --json`:
-   - `orange` or `red`: tell a human (a comment on the issue, a notification);
-   - `green`: `bundle` the branch, push it from the Mac's clone, and `gh pr create --draft`.
-4. When the PR is merged or the issue closed: `worktree remove` (refused while it holds uncommitted work).
-
-### Claude Code on your subscription: `examples/factory/claude-harness.sh`
+`examples/factory/` holds two dispatchers built on these primitives. Both share one loop, `lib/gh-dispatch.sh`:
+- `gh-dispatcher.sh` runs any agent command (`FACTORY_AGENT`);
+- `claude/claude-dispatcher.sh` runs Claude Code through `claude/claude-helper.sh`.
 
 ```bash
-examples/factory/claude-harness.sh auth   acme/widgets                      # once: the token, into the VM
-examples/factory/claude-harness.sh start  acme/widgets --worktree issue-42 --task "Fix #42: ..."
-examples/factory/claude-harness.sh attach acme/widgets --worktree issue-42  # watch it; ctrl-b d to leave
-examples/factory/claude-harness.sh verify acme/widgets                      # which secret each request carried
+examples/factory/claude/claude-dispatcher.sh acme/widgets acme/widgets ~/clones/widgets   # project, repo, your clone
 ```
 
-**`auth`** stores a `claude setup-token` token as the secret `DESOLATE-CLAUDE-<project>-OAUTH`. The secret is substituted only toward `api.anthropic.com`, and only for that project's own daemon.
+Per issue labelled `desolate:run`, each tick:
 
-**`start`** runs `claude` in a detached tmux session in the target, with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. Several things outrank that token, measured on Claude Code 2.1.311:
+1. If there is no worktree `issue-<n>`: `worktree add` it, then start it.
+2. If no agent was started there: start one, with the issue as its task and a pointer to `desolate-status`.
+3. Read `./cli.sh desolate --status --json`:
+   - **the agent's own access broken** (for Claude, `red` "claude: authentication failed"): you are told, in the terminal, with a bell, and by a macOS notification. In a terminal you are asked for a new token, and then each agent that stopped on it carries on its conversation. No new agent starts while this waits.
+   - **`orange` or `red`:** a comment on the issue, once per status.
+   - **`green`:** `bundle` the branch, push it from your clone (never to the default branch, never forced), then `gh pr create --draft`.
+4. When the issue is closed: stop and `worktree remove` (refused while it holds uncommitted work).
+
+Another agent is five shell functions: `agent_ready`, `agent_start`, `agent_blocked`, `agent_renew` and `agent_resume`. See the top of `lib/gh-dispatch.sh`.
+
+### Claude Code on your subscription: `claude/claude-helper.sh`
+
+```bash
+examples/factory/claude/claude-helper.sh auth   acme/widgets                      # once: the token, into the VM
+examples/factory/claude/claude-helper.sh start  acme/widgets --worktree issue-42 --task "Fix #42: ..."
+examples/factory/claude/claude-helper.sh attach acme/widgets --worktree issue-42  # watch it; ctrl-b d to leave
+examples/factory/claude/claude-helper.sh resume acme/widgets --worktree issue-42  # same conversation, new session
+examples/factory/claude/claude-helper.sh verify acme/widgets                      # which secret each request carried
+```
+
+**`auth`** stores a `claude setup-token` token as the secret `DESOLATE-CLAUDE-OAUTH`, substituted only toward `api.anthropic.com`. By default it works for any project.
+
+**What a container that can spend it can do.** It can use your subscription. And because the proxy substitutes inside request bodies too, it can recover the token itself, by asking the model to transform it; addon.py, "What scrubbing is, and what it is not", explains why. Once recovered, the token works anywhere until you revoke it. A `setup-token` token can only make model requests, so the damage is to your account rather than your data:
+- your plan's usage limits;
+- extra usage, if it is enabled on your account;
+- whatever gets sent under your name.
+
+`--scoped` limits that to one project (`DESOLATE-CLAUDE-<project>-OAUTH`), and then that project needs a daemon of its own.
+
+**`start`** runs `claude` in a detached tmux session in the target, with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. If tmux or claude is missing, it installs them:
+- tmux through the image's package manager, as root or with passwordless sudo;
+- claude with its native installer.
+
+It then tells the agent, in its task, that the devcontainer config should carry them.
+
+Several things outrank the OAuth token, measured on Claude Code 2.1.311:
 - `ANTHROPIC_API_KEY`;
 - `ANTHROPIC_AUTH_TOKEN`;
 - an `apiKeyHelper`, including one in the repository's own committed `.claude/settings.json`, which wins silently once the folder is trusted.
@@ -140,7 +165,8 @@ So the launcher:
 - hands the project's own `ANTHROPIC_API_KEY` back to Claude's shell commands only, so the code under test keeps it.
 
 It also pre-answers onboarding and the folder's trust dialog. Claude's own events become the target's status:
-- a failure, such as a failed login, sets red;
+- a failed login sets red, "claude: authentication failed", which is what the dispatcher watches for;
+- another failure also sets red;
 - a permission prompt, or Claude idling while it waits for you, sets orange.
 
 **`verify`** reads the proxy's audit to check that the subscription token really was the one used.

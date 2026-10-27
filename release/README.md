@@ -1445,8 +1445,10 @@ existing stack moves.
 desolate runs a repository and its worktrees in isolated devcontainers; what an
 agent does in one, and what decides when it starts, is yours. A software
 factory is a harness on your Mac built on these primitives
-([docs/agents.md](../docs/agents.md), and a sketch in
-[examples/factory/](../examples/factory/)):
+([docs/agents.md](../docs/agents.md)). [examples/factory/](../examples/factory/)
+has sketches: `claude/claude-dispatcher.sh` turns labelled GitHub issues into
+worktrees running Claude Code on your subscription, and draft PRs. The
+primitives:
 
 ```bash
 ./cli.sh worktree add acme/widgets issue-42              # a place for one piece of work
@@ -1482,7 +1484,7 @@ and is bound to the one project that may spend it:
 
 Every target of the project -- `main` and each worktree -- starts logged in; a
 worker in another project cannot spend it. For Claude Code on a subscription,
-`examples/factory/claude-harness.sh` does this per session instead. It keeps
+`examples/factory/claude/claude-helper.sh` does this per session instead. It keeps
 an `ANTHROPIC_API_KEY`, or a repository's own `apiKeyHelper`, from taking Claude
 off the subscription, because both outrank the OAuth token
 ([docs/agents.md](../docs/agents.md)).
