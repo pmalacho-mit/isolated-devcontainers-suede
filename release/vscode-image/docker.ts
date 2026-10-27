@@ -306,31 +306,51 @@ export const BUNDLED = "desolate-bundled";
 export const PULLED = "desolate-pulled";
 const TRANSFER_GIT = 'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }';
 
-/** $1 the target's directory, $2 the bundle's name. Bundles the branch
- *  checked out there into the project's git dir and says where. */
+/** $1 the target's directory, $2 where to write the bundle, $3 the commits
+ *  the editor's cache already has (one per line; its `.haves` file). Bundles
+ *  the branch checked out there, less what the cache has -- or, when the cache
+ *  has all of it, nothing, and says so. */
 export const bundleScript = [
   TRANSFER_GIT,
-  'branch=$(g -C "$1" symbolic-ref -q --short HEAD) || { echo "no branch is checked out in $1" >&2; exit 3; }',
-  'common=$(cd "$1" && cd "$(g rev-parse --git-common-dir)" && pwd -P) || exit 4',
-  'g -C "$1" bundle create --quiet "$common/$2" "refs/heads/$branch" || exit 5',
-  `echo ${BUNDLED} "$branch" "$(g -C "$1" rev-parse "refs/heads/$branch")" "$common/$2"`,
+  'dir=$1 out=$2 haves=$3',
+  'trap \'rm -f "$haves"\' EXIT',
+  'branch=$(g -C "$dir" symbolic-ref -q --short HEAD) || { echo "no branch is checked out in $dir" >&2; exit 3; }',
+  'commit=$(g -C "$dir" rev-parse "refs/heads/$branch") || exit 4',
+  // Only the ones this project has: a commit it lacks cannot be left out.
+  'excludes=""',
+  'if [ -f "$haves" ]; then while read -r have; do case "$have" in ""|*[!0-9a-f]*) continue ;; esac; ' +
+    'g -C "$dir" cat-file -e "$have^{commit}" 2>/dev/null && excludes="$excludes ^$have"; done < "$haves"; fi',
+  `if [ -n "$excludes" ] && [ -z "$(g -C "$dir" rev-list -n 1 "refs/heads/$branch" $excludes)" ]; then echo ${BUNDLED} "$branch" "$commit" none; exit 0; fi`,
+  'g -C "$dir" bundle create --quiet "$out" "refs/heads/$branch" $excludes || exit 5',
+  `echo ${BUNDLED} "$branch" "$commit" bundled`,
 ].join("; ");
 
-/** $1 the target's directory, $2 the bundle the editor fetched, $3 the CA.
- *  Every branch it holds becomes origin/<branch>; the branch checked out is
- *  fast-forwarded to its own when it can be, and otherwise left as it is.
- *  The merge is the project's own git, hooks and filters and all -- in here,
- *  where they reach nothing but this project. */
+/** $1 the target's directory, $2 the bundle the editor wrote (absent when the
+ *  project needs no objects), $3 the remote's branches (`<commit> <name>` per
+ *  line; its `.refs` file), $4 the CA. origin/* becomes exactly that list --
+ *  every commit of which this project must then have, or it says `needs-full`
+ *  and changes nothing. The branch checked out is fast-forwarded to its own
+ *  when it can be, and otherwise left as it is. The merge is the project's own
+ *  git, hooks and filters and all -- in here, where they reach nothing but this
+ *  project. */
 export const pullScript = [
   TRANSFER_GIT,
-  'trap \'rm -f "$2"\' EXIT',
-  'g -C "$1" fetch --quiet --no-tags "$2" "+refs/heads/*:refs/remotes/origin/*" || exit 4',
+  'dir=$1 bundle=$2 refs=$3 ca=$4',
+  'trap \'rm -f "$bundle" "$refs"\' EXIT',
   `say() { echo ${PULLED} "$@"; exit 0; }`,
-  'branch=$(g -C "$1" symbolic-ref -q --short HEAD) || say fetched -',
-  'g -C "$1" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null || say fetched "$branch"',
-  'g -C "$1" merge-base --is-ancestor "refs/remotes/origin/$branch" HEAD && say current "$branch"',
-  'g -C "$1" merge-base --is-ancestor HEAD "refs/remotes/origin/$branch" || say diverged "$branch"',
-  'git -C "$1" -c "http.sslCAInfo=$3" merge --ff-only --quiet "refs/remotes/origin/$branch" && say fast-forwarded "$branch"',
+  '[ -f "$refs" ] || exit 6',
+  'if [ -s "$bundle" ]; then g -C "$dir" bundle verify --quiet "$bundle" >/dev/null 2>&1 || say needs-full -; ' +
+    'g -C "$dir" fetch --quiet --no-tags "$bundle" "+refs/heads/*:refs/desolate/incoming/*" || exit 4; fi',
+  'while read -r commit name; do g -C "$dir" cat-file -e "$commit^{commit}" 2>/dev/null || say needs-full -; done < "$refs"',
+  'while read -r commit name; do g check-ref-format "refs/remotes/origin/$name" && g -C "$dir" update-ref "refs/remotes/origin/$name" "$commit"; done < "$refs"',
+  'g -C "$dir" for-each-ref --format="%(refname)" refs/remotes/origin/ refs/desolate/incoming/ | while read -r old; do ' +
+    'case "$old" in refs/remotes/origin/HEAD) continue ;; refs/remotes/origin/*) cut -d" " -f2- "$refs" | grep -qxF "${old#refs/remotes/origin/}" && continue ;; esac; ' +
+    'g -C "$dir" update-ref -d "$old"; done',
+  'branch=$(g -C "$dir" symbolic-ref -q --short HEAD) || say fetched -',
+  'g -C "$dir" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null || say fetched "$branch"',
+  'g -C "$dir" merge-base --is-ancestor "refs/remotes/origin/$branch" HEAD && say current "$branch"',
+  'g -C "$dir" merge-base --is-ancestor HEAD "refs/remotes/origin/$branch" || say diverged "$branch"',
+  'git -C "$dir" -c "http.sslCAInfo=$ca" merge --ff-only --quiet "refs/remotes/origin/$branch" && say fast-forwarded "$branch"',
   'say blocked "$branch"',
 ].join("; ");
 
@@ -588,16 +608,16 @@ export const createDocker = (run: Runner) => {
       ]),
     /** `bundleScript` in a target's sandbox: the branch, its commit and the
      *  bundle's path, or null when it did not finish. */
-    bundleBranch: (spec: WorktreeSandbox, targetDir: string, name: string) => {
-      const said = query(...worktreeSandbox(spec, "sh"), "-c", bundleScript, "bundle", targetDir, name);
-      const match = new RegExp(`^${BUNDLED} (\\S+) ([0-9a-f]{40,64}) (/\\S+)$`, "m").exec(said);
-      return match ? { branch: match[1], commit: match[2], file: match[3] } : null;
+    bundleBranch: (spec: WorktreeSandbox, targetDir: string, out: string, haves: string) => {
+      const said = query(...worktreeSandbox(spec, "sh"), "-c", bundleScript, "bundle", targetDir, out, haves);
+      const match = new RegExp(`^${BUNDLED} (\\S+) ([0-9a-f]{40,64}) (bundled|none)$`, "m").exec(said);
+      return match ? { branch: match[1], commit: match[2], bundled: match[3] === "bundled" } : null;
     },
     /** `pullScript` in a target's sandbox: what became of its branch, or null
      *  when it did not finish. */
-    pullBranch: (spec: WorktreeSandbox & { caFile: string }, targetDir: string, bundle: string) => {
-      const said = query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", pullScript, "pull", targetDir, bundle, spec.caFile);
-      const match = new RegExp(`^${PULLED} (fetched|current|diverged|fast-forwarded|blocked) (\\S+)$`, "m").exec(said);
+    pullBranch: (spec: WorktreeSandbox & { caFile: string }, targetDir: string, bundle: string, refs: string) => {
+      const said = query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", pullScript, "pull", targetDir, bundle, refs, spec.caFile);
+      const match = new RegExp(`^${PULLED} (fetched|current|diverged|fast-forwarded|blocked|needs-full) (\\S+)$`, "m").exec(said);
       return match ? { outcome: match[1], branch: match[2] } : null;
     },
     /** `reclaimArgv`, run: the number of entries it changed, or null when

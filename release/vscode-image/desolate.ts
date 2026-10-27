@@ -1559,23 +1559,34 @@ async function onItsDaemon(target: Target): Promise<void> {
   else daemons.use(target, "shared");
 }
 
+/** The files of one transfer, in the project's own git dir: the bundle, and
+ *  beside it what the editor's cache has (`.haves`) or the remote's branches
+ *  (`.refs`). The name is held to TRANSFER_NAME, so these are too. */
+const transferFiles = (target: Target, name: string) => {
+  const stem = path.join(target.projectDir, ".git", name.replace(/\.bundle$/, ""));
+  return { bundle: `${stem}.bundle`, haves: `${stem}.haves`, refs: `${stem}.refs` };
+};
+
 async function bundleTarget(target: Target, name: string): Promise<void> {
   await onItsDaemon(target);
-  const bundled = docker.bundleBranch(worktreeSandbox(target, worktrees.sandboxMounts(target)), target.dir, name);
+  const files = transferFiles(target, name);
+  const bundled = docker.bundleBranch(worktreeSandbox(target, worktrees.sandboxMounts(target)), target.dir, files.bundle, files.haves);
   if (!bundled) return die(`could not bundle ${target.name}'s branch in its sandbox (no branch checked out, or git failed)`);
-  console.log(`BUNDLED ${bundled.branch} ${bundled.commit} ${bundled.file}`);
+  console.log(`BUNDLED ${bundled.branch} ${bundled.commit} ${bundled.bundled ? "bundled" : "none"}`);
 }
 
 async function pullTarget(target: Target, name: string): Promise<void> {
   await onItsDaemon(target);
   const view = SHARED_DIRECTORIES.find((mount) => mount.target === DESOLATE_DIR)!;
+  const files = transferFiles(target, name);
   const pulled = docker.pullBranch(
     {
       ...worktreeSandbox(target, worktrees.checkoutMounts(target, overlay.ensureVolume(target, view), DESOLATE_DIR)),
       caFile: `${CA_DIR}/ca.pem`,
     },
     target.dir,
-    path.join(target.projectDir, ".git", name),
+    files.bundle,
+    files.refs,
   );
   if (!pulled) return die(`could not take the fetched branches into ${target.name} in its sandbox`);
   console.log(`PULLED ${pulled.outcome} ${pulled.branch}`);

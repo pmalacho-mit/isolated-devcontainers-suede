@@ -101,14 +101,21 @@ Not `git push` or `git pull` in the project. In the editor that is the project's
 desolate's push and pull keep the two sides apart (`release/vscode-image/transfer.ts`).
 
 **Push:**
-1. The target's sandbox, which sees only that project, bundles the branch checked out there.
-2. A fresh, empty repository in the editor takes the bundle.
+1. The target's sandbox, which sees only that project, bundles the branch checked out there, less what the editor's cache of the remote already has.
+2. The cache takes the bundle.
 3. It pushes the bundled commit to the repository `repo add` registered for the project, with that repository's key. It never force-pushes, and never pushes to the default branch unless you pass `--allow-default`.
 
 **Pull** runs the other way:
-1. A fresh repository in the editor fetches that registered repository.
-2. The sandbox takes the fetched branches in as `origin/*`.
+1. The editor's cache fetches what is new in that registered repository, and bundles what the project lacks.
+2. The sandbox takes the remote's branches in as `origin/*`, exactly: one deleted upstream goes.
 3. It fast-forwards the checked-out branch if it can, and otherwise says why not.
+
+**The cache.** The editor's side works in a per-project cache of the remote: a bare repository under the editor's `~/.cache/desolate/remotes/`, touched by nothing but desolate's clean git. Only what changed crosses:
+- the cache fetches the remote's new commits;
+- a push bundles only what the cache lacks;
+- a pull bundles only what the project lacks, or nothing at all.
+
+Measured on `git/git`, a pull went from about 35 s to about 2 s, and a push from about 21 s to under a second, after the first. The first push or pull of a project fills the cache, which costs one full fetch. If a pull's guess at what the project has is wrong, the sandbox says so and is sent everything, once.
 
 Review an agent's branch, and commit, in the project's own devcontainer, before you push. No forge token enters the stack, and no clone is needed on the Mac.
 

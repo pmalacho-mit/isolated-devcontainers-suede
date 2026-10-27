@@ -1873,8 +1873,9 @@ Boundaries, strongest first:
   runs either (tests/integration/worktrees, E17) -- but git you type in the
   editor's terminal obeys the repository like any git does. So pushing and
   pulling go through `desolate --push`/`--pull` (and the panel's buttons),
-  which run the project's half in its sandbox and the editor's in a fresh,
-  empty repository, to the repository `repo add` registered
+  which run the project's half in its sandbox and the editor's in a cache of
+  the remote that only desolate's clean git touches, to the repository
+  `repo add` registered
   ([docs/agents.md](../docs/agents.md)); and the editor's interactive shell
   refuses typed git in `/workspaces/*` (`command git` gets past it -- a guard
   for what you type, not a boundary).
