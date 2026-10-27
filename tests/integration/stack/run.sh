@@ -671,6 +671,28 @@ else
   assert_ok "and then the project itself stops" ed desolate --stop "$WT"
 fi
 
+group "a container built from an older spec (#26)"
+# `devcontainer up` starts an existing container as it was BUILT. One built
+# privileged -- docker-in-docker, before v2 -- beside a spec that no longer asks
+# for it: the editor's start is refused by name, not as a PRIVILEGED spec, and
+# --rebuild from the editor replaces it.
+STALE=/workspaces/stale-built
+ed sh -c "rm -rf $STALE && mkdir -p $STALE/.devcontainer" >/dev/null 2>&1
+printf '{ "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04" }' \
+  | ed_in sh -c "cat > $STALE/.devcontainer/devcontainer.json"
+STALE_ID=$(docker exec "$C_ORCH" docker create \
+  --label "devcontainer.local_folder=$STALE" \
+  --label "devcontainer.config_file=$STALE/.devcontainer/devcontainer.json" \
+  --label 'devcontainer.metadata=[{"privileged":true}]' alpine:3 true 2>/dev/null)
+OUT=$(ed desolate stale-built 2>&1)
+assert_contains "starting it is refused for what the container holds" "$OUT" "was built from a different spec"
+assert_not_contains "not for the spec, which asks for nothing of the kind" "$OUT" "requests a PRIVILEGED container"
+OUT=$(ed desolate --rebuild stale-built 2>&1)
+assert_contains "--rebuild from the editor starts it" "$OUT" "is ready:"
+assert_fails "and the old container is gone" docker exec "$C_ORCH" docker inspect "$STALE_ID"
+ed desolate --stop stale-built >/dev/null 2>&1
+ed sh -c "rm -rf $STALE" >/dev/null 2>&1
+
 group "the inner daemon says WHICH state it is in"
 # The healthcheck asserted at the top of this file now runs the classifier, so
 # "dind reports healthy" already covers the healthy path end to end. What is

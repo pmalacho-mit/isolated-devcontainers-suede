@@ -40,6 +40,19 @@ export const describeResolveFailure = (err: any, timeoutMs: number) => {
   }: ${detail}`;
 };
 
+/**
+ * The label `read-configuration` is told to find this workspace's container
+ * by, and that no container carries. Without it the CLI looks the container up
+ * by the workspace's own labels and, if one exists -- stopped ones included --
+ * takes `mergedConfiguration` from THAT container's image metadata instead of
+ * resolving the spec: a container built when the spec said docker-in-docker
+ * answered "privileged" for ever, and the broker refused a clean spec (#26).
+ * With it, every caller judges the spec as it is declared; an existing
+ * container is compared against that separately (policy.ts builtBeyondDeclared).
+ * Measured on @devcontainers/cli 0.88.0: honoured, features still resolved.
+ */
+export const RESOLVE_ID_LABEL = "desolate.resolve=spec";
+
 export const resolveSpec = (
   workspace: string,
   config: string,
@@ -57,6 +70,8 @@ export const resolveSpec = (
         workspace,
         "--override-config",
         config,
+        "--id-label",
+        RESOLVE_ID_LABEL,
       ],
       {
         encoding: "utf8",

@@ -389,6 +389,10 @@ export const createDocker = (run: Runner) => {
           ),
         ),
       ),
+    /** The `devcontainer.metadata` label the CLI stamped a container with:
+     *  what it was BUILT from, which `up` will start it as. "" when absent. */
+    metadata: (id: string) =>
+      query("inspect", "-f", '{{index .Config.Labels "devcontainer.metadata"}}', id).trim().replace(/^<no value>$/, ""),
     namesWithLabel: (label: string) =>
       nonEmptyLines(
         query(

@@ -37,7 +37,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as dind from "./dind.ts";
-import { daemonOf, enforcePolicy, type Daemon } from "./policy.ts";
+import { builtBeyondDeclared, daemonOf, enforcePolicy, type Daemon } from "./policy.ts";
 import {
   EVERY_TARGET,
   list as listTargets,
@@ -1689,15 +1689,24 @@ async function runTarget(
   if (daemon === "project") await useProjectDaemon(target);
   else daemons.use(target, "shared");
 
+  // A rebuild takes the old container away BEFORE anything is judged, so
+  // nothing below is decided on a daemon that still holds it (#26).
+  const before = devcontainerId(dir, true);
+  if (rebuild && before) {
+    docker.container.remove([before]);
+    desolog(`removed the existing container (--rebuild)`);
+  }
+
   // fingerprint before deriving
   const fingerprint = spec.fingerprint(dir, config);
 
   config = deriveRunConfig(target, config, project, daemon);
+  const derived = resolveOrDie(target, config);
 
   try {
     enforcePolicy(
       target,
-      resolveOrDie(target, config),
+      derived,
       listTargets(WORKSPACES),
       daemon,
     );
@@ -1711,12 +1720,19 @@ async function runTarget(
   daemons.save(target, daemon);
 
   const saved = spec.load(target);
-  const existing = devcontainerId(dir, true);
+  const existing = rebuild ? "" : devcontainerId(dir, true);
 
-  if (rebuild && existing) {
-    docker.container.remove([existing]);
-    desolog(`removed the existing container (--rebuild)`);
-  } else if (existing && saved && saved !== fingerprint)
+  // The policy judged the spec as declared; `up` would start an existing
+  // container as it was BUILT. One built with more than the spec now asks for
+  // -- privileged, under docker-in-docker, before v2 -- must not be started
+  // behind a spec that passed (#26).
+  const beyond = existing ? builtBeyondDeclared(docker.container.metadata(existing), derived.mergedConfiguration) : [];
+  if (beyond.length)
+    return die(`${name}'s existing container was built from a different spec than the one it
+      declares now: it has ${beyond.join(", ")}, which devcontainer.json no longer asks for,
+      and starting it would run it as it was built. Recreate it from the spec:
+        ${hint.desolate(`--rebuild ${invocation(target)}`)}`);
+  if (existing && saved && saved !== fingerprint)
     console.log(`
   NOTE: this project's spec has changed since its container was created.
         'devcontainer up' reuses an existing container without re-reading

@@ -82,6 +82,45 @@ interface NormalMount {
 
 type MountField = keyof (typeof allowlist)["mountFields"];
 
+/**
+ * What an EXISTING container was built with that its spec no longer asks for:
+ * the privilege-bearing fields of its `devcontainer.metadata` label against the
+ * declared spec's merged configuration. `devcontainer up` starts an existing
+ * container as it was built, without re-reading the spec, so a container built
+ * privileged -- under docker-in-docker, before v2 -- would run privileged
+ * behind a spec that passed (#26). [] when it holds nothing more. A label that
+ * cannot be read is a difference too.
+ */
+export const builtBeyondDeclared = (metadataLabel: string, declared: Record<string, unknown>): string[] => {
+  let built: unknown;
+  if (!metadataLabel.trim()) return [];
+  try {
+    built = JSON.parse(metadataLabel);
+  } catch {
+    return ["a metadata label that cannot be read"];
+  }
+  const fieldsOf = (entries: unknown[]) => {
+    const strings = (value: unknown) => (Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : []);
+    const objects = entries.filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === "object");
+    return {
+      privileged: objects.some((entry) => entry.privileged === true),
+      capAdd: new Set(objects.flatMap((entry) => strings(entry.capAdd).map((cap) => cap.toUpperCase().replace(/^CAP_/, "")))),
+      securityOpt: new Set(objects.flatMap((entry) => strings(entry.securityOpt))),
+      mounts: new Set(objects.flatMap((entry) => (Array.isArray(entry.mounts) ? entry.mounts : []).map((m) => mount.identity(mount.normalize(m))))),
+    };
+  };
+  const was = fieldsOf(Array.isArray(built) ? built : [built]);
+  const now = fieldsOf([declared]);
+  const beyond = (kind: string, values: Set<string>, allowed: Set<string>) =>
+    [...values].filter((value) => !allowed.has(value)).map((value) => `${kind} ${value}`);
+  return [
+    ...(was.privileged && !now.privileged ? ["privileged: true"] : []),
+    ...beyond("capAdd", was.capAdd, now.capAdd),
+    ...beyond("securityOpt", was.securityOpt, now.securityOpt),
+    ...beyond("mount", was.mounts, now.mounts),
+  ];
+};
+
 export const mount = {
   aliases: new Map(
     Object.entries(allowlist.mountFields).flatMap(([canonical, spellings]) =>

@@ -1222,3 +1222,31 @@ describe("dinds: the supervisor's status, for the editor's extension", () => {
     }
   });
 });
+
+describe("a stale container's metadata is not the spec (#26)", () => {
+  // read-configuration found a workspace's container by its labels -- stopped
+  // ones too -- and answered with THAT container's build metadata. One built
+  // under docker-in-docker said "privileged" for ever, and the broker refused
+  // a clean spec. It needs a daemon to hold the container.
+  const daemon = (() => {
+    try { execFileSync("docker", ["info"], { stdio: "ignore", timeout: 20_000 }); return true; } catch { return false; }
+  })();
+
+  test("a stopped privileged container beside a clean spec does not refuse it", { skip: !daemon && "no docker daemon" }, async () => {
+    const dir = project("stale-meta", JSON.stringify({ image: "alpine:3" }));
+    const name = `desolate-it-stale-${process.pid}`;
+    execFileSync("docker", ["create", "--name", name,
+      "--label", `devcontainer.local_folder=${dir}`,
+      "--label", `devcontainer.config_file=${dir}/.devcontainer/devcontainer.json`,
+      "--label", 'devcontainer.metadata=[{"privileged":true,"capAdd":["SYS_ADMIN"]}]',
+      "alpine:3", "true"], { stdio: "ignore" });
+    try {
+      resetRunner();
+      const msgs = await ask({ op: "start", project: "stale-meta" });
+      assert.equal(result(msgs).ok, true, errorOf(msgs));
+      assert.equal(runnerInvocations().length, 1, "the runner was not reached");
+    } finally {
+      execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+    }
+  });
+});

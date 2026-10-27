@@ -12,6 +12,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  builtBeyondDeclared,
   daemonOf,
   enforcePolicy,
   feature,
@@ -1597,4 +1598,41 @@ test("keys that are refused outright are refused by PRESENCE, not truthiness", (
         new RegExp(key),
         `${key}: ${JSON.stringify(value)} was accepted`,
       );
+});
+
+describe("an existing container built from more than its spec now asks for (#26)", () => {
+  // `devcontainer up` starts an existing container as it was BUILT, so one
+  // built privileged under docker-in-docker must not start behind a clean spec.
+  const legacy = JSON.stringify([
+    { id: "ghcr.io/devcontainers/features/docker-in-docker:2", privileged: true,
+      mounts: [{ source: "dind-var-lib-docker-abc", target: "/var/lib/docker", type: "volume" }] },
+    { remoteUser: "vscode" },
+  ]);
+  const dood = {
+    securityOpt: ["label=disable"],
+    mounts: [{ source: "/var/run/docker.sock", target: "/var/run/docker-host.sock", type: "bind" }],
+  };
+
+  test("a docker-in-docker container behind a docker-outside-of-docker spec is named", () => {
+    assert.deepEqual(builtBeyondDeclared(legacy, dood), [
+      "privileged: true", "mount volume|dind-var-lib-docker-abc|/var/lib/docker",
+    ]);
+  });
+
+  test("a container built from the spec it declares holds nothing more", () => {
+    const same = JSON.stringify([{ securityOpt: ["label=disable"],
+      mounts: ["source=/var/run/docker.sock,target=/var/run/docker-host.sock,type=bind"] }]);
+    assert.deepEqual(builtBeyondDeclared(same, dood), [], "a mount as a string is the same mount as an object");
+    assert.deepEqual(builtBeyondDeclared("", dood), [], "no label: nothing it was built with");
+  });
+
+  test("a capability or a security option it no longer asks for is named, however spelled", () => {
+    assert.deepEqual(builtBeyondDeclared(JSON.stringify([{ capAdd: ["cap_sys_admin"], securityOpt: ["seccomp=unconfined"] }]),
+      { capAdd: ["NET_ADMIN"] }), ["capAdd SYS_ADMIN", "securityOpt seccomp=unconfined"]);
+    assert.deepEqual(builtBeyondDeclared(JSON.stringify([{ capAdd: ["SYS_PTRACE"] }]), { capAdd: ["CAP_SYS_PTRACE"] }), []);
+  });
+
+  test("a label that cannot be read is a difference, not a pass", () => {
+    assert.deepEqual(builtBeyondDeclared("{not json", dood), ["a metadata label that cannot be read"]);
+  });
 });
