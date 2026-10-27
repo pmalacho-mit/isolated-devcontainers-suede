@@ -5,64 +5,221 @@
   "version": "0.1.0",
   "publisher": "desolate",
   "license": "MIT",
-  "engines": { "vscode": "^1.116.0" },
+  "engines": {
+    "vscode": "^1.116.0"
+  },
   "main": "./extension.js",
-  "activationEvents": ["onStartupFinished"],
-  "capabilities": { "untrustedWorkspaces": { "supported": true }, "virtualWorkspaces": false },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": false
+  },
   "contributes": {
     "viewsContainers": {
-      "activitybar": [{ "id": "desolate", "title": "desolate", "icon": "media/desolate.svg" }]
+      "activitybar": [
+        {
+          "id": "desolate",
+          "title": "desolate",
+          "icon": "media/desolate.svg"
+        }
+      ]
     },
     "views": {
       "desolate": [
-        { "id": "desolate.projects", "name": "Projects" },
-        { "id": "desolate.dinds", "name": "Dinds" },
-        { "id": "desolate.factory", "name": "Factory" }
+        {
+          "id": "desolate.projects",
+          "name": "Projects"
+        },
+        {
+          "id": "desolate.dinds",
+          "name": "Dinds"
+        },
+        {
+          "id": "desolate.factory",
+          "name": "Factory"
+        }
       ]
     },
     "commands": [
-      { "command": "desolate.refresh", "title": "Refresh", "icon": "$(refresh)" },
-      { "command": "desolate.start", "title": "Start", "icon": "$(play)" },
-      { "command": "desolate.stop", "title": "Stop", "icon": "$(debug-stop)" },
-      { "command": "desolate.rebuild", "title": "Rebuild" },
-      { "command": "desolate.openEditor", "title": "Open editor", "icon": "$(link-external)" },
-      { "command": "desolate.copyUrl", "title": "Copy editor URL" },
-      { "command": "desolate.worktreeAdd", "title": "Add worktree…" },
-      { "command": "desolate.worktreeRemove", "title": "Remove worktree…" },
-      { "command": "desolate.approve", "title": "Approve", "icon": "$(check)" },
-      { "command": "desolate.push", "title": "Push its branch" },
-      { "command": "desolate.close", "title": "Close worktree" },
-      { "command": "desolate.reply", "title": "Answer…", "icon": "$(reply)" }
+      {
+        "command": "desolate.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "desolate.start",
+        "title": "Start",
+        "icon": "$(play)"
+      },
+      {
+        "command": "desolate.stop",
+        "title": "Stop",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "desolate.openPort",
+        "title": "Open",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "desolate.rebuild",
+        "title": "Rebuild\u2026",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "desolate.openEditor",
+        "title": "Open editor",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "desolate.copyUrl",
+        "title": "Copy editor URL"
+      },
+      {
+        "command": "desolate.worktreeAdd",
+        "title": "Add worktree\u2026"
+      },
+      {
+        "command": "desolate.worktreeRemove",
+        "title": "Remove worktree\u2026"
+      },
+      {
+        "command": "desolate.approve",
+        "title": "Approve",
+        "icon": "$(check)"
+      },
+      {
+        "command": "desolate.push",
+        "title": "Push its branch"
+      },
+      {
+        "command": "desolate.close",
+        "title": "Close worktree"
+      },
+      {
+        "command": "desolate.reply",
+        "title": "Answer\u2026",
+        "icon": "$(reply)"
+      }
     ],
     "menus": {
       "view/title": [
-        { "command": "desolate.refresh", "when": "view =~ /^desolate\\./", "group": "navigation" }
+        {
+          "command": "desolate.refresh",
+          "when": "view =~ /^desolate\\./",
+          "group": "navigation"
+        }
       ],
       "view/item/context": [
-        { "command": "desolate.start", "when": "viewItem =~ /^(project|worktree)\\.stopped$/", "group": "inline" },
-        { "command": "desolate.openEditor", "when": "viewItem =~ /^(project|worktree)\\.running$/", "group": "inline" },
-        { "command": "desolate.stop", "when": "viewItem =~ /^(project|worktree)\\.running$/", "group": "inline" },
-        { "command": "desolate.copyUrl", "when": "viewItem =~ /^(project|worktree)\\.running$/" },
-        { "command": "desolate.rebuild", "when": "viewItem =~ /^(project|worktree)\\./" },
-        { "command": "desolate.worktreeAdd", "when": "viewItem =~ /^project\\./" },
-        { "command": "desolate.worktreeRemove", "when": "viewItem == worktree.stopped" },
-        { "command": "desolate.approve", "when": "viewItem == request.approvable", "group": "inline" },
-        { "command": "desolate.push", "when": "viewItem == factory.worktree" },
-        { "command": "desolate.close", "when": "viewItem == factory.worktree" },
-        { "command": "desolate.reply", "when": "viewItem == message.ask", "group": "inline" }
+        {
+          "command": "desolate.openPort",
+          "when": "viewItem == port",
+          "group": "inline"
+        },
+        {
+          "command": "desolate.start",
+          "when": "viewItem =~ /^(project|worktree)\\.stopped$/",
+          "group": "inline"
+        },
+        {
+          "command": "desolate.openEditor",
+          "when": "viewItem =~ /^(project|worktree)\\.running$/",
+          "group": "inline"
+        },
+        {
+          "command": "desolate.stop",
+          "when": "viewItem =~ /^(project|worktree)\\.running$/",
+          "group": "inline"
+        },
+        {
+          "command": "desolate.copyUrl",
+          "when": "viewItem =~ /^(project|worktree)\\.running$/"
+        },
+        {
+          "command": "desolate.rebuild",
+          "when": "viewItem =~ /^(project|worktree)\\./",
+          "group": "inline"
+        },
+        {
+          "command": "desolate.worktreeAdd",
+          "when": "viewItem =~ /^project\\./"
+        },
+        {
+          "command": "desolate.worktreeRemove",
+          "when": "viewItem == worktree.stopped"
+        },
+        {
+          "command": "desolate.approve",
+          "when": "viewItem == request.approvable",
+          "group": "inline"
+        },
+        {
+          "command": "desolate.push",
+          "when": "viewItem == factory.worktree"
+        },
+        {
+          "command": "desolate.close",
+          "when": "viewItem == factory.worktree"
+        },
+        {
+          "command": "desolate.reply",
+          "when": "viewItem == message.ask",
+          "group": "inline"
+        }
       ],
       "commandPalette": [
-        { "command": "desolate.start", "when": "false" },
-        { "command": "desolate.stop", "when": "false" },
-        { "command": "desolate.rebuild", "when": "false" },
-        { "command": "desolate.openEditor", "when": "false" },
-        { "command": "desolate.copyUrl", "when": "false" },
-        { "command": "desolate.worktreeAdd", "when": "false" },
-        { "command": "desolate.worktreeRemove", "when": "false" },
-        { "command": "desolate.approve", "when": "false" },
-        { "command": "desolate.push", "when": "false" },
-        { "command": "desolate.close", "when": "false" },
-        { "command": "desolate.reply", "when": "false" }
+        {
+          "command": "desolate.start",
+          "when": "false"
+        },
+        {
+          "command": "desolate.stop",
+          "when": "false"
+        },
+        {
+          "command": "desolate.rebuild",
+          "when": "false"
+        },
+        {
+          "command": "desolate.openEditor",
+          "when": "false"
+        },
+        {
+          "command": "desolate.copyUrl",
+          "when": "false"
+        },
+        {
+          "command": "desolate.worktreeAdd",
+          "when": "false"
+        },
+        {
+          "command": "desolate.worktreeRemove",
+          "when": "false"
+        },
+        {
+          "command": "desolate.approve",
+          "when": "false"
+        },
+        {
+          "command": "desolate.push",
+          "when": "false"
+        },
+        {
+          "command": "desolate.close",
+          "when": "false"
+        },
+        {
+          "command": "desolate.reply",
+          "when": "false"
+        },
+        {
+          "command": "desolate.openPort",
+          "when": "false"
+        }
       ]
     }
   }

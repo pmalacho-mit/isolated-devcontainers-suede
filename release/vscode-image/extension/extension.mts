@@ -152,8 +152,16 @@ export function activate(context: vscode.ExtensionContext) {
   register("refresh", () => refreshAll());
   register("start", (node) => act(`starting ${node.label}`, "desolate", targetArgs(node)));
   register("stop", (node) => act(`stopping ${node.label}`, "desolate", ["--stop", ...targetArgs(node)]));
-  register("rebuild", (node) => act(`rebuilding ${node.label}`, "desolate", ["--rebuild", ...targetArgs(node)]));
+  register("rebuild", async (node) => {
+    // A rebuild recreates the container: what lives in it outside /workspaces
+    // -- installed packages, shell history, anything in $HOME -- is gone.
+    const sure = await vscode.window.showWarningMessage(
+      `Rebuild ${node.label}? Its container is recreated from devcontainer.json, and anything in it outside /workspaces is lost.`,
+      { modal: true }, "Rebuild");
+    if (sure === "Rebuild") await act(`rebuilding ${node.label}`, "desolate", ["--rebuild", ...targetArgs(node)]);
+  });
   register("openEditor", (node) => node.target?.url && vscode.env.openExternal(vscode.Uri.parse(node.target.url)));
+  register("openPort", (node) => node.target?.url && vscode.env.openExternal(vscode.Uri.parse(node.target.url)));
   register("copyUrl", async (node) => {
     if (!node.target?.url) return;
     await vscode.env.clipboard.writeText(node.target.url);

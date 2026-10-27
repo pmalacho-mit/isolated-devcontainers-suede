@@ -121,6 +121,24 @@ const { chromium } = require("playwright");
   await page.screenshot({ path: "/run/test/views.png" });
   report.sidebar = await page.locator(".part.sidebar").innerText();
 
+  // Rebuild asks first: cancelled, nothing runs; confirmed, it does.
+  const project = page.locator('.sidebar .monaco-list-row:has-text("acme/widgets")').first();
+  await project.hover();
+  await project.locator('[aria-label="Rebuild…"]').click();
+  await page.waitForTimeout(1500);
+  const confirm = page.locator(".monaco-dialog-box");
+  report.rebuildAsked = await confirm.innerText().catch(() => "");
+  await page.screenshot({ path: "/run/test/rebuild-confirm.png" });
+  await confirm.locator("a.monaco-button, button", { hasText: /^Cancel$/ }).first().click();
+  await page.waitForTimeout(1500);
+  await project.hover();
+  await project.locator('[aria-label="Rebuild…"]').click();
+  await page.waitForTimeout(1500);
+  await page.locator(".monaco-dialog-box a.monaco-button, .monaco-dialog-box button", { hasText: /^Rebuild$/ }).first().click();
+  await page.waitForTimeout(3000);
+  // Each port row has its own Open.
+  report.portOpens = await page.locator('.sidebar .monaco-list-row:has-text("127.0.0.1:") [aria-label="Open"]').count();
+
   // Start a stopped project from its inline action.
   const solo = page.locator('.sidebar .monaco-list-row:has-text("solo")').first();
   await solo.hover();
@@ -140,6 +158,7 @@ docker start -a "$BROWSER" >/dev/null 2>&1
 OUTPUT=$(docker logs "$BROWSER" 2>&1)
 docker cp "$BROWSER:/run/test/views.png" "$OUT/" >/dev/null 2>&1
 docker cp "$BROWSER:/run/test/after-start.png" "$OUT/" >/dev/null 2>&1
+docker cp "$BROWSER:/run/test/rebuild-confirm.png" "$OUT/" >/dev/null 2>&1
 REPORT=$(printf '%s\n' "$OUTPUT" | sed -n 's/^REPORT //p' | tail -1)
 CALLS=$(docker exec "$EDITOR" cat /tmp/calls.log 2>/dev/null)
 # Monaco renders a space as U+00A0; read it as one.
@@ -157,6 +176,11 @@ done
 assert_not_contains "no editor token is shown" "$SIDEBAR" "secret-token"
 
 assert_contains "with Workspace Trust declined" "$(field dialog)" "trust"
+
+group "rebuild asks first, and each port has an Open"
+assert_contains "Rebuild asks, naming what is lost" "$(field rebuildAsked)" "outside /workspaces is lost"
+assert_eq "cancelled, it ran once -- for the confirmed one" "$(printf '%s\n' "$CALLS" | grep -c '^desolate --rebuild acme/widgets$')" "1"
+assert_eq "both of acme/widgets' ports offer Open" "$(field portOpens)" "2"
 
 group "an action runs the editor's command, and its log keeps no token"
 assert_contains "Start on 'solo' ran desolate solo" "$CALLS" "desolate solo"

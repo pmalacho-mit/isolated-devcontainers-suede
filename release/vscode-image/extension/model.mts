@@ -71,13 +71,17 @@ export const redactTokens = (text: string) => text.replace(/([?&]tkn=)[^&#\s"'<>
 
 /** The editor first, then each container port in order -- not in the order
  *  an object happens to keep its keys, which puts "5173" before "editor". */
-const portNodes = (row: Running, id: string): Node[] =>
+/** Each one can be opened: the editor at its URL, token and all (it is the
+ *  link; it never reaches a label), a container port at its loopback address. */
+const portNodes = (row: Running, id: string, at: Known): Node[] =>
   Object.entries(row.ports).sort(([a], [b]) =>
     a === "editor" ? -1 : b === "editor" ? 1 : Number(a) - Number(b)).map(([label, port]) => ({
     id: `${id}:port:${label}`,
     label: label === "editor" ? "editor" : `container :${label}`,
     description: `127.0.0.1:${port}`,
     icon: label === "editor" ? "window" : "plug",
+    actions: "port",
+    target: { ...at, url: label === "editor" && row.url ? row.url : `http://127.0.0.1:${port}/` },
   }));
 
 /**
@@ -98,7 +102,7 @@ export const projectsTree = (known: Known[], running: Running[]): Node[] => {
       icon: row ? "vm-running" : "vm-outline",
       actions: `${kind}.${row ? "running" : "stopped"}`,
       target: { project: target.project, worktree: target.worktree, url: row?.url ?? undefined },
-      children: row ? portNodes(row, id) : [],
+      children: row ? portNodes(row, id, target) : [],
     };
   };
   const projects = known.filter((target) => !target.worktree);

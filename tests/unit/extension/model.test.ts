@@ -52,6 +52,16 @@ describe("the Projects view", () => {
     assert.equal(up.description, "running · own dind");
     assert.deepEqual(up.children!.filter((n) => n.id.includes(":port:")).map((n) => n.description), ["127.0.0.1:8092", "127.0.0.1:8093"]);
     assert.equal(find(tree, "target:solo@")!.actions, "project.stopped");
+  });
+
+  test("each port can be opened: the editor at its URL, a container port at its address", () => {
+    const editor = find(tree, "target:acme/widgets@:port:editor")!;
+    assert.equal(editor.actions, "port");
+    assert.equal(editor.target?.url, "http://127.0.0.1:8092/?tkn=x");
+    assert.ok(!editor.label.includes("tkn") && !editor.description!.includes("tkn"), "the token is in the link only");
+    const app = find(tree, "target:acme/widgets@:port:5173")!;
+    assert.equal(app.actions, "port");
+    assert.equal(app.target?.url, "http://127.0.0.1:8093/");
     assert.equal(find(tree, "target:acme/widgets@wip")!.actions, "worktree.stopped");
   });
 });
