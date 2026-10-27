@@ -14,7 +14,6 @@
 #   ./isolated-devcontainers-suede/cli.sh export owner/repo [path]  # copy files out (tar when piped)
 #   ./isolated-devcontainers-suede/cli.sh reclaim owner/repo [path] # give root-owned files back to the editor
 #   ./isolated-devcontainers-suede/cli.sh exec owner/repo [--worktree wip] -- cmd...   # run it in the devcontainer
-#   ./isolated-devcontainers-suede/cli.sh bundle owner/repo [--worktree wip] out.bundle  # its branch, to push from here
 #   ./isolated-devcontainers-suede/cli.sh desolate --status [--json] [owner/repo]       # what each agent last said
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
@@ -1386,33 +1385,18 @@ case "$CMD" in
              fi
              exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim "$PROJ" ;;
 
-  exec|bundle) ensure_running
-             # The primitives a harness on this Mac builds on (docs/agents.md).
-             # exec: a command in a running target's devcontainer, as its user
-             # -- the Mac's alone; the editor has no way into a devcontainer.
-             # bundle: the target's branch, bundled in its sandbox, copied here
-             # -- so pushing it is yours, with your credentials.
-             PROJ="${1:?usage: cli.sh $CMD <project> [--worktree <name>] ...}"; shift
+  exec)      ensure_running
+             # A command in a running target's devcontainer, as its user -- how
+             # a harness on this Mac starts an agent (docs/agents.md). The
+             # Mac's alone: the editor has no way into a devcontainer.
+             PROJ="${1:?usage: cli.sh exec <project> [--worktree <name>] -- <command...>}"; shift
              WT=()
              if [ "${1:-}" = --worktree ]; then
                WT=(--worktree "${2:?--worktree takes a name}"); shift 2
              fi
-             if [ "$CMD" = exec ]; then
-               [ "${1:-}" = -- ] && shift
-               [ $# -gt 0 ] || { echo "usage: cli.sh exec <project> [--worktree <name>] -- <command...>" >&2; exit 1; }
-               exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --exec ${WT[@]+"${WT[@]}"} "$PROJ" -- "$@"
-             fi
-             DEST="${1:?usage: cli.sh bundle <project> [--worktree <name>] <file>}"
-             [ -e "$DEST" ] && { echo "cli.sh: $DEST already exists; refusing to overwrite it" >&2; exit 1; }
-             OUT=$(docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --bundle ${WT[@]+"${WT[@]}"} "$PROJ") \
-               || { printf '%s\n' "$OUT" >&2; exit 1; }
-             # BUNDLED <branch> <commit> <path in the orchestrator>
-             LINE=$(printf '%s\n' "$OUT" | grep '^BUNDLED ' | tail -n 1)
-             [ -n "$LINE" ] || { printf '%s\n' "$OUT" >&2; echo "cli.sh: the runner said nothing of a bundle" >&2; exit 1; }
-             read -r _ BRANCH COMMIT FROM <<< "$LINE"
-             docker cp "$ORCHESTRATOR:$FROM" "$DEST" >/dev/null
-             echo "cli.sh: $BRANCH at $COMMIT -> $DEST"
-             echo "  git fetch $DEST $BRANCH:$BRANCH && git push origin $BRANCH" ;;
+             [ "${1:-}" = -- ] && shift
+             [ $# -gt 0 ] || { echo "usage: cli.sh exec <project> [--worktree <name>] -- <command...>" >&2; exit 1; }
+             exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --exec ${WT[@]+"${WT[@]}"} "$PROJ" -- "$@" ;;
 
   export)    ensure_running
              # Getting files out (#13). /workspaces is one volume the editor

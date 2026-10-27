@@ -51,10 +51,6 @@ export type Command =
    *  `path` inside it -- that a container left owned by someone else (#15).
    *  What `cli.sh reclaim` and `cli.sh worktree remove` run. */
   | "reclaim"
-  /** A target's current branch, written as a git bundle by a sandbox that
-   *  sees only its project -- how a branch leaves the stack for the Mac to push
-   *  (`cli.sh bundle`, docs/agents.md). */
-  | "bundle"
   /** Run a command inside a running target's devcontainer, as its user, in its
    *  folder -- how a harness starts an agent (`cli.sh exec`, docs/agents.md).
    *  The Mac's alone: the editor has no daemon, and gets no way into one. */
@@ -245,9 +241,6 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--reclaim":
         command = "reclaim";
-        break;
-      case "--bundle":
-        command = "bundle";
         break;
       case "--exec":
         command = "exec";

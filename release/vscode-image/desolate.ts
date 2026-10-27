@@ -1545,35 +1545,6 @@ function removeWorktree(target: Target, force: boolean): void {
   console.log(`worktree: removed ${target.name}`);
 }
 
-/** Where a target's branch is handed out -- `cli.sh bundle` copies it to the
- *  Mac from here: one directory per target, so a sandbox sees only its own.
- *  Under /workspaces/.desolate, which no devcontainer mounts. */
-const BUNDLE_DIRECTORY = path.join(WORKSPACES, ".desolate", "bundles");
-
-/**
- * Bundle a target's current branch, for the Mac to push with its own
- * credentials (`cli.sh bundle`, docs/agents.md).
- *
- * Never git in the editor, which can read every project: it would follow
- * whatever the project's `.git` points at -- a ref that is a symlink,
- * alternates naming another project's objects. So the branch is read in a
- * sandbox that mounts the project root (read-only) and its own output
- * directory, and nothing else of /workspaces: whatever the project points at
- * outside itself resolves to nothing.
- */
-function bundleTarget(target: Target): void {
-  const out = path.join(BUNDLE_DIRECTORY, target.namespace);
-  fs.rmSync(out, { recursive: true, force: true });
-  fs.mkdirSync(out, { recursive: true });
-  const bundled = docker.bundleBranch(
-    worktreeSandbox(target, worktrees.bundleMounts(target, out)),
-    target.dir,
-    "/out/branch.bundle",
-  );
-  if (!bundled) return die(`could not bundle ${target.name}'s branch in its sandbox (no branch checked out, or git failed)`);
-  console.log(`BUNDLED ${bundled.branch} ${bundled.commit} ${path.join(out, "branch.bundle")}`);
-}
-
 /**
  * Run a command inside a running target's devcontainer -- how a harness starts
  * an agent in it (`cli.sh exec`, docs/agents.md). As the container's remote
@@ -1915,7 +1886,6 @@ async function main(): Promise<void> {
   }
   else if (args.command === "uncommitted") reportUncommitted(target);
   else if (args.command === "reclaim") await reclaimTarget(target, args.path);
-  else if (args.command === "bundle") bundleTarget(target);
   else if (args.command === "exec") execTarget(target, args.execArgv!);
   else if (args.command === "populate") populateWorktree(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);

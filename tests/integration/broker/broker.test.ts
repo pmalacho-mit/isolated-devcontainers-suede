@@ -1138,8 +1138,8 @@ describe("--ports --move reaches the runner only in its one shape", () => {
 describe("purge and bundle are not the editor's (docs/agents.md)", () => {
   // ===========================================================================
   // The first factory let the editor purge a worktree and bundle its branch.
-  // Both are the Mac's now (`cli.sh worktree remove`, `cli.sh bundle`), so the
-  // broker -- the editor's only way in -- must not speak either.
+  // A purge is the Mac's (`cli.sh worktree remove`) and a bundle nobody's, so
+  // the broker -- the editor's only way in -- must speak neither.
   test("neither op reaches the runner, for a project or a worktree", async () => {
     project("no-factory", JSON.stringify({ image: "alpine:3" }));
     fs.mkdirSync(path.join(workspaces, "no-factory", ".worktrees", "issue-1"), { recursive: true });

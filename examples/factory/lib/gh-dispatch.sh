@@ -3,10 +3,11 @@
 # Sourced, not run: a dispatcher defines its agent, then calls
 # `dispatch_main "$@"` (see ../gh-dispatcher.sh, ../claude/claude-dispatcher.sh).
 #
-#   <dispatcher> <project> <owner/repo> <clone> [--label L] [--interval S] [--once]
+#   <dispatcher> <project> <owner/repo> [--label L] [--interval S] [--once]
 #
-# Runs on your Mac, with YOUR gh login and git credentials; desolate holds
-# neither. Each tick, for every open issue labelled L (default desolate:run):
+# Runs on your Mac, with YOUR gh login; desolate holds no forge credential.
+# There is no clone here: the repository lives in desolate, and its branches
+# are pushed from the outer editor, by you. Each tick, for every open issue labelled L (default desolate:run):
 #
 #   1. no worktree issue-<n> yet: `cli.sh worktree add`, on branch issue/<n>;
 #   2. not running: start it;
@@ -17,14 +18,14 @@
 #                       you are told, here and by a notification, and asked to
 #                       fix it when this runs in a terminal; then agent_resume;
 #        orange, red -- a comment on the issue, once per status;
-#        green       -- `cli.sh bundle` its branch, push it from <clone> (never
-#                       to the default branch, never forced), open a draft PR;
+#        green       -- you are told to push issue/<n> from the editor; once
+#                       GitHub has that branch, a draft PR is opened for it;
 #
 # and for every worktree it started whose issue is no longer open: stop it and
 # `cli.sh worktree remove` it, which refuses one holding uncommitted work.
 #
-# A status is the agent's claim (docs/agents.md): this pushes what the bundle
-# holds, and a human reviews the draft.
+# A status is the agent's claim (docs/agents.md): you look before you push,
+# and review the draft after.
 #
 # The agent, as functions the dispatcher defines (each has a default here):
 #   agent_ready   <project>                    credentials in place; may ask -- once, at start
@@ -77,23 +78,22 @@ Say how it is going with $STATUS_HELPER; a human sees it beside this worktree:
   set orange "<your question>" when you need a human, then stop;
   set red "<what failed>" when you cannot go on;
   set green "<one line for the PR>" when the work is committed on issue/$1.
-Commit your work; do not push. A human pushes and opens the PR.
+Commit your work on issue/$1; do not push. A human pushes it, and a draft PR follows.
 EOF
 }
 
-dispatch_pull_request() { # <n> <name> <title> <message>
-  local n=$1 name=$2 title=$3 message=$4 tmp out branch commit
-  tmp=$(mktemp -d)
-  out=$("$CLI" bundle "$PROJECT" --worktree "$name" "$tmp/branch.bundle") || { log "#$n: bundle failed"; rm -rf "$tmp"; return; }
-  # cli.sh: <branch> at <commit> -> <file>
-  read -r _ branch _ commit _ <<< "$(printf '%s\n' "$out" | grep '^cli.sh: ')"
-  if [ -z "$branch" ] || [ "$branch" = "$DEFAULT_BRANCH" ]; then
-    log "#$n: refusing to push '${branch:-?}'"; rm -rf "$tmp"; return
+# Green: the push is yours, from the outer editor, where the deploy key is --
+# never this script's, which would run an agent-written repository's hooks and
+# config there with no one looking. Asked for once per status; the PR follows
+# as soon as GitHub has the branch.
+dispatch_pull_request() { # <n> <name> <title> <message> <updated>
+  local n=$1 name=$2 title=$3 message=$4 updated=$5 branch=issue/$1
+  if ! gh api "repos/$REPO/git/ref/heads/$branch" --silent 2>/dev/null; then
+    [ "$(cat "$STATE/$name.push" 2>/dev/null)" = "$updated" ] && return
+    notify "#$n is ready ($message) -- review it, then push from the editor: git -C /workspaces/$PROJECT push origin $branch"
+    echo "$updated" > "$STATE/$name.push"
+    return
   fi
-  git -C "$CLONE" fetch --quiet "$tmp/branch.bundle" "refs/heads/$branch"
-  [ "$(git -C "$CLONE" rev-parse FETCH_HEAD)" = "$commit" ] || { log "#$n: the bundle is not what it said"; rm -rf "$tmp"; return; }
-  git -C "$CLONE" push --quiet origin "$commit:refs/heads/$branch"
-  rm -rf "$tmp"
   gh pr create -R "$REPO" --draft --head "$branch" --base "$DEFAULT_BRANCH" \
     --title "$title" --body "$message
 
@@ -169,7 +169,7 @@ dispatch_tick() {
         echo "$updated" > "$STATE/$name.told"
         log "#$n: $color, said on the issue" ;;
       green)
-        [ -e "$STATE/$name.pr" ] || dispatch_pull_request "$n" "$name" "$title" "$message" ;;
+        [ -e "$STATE/$name.pr" ] || dispatch_pull_request "$n" "$name" "$title" "$message" "$updated" ;;
     esac
   done < <(jq -c '.[]' <<< "$issues")
 
@@ -191,8 +191,8 @@ dispatch_tick() {
 
 dispatch_main() {
   set -euo pipefail
-  [ $# -ge 3 ] || { sed -n '6p' "$FACTORY_LIB/gh-dispatch.sh" | sed "s/^# \{0,1\}//; s/<dispatcher>/$DISPATCHER.sh/" >&2; exit 2; }
-  PROJECT=$1 REPO=$2 CLONE=$3; shift 3
+  [ $# -ge 2 ] || { sed -n '6p' "$FACTORY_LIB/gh-dispatch.sh" | sed "s/^# \{0,1\}//; s/<dispatcher>/$DISPATCHER.sh/" >&2; exit 2; }
+  PROJECT=$1 REPO=$2; shift 2
   LABEL=desolate:run INTERVAL=60 ONCE=
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -205,10 +205,9 @@ dispatch_main() {
   STATE=${FACTORY_STATE:-$HOME/.local/state/desolate-factory}/${PROJECT//\//__}
   mkdir -p "$STATE"
   local tool
-  for tool in gh git jq; do
+  for tool in gh jq; do
     command -v "$tool" >/dev/null || { echo "$DISPATCHER: needs $tool" >&2; exit 1; }
   done
-  git -C "$CLONE" rev-parse --git-dir >/dev/null || { echo "$DISPATCHER: $CLONE is not a git clone" >&2; exit 1; }
   agent_ready "$PROJECT" || { echo "$DISPATCHER: the agent is not ready" >&2; exit 1; }
   DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
   while :; do

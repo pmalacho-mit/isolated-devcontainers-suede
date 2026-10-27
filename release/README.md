@@ -479,7 +479,6 @@ the rules would go stale again each time.
 ./cli.sh worktree remove owner/repo wip
 ./cli.sh export owner/repo [path]        # copy files out to ./<name> (a tar when piped)
 ./cli.sh exec owner/repo [--worktree wip] -- cmd...   # run a command (an agent) in its devcontainer
-./cli.sh bundle owner/repo [--worktree wip] out.bundle   # its branch as a git bundle, to push from here
 ./cli.sh desolate --status       # each target's status, as its agent last set it
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
@@ -1457,7 +1456,6 @@ primitives:
 ./cli.sh desolate acme/widgets --worktree issue-42       # start it
 ./cli.sh exec acme/widgets --worktree issue-42 -- claude -p "..."   # run an agent in it
 ./cli.sh desolate --status --json                        # what every agent last said
-./cli.sh bundle acme/widgets --worktree issue-42 out.bundle   # its branch, to push from here
 ```
 
 **Status, through `.git`.** An agent says how it is going with
@@ -1467,9 +1465,9 @@ in that target's git dir: never committed, never pushed, seen by exactly that
 project's containers. desolate shows it -- the icon's colour and the message in
 the editor's panel, `desolate --status` -- and never acts on it.
 
-**No forge credential is in the stack.** Polling GitHub, pushing and opening
-PRs happen on your Mac, with your own `gh` and git: `bundle` hands you the
-branch.
+**No forge credential is in the stack.** Polling GitHub and opening PRs happen
+on your Mac, with your own `gh`; you push the branch from the outer editor, as
+any other.
 
 **Agents' credentials are placeholders.** Claude Code sends whatever token it
 is given as the bearer, with no local check of its shape (measured:
@@ -1495,8 +1493,7 @@ off the subscription, because both outrank the OAuth token
 any of them can write any target's status, so a status is the agent's claim --
 check what it claims (that a branch builds, say) before acting on it. What
 bounds a hostile agent is what reaches outside the project: `exec` is the
-Mac's alone, a bundle is made in a sandbox that mounts only that project, and
-the push is yours.
+Mac's alone, and the push is yours.
 
 ## Secrets: placeholders in, real values never
 

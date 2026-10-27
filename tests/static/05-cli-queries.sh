@@ -276,16 +276,15 @@ AUDIT verdict=ALLOW host=c.com project=a.b/c
     "AUDIT verdict=ALLOW host=a.com project=a.b|[12:04:04.855] AUDIT verdict=ALLOW host=d.com project=a.b|"
 fi
 
-group "exec, bundle and --status: what reaches docker (docs/agents.md)"
+group "exec and --status: what reaches docker (docs/agents.md)"
 # A stand-in docker that logs each call's argv, one word per field, and answers
-# as the stack would: the editor running, a bundle made in the orchestrator.
+# as the stack would: the editor running.
 STUB=$(mktemp -d)
 cat > "$STUB/docker" <<EOF
 #!/bin/sh
 printf '%s|' "\$@" >> "$STUB/calls"; echo >> "$STUB/calls"
 case "\$1" in
   inspect) echo running ;;
-  exec) case "\$*" in *--bundle*) echo "a log line"; echo "BUNDLED issue/42 abc123 /workspaces/.desolate/bundles/ns/branch.bundle" ;; esac ;;
   cp) : > "\$3" ;;
 esac
 EOF
@@ -302,16 +301,6 @@ assert_eq "exec: no worktree, and no -- needed" "$(execs)" \
 OUT=$(cli exec solo --)
 assert_eq "exec with no command is refused, before docker" "$(execs)" ""
 assert_contains "and says how" "$OUT" "usage: cli.sh exec"
-
-DEST="$STUB/out.bundle"
-OUT=$(cli bundle acme/widgets --worktree issue-42 "$DEST")
-assert_eq "bundle: made in the sandbox, then copied out of the orchestrator" \
-  "$(grep -E '^(exec|cp)\|' "$STUB/calls" | tr '\n' ' ')" \
-  "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--bundle|--worktree|issue-42|acme/widgets| cp|desolate-orchestrator:/workspaces/.desolate/bundles/ns/branch.bundle|$DEST| "
-assert_contains "and says what it holds" "$OUT" "issue/42 at abc123 -> $DEST"
-OUT=$(cli bundle acme/widgets "$DEST")
-assert_contains "a file that is there is not overwritten" "$OUT" "already exists; refusing"
-assert_eq "  before docker is asked" "$(grep -cE '^(exec|cp)\|' "$STUB/calls")" "0"
 
 cli desolate --status --json acme/widgets >/dev/null
 assert_eq "desolate --status is the editor's to read, not the orchestrator's" "$(execs)" \

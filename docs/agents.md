@@ -17,7 +17,7 @@ needs nothing else. `examples/factory/` holds such harnesses, as sketches.
 | what is running, for a program | `./cli.sh desolate --list --json` | Mac or editor |
 | run an agent in it | `./cli.sh exec <project> [--worktree <name>] -- <command...>` | Mac |
 | hear from it | its **status**, through `.git` (below) | written inside; read anywhere |
-| get its branch out | `./cli.sh bundle <project> [--worktree <name>] <file>` | Mac |
+| get its branch out | `git push`, by you, in the outer editor | editor |
 | give it a credential | `./cli.sh secret add NAME --hosts … --projects <project>` | Mac (the value stays in the VM) |
 | see what it reached | `./cli.sh proxy audit --project <project>` | Mac |
 
@@ -86,15 +86,15 @@ The reader is strict about the file. It:
 - shows the message as one plain line of at most 200 printable characters;
 - shows a colour it doesn't know as `gray`.
 
-### `bundle`: get a branch out
+### Getting a branch out
+
+You push it, from the outer editor's terminal, where the deploy keys are:
 
 ```bash
-./cli.sh bundle acme/widgets --worktree issue-42 ~/work/issue-42.bundle
-git -C ~/clones/widgets fetch ~/work/issue-42.bundle issue/42:issue/42
-git -C ~/clones/widgets push origin issue/42      # with YOUR credentials
+git -C /workspaces/acme/widgets push origin issue/42
 ```
 
-This writes a git bundle of the target's current branch to a file on the Mac. The bundle is made in a sandbox that mounts the project's root read-only and nothing else of `/workspaces`, so a ref the project made a link, or alternates pointing into another project, resolve to nothing. The editor's git is never asked to read the project. Pushing, and opening a PR, happen on the Mac, with your credentials; no forge token ever enters the stack.
+A worktree's branches are in the project's own `.git`, so the project's directory is the place to push from. Nothing here pushes for you. Git in the editor obeys the repository's own config and hooks (README, "project <-> editor"), so a branch an agent wrote is one to look at before pushing. No forge token enters the stack, and no clone is needed on the Mac.
 
 ### What desolate deliberately does not do
 
@@ -114,7 +114,7 @@ Those choices belong to the harness, which is where they can change without chan
 - `claude/claude-dispatcher.sh` runs Claude Code through `claude/claude-helper.sh`.
 
 ```bash
-examples/factory/claude/claude-dispatcher.sh acme/widgets acme/widgets ~/clones/widgets   # project, repo, your clone
+examples/factory/claude/claude-dispatcher.sh acme/widgets acme/widgets   # project, then its GitHub repo
 ```
 
 Per issue labelled `desolate:run`, each tick:
@@ -124,7 +124,7 @@ Per issue labelled `desolate:run`, each tick:
 3. Read `./cli.sh desolate --status --json`:
    - **the agent's own access broken** (for Claude, `red` "claude: authentication failed"): you are told, in the terminal, with a bell, and by a macOS notification. In a terminal you are asked for a new token, and then each agent that stopped on it carries on its conversation. No new agent starts while this waits.
    - **`orange` or `red`:** a comment on the issue, once per status.
-   - **`green`:** `bundle` the branch, push it from your clone (never to the default branch, never forced), then `gh pr create --draft`.
+   - **`green`:** you are told, once, to review the branch and push it from the editor. As soon as GitHub has `issue/<n>`, the dispatcher opens a draft PR for it (`gh pr create --draft`).
 4. When the issue is closed: stop and `worktree remove` (refused while it holds uncommitted work).
 
 Another agent is five shell functions: `agent_ready`, `agent_start`, `agent_blocked`, `agent_renew` and `agent_resume`. See the top of `lib/gh-dispatch.sh`.
@@ -184,4 +184,4 @@ The first factory, `cli.sh work` and `cli.sh forge`, built this workflow into de
 That was too prescriptive, and it blurred the line between forge credentials and the stack. It is gone. These primitives replace it:
 - the status replaces the message protocol;
 - `exec` replaces the watcher's starts;
-- `bundle` replaces its push.
+- your own push, from the editor, replaces its push.

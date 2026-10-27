@@ -237,11 +237,8 @@ describe("--json (F2)", () => {
   test("anything else refuses it", () => refuses(["--json", "acme/widgets"], /only means something with --list or --ports/));
 });
 
-describe("--bundle (docs/agents.md)", () => {
-  test("a worktree's branch, or the project's own", () => {
-    assert.equal(parse("--bundle", "--worktree", "w", "acme/widgets").command, "bundle");
-    assert.equal(parse("--bundle", "acme/widgets").command, "bundle");
-  });
+describe("--bundle is gone (docs/agents.md)", () => {
+  test("refused as any unknown option is", () => refuses(["--bundle", "acme/widgets"], /unknown option '--bundle'/));
 });
 
 describe("--exec (docs/agents.md)", () => {

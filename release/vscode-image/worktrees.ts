@@ -197,19 +197,6 @@ export const checkoutMounts = (
 ];
 
 /**
- * The bundle's sandbox (desolate.ts bundleTarget): the PROJECT ROOT,
- * read-only, and an output directory of this target's own -- and nothing else
- * of /workspaces. The root, not `.git`: a project cannot replace its own root
- * the way it can swap `.git` for a link, so whatever its repository points at
- * outside itself resolves inside the sandbox, where no other project is. For
- * `docker run --mount` (which accepts `readonly`), as checkoutMounts is.
- */
-export const bundleMounts = (target: Target, out: string): string[] => [
-  `type=bind,source=${target.projectDir},target=${target.projectDir},readonly`,
-  `type=bind,source=${out},target=/out`,
-];
-
-/**
  * An empty tmpfs over `.worktrees`, so the main tree's editor holds one copy of
  * every filename rather than one per branch.
  *
