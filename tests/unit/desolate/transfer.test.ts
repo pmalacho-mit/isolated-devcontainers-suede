@@ -17,7 +17,7 @@ const workspaces = join(root, "workspaces");
 const cacheRoot = join(root, "cache");
 process.env.DESOLATE_WORKSPACES = workspaces;
 process.env.DESOLATE_REMOTE_CACHE = cacheRoot;
-const { push, pull, registrationOf, defaultBranchOf, TransferError } = await import("../../../release/vscode-image/transfer.ts");
+const { push, pull, registrationOf, defaultBranchOf, cloneThroughCache, TransferError } = await import("../../../release/vscode-image/transfer.ts");
 const { bundleScript, pullScript } = await import("../../../release/vscode-image/docker.ts");
 
 const git = (cwd: string, ...args: string[]) =>
@@ -204,6 +204,36 @@ describe("pull", () => {
     const before = git(project, "rev-parse", "HEAD");
     assert.match(await pull("acme/widgets", { registration, ask: puller }), /have diverged/);
     assert.equal(git(project, "rev-parse", "HEAD"), before);
+  });
+});
+
+describe("a project cloned through its cache (`repo add`)", () => {
+  const cloned = join(workspaces, "acme", "gadgets");
+  const gadgets = { tag: "acme__gadgets", ownerRepo: "acme/gadgets", url: remote };
+
+  test("the clone is the remote's, with origin pointing there and the default branch checked out", () => {
+    cloneThroughCache(gadgets, cloned);
+    assert.equal(git(cloned, "remote", "get-url", "origin"), remote);
+    assert.equal(git(cloned, "symbolic-ref", "--short", "HEAD"), "main");
+    assert.equal(git(cloned, "rev-parse", "refs/remotes/origin/feature"), git(root, "--git-dir", remote, "rev-parse", "feature"));
+  });
+
+  test("its objects are copies: no file is shared with the cache", () => {
+    const objects = (dir: string) => execFileSync("find", [dir, "-type", "f", "-path", "*objects*", "-links", "+1"], { encoding: "utf8" }).trim();
+    assert.equal(objects(join(cloned, ".git")), "", "a hardlinked object file is the cache's own, writable from the project");
+  });
+
+  test("and the cache knows it has every branch: the first pull sends no bundle", async () => {
+    const before = seen.length;
+    const ask = async (request: Record<string, unknown>, onLog: (line: string) => boolean) => {
+      const stem = join(cloned, ".git", String(request.transfer).replace(/\.bundle$/, ""));
+      seen.push({ op: "pull", bundle: describeBundle(`${stem}.bundle`) });
+      const result = spawnSync("sh", ["-c", pullScript, "pull", cloned, `${stem}.bundle`, `${stem}.refs`, "/dev/null"], { encoding: "utf8" });
+      for (const line of (result.stdout ?? "").split("\n").filter(Boolean)) onLog(line.replace(/^desolate-pulled/, "PULLED"));
+      return result.status ?? 1;
+    };
+    assert.match(await pull("acme/gadgets", { registration: gadgets, ask }), /up to date/);
+    assert.deepEqual(seen.slice(before).map((s) => s.bundle), ["none"]);
   });
 });
 

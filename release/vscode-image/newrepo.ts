@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import { exchange } from "./keyring-client.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { cloneThroughCache } from "./transfer.ts";
 
 const WORKSPACES = "/workspaces";
 
@@ -281,17 +282,17 @@ function doClone(repo: Repo): void {
   if (fs.existsSync(`${dest}/.git`)) {
     console.log(`newrepo: ${dest} already cloned`);
   } else {
+    // Through desolate push/pull's cache (transfer.ts): the one download
+    // fills it, and the project is cloned from it, so neither the first push
+    // nor the first pull fetches the history again.
     try {
-      execFileSync(
-        "git",
-        ["clone", `git@${repo.hostAlias}:${repo.ownerRepo}.git`, dest],
-        {
-          stdio: ["ignore", "inherit", "inherit"],
-          env: { ...process.env, GIT_SSH_COMMAND: gitSshCommand() },
-        },
+      cloneThroughCache(
+        { tag: repo.tag, ownerRepo: repo.ownerRepo, url: `git@${repo.hostAlias}:${repo.ownerRepo}.git` },
+        dest,
+        { ssh: gitSshCommand() },
       );
-    } catch {
-      die(`clone failed -- is the deploy key registered on GitHub yet?
+    } catch (err: any) {
+      die(`clone failed (${err?.message ?? err}) -- is the deploy key registered on GitHub yet?
         Repo -> Settings -> Deploy keys -> Add, paste the PUBKEY line,
         tick 'Allow write access', then rerun this command.`);
     }

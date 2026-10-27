@@ -115,7 +115,7 @@ desolate's push and pull keep the two sides apart (`release/vscode-image/transfe
 - a push bundles only what the cache lacks;
 - a pull bundles only what the project lacks, or nothing at all.
 
-Measured on `git/git`, a pull went from about 35 s to about 2 s, and a push from about 21 s to under a second, after the first. The first push or pull of a project fills the cache, which costs one full fetch. If a pull's guess at what the project has is wrong, the sandbox says so and is sent everything, once.
+Measured on `git/git`, a pull went from about 35 s to about 2 s, and a push from about 21 s to under a second, after the first. A project added with `./cli.sh repo add` is cloned through its cache: the clone's one download fills it, and the project's objects are copied from it, never hardlinked, so the project can't write into the cache. Its first push and pull are as small as any later one. For a project cloned before this, the first push or pull fills the cache instead, which costs one full fetch. If a pull's guess at what the project has is wrong, the sandbox says so and is sent everything, once.
 
 Review an agent's branch, and commit, in the project's own devcontainer, before you push. No forge token enters the stack, and no clone is needed on the Mac.
 

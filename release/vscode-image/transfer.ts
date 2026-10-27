@@ -235,6 +235,35 @@ const refresh = (cache: Cache, registration: Registration, ssh?: string) => {
     fail(`could not fetch ${registration.ownerRepo}`);
 };
 
+/**
+ * Clone a newly registered project THROUGH its cache (`repo add`, newrepo.ts):
+ * the cache is filled from the remote -- the one download -- and the project
+ * cloned from it, so the first push and pull are as small as every later one.
+ *
+ * `--no-hardlinks`, not a local clone's default: a hardlinked object file is
+ * the same file in both, and the project can write its own .git. `origin` is
+ * then the registered remote, as a clone from it would have it. The cache's
+ * HEAD names the remote's default branch, so the clone checks that out.
+ */
+export function cloneThroughCache(registration: Registration, dest: string, options: { ssh?: string; env?: NodeJS.ProcessEnv } = {}) {
+  const cache = openCache(registration);
+  try {
+    refresh(cache, registration, options.ssh);
+    const head = cleanGit(["-C", cache.dir, "ls-remote", "--symref", registration.url, "HEAD"], { capture: true, ssh: options.ssh });
+    const main = defaultBranchOf(head.stdout);
+    if (main) cleanGit(["-C", cache.dir, "symbolic-ref", "HEAD", `refs/heads/${main}`]);
+    const cloned = spawnSync("git", ["clone", "--quiet", "--no-hardlinks", "--origin", "origin", cache.dir, dest], {
+      stdio: ["ignore", "inherit", "inherit"],
+      env: options.env ?? process.env,
+    });
+    if (cloned.status !== 0) fail(`could not clone ${registration.ownerRepo} from its cache`);
+    spawnSync("git", ["-C", dest, "remote", "set-url", "origin", registration.url], { env: options.env ?? process.env });
+    cache.remember(branchesOf(cache).map(([commit]) => commit));
+  } finally {
+    cache.release();
+  }
+}
+
 /** The cache's branches, `[commit, name]`, newest first. */
 const branchesOf = (cache: Cache) =>
   cleanGit(["-C", cache.dir, "for-each-ref", "--sort=-committerdate", "--format=%(objectname) %(refname:strip=2)", "refs/heads/"], { capture: true })
