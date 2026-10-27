@@ -317,14 +317,16 @@ RUN printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/d
 # shells, so both arrive here. No bash-completion package needed: `complete`
 # and `compgen` are builtins, and only helpers like _init_completion are not.
 COPY completion.bash /etc/bash_completion.d/desolate
+# And, by the same route, no typed git in a project (git-guard.bash).
+COPY git-guard.bash /etc/desolate/git-guard.bash
 RUN set -eux; \
     test -f /etc/bash.bashrc; \
-    printf '\ncase $- in *i*)\n  for f in /etc/bash_completion.d/*; do [ -r "$f" ] && . "$f"; done; unset f ;;\nesac\n' \
+    printf '\ncase $- in *i*)\n  for f in /etc/bash_completion.d/* /etc/desolate/git-guard.bash; do [ -r "$f" ] && . "$f"; done; unset f ;;\nesac\n' \
       >> /etc/bash.bashrc; \
-    # Assert that an interactive bash ACTUALLY reaches it. A completion that
+    # Assert that an interactive bash ACTUALLY reaches both. A completion that
     # silently never registers is indistinguishable from never adding one, and
     # this is the only step in the chain that cannot be checked by reading.
-    bash -ic 'complete -p desolate >/dev/null'
+    bash -ic 'complete -p desolate >/dev/null && [ "$(type -t git)" = function ]'
 
 # Optional: pre-bake pinned extensions from Open VSX instead of letting the
 # running editor pull them ad hoc. Example:

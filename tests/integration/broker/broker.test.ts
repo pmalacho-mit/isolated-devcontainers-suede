@@ -1135,22 +1135,49 @@ describe("--ports --move reaches the runner only in its one shape", () => {
   });
 });
 
-describe("purge and bundle are not the editor's (docs/agents.md)", () => {
+describe("purge is not the editor's (docs/agents.md)", () => {
   // ===========================================================================
-  // The first factory let the editor purge a worktree and bundle its branch.
-  // A purge is the Mac's (`cli.sh worktree remove`) and a bundle nobody's, so
-  // the broker -- the editor's only way in -- must speak neither.
-  test("neither op reaches the runner, for a project or a worktree", async () => {
+  // The first factory let the editor purge a worktree. That is the Mac's
+  // (`cli.sh worktree remove`), so the broker -- the editor's only way in --
+  // must not speak it.
+  test("it never reaches the runner, for a project or a worktree", async () => {
     project("no-factory", JSON.stringify({ image: "alpine:3" }));
     fs.mkdirSync(path.join(workspaces, "no-factory", ".worktrees", "issue-1"), { recursive: true });
-    for (const op of ["purge", "bundle"])
-      for (const at of [{}, { worktree: "issue-1" }]) {
-        resetRunner();
-        const msgs = await ask({ op, project: "no-factory", ...at });
-        assert.equal(result(msgs).ok, false, `${op} ${JSON.stringify(at)}: ${JSON.stringify(msgs)}`);
-        assert.deepEqual(runnerInvocations(), []);
-      }
+    for (const at of [{}, { worktree: "issue-1" }]) {
+      resetRunner();
+      const msgs = await ask({ op: "purge", project: "no-factory", ...at });
+      assert.equal(result(msgs).ok, false, `purge ${JSON.stringify(at)}: ${JSON.stringify(msgs)}`);
+      assert.deepEqual(runnerInvocations(), []);
+    }
   });
+});
+
+describe("bundle and pull: a push's and a pull's project halves (transfer.ts)", () => {
+  // ===========================================================================
+  const name = "desolate-transfer-0123456789abcdef.bundle";
+  test("each reaches the runner with its bundle's name, for a project or a worktree", async () => {
+    project("pushes", JSON.stringify({ image: "alpine:3" }));
+    fs.mkdirSync(path.join(workspaces, "pushes", ".worktrees", "issue-1"), { recursive: true });
+    resetRunner();
+    assert.equal(result(await ask({ op: "bundle", project: "pushes", transfer: name })).ok, true);
+    assert.equal(result(await ask({ op: "pull", project: "pushes", worktree: "issue-1", transfer: name })).ok, true);
+    assert.deepEqual(runnerInvocations(), [
+      ["--bundle", name, "pushes"],
+      ["--pull", name, "--worktree", "issue-1", "pushes"],
+    ]);
+  });
+
+  for (const [why, query] of [
+    ["no bundle name", { op: "bundle", project: "pushes" }],
+    ["a name that is a path", { op: "bundle", project: "pushes", transfer: "../../other/.git/x.bundle" }],
+    ["a name that is a flag", { op: "pull", project: "pushes", transfer: "--rebuild" }],
+    ["a bundle name on another op", { op: "start", project: "pushes", transfer: name }],
+  ] as const)
+    test(`refuses ${why}, before the runner`, async () => {
+      resetRunner();
+      assert.equal(result(await ask(query)).ok, false);
+      assert.deepEqual(runnerInvocations(), []);
+    });
 });
 
 describe("--json, for programs (F2)", () => {

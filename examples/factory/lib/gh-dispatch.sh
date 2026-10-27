@@ -3,7 +3,12 @@
 # Sourced, not run: a dispatcher defines its agent, then calls
 # `dispatch_main "$@"` (see ../gh-dispatcher.sh, ../claude/claude-dispatcher.sh).
 #
-#   <dispatcher> <project> <owner/repo> [--label L] [--interval S] [--once]
+#   <dispatcher> <project> [<owner/repo>] [--label L] [--interval S] [--once]
+#
+# <project> is desolate's name for it -- its path under /workspaces, what
+# `./cli.sh desolate <project>` takes. <owner/repo> is its GitHub repository,
+# for gh; it defaults to <project>, which is what `./cli.sh repo add owner/repo`
+# clones it as.
 #
 # Runs on your Mac, with YOUR gh login; desolate holds no forge credential.
 # There is no clone here: the repository lives in desolate, and its branches
@@ -18,8 +23,9 @@
 #                       you are told, here and by a notification, and asked to
 #                       fix it when this runs in a terminal; then agent_resume;
 #        orange, red -- a comment on the issue, once per status;
-#        green       -- you are told to push issue/<n> from the editor; once
-#                       GitHub has that branch, a draft PR is opened for it;
+#        green       -- you are told to review and push it (`desolate --push`,
+#                       or the panel's Push); once GitHub has issue/<n>, a
+#                       draft PR is opened for it;
 #
 # and for every worktree it started whose issue is no longer open: stop it and
 # `cli.sh worktree remove` it, which refuses one holding uncommitted work.
@@ -83,15 +89,15 @@ How this environment works -- the proxy, secrets, what you cannot reach: /desola
 EOF
 }
 
-# Green: the push is yours, from the outer editor, where the deploy key is --
-# never this script's, which would run an agent-written repository's hooks and
-# config there with no one looking. Asked for once per status; the PR follows
-# as soon as GitHub has the branch.
+# Green: the push is yours, after you have looked at what the agent wrote --
+# through desolate's push, which never runs the project's git in the editor
+# (transfer.ts). Asked for once per status; the PR follows as soon as GitHub
+# has the branch.
 dispatch_pull_request() { # <n> <name> <title> <message> <updated>
   local n=$1 name=$2 title=$3 message=$4 updated=$5 branch=issue/$1
   if ! gh api "repos/$REPO/git/ref/heads/$branch" --silent 2>/dev/null; then
     [ "$(cat "$STATE/$name.push" 2>/dev/null)" = "$updated" ] && return
-    notify "#$n is ready ($message) -- review it, then push from the editor: git -C /workspaces/$PROJECT push origin $branch"
+    notify "#$n is ready ($message) -- review it, then push: the panel's Push on $name, or desolate --push --worktree $name $PROJECT"
     echo "$updated" > "$STATE/$name.push"
     return
   fi
@@ -192,8 +198,11 @@ dispatch_tick() {
 
 dispatch_main() {
   set -euo pipefail
-  [ $# -ge 2 ] || { sed -n '6p' "$FACTORY_LIB/gh-dispatch.sh" | sed "s/^# \{0,1\}//; s/<dispatcher>/$DISPATCHER.sh/" >&2; exit 2; }
-  PROJECT=$1 REPO=$2; shift 2
+  [ $# -ge 1 ] || { sed -n '6p' "$FACTORY_LIB/gh-dispatch.sh" | sed "s/^# \{0,1\}//; s/<dispatcher>/$DISPATCHER.sh/" >&2; exit 2; }
+  PROJECT=$1; shift
+  REPO=$PROJECT
+  case "${1:-}" in ""|-*) ;; *) REPO=$1; shift ;; esac
+  case "$REPO" in */*) ;; *) echo "$DISPATCHER: $PROJECT is no owner/repo; name its GitHub repository after it" >&2; exit 2 ;; esac
   LABEL=desolate:run INTERVAL=60 ONCE=
   while [ $# -gt 0 ]; do
     case "$1" in

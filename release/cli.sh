@@ -14,6 +14,7 @@
 #   ./isolated-devcontainers-suede/cli.sh export owner/repo [path]  # copy files out (tar when piped)
 #   ./isolated-devcontainers-suede/cli.sh reclaim owner/repo [path] # give root-owned files back to the editor
 #   ./isolated-devcontainers-suede/cli.sh exec owner/repo [--worktree wip] -- cmd...   # run it in the devcontainer
+#   ./isolated-devcontainers-suede/cli.sh push|pull owner/repo [--worktree wip]       # its branch, to and from GitHub
 #   ./isolated-devcontainers-suede/cli.sh desolate --status [--json] [owner/repo]       # what each agent last said
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
@@ -1384,6 +1385,12 @@ case "$CMD" in
                exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim --path "$2" "$PROJ"
              fi
              exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim "$PROJ" ;;
+
+  push|pull) ensure_running
+             # Done in the editor, where the deploy keys are -- and never as the
+             # project's own git, which would run its hooks and config there
+             # (transfer.ts). The same as `desolate --push` in its terminal.
+             exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" desolate "--$CMD" "$@" ;;
 
   exec)      ensure_running
              # A command in a running target's devcontainer, as its user -- how

@@ -136,6 +136,17 @@ const { chromium } = require("playwright");
   await page.waitForTimeout(1500);
   await page.locator(".monaco-dialog-box a.monaco-button, .monaco-dialog-box button", { hasText: /^Rebuild$/ }).first().click();
   await page.waitForTimeout(3000);
+  // Push asks first, then runs desolate --push; Pull runs desolate --pull.
+  await project.hover();
+  await project.locator('[aria-label="Push…"]').click();
+  await page.waitForTimeout(1500);
+  report.pushAsked = await page.locator(".monaco-dialog-box").innerText().catch(() => "");
+  await page.locator(".monaco-dialog-box a.monaco-button, .monaco-dialog-box button", { hasText: /^Push$/ }).first().click();
+  await page.waitForTimeout(3000);
+  const worktreeRow = page.locator('.sidebar .monaco-list-row:has-text("issue-42")').first();
+  await worktreeRow.hover();
+  await worktreeRow.locator('[aria-label="Pull"]').click();
+  await page.waitForTimeout(3000);
   // Each port row has its own Open.
   report.portOpens = await page.locator('.sidebar .monaco-list-row:has-text("127.0.0.1:") [aria-label="Open"]').count();
 
@@ -187,6 +198,11 @@ group "rebuild asks first, and each port has an Open"
 assert_contains "Rebuild asks, naming what is lost" "$(field rebuildAsked)" "outside /workspaces is lost"
 assert_eq "cancelled, it ran once -- for the confirmed one" "$(printf '%s\n' "$CALLS" | grep -c '^desolate --rebuild acme/widgets$')" "1"
 assert_eq "both of acme/widgets' ports offer Open" "$(field portOpens)" "2"
+
+group "push and pull run desolate's, never git in the project"
+assert_contains "Push asks, and says why to look first" "$(field pushAsked)" "Review it first"
+assert_contains "confirmed, it ran desolate --push" "$CALLS" "desolate --push acme/widgets"
+assert_contains "Pull on a worktree ran desolate --pull for it" "$CALLS" "desolate --pull --worktree issue-42 acme/widgets"
 
 group "an action runs the editor's command, and its log keeps no token"
 assert_contains "Start on 'solo' ran desolate solo" "$CALLS" "desolate solo"

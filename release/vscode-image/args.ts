@@ -5,6 +5,11 @@
  * subprocess. Turning a UsageError into an exit code is the entry point's job.
  */
 
+/** A bundle handed between the editor and a target's sandbox (transfer.ts):
+ *  the editor picks the name, and everything that takes one holds it to this,
+ *  so no side can be asked for any other file. */
+export const TRANSFER_NAME = /^desolate-transfer-[0-9a-f]{16}\.bundle$/;
+
 /**
  * What the invocation asks for. Each one acts on exactly one target.
  *
@@ -54,7 +59,13 @@ export type Command =
   /** Run a command inside a running target's devcontainer, as its user, in its
    *  folder -- how a harness starts an agent (`cli.sh exec`, docs/agents.md).
    *  The Mac's alone: the editor has no daemon, and gets no way into one. */
-  | "exec";
+  | "exec"
+  /** The project's half of `desolate --push` (transfer.ts): bundle the branch
+   *  checked out in the target, in its sandbox, into the project's git dir. */
+  | "bundle"
+  /** The project's half of `desolate --pull`: take the bundle the editor
+   *  fetched into origin/*, in the target's sandbox, and fast-forward. */
+  | "pull";
 
 export type Args = {
   command: Command;
@@ -104,6 +115,8 @@ export type Args = {
   json: boolean;
   /** `exec`'s command line: everything after `--`. */
   execArgv?: string[];
+  /** `bundle` and `pull`: the bundle's file name in the project's git dir. */
+  transfer?: string;
 };
 
 /** The wire form the broker spawns desolate with. */
@@ -120,6 +133,8 @@ export type Flags =
   | ["--config", string]
   | ["--worktree", string]
   | ["--move", string, string]
+  | ["--bundle", string]
+  | ["--pull", string]
   | "--rebuild"
   | [
       "--rebuild",
@@ -194,6 +209,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   const positional: string[] = [];
   const queue = [...argv];
   let execArgv: string[] | undefined;
+  let transfer: string | undefined;
 
   while (queue.length) {
     const arg = queue.shift()!;
@@ -244,6 +260,13 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--exec":
         command = "exec";
+        break;
+      case "--bundle":
+      case "--pull":
+        command = arg === "--bundle" ? "bundle" : "pull";
+        transfer = queue.shift() ?? "";
+        if (!TRANSFER_NAME.test(transfer))
+          throw new UsageError(`${arg} takes a bundle name (desolate-transfer-<16 hex>.bundle), got '${transfer}'`);
         break;
       case "--path":
         reclaimPath = queue.shift() ?? "";
@@ -328,5 +351,6 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     ...(move ? { move } : {}),
     ...(reclaimPath !== undefined ? { path: reclaimPath } : {}),
     ...(execArgv !== undefined ? { execArgv } : {}),
+    ...(transfer !== undefined ? { transfer } : {}),
   };
 };

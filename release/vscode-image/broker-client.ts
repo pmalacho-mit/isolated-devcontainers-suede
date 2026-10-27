@@ -11,8 +11,12 @@ const SOCKET = process.env.DESOLATE_BROKER ?? "/run/broker/desolate.sock";
 
 /** Send `request`, print what the broker relays as it arrives, and resolve to
  *  the exit status it reported: 0 when it succeeded. A broker that cannot be
- *  reached is a 1, said so, never a silent success. */
-export const ask = (request: Record<string, unknown>): Promise<number> =>
+ *  reached is a 1, said so, never a silent success. `onLog` sees each relayed
+ *  line first, and prints it only if it returns true. */
+export const ask = (
+  request: Record<string, unknown>,
+  onLog: (line: string) => boolean = () => true,
+): Promise<number> =>
   new Promise((resolve) => {
     const conn = net.createConnection(SOCKET);
     let exitCode = 0;
@@ -29,7 +33,7 @@ export const ask = (request: Record<string, unknown>): Promise<number> =>
         if (!line) continue;
         let msg: any;
         try { msg = JSON.parse(line); } catch { console.log(line); continue; }
-        if (msg.log !== undefined) { console.log(msg.log); continue; }
+        if (msg.log !== undefined) { if (onLog(String(msg.log))) console.log(msg.log); continue; }
         if (msg.error) { console.error(`desolate: ${msg.error}`); }
         if (msg.ok === false) exitCode = typeof msg.exit === "number" ? msg.exit : 1;
       }

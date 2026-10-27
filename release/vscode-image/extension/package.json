@@ -67,6 +67,16 @@
         "icon": "$(debug-restart)"
       },
       {
+        "command": "desolate.pull",
+        "title": "Pull",
+        "icon": "$(repo-pull)"
+      },
+      {
+        "command": "desolate.push",
+        "title": "Push\u2026",
+        "icon": "$(repo-push)"
+      },
+      {
         "command": "desolate.openEditor",
         "title": "Open editor",
         "icon": "$(link-external)"
@@ -118,6 +128,16 @@
           "when": "viewItem =~ /^(project|worktree)\\.running$/"
         },
         {
+          "command": "desolate.pull",
+          "when": "viewItem =~ /^(project|worktree)\\./",
+          "group": "inline"
+        },
+        {
+          "command": "desolate.push",
+          "when": "viewItem =~ /^(project|worktree)\\./",
+          "group": "inline"
+        },
+        {
           "command": "desolate.rebuild",
           "when": "viewItem =~ /^(project|worktree)\\./",
           "group": "inline"
@@ -162,6 +182,14 @@
         },
         {
           "command": "desolate.openPort",
+          "when": "false"
+        },
+        {
+          "command": "desolate.pull",
+          "when": "false"
+        },
+        {
+          "command": "desolate.push",
           "when": "false"
         }
       ]

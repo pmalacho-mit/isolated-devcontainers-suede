@@ -146,6 +146,15 @@ export function activate(context: vscode.ExtensionContext) {
       { modal: true }, "Rebuild");
     if (sure === "Rebuild") await act(`rebuilding ${node.label}`, "desolate", ["--rebuild", ...targetArgs(node)]);
   });
+  // Push and pull never run git in the project here: `desolate --push` and
+  // `--pull` hand the project's half to its sandbox (transfer.ts).
+  register("push", async (node) => {
+    const sure = await vscode.window.showInformationMessage(
+      `Push the branch checked out in ${node.label} to its GitHub repository? Review it first: an agent may have written it.`,
+      { modal: true }, "Push");
+    if (sure === "Push") await act(`pushing ${node.label}`, "desolate", ["--push", ...targetArgs(node)]);
+  });
+  register("pull", (node) => act(`pulling into ${node.label}`, "desolate", ["--pull", ...targetArgs(node)]));
   register("openEditor", (node) => node.target?.url && vscode.env.openExternal(vscode.Uri.parse(node.target.url)));
   register("openPort", (node) => node.target?.url && vscode.env.openExternal(vscode.Uri.parse(node.target.url)));
   register("copyUrl", async (node) => {

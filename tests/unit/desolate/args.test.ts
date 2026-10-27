@@ -237,8 +237,21 @@ describe("--json (F2)", () => {
   test("anything else refuses it", () => refuses(["--json", "acme/widgets"], /only means something with --list or --ports/));
 });
 
-describe("--bundle is gone (docs/agents.md)", () => {
-  test("refused as any unknown option is", () => refuses(["--bundle", "acme/widgets"], /unknown option '--bundle'/));
+describe("--bundle and --pull: the project's halves of a push and a pull (transfer.ts)", () => {
+  const name = "desolate-transfer-0123456789abcdef.bundle";
+  test("each takes the bundle's name, and names a target", () => {
+    const bundle = parse("--bundle", name, "--worktree", "issue-42", "acme/widgets");
+    assert.equal(bundle.command, "bundle");
+    assert.equal(bundle.transfer, name);
+    assert.equal(bundle.worktree, "issue-42");
+    assert.equal(parse("--pull", name, "acme/widgets").command, "pull");
+  });
+
+  test("any other name is refused: no side can be asked for another file", () => {
+    for (const bad of ["", "../x.bundle", "desolate-transfer-xyz.bundle", "a/desolate-transfer-0123456789abcdef.bundle", "--worktree"])
+      refuses(["--bundle", bad, "acme/widgets"], /takes a bundle name/);
+    refuses(["--pull"], /takes a bundle name/);
+  });
 });
 
 describe("--exec (docs/agents.md)", () => {

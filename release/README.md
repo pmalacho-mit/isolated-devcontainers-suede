@@ -479,6 +479,8 @@ the rules would go stale again each time.
 ./cli.sh worktree remove owner/repo wip
 ./cli.sh export owner/repo [path]        # copy files out to ./<name> (a tar when piped)
 ./cli.sh exec owner/repo [--worktree wip] -- cmd...   # run a command (an agent) in its devcontainer
+./cli.sh push owner/repo [--worktree wip]     # its checked-out branch to GitHub (never git in the editor)
+./cli.sh pull owner/repo [--worktree wip]     # GitHub's branches in as origin/*, fast-forwarded
 ./cli.sh desolate --status       # each target's status, as its agent last set it
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
@@ -528,7 +530,8 @@ image (nothing is installed from a marketplace):
   their ports, and each one's **status** (its agent's colour on the icon, its
   message beside it; refreshed every 3 s). Start, stop, rebuild (asked first),
   open its editor or a port in a new tab, copy its URL, add or remove a
-  worktree.
+  worktree, and **Push** (asked first) or **Pull** its branch -- through
+  `desolate --push`/`--pull`, never git in the project.
 - **Dinds** -- each project dind's health, whether it is in use or for how long
   idle, its memory and image store, and the VM's headroom.
 
@@ -1841,7 +1844,13 @@ Boundaries, strongest first:
   there for you (`worktree add`, `list`, `remove`) switches off hooks, fsmonitor
   and the pager on its command line and never reads file content, so no filter
   runs either (tests/integration/worktrees, E17) -- but git you type in the
-  editor's terminal obeys the repository like any git does.
+  editor's terminal obeys the repository like any git does. So pushing and
+  pulling go through `desolate --push`/`--pull` (and the panel's buttons),
+  which run the project's half in its sandbox and the editor's in a fresh,
+  empty repository, to the repository `repo add` registered
+  ([docs/agents.md](../docs/agents.md)); and the editor's interactive shell
+  refuses typed git in `/workspaces/*` (`command git` gets past it -- a guard
+  for what you type, not a boundary).
   Assume any project you work on in the outer editor can execute there. The design response is not to
   prevent it but to make it survivable: there is nothing in that container worth
   stealing, only capabilities that stop when it restarts.

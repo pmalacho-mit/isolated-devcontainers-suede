@@ -302,6 +302,12 @@ OUT=$(cli exec solo --)
 assert_eq "exec with no command is refused, before docker" "$(execs)" ""
 assert_contains "and says how" "$OUT" "usage: cli.sh exec"
 
+cli push acme/widgets --worktree issue-42 >/dev/null
+assert_eq "push is the editor's desolate --push, where the keys are" "$(execs)" \
+  "exec|-i|-e|DESOLATE_PLANE=mac|desolate-vscode|desolate|--push|acme/widgets|--worktree|issue-42| "
+cli pull acme/widgets >/dev/null
+assert_eq "and pull its --pull" "$(execs)" "exec|-i|-e|DESOLATE_PLANE=mac|desolate-vscode|desolate|--pull|acme/widgets| "
+
 cli desolate --status --json acme/widgets >/dev/null
 assert_eq "desolate --status is the editor's to read, not the orchestrator's" "$(execs)" \
   "exec|-e|DESOLATE_PLANE=mac|desolate-vscode|desolate|--status|--json|acme/widgets| "

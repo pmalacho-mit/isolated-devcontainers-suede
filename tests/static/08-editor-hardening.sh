@@ -112,4 +112,32 @@ for key in '"browser"' '"extensionDependencies"' '"extensionPack"' '"authenticat
 done
 assert_contains "and refuses to run in a virtual workspace" "$MANIFEST" '"virtualWorkspaces": false'
 
+group "the editor's typed git refuses a project (git-guard.bash)"
+GUARD="$RELEASE/vscode-image/git-guard.bash"
+G_TMP=$(mktemp -d)
+mkdir -p "$G_TMP/plain" && ln -s /workspaces "$G_TMP/link"
+guarded() { (cd "${1}" && shift && bash -c ". '$GUARD'; $*" 2>&1; echo "exit=$?"); }
+if [ -d /workspaces ]; then
+  for case in "/workspaces|git status" \
+              "$G_TMP/plain|git -C /workspaces log" \
+              "$G_TMP/plain|git -c core.pager=cat -C /workspaces status" \
+              "$G_TMP/plain|git --git-dir=/workspaces/x/.git status" \
+              "$G_TMP/plain|git --git-dir /workspaces/x/.git status" \
+              "$G_TMP/plain|GIT_DIR=/workspaces/x/.git git status" \
+              "$G_TMP/plain|git -C $G_TMP/link status" \
+              "$G_TMP/plain|git -C /tmp -C /workspaces push"; do
+    OUT=$(guarded "${case%%|*}" "${case#*|}")
+    assert_contains "refused: (in ${case%%|*}) ${case#*|}" "$OUT" "no git in a project from the outer editor"
+    assert_contains "  and it fails" "$OUT" "exit=1"
+  done
+  assert_contains "git elsewhere is git" "$(guarded "$G_TMP/plain" "git --version")" "git version"
+  assert_contains "a -C that stays outside /workspaces is git" "$(guarded "$G_TMP/plain" "git -C . config --get nothing.here; true")" "exit=0"
+  assert_contains "command git is the way past it, on purpose" \
+    "$(guarded /workspaces "command git --version")" "git version"
+else
+  skip "the git guard against /workspaces" "no /workspaces here"
+fi
+rm -rf "$G_TMP"
+assert_contains "the image sources it in interactive shells" "$(cat "$RELEASE/vscode-image/Dockerfile")" "/etc/desolate/git-guard.bash; do"
+
 summary

@@ -33,7 +33,7 @@ import {
   type Target,
 } from "./projects.ts";
 import { daemonOf, enforcePolicy, PolicyError } from "./policy.ts";
-import type { Flags } from "./args.ts";
+import { TRANSFER_NAME, type Flags } from "./args.ts";
 import { identity, noop } from "./utils.ts";
 
 type Config = {
@@ -85,12 +85,17 @@ type GlobalOperation = (typeof globalOperations)[number];
  *  its sandbox -- the editor must not (worktrees.ts). */
 const worktreeOperations = ["worktree-add", "worktree-remove"] as const;
 
+/** The project's halves of `desolate --push` and `--pull` (transfer.ts): a
+ *  bundle, named by the editor, made or taken in the target's sandbox. */
+const transferOperations = ["bundle", "pull"] as const;
+
 const operations = [
   "start",
   "rebuild",
   "stop",
   "ports",
   ...worktreeOperations,
+  ...transferOperations,
   ...globalOperations,
 ] as const;
 type Operation = (typeof operations)[number];
@@ -114,7 +119,9 @@ type Request = {
         ? { op: op; project: string; worktree: string; force?: boolean }
         : op extends "ports"
           ? { op: op; project: string; worktree?: string; move?: { label: string; port: number }; json?: boolean }
-          : { op: op; project: string; worktree?: string };
+          : op extends "bundle" | "pull"
+            ? { op: op; project: string; worktree?: string; transfer: string }
+            : { op: op; project: string; worktree?: string };
 }[Operation];
 
 /** Absent, or of this type. */
@@ -178,7 +185,10 @@ const request = {
         (query.op === "worktree-add" ? optional(query, "branch", "string") : !("branch" in query)) &&
         (query.op === "worktree-add" ? optional(query, "from", "string") : !("from" in query)) &&
         (query.op === "worktree-remove" ? optional(query, "force", "boolean") : !("force" in query)) &&
-        (!("move" in query) || (query.op === "ports" && isMove(query.move))))),
+        (!("move" in query) || (query.op === "ports" && isMove(query.move))) &&
+        ((transferOperations as readonly string[]).includes(query.op)
+          ? "transfer" in query && typeof query.transfer === "string" && TRANSFER_NAME.test(query.transfer)
+          : !("transfer" in query)))),
 };
 
 /**
@@ -318,6 +328,12 @@ async function handle(req: unknown, send: Send) {
       }
       case "stop":
         flags = ["--stop"];
+        break;
+      case "bundle":
+        flags = [["--bundle", req.transfer]];
+        break;
+      case "pull":
+        flags = [["--pull", req.transfer]];
         break;
       case "ports":
         flags = ["--ports"];

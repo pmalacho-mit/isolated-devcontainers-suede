@@ -11,6 +11,8 @@
 //   desolate --ports myproject
 //   desolate --list                 what is running right now
 //   desolate --status [--json] [project]     each target's status (status.ts)
+//   desolate --push [--worktree w] [--allow-default] project   its branch to GitHub (transfer.ts)
+//   desolate --pull [--worktree w] project   GitHub's branches in, fast-forwarded
 //   desolate --list --json | desolate --ports myproject --json   for programs
 //
 // The broker validates both the project name and the project's
@@ -24,6 +26,7 @@ import { ask } from "./broker-client.ts";
 import { ensure as ensureWorktree } from "./worktrees.ts";
 import { EVERY_TARGET, meansEveryTarget } from "./projects.ts";
 import { statusRows } from "./status.ts";
+import { pull, push, TransferError } from "./transfer.ts";
 
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
@@ -42,6 +45,10 @@ function usage(code = 0): never {
   out("       desolate --dinds                   every project dind and the VM's headroom, as JSON");
   out("       desolate --status [--json] [<project>]   each target's status (desolate-status, inside)");
   out("       desolate --stop all|--stop --all   stop every running target");
+  out("       desolate --push [--worktree <name>] [--allow-default] <project>");
+  out("                                          push its checked-out branch to its GitHub repository");
+  out("       desolate --pull [--worktree <name>] <project>");
+  out("                                          fetch that repository into origin/*, and fast-forward");
   out("");
   out("  --rebuild  recreate the container from the current devcontainer.json.");
   out("             Plain start REUSES an existing container and does not");
@@ -93,6 +100,31 @@ if (argv[0] === "--status") {
   }
   process.exit(0);
 }
+
+// Push and pull run git HERE, in a scratch repository that has nothing of the
+// project's (transfer.ts) -- the project's half is asked of the broker. Never
+// `git push`/`git pull` in a project from this editor: that is the project's
+// own git, hooks and all, with every deploy key in reach.
+if (argv[0] === "--push" || argv[0] === "--pull") {
+  const which = argv[0];
+  const words = argv.slice(1);
+  let worktree: string | undefined, allowDefault = false;
+  const projects: string[] = [];
+  while (words.length) {
+    const word = words.shift()!;
+    if (word === "--worktree") worktree = words.shift() || refuse("--worktree expects a name");
+    else if (word === "--allow-default" && which === "--push") allowDefault = true;
+    else if (word.startsWith("-")) refuse(`unknown option '${word}' for ${which}`);
+    else projects.push(word.replace(/\/+$/, "").replace(new RegExp(`^${WORKSPACES}/`), ""));
+  }
+  if (projects.length !== 1) refuse(`usage: desolate ${which} [--worktree <name>]${which === "--push" ? " [--allow-default]" : ""} <project>`);
+  (which === "--push" ? push(projects[0], { worktree, allowDefault }) : pull(projects[0], { worktree }))
+    .then((said) => { console.log(`desolate: ${said}`); process.exit(0); })
+    .catch((err) => {
+      if (!(err instanceof TransferError)) throw err;
+      refuse(err.message);
+    });
+} else {
 
 // Order-independent, and an unrecognised --flag is REFUSED rather than dropped.
 // The old parsing only ever looked at argv[0], so `desolate myproj --rebuild`
@@ -191,3 +223,4 @@ const created = worktree !== undefined && (op === "start" || op === "rebuild")
 created
   .then((code) => (code === 0 ? ask(request) : code))
   .then((code) => process.exit(code));
+}

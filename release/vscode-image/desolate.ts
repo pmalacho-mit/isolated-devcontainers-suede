@@ -1547,6 +1547,38 @@ function removeWorktree(target: Target, force: boolean): void {
 }
 
 /**
+ * The project's halves of `desolate --push` and `--pull` (transfer.ts), in
+ * the target's sandbox on the daemon it runs on: the one place a project's git
+ * may run with nothing else in reach. Neither needs the target running.
+ */
+async function onItsDaemon(target: Target): Promise<void> {
+  if (daemons.saved(target) === "project") await useProjectDaemon(target);
+  else daemons.use(target, "shared");
+}
+
+async function bundleTarget(target: Target, name: string): Promise<void> {
+  await onItsDaemon(target);
+  const bundled = docker.bundleBranch(worktreeSandbox(target, worktrees.sandboxMounts(target)), target.dir, name);
+  if (!bundled) return die(`could not bundle ${target.name}'s branch in its sandbox (no branch checked out, or git failed)`);
+  console.log(`BUNDLED ${bundled.branch} ${bundled.commit} ${bundled.file}`);
+}
+
+async function pullTarget(target: Target, name: string): Promise<void> {
+  await onItsDaemon(target);
+  const view = SHARED_DIRECTORIES.find((mount) => mount.target === DESOLATE_DIR)!;
+  const pulled = docker.pullBranch(
+    {
+      ...worktreeSandbox(target, worktrees.checkoutMounts(target, overlay.ensureVolume(target, view), DESOLATE_DIR)),
+      caFile: `${CA_DIR}/ca.pem`,
+    },
+    target.dir,
+    path.join(target.projectDir, ".git", name),
+  );
+  if (!pulled) return die(`could not take the fetched branches into ${target.name} in its sandbox`);
+  console.log(`PULLED ${pulled.outcome} ${pulled.branch}`);
+}
+
+/**
  * Run a command inside a running target's devcontainer -- how a harness starts
  * an agent in it (`cli.sh exec`, docs/agents.md). As the container's remote
  * user (its metadata label), in its workspace folder, through a login shell so
@@ -1888,6 +1920,8 @@ async function main(): Promise<void> {
   else if (args.command === "uncommitted") reportUncommitted(target);
   else if (args.command === "reclaim") await reclaimTarget(target, args.path);
   else if (args.command === "exec") execTarget(target, args.execArgv!);
+  else if (args.command === "bundle") await bundleTarget(target, args.transfer!);
+  else if (args.command === "pull") await pullTarget(target, args.transfer!);
   else if (args.command === "populate") populateWorktree(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }

@@ -295,6 +295,45 @@ const dindRunArgv = (spec: DindSpec) => [
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 
 
+/**
+ * A branch crossing between a project and its remote: `desolate --push` and
+ * `--pull` (transfer.ts). The editor never runs git in a project -- it would
+ * obey the project's hooks and config with every deploy key in reach -- so
+ * the project's half runs here, in a sandbox that sees that project alone,
+ * and the two halves meet at a bundle file in the project's own git dir.
+ */
+export const BUNDLED = "desolate-bundled";
+export const PULLED = "desolate-pulled";
+const TRANSFER_GIT = 'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }';
+
+/** $1 the target's directory, $2 the bundle's name. Bundles the branch
+ *  checked out there into the project's git dir and says where. */
+export const bundleScript = [
+  TRANSFER_GIT,
+  'branch=$(g -C "$1" symbolic-ref -q --short HEAD) || { echo "no branch is checked out in $1" >&2; exit 3; }',
+  'common=$(cd "$1" && cd "$(g rev-parse --git-common-dir)" && pwd -P) || exit 4',
+  'g -C "$1" bundle create --quiet "$common/$2" "refs/heads/$branch" || exit 5',
+  `echo ${BUNDLED} "$branch" "$(g -C "$1" rev-parse "refs/heads/$branch")" "$common/$2"`,
+].join("; ");
+
+/** $1 the target's directory, $2 the bundle the editor fetched, $3 the CA.
+ *  Every branch it holds becomes origin/<branch>; the branch checked out is
+ *  fast-forwarded to its own when it can be, and otherwise left as it is.
+ *  The merge is the project's own git, hooks and filters and all -- in here,
+ *  where they reach nothing but this project. */
+export const pullScript = [
+  TRANSFER_GIT,
+  'trap \'rm -f "$2"\' EXIT',
+  'g -C "$1" fetch --quiet --no-tags "$2" "+refs/heads/*:refs/remotes/origin/*" || exit 4',
+  `say() { echo ${PULLED} "$@"; exit 0; }`,
+  'branch=$(g -C "$1" symbolic-ref -q --short HEAD) || say fetched -',
+  'g -C "$1" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null || say fetched "$branch"',
+  'g -C "$1" merge-base --is-ancestor "refs/remotes/origin/$branch" HEAD && say current "$branch"',
+  'g -C "$1" merge-base --is-ancestor HEAD "refs/remotes/origin/$branch" || say diverged "$branch"',
+  'git -C "$1" -c "http.sslCAInfo=$3" merge --ff-only --quiet "refs/remotes/origin/$branch" && say fast-forwarded "$branch"',
+  'say blocked "$branch"',
+].join("; ");
+
 /** What `reclaim` reports once it has run: the count of entries it changed.
  *  Absent, the reclaim did not finish -- which every caller must say. */
 export const RECLAIMED = "desolate-reclaimed";
@@ -547,6 +586,20 @@ export const createDocker = (run: Runner) => {
         "desolate-worktree",
         ...args,
       ]),
+    /** `bundleScript` in a target's sandbox: the branch, its commit and the
+     *  bundle's path, or null when it did not finish. */
+    bundleBranch: (spec: WorktreeSandbox, targetDir: string, name: string) => {
+      const said = query(...worktreeSandbox(spec, "sh"), "-c", bundleScript, "bundle", targetDir, name);
+      const match = new RegExp(`^${BUNDLED} (\\S+) ([0-9a-f]{40,64}) (/\\S+)$`, "m").exec(said);
+      return match ? { branch: match[1], commit: match[2], file: match[3] } : null;
+    },
+    /** `pullScript` in a target's sandbox: what became of its branch, or null
+     *  when it did not finish. */
+    pullBranch: (spec: WorktreeSandbox & { caFile: string }, targetDir: string, bundle: string) => {
+      const said = query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", pullScript, "pull", targetDir, bundle, spec.caFile);
+      const match = new RegExp(`^${PULLED} (fetched|current|diverged|fast-forwarded|blocked) (\\S+)$`, "m").exec(said);
+      return match ? { outcome: match[1], branch: match[2] } : null;
+    },
     /** `reclaimArgv`, run: the number of entries it changed, or null when
      *  it did not finish. */
     reclaim: (image: string, projectDir: string, inProject: string, uid: number) => {

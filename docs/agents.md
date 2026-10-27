@@ -17,7 +17,7 @@ needs nothing else. `examples/factory/` holds such harnesses, as sketches.
 | what is running, for a program | `./cli.sh desolate --list --json` | Mac or editor |
 | run an agent in it | `./cli.sh exec <project> [--worktree <name>] -- <command...>` | Mac |
 | hear from it | its **status**, through `.git` (below) | written inside; read anywhere |
-| get its branch out | `git push`, by you, in the outer editor | editor |
+| get its branch out, and the remote's in | `desolate --push` / `--pull`, by you (editor, the panel, or `./cli.sh push`/`pull`) | editor |
 | give it a credential | `./cli.sh secret add NAME --hosts … --projects <project>` | Mac (the value stays in the VM) |
 | see what it reached | `./cli.sh proxy audit --project <project>` | Mac |
 
@@ -86,15 +86,31 @@ The reader is strict about the file. It:
 - shows the message as one plain line of at most 200 printable characters;
 - shows a colour it doesn't know as `gray`.
 
-### Getting a branch out
+### Getting a branch out, and the remote's back in
 
-You push it, from the outer editor's terminal, where the deploy keys are:
+You push it, with desolate's push, from the outer editor's terminal, the desolate panel's **Push** on the project or worktree, or the Mac:
 
 ```bash
-git -C /workspaces/acme/widgets push origin issue/42
+desolate --push --worktree issue-42 acme/widgets         # in the outer editor
+./cli.sh push acme/widgets --worktree issue-42           # or from the Mac
+desolate --pull --worktree issue-42 acme/widgets         # the remote's branches as origin/*, fast-forwarded
 ```
 
-A worktree's branches are in the project's own `.git`, so the project's directory is the place to push from. Nothing here pushes for you. Git in the editor obeys the repository's own config and hooks (README, "project <-> editor"), so a branch an agent wrote is one to look at before pushing. No forge token enters the stack, and no clone is needed on the Mac.
+Not `git push` or `git pull` in the project. In the editor that is the project's own git: it runs its hooks, obeys its config (`core.sshCommand`, `url.*.insteadOf`), and follows its refs, all in the one container that can write every project and use every deploy key. The editor's shell refuses typed git in `/workspaces/*` for that reason (`command git` gets past it).
+
+desolate's push and pull keep the two sides apart (`release/vscode-image/transfer.ts`).
+
+**Push:**
+1. The target's sandbox, which sees only that project, bundles the branch checked out there.
+2. A fresh, empty repository in the editor takes the bundle.
+3. It pushes the bundled commit to the repository `repo add` registered for the project, with that repository's key. It never force-pushes, and never pushes to the default branch unless you pass `--allow-default`.
+
+**Pull** runs the other way:
+1. A fresh repository in the editor fetches that registered repository.
+2. The sandbox takes the fetched branches in as `origin/*`.
+3. It fast-forwards the checked-out branch if it can, and otherwise says why not.
+
+Review an agent's branch, and commit, in the project's own devcontainer, before you push. No forge token enters the stack, and no clone is needed on the Mac.
 
 ### What desolate deliberately does not do
 
@@ -114,7 +130,7 @@ Those choices belong to the harness, which is where they can change without chan
 - `claude/claude-dispatcher.sh` runs Claude Code through `claude/claude-helper.sh`.
 
 ```bash
-examples/factory/claude/claude-dispatcher.sh acme/widgets acme/widgets   # project, then its GitHub repo
+examples/factory/claude/claude-dispatcher.sh acme/widgets   # the project; its GitHub repo defaults to the same name
 ```
 
 Per issue labelled `desolate:run`, each tick:
@@ -124,7 +140,7 @@ Per issue labelled `desolate:run`, each tick:
 3. Read `./cli.sh desolate --status --json`:
    - **the agent's own access broken** (for Claude, `red` "claude: authentication failed"): you are told, in the terminal, with a bell, and by a macOS notification. In a terminal you are asked for a new token, and then each agent that stopped on it carries on its conversation. No new agent starts while this waits.
    - **`orange` or `red`:** a comment on the issue, once per status.
-   - **`green`:** you are told, once, to review the branch and push it from the editor. As soon as GitHub has `issue/<n>`, the dispatcher opens a draft PR for it (`gh pr create --draft`).
+   - **`green`:** you are told, once, to review the branch and push it (the panel's **Push**, or `desolate --push`). As soon as GitHub has `issue/<n>`, the dispatcher opens a draft PR for it (`gh pr create --draft`).
 4. When the issue is closed: stop and `worktree remove` (refused while it holds uncommitted work).
 
 Another agent is five shell functions: `agent_ready`, `agent_start`, `agent_blocked`, `agent_renew` and `agent_resume`. See the top of `lib/gh-dispatch.sh`.
