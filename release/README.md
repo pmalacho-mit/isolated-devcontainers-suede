@@ -1212,6 +1212,33 @@ If you would rather keep all of this out of your project entirely, reference a
 **pre-built image** (`image: myapp:dev`) instead of building in place. Nothing
 needs deriving, and it is closer to what production actually does.
 
+### Giving a project more memory
+
+A project's daemon has one memory ceiling, and everything in it shares it:
+- the devcontainer and its editor and language servers;
+- an agent working there;
+- the project's compose services, dev servers and image builds.
+
+It's 6 GiB unless the project says otherwise:
+
+```jsonc
+"customizations": { "desolate": { "memory": "12g" } }   // whole megabytes or gigabytes
+```
+
+Raising it is live: the next `desolate <project>` raises the running daemon's
+ceiling with `docker update`, and nothing restarts. Lowering it is not: a
+ceiling under what is running would OOM-kill it, so a lower value takes effect
+when the daemon is next made (`./cli.sh down`, then `up`). A value above what
+the VM has, less `DESOLATE_DIND_MEM_FLOOR`, is refused.
+
+Ceilings may add up to more than the VM. Six projects at 10 GiB on a 40 GiB VM
+is fine: a ceiling is a cap, not a reservation, and a new daemon is admitted on
+what the VM has *free*. What the ceiling buys is where the damage lands. A
+project that runs away is OOM-killed inside its own daemon, rather than the
+VM's kernel picking a victim anywhere on the VM, which could be another
+project, the proxy or the editor. Give the VM itself more with Colima
+(`colima start --memory`).
+
 ### Applying changes to devcontainer.json
 
 ```bash
@@ -2021,7 +2048,7 @@ machine.
 | `DESOLATE_MAX_DINDS`         | `16`            | Project daemons running at once. A newcomer past it stops the longest-idle one; a daemon with a devcontainer running is never stopped for it.                            |
 | `DESOLATE_DIND_GRACE`        | `15`            | Minutes after a project daemon was started or last busy during which it is never stopped to make room -- its devcontainer may still be building.                       |
 | `DESOLATE_DIND_MEM_FLOOR`    | `2147483648`    | Bytes of VM memory kept free. A project daemon that would start below it is refused, naming the busy daemons in the way, after idle ones have been stopped.              |
-| `DESOLATE_DIND_MEMORY`       | `6g`            | Memory ceiling of each project daemon, everything it runs included.                                                                                                     |
+| `DESOLATE_DIND_MEMORY`       | `6g`            | Memory ceiling of each project daemon, everything it runs included. One project can ask for its own: `customizations.desolate.memory` ("Giving a project more memory"). |
 | `DESOLATE_DIND_CPUS`         | `4`             | CPU ceiling of each project daemon (never more than the VM has).                                                                                                        |
 | `DESOLATE_DIND_BUILD_CACHE`  | `20GB`          | BuildKit's garbage-collection target in every project daemon: build cache above it is collected as builds run. `./cli.sh dind gc` collects all of it now.                  |
 | `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |

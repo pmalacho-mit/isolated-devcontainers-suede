@@ -648,6 +648,17 @@ describe("a project dind's create argv", () => {
     assert.match(argvFor().join(" "), /\/desolate\/ca\/install-ca\.sh/, "the entrypoint installs the CA from its new path");
   });
 
+  test("its ceiling is read, and raised live with swap kept at as much again", () => {
+    // Measured (runc, docker 29): created with --memory alone, MemorySwap is
+    // twice it, and `update --memory` alone is refused for being above it.
+    const { runner, calls } = recorder(["6442450944", "not a number"]);
+    const docker = createDocker(runner);
+    assert.equal(docker.dind.memoryLimit("d"), 6442450944);
+    assert.ok(Number.isNaN(docker.dind.memoryLimit("d")));
+    docker.dind.raiseMemory("d", 12 * 1024 ** 3);
+    assert.deepEqual(calls.at(-1), ["update", "--memory", String(12 * 1024 ** 3), "--memory-swap", String(24 * 1024 ** 3), "d"]);
+  });
+
   test("is bounded: memory, pids and cpus", () => {
     const argv = argvFor();
     assert.equal(argv[argv.indexOf("--memory") + 1], "4g");

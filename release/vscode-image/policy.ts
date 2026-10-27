@@ -4,6 +4,7 @@
 import { posix } from "node:path";
 import type { ResolvedSpec } from "./devcontainer.ts";
 import * as dind from "./dind.ts";
+import { MEMORY_SIZE } from "./capacity.ts";
 import type { Target } from "./projects.ts";
 import {
   isWithin,
@@ -857,6 +858,19 @@ const checks = {
     }
   },
   /**
+   * `customizations.desolate.memory` -- this project's own daemon's ceiling
+   * (capacity.ts), "12g" or "8192m". Held to its shape here; to the VM's size
+   * by the supervisor, which can read it.
+   */
+  memoryIsASize: ({ read }) => {
+    const declared = read.desolate("memory");
+    if (declared === undefined || declared === null) return;
+    if (typeof declared !== "string" || !MEMORY_SIZE.test(declared))
+      return fail`
+        "customizations.desolate.memory" is whole megabytes or gigabytes, as a
+        string -- "12g", "8192m" -- not ${JSON.stringify(declared)}`;
+  },
+  /**
    * The source is compared for EQUALITY against a path computed from the
    * target -- never parsed out of the spec, and never prefix-matched. A prefix
    * rule here would accept `/workspaces/acme/widgets-evil` for `acme/widgets`,
@@ -944,5 +958,6 @@ export function enforcePolicy(
   checks.runArgsOnAllowlist();
   checks.buildPathsStayInOwnProject();
   checks.shadowImagesAreImages();
+  checks.memoryIsASize();
   checks.workspaceMountIsOwnFolder();
 }

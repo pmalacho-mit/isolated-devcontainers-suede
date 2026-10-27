@@ -662,6 +662,15 @@ export const createDocker = (run: Runner) => {
         query("inspect", "-f", `{{index .Config.Labels "${labelKey}"}}`, name),
       /** "" when there is no such container. */
       state: (name: string) => query("inspect", "-f", "{{.State.Status}}", name),
+      /** Its memory ceiling in bytes; 0 for none, NaN when it cannot be read. */
+      memoryLimit: (name: string) => {
+        const said = query("inspect", "-f", "{{.HostConfig.Memory}}", name);
+        return /^\d+$/.test(said) ? Number(said) : NaN;
+      },
+      /** Raise it, live: swap stays what `--memory` alone gives at create,
+       *  as much again, or docker refuses a ceiling above the old swap. */
+      raiseMemory: (name: string, bytes: number) =>
+        effect("update", "--memory", String(bytes), "--memory-swap", String(2 * bytes), name),
       /** The same verdict the shared dind's healthcheck gives -- one script,
        *  pointed at this dind's socket. 0 healthy, 1 booting, 2 wedged. */
       health: (name: string) =>

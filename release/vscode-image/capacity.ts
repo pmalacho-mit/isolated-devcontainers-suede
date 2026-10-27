@@ -134,6 +134,56 @@ export const admit = (daemons: readonly ProjectDaemon[], budget: Budget, now: nu
   };
 };
 
+/**
+ * A project daemon's memory CEILING -- everything it runs shares it: the
+ * devcontainer, its editor server and language servers, an agent, the
+ * project's own containers and builds. DESOLATE_DIND_MEMORY is everyone's;
+ * `customizations.desolate.memory` is one project's.
+ *
+ * A ceiling, not a reservation: admission (above) is decided on what the VM
+ * has free, so ceilings may add up to more than the VM. What one buys is that
+ * a project that runs away is stopped inside its own daemon (an OOM kill in
+ * there) instead of the VM's kernel choosing a victim anywhere on it.
+ */
+/** What either may say: whole megabytes or gigabytes, as docker spells them. */
+export const MEMORY_SIZE = /^([1-9][0-9]{0,6})([mg])$/i;
+
+/** A size in bytes, NaN when it is not one MEMORY_SIZE accepts. */
+export const bytesOf = (size: string) => {
+  const parts = MEMORY_SIZE.exec(size);
+  return parts ? Number(parts[1]) * 1024 ** (parts[2].toLowerCase() === "g" ? 3 : 2) : NaN;
+};
+
+/** What to do with a daemon's ceiling when its project asks for `want` bytes:
+ *  `have` is the one it has (0 for none; undefined when there is no daemon
+ *  yet), `most` the most any one may have -- the VM's memory less the floor.
+ *  Raised live, never lowered live: lowering a ceiling under what is running
+ *  is an OOM kill, so a lower one waits for the daemon to be made again. */
+export type MemoryPlan =
+  | { action: "create"; bytes: number }
+  | { action: "raise"; from: number; bytes: number }
+  | { action: "keep"; bytes: number; asked?: number }
+  | { action: "refuse"; reason: string };
+
+export const memoryPlan = (have: number | undefined, want: number, most: number): MemoryPlan => {
+  if (!(want > 0)) return { action: "refuse", reason: "is not a size (whole megabytes or gigabytes: 512m, 12g)" };
+  if (want > most)
+    return { action: "refuse", reason: `is more than any one daemon may have: ${gib(most)}, the VM's memory less the floor kept free` };
+  if (have === undefined) return { action: "create", bytes: want };
+  if (!Number.isFinite(have)) return { action: "keep", bytes: 0 };   // unreadable: leave it, say nothing
+  if (have === 0 || have === want) return { action: "keep", bytes: have };
+  if (want > have) return { action: "raise", from: have, bytes: want };
+  return { action: "keep", bytes: have, asked: want };
+};
+
+const gib = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+
+/** `MemTotal` from /proc/meminfo, in bytes; NaN when it is not there. */
+export const memTotal = (meminfo: string) => {
+  const kib = /^MemTotal:\s+(\d+)\s+kB$/m.exec(meminfo)?.[1];
+  return kib === undefined ? NaN : Number(kib) * 1024;
+};
+
 /** `MemAvailable` from /proc/meminfo, in bytes; NaN when it is not there,
  *  which `budget` refuses rather than reading as zero or as plenty. */
 export const memAvailable = (meminfo: string) => {

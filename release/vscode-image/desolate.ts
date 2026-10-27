@@ -299,8 +299,8 @@ const driveSaved = (target: Target) => {
  * back to the shared daemon -- that would hand it a socket that is root over
  * every other project.
  */
-async function useProjectDaemon(target: Target): Promise<void> {
-  const answer = await supervisor.ask({ op: "ensure", project: target.project });
+async function useProjectDaemon(target: Target, memory?: string): Promise<void> {
+  const answer = await supervisor.ask({ op: "ensure", project: target.project, ...(memory ? { memory } : {}) });
   if (answer.ok !== true)
     die(`${target.name} uses docker-outside-of-docker, so it runs on a daemon of its own,
       and that daemon is not available -- refusing to start (it never falls back to the
@@ -592,6 +592,8 @@ interface ProjectConfig extends EditorCustomizations {
   /** Base images whose tag should point at a CA-trusting derivative inside this
    *  project's own daemon. */
   shadowImages: string[];
+  /** `customizations.desolate.memory`: its own daemon's ceiling, if it says. */
+  memory?: string;
 }
 
 /** Project the CLI's own parse down to the handful of fields this file acts on.
@@ -631,6 +633,7 @@ function readProjectConfig(spec: ResolvedSpec): ProjectConfig {
     image: typeof config.image === "string" ? config.image : "",
     usesDockerfile: Boolean(config.build?.dockerfile ?? config.dockerFile),
     shadowImages,
+    ...(typeof config.customizations?.desolate?.memory === "string" ? { memory: config.customizations.desolate.memory } : {}),
   };
 }
 
@@ -1716,7 +1719,7 @@ async function runTarget(
   migrateOffItsOwnDaemon(target, daemon, rebuild);
 
   // From here on, every docker call is to the daemon this target runs on.
-  if (daemon === "project") await useProjectDaemon(target);
+  if (daemon === "project") await useProjectDaemon(target, project.memory);
   else daemons.use(target, "shared");
 
   // A rebuild takes the old container away BEFORE anything is judged, so

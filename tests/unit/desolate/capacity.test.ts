@@ -10,7 +10,10 @@ import assert from "node:assert/strict";
 import {
   admit,
   budget,
+  bytesOf,
   memAvailable,
+  memoryPlan,
+  memTotal,
   reapable,
   DEFAULTS,
   type Budget,
@@ -241,4 +244,47 @@ describe("the budget, from the environment and /proc/meminfo", () => {
     test(`a malformed DESOLATE_MAX_DINDS (${JSON.stringify(raw)}) is a refusal`, () => {
       assert.throws(() => budget({ DESOLATE_MAX_DINDS: raw }, MEMINFO), /positive integer/);
     });
+});
+
+describe("a daemon's memory ceiling (customizations.desolate.memory)", () => {
+  const most = 30 * GIB;
+
+  test("sizes are whole megabytes or gigabytes, as docker spells them", () => {
+    assert.equal(bytesOf("12g"), 12 * GIB);
+    assert.equal(bytesOf("8192m"), 8 * GIB);
+    assert.equal(bytesOf("6G"), 6 * GIB);
+    for (const bad of ["12", "12gb", "1.5g", "0g", "-1g", "12 g", "", "1e3g", "99999999g"])
+      assert.ok(Number.isNaN(bytesOf(bad)), bad);
+  });
+
+  test("a new daemon is made with what was asked", () =>
+    assert.deepEqual(memoryPlan(undefined, 12 * GIB, most), { action: "create", bytes: 12 * GIB }));
+
+  test("a higher one is raised to it, live", () =>
+    assert.deepEqual(memoryPlan(6 * GIB, 12 * GIB, most), { action: "raise", from: 6 * GIB, bytes: 12 * GIB }));
+
+  test("a lower one is NOT lowered under what is running: it keeps its own, and says what was asked", () =>
+    assert.deepEqual(memoryPlan(12 * GIB, 6 * GIB, most), { action: "keep", bytes: 12 * GIB, asked: 6 * GIB }));
+
+  test("the same, none, or an unreadable one is left alone", () => {
+    assert.deepEqual(memoryPlan(6 * GIB, 6 * GIB, most), { action: "keep", bytes: 6 * GIB });
+    assert.deepEqual(memoryPlan(0, 6 * GIB, most), { action: "keep", bytes: 0 });
+    assert.deepEqual(memoryPlan(NaN, 6 * GIB, most), { action: "keep", bytes: 0 });
+  });
+
+  test("more than the VM has, less its floor, is refused -- and so is no size at all", () => {
+    assert.equal(memoryPlan(undefined, 31 * GIB, most).action, "refuse");
+    assert.match((memoryPlan(6 * GIB, 64 * GIB, most) as { reason: string }).reason, /30\.0 GiB/);
+    assert.equal(memoryPlan(undefined, NaN, most).action, "refuse");
+  });
+
+  test("ceilings may add up to more than the VM: each is checked alone", () => {
+    // Six daemons at 10 GiB on a 40 GiB VM: admission is what the VM has FREE.
+    for (let i = 0; i < 6; i++) assert.equal(memoryPlan(undefined, 10 * GIB, 38 * GIB).action, "create");
+  });
+
+  test("MemTotal is read from /proc/meminfo", () => {
+    assert.equal(memTotal("MemTotal:       41943040 kB\nMemAvailable:   1 kB\n"), 40 * GIB);
+    assert.ok(Number.isNaN(memTotal("MemAvailable: 1 kB\n")));
+  });
 });

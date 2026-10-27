@@ -23,6 +23,21 @@ describe("what the supervisor accepts", () => {
   test("the five ops, in their exact shapes", () => {
     assert.ok(isRequest({ op: "status" }));
     for (const op of ["ensure", "stop", "reset", "purge"]) assert.ok(isRequest({ op, project: "acme/widgets" }), op);
+    assert.ok(isRequest({ op: "ensure", project: "acme/widgets", memory: "12g" }), "ensure, with its project's ceiling");
+  });
+
+  for (const [why, query] of [
+    ["a ceiling on any op but ensure", { op: "stop", project: "x", memory: "12g" }],
+    ["a ceiling that is no size", { op: "ensure", project: "x", memory: "12gb" }],
+    ["a ceiling that is a number", { op: "ensure", project: "x", memory: 12 }],
+    ["a ceiling with something else beside it", { op: "ensure", project: "x", memory: "12g", runtime: "runc" }],
+  ] as const)
+    test(`refuses ${why}`, () => assert.equal(isRequest(query), false));
+
+  test("DESOLATE_DIND_MEMORY is held to the same shape", () => {
+    assert.equal(settingsFrom({ DESOLATE_DIND_MEMORY: "8g" }).limits.memory, "8g");
+    assert.equal(settingsFrom({}).limits.memory, "6g");
+    assert.throws(() => settingsFrom({ DESOLATE_DIND_MEMORY: "6GB" }), /whole megabytes or gigabytes/);
   });
 
   for (const [why, query] of [

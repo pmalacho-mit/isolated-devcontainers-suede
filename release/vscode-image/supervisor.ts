@@ -59,7 +59,8 @@ type Operation = (typeof operations)[number];
 
 export type Request =
   | { op: "status" }
-  | { op: Exclude<Operation, "status">; project: string };
+  | { op: "ensure"; project: string; memory?: string }
+  | { op: Exclude<Operation, "status" | "ensure">; project: string };
 
 const MAX_REQUEST_BYTES = 1024;
 
@@ -73,7 +74,10 @@ export const isRequest = (query: unknown): query is Request =>
     ? Object.keys(query).length === 1
     : "project" in query &&
       typeof query.project === "string" &&
-      Object.keys(query).length === 2);
+      // `memory` is ensure's alone: the project's own ceiling, if it asks.
+      (query.op === "ensure" && "memory" in query
+        ? typeof query.memory === "string" && capacity.MEMORY_SIZE.test(query.memory) && Object.keys(query).length === 3
+        : Object.keys(query).length === 2));
 
 /** A project name, held to the rules every other component holds it to.
  *  Not checked against the filesystem: this container mounts no workspace,
@@ -105,6 +109,12 @@ export interface Settings {
  * it has to be asked for twice, by the one file that sets both
  * (tests/environments/nested/compose.nested.yml).
  */
+const memorySetting = (size = "6g") => {
+  if (!capacity.MEMORY_SIZE.test(size))
+    throw new Error(`DESOLATE_DIND_MEMORY is whole megabytes or gigabytes (6g, 6144m), not '${size}'`);
+  return size;
+};
+
 export const settingsFrom = (env: Record<string, string | undefined>): Settings => {
   const runtime = env.DESOLATE_DIND_RUNTIME ?? "sysbox-runc";
   if (runtime !== "sysbox-runc" && runtime !== "runc")
@@ -120,7 +130,7 @@ export const settingsFrom = (env: Record<string, string | undefined>): Settings 
     volumePrefix: env.DESOLATE_VOLUME_PREFIX ?? "desolate_",
     caDirectory: env.DESOLATE_CA_DIRECTORY ?? "/var/lib/desolate-proxy/public",
     limits: {
-      memory: env.DESOLATE_DIND_MEMORY ?? "6g",
+      memory: memorySetting(env.DESOLATE_DIND_MEMORY),
       pids: Number(env.DESOLATE_DIND_PIDS ?? "8192"),
       cpus: env.DESOLATE_DIND_CPUS ?? "4",
     },
@@ -323,16 +333,35 @@ const refuse = (message: string): never => {
 };
 
 const operations_ = {
-  ensure: async (target: Target, settings: Settings, say: Say) => {
+  ensure: async (target: Target, settings: Settings, say: Say, request: { memory?: string } = {}) => {
     const name = dind.name(target);
     const state = docker.dind.state(name);
+    const meminfo = readFileSync(config.meminfo, "utf8");
+    const budget = capacity.budget(process.env, meminfo);
+
+    // Its ceiling: the project's if it asked (customizations.desolate.memory),
+    // else everyone's -- made with it, raised live to it, never lowered live.
+    // Only a start asks; any other ensure (a push, a worktree's sandbox) leaves
+    // an existing daemon's ceiling as it is.
+    const asked = request.memory;
+    const plan = state !== "" && asked === undefined
+      ? ({ action: "keep", bytes: 0 } as capacity.MemoryPlan)
+      : capacity.memoryPlan(
+          state === "" ? undefined : docker.dind.memoryLimit(name),
+          capacity.bytesOf(asked ?? settings.limits.memory),
+          capacity.memTotal(meminfo) - budget.floor,
+        );
+    if (plan.action === "refuse")
+      return refuse(`${asked !== undefined ? `customizations.desolate.memory "${asked}"` : `DESOLATE_DIND_MEMORY "${settings.limits.memory}"`} ${plan.reason}`);
+    if (plan.action === "raise") {
+      if (docker.dind.raiseMemory(name, plan.bytes) === 0) say(`${name}: memory ceiling raised to ${gib(plan.bytes)} (from ${gib(plan.from)})`);
+      else say(`${name}: could not raise its memory ceiling to ${gib(plan.bytes)} (${lastFailure}); it keeps ${gib(plan.from)}`);
+    }
+    if (plan.action === "keep" && plan.asked !== undefined && asked !== undefined)
+      say(`${name} keeps its ${gib(plan.bytes)} memory ceiling: ${gib(plan.asked)} is lower, and a ceiling is never lowered under what is running -- it takes effect when the dind is made again (./cli.sh down, then up)`);
 
     if (state !== "running") {
-      const admission = capacity.admit(
-        daemons.observe(),
-        capacity.budget(process.env, readFileSync(config.meminfo, "utf8")),
-        Date.now(),
-      );
+      const admission = capacity.admit(daemons.observe(), budget, Date.now());
       if (!admission.admitted)
         return refuse(admission.reason === "memory"
           ? `the VM has no headroom for another dind: starting ${name} would leave less than
@@ -350,7 +379,8 @@ const operations_ = {
 
     if (state === "") {
       const base = specFor(target, settings);
-      const spec = { ...base, limits: { ...base.limits, cpus: cpusFor(base.limits.cpus, docker.cpus()) } };
+      const spec = { ...base, limits: { ...base.limits, cpus: cpusFor(base.limits.cpus, docker.cpus()),
+                                          memory: plan.action === "create" ? String(plan.bytes) : base.limits.memory } };
       if (!docker.dind.networkExists(spec.network) &&
           docker.dind.createNetwork(spec.network, spec.network, spec.label) !== 0)
         refuse(`could not create ${spec.network}: ${lastFailure}`);
@@ -493,7 +523,7 @@ const serve = (settings: Settings) => {
         const result = request.op === "status"
           ? operations_.status()
           : await serially<Record<string, unknown>>(() =>
-              operations_[request.op](targetOf(request.project), settings, say));
+              operations_[request.op](targetOf(request.project), settings, say, request as { memory?: string }));
         send({ ok: true, ...result });
       } catch (err: any) {
         send({ ok: false, error: String(err?.message ?? err) });

@@ -898,6 +898,24 @@ describe("other refused keys", () => {
 });
 
 // ===========================================================================
+describe("customizations.desolate.memory", () => {
+  // ===========================================================================
+  // The project's own daemon's ceiling. Its shape is held here, where the
+  // message can quote the key; the VM's size, by the supervisor.
+  const asking = (memory: any) => spec({ image: "x", customizations: { desolate: { memory } } });
+
+  test("whole megabytes or gigabytes are accepted, and absent is the normal case", () => {
+    allows(asking("12g"));
+    allows(asking("8192m"));
+    allows(spec({ image: "x" }));
+  });
+
+  test("anything else is refused, naming the key", () => {
+    for (const bad of [12, "12", "12GB", "1.5g", "", ["12g"], { g: 12 }])
+      refuses(asking(bad), /customizations\.desolate\.memory/);
+  });
+});
+
 describe("shadowImages", () => {
   // ===========================================================================
   // Base images whose tag desolate points at a CA-trusting derivative, inside
