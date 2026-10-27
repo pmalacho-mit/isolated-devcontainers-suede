@@ -66,7 +66,6 @@ import {
 import {
   CA_DIR,
   DESOLATE_DIR,
-  LEGACY_VIEW,
   OVERLAY_KEY_LABEL,
   SERVER_DST,
   SHARED_DIRECTORIES,
@@ -1626,10 +1625,9 @@ function purgeTarget(target: Target): void {
   const id = devcontainerId(target.dir, /* includeStopped */ true);
   if (id) docker.container.remove([id]);
 
-  // The view of /desolate-ca too, from before the move, if this one has it.
   docker.volume.remove(
-    [...SHARED_DIRECTORIES.map((mount) => mount.name), LEGACY_VIEW].flatMap((name) =>
-      Object.values(overlayVolumes(target, name)),
+    SHARED_DIRECTORIES.flatMap((mount) =>
+      Object.values(overlayVolumes(target, mount.name)),
     ),
   );
 

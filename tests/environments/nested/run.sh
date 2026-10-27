@@ -26,8 +26,8 @@
 # VM, and this would put a privileged dind on it.
 #
 # Needs: sudo, nft, docker, a python with mitmproxy 11.0.2 (DESOLATE_MITMDUMP,
-# or the venv tests/README.md describes), and /desolate/ca or /desolate-ca (this
-# repo's own devcontainer has one) to derive a CA-trusting build base. Installs dnsmasq-base
+# or the venv tests/README.md describes), and /desolate/ca (this repo's own
+# devcontainer has it) to derive a CA-trusting build base. Installs dnsmasq-base
 # with apt if it is missing. Creates the `desolate-proxy` system user if it is
 # missing, and removes it again on `down` only if it created it.
 set -uo pipefail
@@ -37,9 +37,7 @@ ROOT=$(cd "$HERE/../../.." && pwd)
 RELEASE="$ROOT/release"
 STATE=${DESOLATE_NESTED_STATE:-/tmp/desolate-nested}
 CONFDIR=/var/lib/desolate-proxy        # compose mounts $CONFDIR/public as /desolate
-# This devcontainer's own copy: /desolate/ca, or before the move /desolate-ca.
 TRUST_IN_BUILDS=/desolate/ca/trust-proxy-in-builds.sh
-[ -x "$TRUST_IN_BUILDS" ] || TRUST_IN_BUILDS=/desolate-ca/trust-proxy-in-builds.sh
 INGRESS_ROOT=/run/desolate-ingress     # desolate-ingress.tmpfiles
 PROXY_USER=desolate-proxy
 INGRESS_USER=desolate-ingress

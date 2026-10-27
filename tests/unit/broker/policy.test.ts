@@ -568,14 +568,10 @@ describe("mounts", () => {
       }),
       /bind/,
     );
-    allows(
-      spec({
-        image: "x",
-        mounts: ["source=/desolate-ca,target=/desolate-ca,type=bind"],
-      }),
-    );
-    // desolate's directory at its own path, and only that exact path.
+    // desolate's directory at its own path, and only that exact path -- the
+    // old /desolate-ca is no longer it.
     allows(spec({ image: "x", mounts: ["source=/desolate,target=/desolate,type=bind"] }));
+    refuses(spec({ image: "x", mounts: ["source=/desolate-ca,target=/desolate-ca,type=bind"] }), /bind/);
     refuses(spec({ image: "x", mounts: ["source=/desolate/../workspaces,target=/w,type=bind"] }), /bind/);
     refuses(spec({ image: "x", mounts: ["source=/desolate-cache,target=/w,type=bind"] }), /bind/);
   });
@@ -1362,10 +1358,10 @@ test("a project cannot reach a sibling whose name it prefixes", () => {
 });
 
 test("volumes desolate injects for a project are still its own", () => {
-  // The overlay views are named <project>-vscode-server / -desolate-ca, and
+  // The overlay views are named <project>-vscode-server / -desolate, and
   // must not be mistaken for a sibling's just because siblings exist.
   const siblings: EnforceArgs = [[named("web"), named("web-api")], "shared"];
-  for (const v of ["web-vscode-server", "web-vscode-server-data", "web-desolate-ca"]) {
+  for (const v of ["web-vscode-server", "web-vscode-server-data", "web-desolate"]) {
     enforcePolicy(named("web"), spec({ image: "x" }, { mounts: [{ source: v, target: "/x", type: "volume" }] }), ...siblings);
   }
 });

@@ -71,7 +71,7 @@ const allowlist = (() => {
 /** The read-only public proxy CA. Injected by desolate, never by a project --
  *  but tolerated in project config so a copied devcontainer.json is not a
  *  confusing hard failure. Nothing secret lives there (public cert only). */
-const CA_BIND_SOURCES = ["/desolate", "/desolate-ca"];
+const CA_BIND_SOURCE = "/desolate";
 
 interface NormalMount {
   type: string;
@@ -216,7 +216,7 @@ export const mount = {
       .at(0),
   /** The public proxy CA, which desolate injects into every project. */
   isPublicCa: ({ type, source }: NormalMount) =>
-    type === "bind" && CA_BIND_SOURCES.includes(source),
+    type === "bind" && source === CA_BIND_SOURCE,
   /**
    * The ONE bind a project dind's devcontainer may hold: its daemon's socket,
    * exactly as `docker-outside-of-docker` declares it -- measured

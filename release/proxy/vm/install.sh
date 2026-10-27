@@ -119,15 +119,10 @@ install -m 0644 ../../AGENTS.md "$PUBLIC/AGENTS.md"
 if [ -f /var/lib/desolate-proxy/mitmproxy-ca-cert.pem ]; then
   install -m 0644 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy/mitmproxy-ca-cert.pem "$PUBLIC/ca/ca.pem"
 fi
-# The old flat layout, as links into the new one: a container made before the
-# move still mounts this directory at /desolate-ca and names these paths, and
-# so may a project's own config. Removed in a later release.
-for old in ca.pem:ca/ca.pem install-ca.sh:ca/install-ca.sh trust-proxy-in-builds.sh:ca/trust-proxy-in-builds.sh \
-           desolate-status:status desolate-net:net; do
-  ln -sfn "${old#*:}" "$PUBLIC/${old%%:*}"
-done
-# The factory's helper, retired: a stale copy would still be on every PATH.
-rm -f "$PUBLIC/desolate-work"
+# The flat layout this replaced (it was mounted at /desolate-ca), and the
+# factory's retired helper: stale copies, gone.
+rm -f "$PUBLIC/ca.pem" "$PUBLIC/install-ca.sh" "$PUBLIC/trust-proxy-in-builds.sh" \
+      "$PUBLIC/desolate-status" "$PUBLIC/desolate-net" "$PUBLIC/desolate-work"
 install -m 0755 ssh-allow.sh /opt/desolate-proxy/ssh-allow.sh
 
 # Both bridges, because the stack is split across two networks and BOTH must be

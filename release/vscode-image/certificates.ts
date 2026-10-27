@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Docker } from "./docker.ts";
-import { CA_DIR, LEGACY_DIR } from "./overlay.ts";
+import { CA_DIR } from "./overlay.ts";
 
 const CA_IMAGE_REPO = "desolate-ca/base";
 
@@ -62,18 +62,7 @@ ${name}() {
  * container being torn down. The outgoing pid is knowable only here, which is
  * why the wait cannot be left to whoever needs the daemon next.
  */
-/** Where a CA script is in the container this runs in: /desolate/ca, or in a
- *  devcontainer made before the move, /desolate-ca (overlay.ts LEGACY_DIR). */
-const CA_SCRIPT_LOOKUP = `
-ca_script() {
-    for dir in ${CA_DIR} ${LEGACY_DIR}; do
-        [ -x "$dir/$1" ] && { echo "$dir/$1"; return 0; }
-    done
-    echo "desolate: no $1 in ${CA_DIR} or ${LEGACY_DIR}" >&2
-    return 1
-}`;
-
-const INSTALL_CA_SCRIPT = `${CA_SCRIPT_LOOKUP}
+const INSTALL_CA_SCRIPT = `
 dockerd_pid() { pgrep dockerd | head -n1; }
 
 this_container_runs_a_daemon() { [ -n "$(dockerd_pid)" ]; }
@@ -96,8 +85,7 @@ report_daemon_never_came_back() {
     echo "             ${DAEMON_WAIT_SECONDS}s after being restarted to pick up the proxy CA." >&2
 }
 
-installer=$(ca_script install-ca.sh) || exit 1
-"$installer" >/dev/null 2>&1 || exit 1
+${CA_DIR}/install-ca.sh >/dev/null 2>&1 || exit 1
 this_container_runs_a_daemon || exit 0
 restart_and_wait || { report_daemon_never_came_back; exit 1; }
 `;
@@ -105,7 +93,7 @@ restart_and_wait || { report_daemon_never_came_back; exit 1; }
 /** The docker-in-docker daemon starts WITH the container, so on a cold start it
  *  can still be coming up. One success is enough: whoever restarts this daemon
  *  waits for it, so an answer here is not one on its way down. */
-const SHADOW_SCRIPT = `${CA_SCRIPT_LOOKUP}
+const SHADOW_SCRIPT = `
 daemon_answers() { docker info >/dev/null 2>&1; }
 ${boundedWait("wait_for_the_booting_daemon", "daemon_answers")}
 
@@ -117,12 +105,11 @@ report_no_daemon() {
 
 shadow_one_image() {
     echo "=== $1"
-    "$shadower" --image "$1" --shadow ||
+    ${CA_DIR}/trust-proxy-in-builds.sh --image "$1" --shadow ||
         echo "!!! could not shadow $1 -- builds FROM it will NOT trust the proxy CA"
 }
 
 echo "=== shadowing $# base image(s) so that builds FROM them trust the proxy CA"
-shadower=$(ca_script trust-proxy-in-builds.sh) || { echo "!!! no trust-proxy-in-builds.sh here -- nothing was shadowed"; exit 0; }
 wait_for_the_booting_daemon || { report_no_daemon; exit 0; }
 for image in "$@"; do shadow_one_image "$image"; done
 echo "=== done"

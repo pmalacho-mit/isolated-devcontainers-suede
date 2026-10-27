@@ -24,10 +24,6 @@ export const SERVER_DST = "/vscode-server";
 export const DESOLATE_DIR = "/desolate";
 /** The proxy CA, within it. */
 export const CA_DIR = `${DESOLATE_DIR}/ca`;
-/** Where it was before (/desolate-ca, flat): what a devcontainer made before
- *  the move still mounts, and so what its view's volumes are named for. */
-export const LEGACY_DIR = "/desolate-ca";
-export const LEGACY_VIEW = "desolate-ca";
 
 /** Label carrying the identity of the lower a cached view was built from. */
 export const OVERLAY_KEY_LABEL = "desolate.overlay.key";

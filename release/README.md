@@ -553,11 +553,9 @@ view of it:
 | `/desolate/net` | joins this devcontainer to its project's compose networks |
 | `/desolate/AGENTS.md` | what an agent in here should know |
 
-It used to be `/desolate-ca`, flat (`/desolate-ca/ca.pem`,
-`/desolate-ca/desolate-status`). A container made before the move keeps
-that mount until it is rebuilt, and the old names still resolve there. In a
-new container, `/desolate-ca` is a link to `/desolate`, so a project's own config
-that names the old path keeps working. The old names go in a later release.
+It used to be `/desolate-ca`, flat. Nothing answers at the old path: a container
+made before the move needs `desolate --rebuild`, and a project's own config
+that names `/desolate-ca/...` needs the new path.
 
 ## Privilege separation (why the editor can't touch the daemon)
 

@@ -642,12 +642,9 @@ describe("a project dind's create argv", () => {
       assert.match(all.find((m) => m.includes(shared))!, /,readonly$/, shared);
   });
 
-  test("has desolate's directory at /desolate, and at /desolate-ca for views made before the move", () => {
+  test("has desolate's directory at /desolate, and only there", () => {
     const ca = mounts(argvFor()).filter((m) => m.includes("/var/lib/desolate-proxy/public"));
-    assert.deepEqual(ca, [
-      "type=bind,source=/var/lib/desolate-proxy/public,target=/desolate,readonly",
-      "type=bind,source=/var/lib/desolate-proxy/public,target=/desolate-ca,readonly",
-    ]);
+    assert.deepEqual(ca, ["type=bind,source=/var/lib/desolate-proxy/public,target=/desolate,readonly"]);
     assert.match(argvFor().join(" "), /\/desolate\/ca\/install-ca\.sh/, "the entrypoint installs the CA from its new path");
   });
 

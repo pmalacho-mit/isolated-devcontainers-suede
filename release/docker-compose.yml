@@ -135,9 +135,6 @@ services:
         hard: 524288
     volumes:
       - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
-      # Also at the old path, for devcontainers made before the move: their
-      # copy-on-write views of it name /desolate-ca as their lower.
-      - /var/lib/desolate-proxy/public:/desolate-ca:ro
       - inner-run:/run/inner          # the inner socket lives here
       - dind-sysbox-data:/var/lib/docker  # inner images/containers
       # MUST match the vscode mount path so devcontainer bind mounts resolve

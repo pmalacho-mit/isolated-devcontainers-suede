@@ -280,10 +280,6 @@ const dindRunArgv = (spec: DindSpec) => [
   `type=volume,source=${spec.volumes.health},target=/desolate-health,readonly`,
   "--mount",
   `type=bind,source=${spec.caDirectory},target=/desolate,readonly`,
-  // And at the old path: a devcontainer made before the move names it as the
-  // lower of its view (overlay.ts LEGACY_DIR).
-  "--mount",
-  `type=bind,source=${spec.caDirectory},target=/desolate-ca,readonly`,
   "--entrypoint",
   "/bin/sh",
   spec.image,

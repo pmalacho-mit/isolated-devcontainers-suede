@@ -231,14 +231,6 @@ NOTE
 fi
 [ -z "$installed" ] || say "installed$installed for this session (a rebuild loses them; the agent was told)"
 
-# A container made before desolate's directory moved has it at /desolate-ca
-# (the same files; the new names are there too). Use it, and say so.
-if [ ! -e /desolate ] && [ -d /desolate-ca ]; then
-  case "$status" in /desolate/*) status=/desolate-ca/${status#/desolate/} ;; esac
-  [ ! -s "$dir/task" ] || printf '\n%s\n' "In this container desolate's directory is at /desolate-ca, not /desolate (it was made before the move): read every /desolate/ above as /desolate-ca/." >> "$dir/task"
-  say "this devcontainer predates /desolate; using /desolate-ca (a rebuild moves it)"
-fi
-
 # Claude's events, as this target's status. Fields read with sed: no jq needed.
 cat > "$dir/hook" <<HOOK
 #!/bin/sh

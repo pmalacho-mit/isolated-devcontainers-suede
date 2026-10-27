@@ -16,7 +16,6 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 . "$ROOT/tests/lib/harness.sh"
 DIND=desolate-mirror-test BASE=alpine:3.20
 CA=${DESOLATE_TEST_CA:-/desolate/ca/ca.pem}
-[ -n "${DESOLATE_TEST_CA:-}" ] || [ -f "$CA" ] || CA=/desolate-ca/ca.pem   # a devcontainer made before the move
 RUNTIME=(--privileged)
 docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc && RUNTIME=(--runtime sysbox-runc)
 

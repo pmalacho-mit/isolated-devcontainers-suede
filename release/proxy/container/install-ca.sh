@@ -4,16 +4,13 @@
 # Run as ROOT: image build, dind entrypoint, or `docker exec -u 0`.
 #
 # CA source, in order of preference:
-#   1. /desolate/ca/ca.pem   -- bind-mount chain (how desolate does it);
-#      /desolate-ca/ca.pem in a container made before the move
+#   1. /desolate/ca/ca.pem   -- bind-mount chain (how desolate does it)
 #   2. $DESOLATE_CA_URL      -- http://<vm-bridge-gw>:18081/ca/ca.pem
 set -eu
 
 SRC=""
 if [ -f /desolate/ca/ca.pem ]; then
     SRC=/desolate/ca/ca.pem
-elif [ -f /desolate-ca/ca.pem ]; then
-    SRC=/desolate-ca/ca.pem
 elif [ -n "${DESOLATE_CA_URL:-}" ]; then
     command -v curl >/dev/null 2>&1 || {
         echo "desolate-ca: DESOLATE_CA_URL is set but this image has no curl" >&2
@@ -70,14 +67,6 @@ fi
 if command -v keytool >/dev/null 2>&1; then
     keytool -importcert -trustcacerts -noprompt -cacerts \
         -storepass changeit -alias desolate-proxy -file "$SRC" >/dev/null 2>&1 || true
-fi
-
-# The old path, for a project's own config that still names it (a
-# postStartCommand, a compose file inside the container): /desolate-ca as a
-# link to /desolate, where this container has one and nothing is there yet.
-# Removed in a later release, with the links in the VM's directory.
-if [ -d /desolate ] && [ ! -e /desolate-ca ] && [ ! -L /desolate-ca ]; then
-    ln -s /desolate /desolate-ca 2>/dev/null || true
 fi
 
 if [ "$INSTALLED" = 1 ]; then

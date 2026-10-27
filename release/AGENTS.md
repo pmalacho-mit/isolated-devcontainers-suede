@@ -8,8 +8,6 @@ You are running inside a **devcontainer managed by `desolate`** (isolated-devcon
   - `status`: say how your work is going, below;
   - `net`: join your project's compose networks;
   - `AGENTS.md`: this file.
-
-  A container made before it moved has it at `/desolate-ca/` instead, under the old flat names (`/desolate-ca/ca.pem`, `/desolate-ca/desolate-status`), and those still work there.
 - There is **no host Docker socket** anywhere in the stack. If this project declares the `docker-outside-of-docker` feature, `docker` here talks to **the project's own daemon** -- a sandboxed dind desolate runs for this project alone, which sees only this project's files (see "Docker" below). Otherwise there is no `docker` at all. `docker-in-docker` is refused: switch to `docker-outside-of-docker`.
 - Sibling projects' devcontainers are reachable over the network; the editor/orchestrator containers are not.
 - Dev servers: bind to `0.0.0.0`, not `127.0.0.1`. Ports declared in `customizations.desolate.ports` get forwarded to a host port (from 8080 up; `desolate` prints which). **The port you listen on is not the one the human opens.** When you print a URL for the human, read it from `DESOLATE_EXTERNAL_<port>_URL` (e.g. `$DESOLATE_EXTERNAL_5173_URL` for a server on 5173; `DESOLATE_EXTERNAL_<port>` is the bare host port). They are set in the editor's terminals and in login shells (`bash -l`); a port not declared in `devcontainer.json` has none, because nothing forwards it. Never add `appPort` to `devcontainer.json` — `desolate` hard-fails on it.
@@ -92,7 +90,7 @@ Plain-HTTP `apt` is unaffected, which is why this often doesn't surface until th
 /desolate/ca/trust-proxy-in-builds.sh --service <service> --image <base-image>
 ```
 
-Note the path is `/desolate/ca/`. (A container made before desolate's directory moved has it at `/desolate-ca/`, and both spellings work there.) It derives `desolate-ca/<base-image>` with the CA installed plus the TLS env vars above, and writes a gitignored `compose.override.yml` pointing that service's build at it. Your `Dockerfile` and `compose.yml` are never modified.
+Note the path is `/desolate/ca/`. It derives `desolate-ca/<base-image>` with the CA installed plus the TLS env vars above, and writes a gitignored `compose.override.yml` pointing that service's build at it. Your `Dockerfile` and `compose.yml` are never modified.
 
 - Run it **once per (service, base image)** — a second service on a different base needs its own run.
 - **Never pass `--pull`** to the subsequent build; BuildKit will try to fetch `desolate-ca/*` from a registry and fail with `pull access denied`.
