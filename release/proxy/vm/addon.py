@@ -239,6 +239,7 @@ import json
 import logging
 import os
 import re
+import stat
 
 from mitmproxy import http
 
@@ -316,7 +317,18 @@ def dinds_fingerprint(directory):
             st = os.lstat(os.path.join(directory, name))
         except OSError:
             continue
-        stamp.append((name, st.st_ino, st.st_mtime_ns, st.st_size))
+        # The content too, not only the inode and times: a dind removed and
+        # made again can get its file's freed inode back, at an address of the
+        # same length, within one mtime tick -- and its old address would go
+        # on naming the project. The files are one address each.
+        content = b""
+        if not stat.S_ISLNK(st.st_mode):
+            try:
+                with open(os.path.join(directory, name), "rb") as handle:
+                    content = handle.read(64)
+            except OSError:
+                pass
+        stamp.append((name, st.st_ino, st.st_mtime_ns, st.st_size, content))
     return tuple(stamp)
 
 
@@ -377,8 +389,8 @@ class DesolateProxy:
         # Each file's inode and mtime, not the directory's: a directory's mtime
         # is too coarse to see two changes in one tick, and an address docker
         # hands a new dind after an old one's purge must never be attributed to
-        # the old one's project. The supervisor writes by rename, so every
-        # change is a new inode.
+        # the old one's project. Compared by content as well as inode
+        # (dinds_fingerprint): an unlinked file's inode can come straight back.
         stamp = dinds_fingerprint(DINDS_DIR)
         if stamp != self._dinds_stamp:
             self._projects_by_address = read_dind_addresses(DINDS_DIR)
