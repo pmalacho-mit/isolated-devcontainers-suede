@@ -3,7 +3,7 @@
 # Sourced, not run: a dispatcher defines its agent, then calls
 # `dispatch_main "$@"` (see ../gh-dispatcher.sh, ../claude/claude-dispatcher.sh).
 #
-#   <dispatcher> <project> [<owner/repo>] [--label L] [--interval S] [--once]
+#   <dispatcher> <project> [<owner/repo>] [--base B] [--label L] [--interval S] [--once]
 #
 # <project> is desolate's name for it -- its path under /workspaces, what
 # `./cli.sh desolate <project>` takes. <owner/repo> is its GitHub repository,
@@ -14,7 +14,10 @@
 # There is no clone here: the repository lives in desolate, and its branches
 # are pushed from the outer editor, by you. Each tick, for every open issue labelled L (default desolate:run):
 #
-#   1. no worktree issue-<n> yet: `cli.sh worktree add`, on branch issue/<n>;
+#   1. no worktree issue-<n> yet: `cli.sh worktree add`, on a new branch
+#      issue/<n> started from B (--base: a branch or ref of the project's,
+#      `v2` or `origin/v2`; default: the project's HEAD), and its draft PR
+#      targets B too (without `origin/`; default: the repo's default branch);
 #   2. not running: start it;
 #   3. no agent started here yet: agent_start, with the issue as its task and
 #      desolate-status as its voice;
@@ -101,7 +104,7 @@ dispatch_pull_request() { # <n> <name> <title> <message> <updated>
     echo "$updated" > "$STATE/$name.push"
     return
   fi
-  gh pr create -R "$REPO" --draft --head "$branch" --base "$DEFAULT_BRANCH" \
+  gh pr create -R "$REPO" --draft --head "$branch" --base "$PR_BASE" \
     --title "$title" --body "$message
 
 Closes #$n" > "$STATE/$name.pr"
@@ -150,7 +153,7 @@ dispatch_tick() {
       [ -n "$can_start" ] || continue
       if ! jq -e --arg w "$name" 'any(.[]; .worktree == $w)' <<< "$statuses" >/dev/null; then
         log "#$n: a worktree"
-        "$CLI" worktree add "$PROJECT" "$name" "issue/$n" || { log "#$n: worktree add failed"; continue; }
+        "$CLI" worktree add "$PROJECT" "$name" "issue/$n" ${BASE:+"$BASE"} || { log "#$n: worktree add failed"; continue; }
       fi
       if ! jq -e --arg w "$name" 'any(.[]?; .worktree == $w)' <<< "${running:-[]}" >/dev/null; then
         log "#$n: starting it"
@@ -203,10 +206,11 @@ dispatch_main() {
   REPO=$PROJECT
   case "${1:-}" in ""|-*) ;; *) REPO=$1; shift ;; esac
   case "$REPO" in */*) ;; *) echo "$DISPATCHER: $PROJECT is no owner/repo; name its GitHub repository after it" >&2; exit 2 ;; esac
-  LABEL=desolate:run INTERVAL=60 ONCE=
+  LABEL=desolate:run INTERVAL=60 ONCE= BASE=
   while [ $# -gt 0 ]; do
     case "$1" in
       --label) LABEL=${2:?}; shift 2 ;;
+      --base) BASE=${2:?--base takes a branch, e.g. v2}; shift 2 ;;
       --interval) INTERVAL=${2:?}; shift 2 ;;
       --once) ONCE=1; shift ;;
       *) echo "$DISPATCHER: unknown option '$1'" >&2; exit 2 ;;
@@ -220,6 +224,7 @@ dispatch_main() {
   done
   agent_ready "$PROJECT" || { echo "$DISPATCHER: the agent is not ready" >&2; exit 1; }
   DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
+  PR_BASE=${BASE#origin/}; PR_BASE=${PR_BASE:-$DEFAULT_BRANCH}
   while :; do
     dispatch_tick || log "tick failed; trying again next time"
     [ -z "$ONCE" ] || exit 0

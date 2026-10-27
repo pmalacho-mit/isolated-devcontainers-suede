@@ -142,7 +142,7 @@ examples/factory/claude/claude-dispatcher.sh acme/widgets   # the project; its G
 
 Per issue labelled `desolate:run`, each tick:
 
-1. If there is no worktree `issue-<n>`: `worktree add` it, then start it.
+1. If there is no worktree `issue-<n>`: `worktree add` it on a new branch `issue/<n>`, then start it. `--base v2` starts that branch from `v2` (any branch or ref of the project's, `origin/v2` too), and makes `v2` the draft PR's target.
 2. If no agent was started there: start one, with the issue as its task and a pointer to `desolate-status`.
 3. Read `./cli.sh desolate --status --json`:
    - **the agent's own access broken** (for Claude, `red` "claude: authentication failed"): you are told, in the terminal, with a bell, and by a macOS notification. In a terminal you are asked for a new token, and then each agent that stopped on it carries on its conversation. No new agent starts while this waits.
