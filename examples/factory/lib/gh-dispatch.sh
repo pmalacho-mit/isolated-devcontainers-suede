@@ -43,7 +43,7 @@
 
 FACTORY_LIB=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CLI=${DESOLATE_CLI:-$FACTORY_LIB/../../../release/cli.sh}
-STATUS_HELPER=${DESOLATE_STATUS_HELPER:-/desolate-ca/desolate-status}
+STATUS_HELPER=${DESOLATE_STATUS_HELPER:-/desolate/status}
 DISPATCHER=$(basename "$0" .sh)
 
 declare -F agent_ready   >/dev/null || agent_ready()   { :; }
@@ -79,6 +79,7 @@ Say how it is going with $STATUS_HELPER; a human sees it beside this worktree:
   set red "<what failed>" when you cannot go on;
   set green "<one line for the PR>" when the work is committed on issue/$1.
 Commit your work on issue/$1; do not push. A human pushes it, and a draft PR follows.
+How this environment works -- the proxy, secrets, what you cannot reach: /desolate/AGENTS.md.
 EOF
 }
 

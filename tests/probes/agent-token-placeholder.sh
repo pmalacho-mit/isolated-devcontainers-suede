@@ -72,8 +72,8 @@ declare -A ANSWER
 for v in V1 V2 V3 V4; do
   read -r var value <<<"${VARIANT[$v]}"
   start=$(sudo wc -l < "$LOG")
-  out=$(docker exec "$DIND" timeout 300 docker run --rm -v /desolate-ca:/desolate-ca:ro \
-    -e NODE_EXTRA_CA_CERTS=/desolate-ca/ca.pem -e "$var=$value" -e DISABLE_AUTOUPDATER=1 -e CI=1 \
+  out=$(docker exec "$DIND" timeout 300 docker run --rm -v /desolate:/desolate:ro \
+    -e NODE_EXTRA_CA_CERTS=/desolate/ca/ca.pem -e "$var=$value" -e DISABLE_AUTOUPDATER=1 -e CI=1 \
     node:22-bookworm-slim sh -c 'npx -y @anthropic-ai/claude-code@latest -p "say ok" 2>&1 | tail -3' 2>&1)
   sleep 2
   lines=$(sudo tail -n +"$((start + 1))" "$LOG" | grep -a 'AUDIT .*host=[a-z.]*anthropic.com' | sed 's/^.*AUDIT/AUDIT/')

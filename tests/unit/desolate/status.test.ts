@@ -1,5 +1,5 @@
 /// <reference types="node" />
-// A target's status through `.git`: what /desolate-ca/desolate-status writes,
+// A target's status through `.git`: what /desolate/status writes,
 // where, and what the editor's reader (status.ts) makes of it -- including
 // what a project could put there to make the editor misbehave.
 

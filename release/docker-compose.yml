@@ -105,7 +105,7 @@ services:
     entrypoint:
       - /bin/sh
       - -c
-      - '[ -x /desolate-ca/install-ca.sh ] && /desolate-ca/install-ca.sh >/dev/null 2>&1 || true; exec dockerd-entrypoint.sh "$$@"'
+      - '[ -x /desolate/ca/install-ca.sh ] && /desolate/ca/install-ca.sh >/dev/null 2>&1 || true; exec dockerd-entrypoint.sh "$$@"'
       - --
     environment:
       DOCKER_TLS_CERTDIR: ""          # no TCP listener at all -> no TLS needed
@@ -134,7 +134,10 @@ services:
         soft: 524288
         hard: 524288
     volumes:
-      - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
+      - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
+      # Also at the old path, for devcontainers made before the move: their
+      # copy-on-write views of it name /desolate-ca as their lower.
+      - /var/lib/desolate-proxy/public:/desolate-ca:ro
       - inner-run:/run/inner          # the inner socket lives here
       - dind-sysbox-data:/var/lib/docker  # inner images/containers
       # MUST match the vscode mount path so devcontainer bind mounts resolve
@@ -201,7 +204,7 @@ services:
       VSCODE_PORT: ${VSCODE_PORT:-3000}
     entrypoint: ["/usr/local/bin/with-ca", "tsx", "/usr/local/lib/desolate/broker.ts"]
     volumes:
-      - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
+      - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
       - inner-run:/run/inner        # the daemon socket lives here ONLY
       - workspaces:/workspaces
       # Read-only for the same reason as dind's copy above: the orchestrator
@@ -342,7 +345,7 @@ services:
       - --connection-token=${VSCODE_TOKEN:?set VSCODE_TOKEN in .env}
     volumes:
       # NOTE: inner-run is deliberately ABSENT -- no docker socket here.
-      - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
+      - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
       - workspaces:/workspaces        # full read/write: the universal editor
       - vscode-home:/home/workspace   # settings + extensions persist here
       - broker-run:/run/broker        # narrow request channel to orchestrator

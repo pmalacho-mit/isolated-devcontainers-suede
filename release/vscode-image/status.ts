@@ -2,7 +2,7 @@
  * status.ts -- each target's status: a colour and a message, through `.git`.
  *
  * An agent, or anything else in a project, says how its work is going by
- * writing `<git-dir>/desolate-status.json` -- `/desolate-ca/desolate-status`
+ * writing `<git-dir>/desolate-status.json` -- `/desolate/status`
  * does it from inside a devcontainer -- and desolate SHOWS it: in the editor's
  * panel, in `desolate --status`, and to the Mac's harness through
  * `./cli.sh desolate --status --json` (docs/agents.md). It never acts on one.

@@ -3,6 +3,13 @@
 You are running inside a **devcontainer managed by `desolate`** (isolated-devcontainers-suede). The nesting is: macOS host → Colima Linux VM → an unprivileged Docker-in-Docker daemon (sysbox runtime) → your devcontainer. You are at the bottom of that stack, and several things you would normally reach are deliberately unreachable. Read this before diagnosing any network, TLS, or git failure — most of them are expected here and are not bugs in the project.
 
 - Your project lives at `/workspaces/<project>` or `/workspaces/<owner>/<repo>`. The in-container path mirrors the outer path.
+- `/desolate` is desolate's read-only directory, in every container. It holds:
+  - `ca/`: the proxy's CA and the scripts that trust it;
+  - `status`: say how your work is going, below;
+  - `net`: join your project's compose networks;
+  - `AGENTS.md`: this file.
+
+  A container made before it moved has it at `/desolate-ca/` instead, under the old flat names (`/desolate-ca/ca.pem`, `/desolate-ca/desolate-status`), and those still work there.
 - There is **no host Docker socket** anywhere in the stack. If this project declares the `docker-outside-of-docker` feature, `docker` here talks to **the project's own daemon** -- a sandboxed dind desolate runs for this project alone, which sees only this project's files (see "Docker" below). Otherwise there is no `docker` at all. `docker-in-docker` is refused: switch to `docker-outside-of-docker`.
 - Sibling projects' devcontainers are reachable over the network; the editor/orchestrator containers are not.
 - Dev servers: bind to `0.0.0.0`, not `127.0.0.1`. Ports declared in `customizations.desolate.ports` get forwarded to a host port (from 8080 up; `desolate` prints which). **The port you listen on is not the one the human opens.** When you print a URL for the human, read it from `DESOLATE_EXTERNAL_<port>_URL` (e.g. `$DESOLATE_EXTERNAL_5173_URL` for a server on 5173; `DESOLATE_EXTERNAL_<port>` is the bare host port). They are set in the editor's terminals and in login shells (`bash -l`); a port not declared in `devcontainer.json` has none, because nothing forwards it. Never add `appPort` to `devcontainer.json` — `desolate` hard-fails on it.
@@ -14,9 +21,9 @@ You are running inside a **devcontainer managed by `desolate`** (isolated-devcon
 With `docker-outside-of-docker`, `docker` and `docker compose` here drive a daemon that belongs to this project and its worktrees, and nothing else:
 
 - **Containers you start are siblings, not children.** They run beside this devcontainer on the project's daemon. `docker run -v $PWD:/x ...` works, because the project sits at the same path on both sides. Its `/workspaces` holds only this project, so a bind of `/workspaces` shows nothing of anyone else's.
-- **Reaching a compose service by name** needs this container on its network. desolate joins every network that exists when the project starts; for one a later `docker compose up` creates, run `/desolate-ca/desolate-net join --all` (or `join <network>`). `desolate-net list` shows what there is.
+- **Reaching a compose service by name** needs this container on its network. desolate joins every network that exists when the project starts; for one a later `docker compose up` creates, run `/desolate/net join --all` (or `join <network>`). `desolate-net list` shows what there is.
 - **A file a container wrote as root** (a compose service writing into the repo) can be reclaimed from here: `docker run --rm -v "$PWD":/w alpine chown -R "$(id -u):$(id -g)" /w`. The daemon sees only this project, so this reaches nothing else.
-- **TLS inside builds** still needs `/desolate-ca/trust-proxy-in-builds.sh` (below); the daemon's own pulls already trust the proxy.
+- **TLS inside builds** still needs `/desolate/ca/trust-proxy-in-builds.sh` (below); the daemon's own pulls already trust the proxy.
 - The daemon is **stopped when the project has been idle a while** and started again on the next `desolate <project>` -- images and build cache survive; containers you left running do not.
 
 ## Network: everything goes through an intercepting proxy
@@ -82,10 +89,10 @@ Plain-HTTP `apt` is unaffected, which is why this often doesn't surface until th
 - **Builds you run yourself** (your own `compose.yml`, `docker build` inside the devcontainer) are not, and need this script, published into every devcontainer:
 
 ```bash
-/desolate-ca/trust-proxy-in-builds.sh --service <service> --image <base-image>
+/desolate/ca/trust-proxy-in-builds.sh --service <service> --image <base-image>
 ```
 
-Note the path is `/desolate-ca/`, not `/desolate/`. It derives `desolate-ca/<base-image>` with the CA installed plus the TLS env vars above, and writes a gitignored `compose.override.yml` pointing that service's build at it. Your `Dockerfile` and `compose.yml` are never modified.
+Note the path is `/desolate/ca/`. (A container made before desolate's directory moved has it at `/desolate-ca/`, and both spellings work there.) It derives `desolate-ca/<base-image>` with the CA installed plus the TLS env vars above, and writes a gitignored `compose.override.yml` pointing that service's build at it. Your `Dockerfile` and `compose.yml` are never modified.
 
 - Run it **once per (service, base image)** — a second service on a different base needs its own run.
 - **Never pass `--pull`** to the subsequent build; BuildKit will try to fetch `desolate-ca/*` from a registry and fail with `pull access denied`.
@@ -96,7 +103,7 @@ Note the path is `/desolate-ca/`, not `/desolate/`. It derives `desolate-ca/<bas
 - **Builds that go through neither compose nor buildx** — anything driven by an SDK (`dockerode`, `docker-py`, `testcontainers`, the Go client) posting to the Engine API, or plain `docker build` with no buildx — cannot be handed a named build context at all. There is nothing to override. Point the base image's own tag at the derivative instead:
 
 ```bash
-/desolate-ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
+/desolate/ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
 ```
 
 `FROM node:22-bookworm-slim` in this daemon then resolves to the CA-trusting image for every builder that reads the local image store. The Dockerfile stays unmodified and production-clean. `--unshadow` puts the upstream image back. Two things to know: a later `docker pull node:22-bookworm-slim` silently restores the untrusting image (re-run the script), and the tag is lost when the container is rebuilt.
@@ -132,16 +139,16 @@ Environment variables may contain **placeholders** (e.g. `MYAPP-OPENAI-KEY`) rat
 - Never `COPY .env` or `ARG` a real credential into an image; layers are permanent.
 - Files you cannot delete because a container wrote them as root: with a daemon of your own, reclaim them yourself (the Docker section above). Without one, ask the human to run `./cli.sh reclaim <project> [<path>]` on the Mac. `./cli.sh worktree remove` does it before it removes anything.
 
-## Saying how it's going: `/desolate-ca/desolate-status`
+## Saying how it's going: `/desolate/status`
 
 Your target -- the project's tree, or this worktree -- has one status, a colour and a one-line message, that the human sees beside it in the editor's panel and a harness reads from the Mac. Set it whenever what you need changes:
 
 ```bash
-/desolate-ca/desolate-status set blue   "working: issue #42"
-/desolate-ca/desolate-status set orange "needs a human: which API version?"
-/desolate-ca/desolate-status set red    "authentication failed"
-/desolate-ca/desolate-status set green  "ready for a PR on issue/42-headers"
-/desolate-ca/desolate-status clear
+/desolate/status set blue   "working: issue #42"
+/desolate/status set orange "needs a human: which API version?"
+/desolate/status set red    "authentication failed"
+/desolate/status set green  "ready for a PR on issue/42-headers"
+/desolate/status clear
 ```
 
 - Colours: `gray`, `blue`, `green`, `yellow`, `orange`, `red`. Unless your task says otherwise: blue working, orange needs a human, red failed, green done.

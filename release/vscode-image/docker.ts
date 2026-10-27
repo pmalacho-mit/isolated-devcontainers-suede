@@ -236,7 +236,7 @@ export interface DindSpec {
  *  /var/run/docker.sock ALIAS -- what docker-outside-of-docker's own mount
  *  binds from (sibling-feature.sh F1/F3). */
 const DIND_ENTRYPOINT =
-  '[ -x /desolate-ca/install-ca.sh ] && /desolate-ca/install-ca.sh >/dev/null 2>&1 || true; ' +
+  '[ -x /desolate/ca/install-ca.sh ] && /desolate/ca/install-ca.sh >/dev/null 2>&1 || true; ' +
   'mkdir -p /etc/docker && printf "%s" "$DESOLATE_DAEMON_JSON" > /etc/docker/daemon.json; ' +
   'ln -sf /run/dind-sock/docker.sock /var/run/docker.sock; ' +
   'exec dockerd-entrypoint.sh "$@"';
@@ -278,6 +278,10 @@ const dindRunArgv = (spec: DindSpec) => [
   `type=volume,source=${spec.volumes.serverDist},target=/server-dist,readonly`,
   "--mount",
   `type=volume,source=${spec.volumes.health},target=/desolate-health,readonly`,
+  "--mount",
+  `type=bind,source=${spec.caDirectory},target=/desolate,readonly`,
+  // And at the old path: a devcontainer made before the move names it as the
+  // lower of its view (overlay.ts LEGACY_DIR).
   "--mount",
   `type=bind,source=${spec.caDirectory},target=/desolate-ca,readonly`,
   "--entrypoint",

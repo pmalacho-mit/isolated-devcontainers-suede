@@ -292,7 +292,7 @@ fi
 # =========================================================================
 group "E7: a project cannot poison the shared CA scripts"
 # =========================================================================
-# /desolate-ca/install-ca.sh is executed with `docker exec -u 0` in EVERY
+# /desolate/ca/install-ca.sh is executed with `docker exec -u 0` in EVERY
 # devcontainer by installProxyCa(), and by dind's own entrypoint. Shared and
 # writable, poisoning it once buys ROOT execution in every project and in the
 # daemon holding them all -- strictly worse than the editor binary in E6. Same
@@ -300,15 +300,15 @@ group "E7: a project cannot poison the shared CA scripts"
 if [ -z "${DEVC:-}" ]; then
   skip "E7 CA poisoning" "no example-project devcontainer is running"
 else
-  CA_BEFORE=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
+  CA_BEFORE=$(docker exec "$C_DIND" sha256sum /desolate/ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
   # Keep the output. Same lesson as E6: a write that never happened leaves the
   # hash unchanged and the assertion green, having defended against nothing.
   CA_ATTACK=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" \
-    sh -c 'echo POISONED > /desolate-ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
+    sh -c 'echo POISONED > /desolate/ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
   # And the privileged escalation the read-only flag could not stop.
   CA_ATTACK2=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
-    'mount -o remount,bind,rw /desolate-ca 2>&1; echo POISONED > /desolate-ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
-  CA_AFTER=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
+    'mount -o remount,bind,rw /desolate 2>&1; echo POISONED > /desolate/ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
+  CA_AFTER=$(docker exec "$C_DIND" sha256sum /desolate/ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
 
   # The positive control: the write must have been ATTEMPTED and REFUSED by the
   # filesystem, not skipped because the path was absent or the exec failed.

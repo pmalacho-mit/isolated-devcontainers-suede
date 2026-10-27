@@ -44,10 +44,10 @@ It is the Mac's alone. The editor has no daemon access, and giving it a way into
 Every target has one status: a colour and a one-line message. An agent sets it from inside its devcontainer:
 
 ```bash
-/desolate-ca/desolate-status set orange "needs a human: which API version?"
-/desolate-ca/desolate-status set green  "ready for a PR"
-/desolate-ca/desolate-status set red    "authentication failed"
-/desolate-ca/desolate-status clear
+/desolate/status set orange "needs a human: which API version?"
+/desolate/status set green  "ready for a PR"
+/desolate/status set red    "authentication failed"
+/desolate/status clear
 ```
 
 Colours: `gray`, `blue`, `green`, `yellow`, `orange`, `red`. What they mean is the harness's to decide; desolate only shows them. A useful convention:

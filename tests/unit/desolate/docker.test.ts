@@ -379,8 +379,8 @@ describe("exec and helper containers", () => {
     // install-ca.sh writes to the system trust store; the devcontainer's
     // default user is usually not root.
     const { docker, calls } = recorder();
-    docker.container.execAsRoot("cid", ["/desolate-ca/install-ca.sh"]);
-    assert.deepEqual(calls[0], ["exec", "-u", "0", "cid", "/desolate-ca/install-ca.sh"]);
+    docker.container.execAsRoot("cid", ["/desolate/ca/install-ca.sh"]);
+    assert.deepEqual(calls[0], ["exec", "-u", "0", "cid", "/desolate/ca/install-ca.sh"]);
   });
 
   test("the docker-in-docker probe is one exec, spelled once", () => {
@@ -431,7 +431,7 @@ describe("exec and helper containers", () => {
 
   test("a helper never receives a bind mount of a shared directory", () => {
     // -v <name>:<target> is a named volume; -v /path:<target> is a bind, and a
-    // bind of /server-dist or /desolate-ca is the poisonable shape.
+    // bind of /server-dist or /desolate is the poisonable shape.
     const { docker, calls } = recorder();
     docker.inVolume("alpine:3", "myapp-vscode-server", "/vscode-server", ["test", "-e", "/x"]);
     const mount = calls[0][calls[0].indexOf("-v") + 1];
@@ -492,15 +492,15 @@ describe("images", () => {
   test("the build reads its Dockerfile from stdin, never from disk", () => {
     // Writing it out would put a file the editor could race into the build.
     const { docker, calls, built } = recorder();
-    docker.image.build("desolate-ca/base:abc", "FROM alpine\n", "/desolate-ca");
-    assert.deepEqual(calls[0], ["build", "-t", "desolate-ca/base:abc", "-f", "-", "/desolate-ca"]);
+    docker.image.build("desolate-ca/base:abc", "FROM alpine\n", "/desolate/ca");
+    assert.deepEqual(calls[0], ["build", "-t", "desolate-ca/base:abc", "-f", "-", "/desolate/ca"]);
     assert.deepEqual(built, ["FROM alpine\n"]);
   });
 
   test("the build context is the CA directory, so ca.pem is COPYable", () => {
     const { docker, calls } = recorder();
-    docker.image.build("t", "FROM alpine", "/desolate-ca");
-    assert.equal(calls[0].at(-1), "/desolate-ca");
+    docker.image.build("t", "FROM alpine", "/desolate/ca");
+    assert.equal(calls[0].at(-1), "/desolate/ca");
   });
 });
 
@@ -515,7 +515,7 @@ describe("a worktree's sandbox", () => {
   const argvFor = (op: "checkout" | "changes") => {
     const { runner, calls } = recorder();
     const docker = createDocker(runner);
-    if (op === "checkout") docker.checkoutWorktree({ ...spec, caFile: "/desolate-ca/ca.pem" });
+    if (op === "checkout") docker.checkoutWorktree({ ...spec, caFile: "/desolate/ca/ca.pem" });
     else docker.worktreeChanges(spec);
     return calls[0];
   };
@@ -545,7 +545,7 @@ describe("a worktree's sandbox", () => {
       "600",
       "git",
       "-c",
-      "http.sslCAInfo=/desolate-ca/ca.pem",
+      "http.sslCAInfo=/desolate/ca/ca.pem",
       "checkout",
       "--force",
     ]);
@@ -640,6 +640,15 @@ describe("a project dind's create argv", () => {
     assert.ok(all.includes("type=volume,source=dind-data-acme__widgets,target=/var/lib/docker"));
     for (const shared of ["desolate_server-dist", "desolate_inner-health", "/var/lib/desolate-proxy/public"])
       assert.match(all.find((m) => m.includes(shared))!, /,readonly$/, shared);
+  });
+
+  test("has desolate's directory at /desolate, and at /desolate-ca for views made before the move", () => {
+    const ca = mounts(argvFor()).filter((m) => m.includes("/var/lib/desolate-proxy/public"));
+    assert.deepEqual(ca, [
+      "type=bind,source=/var/lib/desolate-proxy/public,target=/desolate,readonly",
+      "type=bind,source=/var/lib/desolate-proxy/public,target=/desolate-ca,readonly",
+    ]);
+    assert.match(argvFor().join(" "), /\/desolate\/ca\/install-ca\.sh/, "the entrypoint installs the CA from its new path");
   });
 
   test("is bounded: memory, pids and cpus", () => {

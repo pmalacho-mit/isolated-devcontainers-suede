@@ -23,7 +23,8 @@ mkdir -p "$OUT"
 NET=desolate-ext-test EDITOR=desolate-ext-editor BROWSER=desolate-ext-browser
 TOKEN=ext-test-token
 PLAYWRIGHT=mcr.microsoft.com/playwright:v1.49.1-noble
-CA=${DESOLATE_TEST_CA:-/desolate-ca/ca.pem}
+CA=${DESOLATE_TEST_CA:-/desolate/ca/ca.pem}
+[ -n "${DESOLATE_TEST_CA:-}" ] || [ -f "$CA" ] || CA=/desolate-ca/ca.pem   # a devcontainer made before the move
 
 cleanup() { docker rm -f "$EDITOR" "$BROWSER" >/dev/null 2>&1; docker network rm "$NET" >/dev/null 2>&1; }
 trap '[ -n "${DESOLATE_TEST_KEEP:-}" ] || cleanup' EXIT

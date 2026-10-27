@@ -15,7 +15,8 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 # shellcheck source=../../lib/harness.sh
 . "$ROOT/tests/lib/harness.sh"
 DIND=desolate-mirror-test BASE=alpine:3.20
-CA=${DESOLATE_TEST_CA:-/desolate-ca/ca.pem}
+CA=${DESOLATE_TEST_CA:-/desolate/ca/ca.pem}
+[ -n "${DESOLATE_TEST_CA:-}" ] || [ -f "$CA" ] || CA=/desolate-ca/ca.pem   # a devcontainer made before the move
 RUNTIME=(--privileged)
 docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc && RUNTIME=(--runtime sysbox-runc)
 
@@ -30,17 +31,17 @@ trap '[ -n "${DESOLATE_TEST_KEEP:-}" ] || cleanup' EXIT
 cleanup
 docker run -d --name "$DIND" "${RUNTIME[@]}" -e DOCKER_TLS_CERTDIR= -e "DAEMON_JSON=$DAEMON_JSON" \
   --entrypoint sh docker:29-dind -c '
-    mkdir -p /etc/docker /desolate-ca && printf "%s" "$DAEMON_JSON" > /etc/docker/daemon.json
-    while [ ! -s /desolate-ca/ca.pem ]; do sleep 0.2; done
-    cp /desolate-ca/ca.pem /usr/local/share/ca-certificates/desolate.crt && update-ca-certificates >/dev/null 2>&1
+    mkdir -p /etc/docker /desolate/ca && printf "%s" "$DAEMON_JSON" > /etc/docker/daemon.json
+    while [ ! -s /desolate/ca/ca.pem ]; do sleep 0.2; done
+    cp /desolate/ca/ca.pem /usr/local/share/ca-certificates/desolate.crt && update-ca-certificates >/dev/null 2>&1
     exec dockerd-entrypoint.sh' >/dev/null || { fail "start a dind"; summary; exit 1; }
 # The proxy's CA where a devcontainer has it (the dind pulls through the proxy
 # too), and the script beside it. Outside desolate, a CA of no consequence.
-if [ -f "$CA" ]; then docker cp "$CA" "$DIND:/desolate-ca/ca.pem" >/dev/null
+if [ -f "$CA" ]; then docker cp "$CA" "$DIND:/desolate/ca/ca.pem" >/dev/null
 else SCRATCH=$(mktemp -d)
      openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=test -days 1 -keyout /dev/null -out "$SCRATCH/ca.pem" 2>/dev/null \
-       && docker cp "$SCRATCH/ca.pem" "$DIND:/desolate-ca/ca.pem" >/dev/null; fi
-docker cp "$RELEASE/proxy/container/trust-proxy-in-builds.sh" "$DIND:/desolate-ca/" >/dev/null
+       && docker cp "$SCRATCH/ca.pem" "$DIND:/desolate/ca/ca.pem" >/dev/null; fi
+docker cp "$RELEASE/proxy/container/trust-proxy-in-builds.sh" "$DIND:/desolate/ca/" >/dev/null
 in_dind() { docker exec -i "$DIND" "$@"; }
 for _ in $(seq 1 60); do in_dind docker info >/dev/null 2>&1 && break; sleep 1; done
 
@@ -87,7 +88,7 @@ group "before a shadow, the Engine-API build gets the pristine base"
 assert_eq "FROM $BASE" "$(engine_build)" "PRISTINE"
 
 group "--shadow: the mirror serves the derivative under the base's name"
-OUT=$(in_dind sh -c "cd /tmp && sh /desolate-ca/trust-proxy-in-builds.sh --image $BASE --shadow" 2>&1)
+OUT=$(in_dind sh -c "cd /tmp && sh /desolate/ca/trust-proxy-in-builds.sh --image $BASE --shadow" 2>&1)
 assert_contains "the script says so" "$OUT" "the mirror serves it as library/alpine:3.20"
 assert_eq "the mirror runs on the dind's loopback" \
   "$(in_dind docker port desolate-mirror 5000/tcp 2>/dev/null)" "127.0.0.1:5995"
@@ -98,7 +99,7 @@ assert_eq "and so does a pull" \
   "$(in_dind docker run --rm "$BASE" sh -c 'test -f /usr/local/share/ca-certificates/desolate-proxy.crt && echo DERIVATIVE || echo PRISTINE')" "DERIVATIVE"
 
 group "--unshadow takes it out of the mirror again"
-OUT=$(in_dind sh -c "cd /tmp && sh /desolate-ca/trust-proxy-in-builds.sh --image $BASE --unshadow" 2>&1)
+OUT=$(in_dind sh -c "cd /tmp && sh /desolate/ca/trust-proxy-in-builds.sh --image $BASE --unshadow" 2>&1)
 assert_contains "the script says so" "$OUT" "the mirror no longer serves library/alpine:3.20"
 assert_eq "the Engine-API build gets the pristine base" "$(engine_build)" "PRISTINE"
 

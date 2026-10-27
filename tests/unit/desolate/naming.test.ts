@@ -43,14 +43,14 @@ describe("a target with no worktree is named exactly as it was", () => {
       view: "acme__widgets-vscode-server",
       data: "acme__widgets-vscode-server-data",
     });
-    assert.deepEqual(overlayVolumes(nested, "desolate-ca"), {
-      view: "acme__widgets-desolate-ca",
-      data: "acme__widgets-desolate-ca-data",
+    assert.deepEqual(overlayVolumes(nested, "desolate"), {
+      view: "acme__widgets-desolate",
+      data: "acme__widgets-desolate-data",
     });
     // and those two are the whole set, so no third volume appears unannounced
     assert.deepEqual(
       SHARED_DIRECTORIES.map(({ name }) => name),
-      ["vscode-server", "desolate-ca"],
+      ["vscode-server", "desolate"],
     );
   });
 

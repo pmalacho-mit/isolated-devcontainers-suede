@@ -538,6 +538,27 @@ the editor's terminal (`desolate`, `worktree`), and its log is the
 Restricted Mode, which is where this editor should stay for a folder of other
 people's code. Resetting a dind stays on the Mac: `./cli.sh dind reset`.
 
+### `/desolate` inside every container
+
+Every devcontainer, and every dind, has desolate's directory read-only at
+`/desolate`. It comes from the VM, and each project gets its own copy-on-write
+view of it:
+
+| Path | What it is |
+| --- | --- |
+| `/desolate/ca/ca.pem` | the proxy's CA (the public certificate only) |
+| `/desolate/ca/install-ca.sh` | trusts it in this container; desolate runs it as root on every start |
+| `/desolate/ca/trust-proxy-in-builds.sh` | trusts it in this container's own builds ("Building your own containers") |
+| `/desolate/status` | an agent's status, through `.git` ([docs/agents.md](../docs/agents.md)) |
+| `/desolate/net` | joins this devcontainer to its project's compose networks |
+| `/desolate/AGENTS.md` | what an agent in here should know |
+
+It used to be `/desolate-ca`, flat (`/desolate-ca/ca.pem`,
+`/desolate-ca/desolate-status`). A container made before the move keeps
+that mount until it is rebuilt, and the old names still resolve there. In a
+new container, `/desolate-ca` is a link to `/desolate`, so a project's own config
+that names the old path keeps working. The old names go in a later release.
+
 ## Privilege separation (why the editor can't touch the daemon)
 
 The editor is a **universal file viewer/editor** over `/workspaces` -- you can
@@ -949,7 +970,7 @@ it. `desolate` publishes a script into every devcontainer for this -- run it
 from **your own terminal inside the devcontainer**:
 
 ```bash
-/desolate-ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim
+/desolate/ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim
 ```
 
 That does two things:
@@ -1023,7 +1044,7 @@ trust-proxy: deriving desolate-ca/python:3.12-slim
     | LABEL desolate.ca.fingerprint=<sha256 of the CA>
     | USER vscode
 
-             build context: /desolate-ca  (contains only the public CA cert)
+             build context: /desolate/ca  (contains only the public CA cert)
 ```
 
 Use `--print-recipe` to read it _before_ anything is built. The recipe is shown
@@ -1048,7 +1069,7 @@ For those, deliver the same derivative by pointing the base image's own tag at
 it, in this devcontainer's daemon:
 
 ```bash
-/desolate-ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
+/desolate/ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
 ```
 
 `FROM node:22-bookworm-slim` in that daemon now resolves to the CA-trusting
@@ -1459,7 +1480,7 @@ primitives:
 ```
 
 **Status, through `.git`.** An agent says how it is going with
-`/desolate-ca/desolate-status set <color> <message>` -- `orange` "needs a
+`/desolate/status set <color> <message>` -- `orange` "needs a
 human", `green` "ready for a PR", `red` "authentication failed". It is a file
 in that target's git dir: never committed, never pushed, seen by exactly that
 project's containers. desolate shows it -- the icon's colour and the message in
@@ -1841,7 +1862,7 @@ Boundaries, strongest first:
   | Mount            | Executed by                                                                          | If poisoned                                     |
   | ---------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------- |
   | `/vscode-server` | every devcontainer, on start                                                         | code execution as each project's user           |
-  | `/desolate-ca`   | `install-ca.sh`, via `docker exec -u 0` in every devcontainer, and dind's entrypoint | **root** execution in every project and in dind |
+  | `/desolate`      | `ca/install-ca.sh`, via `docker exec -u 0` in every devcontainer, and dind's entrypoint | **root** execution in every project and in dind |
 
   Shared and writable, either is cross-project code execution needing no
   privilege at all -- overwrite one file, and every other project runs it.

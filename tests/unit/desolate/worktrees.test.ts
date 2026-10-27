@@ -260,9 +260,9 @@ describe("the checkout sandbox's reach", () => {
     const feature = box.worktree("acme/widgets", "feature123");
     const project = join(box.workspaces, "acme/widgets");
     assert.deepEqual(sandboxMounts(feature), [projectRoot(feature)]);
-    assert.deepEqual(checkoutMounts(feature, "acme__widgets--wt--feature123-desolate-ca", "/desolate-ca"), [
+    assert.deepEqual(checkoutMounts(feature, "acme__widgets--wt--feature123-desolate", "/desolate"), [
       `type=bind,source=${project},target=${project}`,
-      "type=volume,source=acme__widgets--wt--feature123-desolate-ca,target=/desolate-ca,readonly",
+      "type=volume,source=acme__widgets--wt--feature123-desolate,target=/desolate,readonly",
     ]);
   });
 
@@ -275,7 +275,7 @@ describe("the checkout sandbox's reach", () => {
     box.worktree("acme/widgets", "other");
     const feature = box.worktree("acme/widgets", "feature123");
     const project = join(box.workspaces, "acme/widgets");
-    const binds = checkoutMounts(feature, "ca", "/desolate-ca").filter((m) => m.startsWith("type=bind,"));
+    const binds = checkoutMounts(feature, "ca", "/desolate").filter((m) => m.startsWith("type=bind,"));
     assert.deepEqual(binds.map((mount) => /source=([^,]+)/.exec(mount)![1]), [project]);
   });
 });

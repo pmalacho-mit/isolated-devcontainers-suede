@@ -574,6 +574,10 @@ describe("mounts", () => {
         mounts: ["source=/desolate-ca,target=/desolate-ca,type=bind"],
       }),
     );
+    // desolate's directory at its own path, and only that exact path.
+    allows(spec({ image: "x", mounts: ["source=/desolate,target=/desolate,type=bind"] }));
+    refuses(spec({ image: "x", mounts: ["source=/desolate/../workspaces,target=/w,type=bind"] }), /bind/);
+    refuses(spec({ image: "x", mounts: ["source=/desolate-cache,target=/w,type=bind"] }), /bind/);
   });
 
   test("object-form mounts are normalised the same way as string-form", () => {

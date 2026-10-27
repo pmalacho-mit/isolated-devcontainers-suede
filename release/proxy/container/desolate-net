@@ -1,9 +1,9 @@
 #!/bin/sh
 # desolate-net -- join THIS devcontainer to a network on its project's daemon.
 #
-#   /desolate-ca/desolate-net join <network>...   join these
-#   /desolate-ca/desolate-net join --all          every network on the daemon
-#   /desolate-ca/desolate-net list                what there is, and what you are on
+#   /desolate/net join <network>...   join these
+#   /desolate/net join --all          every network on the daemon
+#   /desolate/net list                what there is, and what you are on
 #
 # Why it exists. With docker-outside-of-docker, the containers you start are
 # SIBLINGS of this one on your project's own daemon, not children of it, and

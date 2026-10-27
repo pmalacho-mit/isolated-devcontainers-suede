@@ -274,7 +274,7 @@ if docker exec desolate-dind test -f /usr/local/share/ca-certificates/desolate-p
   ok "dind has the proxy CA in its trust store"
 else
   bad "dind has NOT installed the proxy CA -- every image pull will fail with x509"
-  note "docker exec -u 0 desolate-dind /desolate-ca/install-ca.sh   # now reports the real reason"
+  note "docker exec -u 0 desolate-dind /desolate/ca/install-ca.sh   # now reports the real reason"
   note "then: docker restart desolate-dind"
 fi
 
@@ -285,7 +285,7 @@ else
   case "$RUNOUT" in
     *x509*|*"unknown authority"*|*"certificate is not trusted"*)
       bad "inner run failed: dind does not trust the proxy CA (x509)"
-      note "docker exec -u 0 desolate-dind /desolate-ca/install-ca.sh; docker restart desolate-dind" ;;
+      note "docker exec -u 0 desolate-dind /desolate/ca/install-ca.sh; docker restart desolate-dind" ;;
     *"no such host"*|*"server misbehaving"*|*"Temporary failure in name resolution"*)
       bad "inner run failed: name resolution inside dind"
       note "desolate-dnsmasq on :5353 and the nftables dport-53 redirect are the path" ;;
@@ -428,10 +428,10 @@ if vm_ssh systemctl is-active --quiet desolate-proxy 2>/dev/null; then
   PERM=$(vm_ssh sudo stat -c '%a' /etc/desolate-proxy/settings.json 2>/dev/null)
   [ "$PERM" = "600" ] && ok "settings.json is 0600" \
     || bad "settings.json mode is '$PERM' (want 600) -- secret values may be readable"
-  if docker exec desolate-orchestrator test -f /desolate-ca/ca.pem 2>/dev/null; then
+  if docker exec desolate-orchestrator test -f /desolate/ca/ca.pem 2>/dev/null; then
     ok "proxy CA is mounted into the stack"
   else
-    bad "CA missing at /desolate-ca/ca.pem -- TLS through the proxy will fail"
+    bad "CA missing at /desolate/ca/ca.pem -- TLS through the proxy will fail"
     note "did install.sh run? it creates /var/lib/desolate-proxy/public in the VM"
   fi
   # Interception check: a request from inside the stack should be MITM'd.

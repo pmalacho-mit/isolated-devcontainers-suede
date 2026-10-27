@@ -26,8 +26,8 @@
 # VM, and this would put a privileged dind on it.
 #
 # Needs: sudo, nft, docker, a python with mitmproxy 11.0.2 (DESOLATE_MITMDUMP,
-# or the venv tests/README.md describes), and /desolate-ca (this repo's own
-# devcontainer has it) to derive a CA-trusting build base. Installs dnsmasq-base
+# or the venv tests/README.md describes), and /desolate/ca or /desolate-ca (this
+# repo's own devcontainer has one) to derive a CA-trusting build base. Installs dnsmasq-base
 # with apt if it is missing. Creates the `desolate-proxy` system user if it is
 # missing, and removes it again on `down` only if it created it.
 set -uo pipefail
@@ -36,7 +36,10 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd "$HERE/../../.." && pwd)
 RELEASE="$ROOT/release"
 STATE=${DESOLATE_NESTED_STATE:-/tmp/desolate-nested}
-CONFDIR=/var/lib/desolate-proxy        # compose mounts $CONFDIR/public as /desolate-ca
+CONFDIR=/var/lib/desolate-proxy        # compose mounts $CONFDIR/public as /desolate
+# This devcontainer's own copy: /desolate/ca, or before the move /desolate-ca.
+TRUST_IN_BUILDS=/desolate/ca/trust-proxy-in-builds.sh
+[ -x "$TRUST_IN_BUILDS" ] || TRUST_IN_BUILDS=/desolate-ca/trust-proxy-in-builds.sh
 INGRESS_ROOT=/run/desolate-ingress     # desolate-ingress.tmpfiles
 PROXY_USER=desolate-proxy
 INGRESS_USER=desolate-ingress
@@ -145,11 +148,14 @@ start_proxy() {
   ok "mitmproxy + addon.py on :18080 as $PROXY_USER ($mitmdump)"
 
   # desolate-proxy-ca.service: the cert and the two scripts, never the key.
-  sudo install -m 0644 "$CONFDIR/mitmproxy-ca-cert.pem" "$CONFDIR/public/ca.pem"
-  sudo install -m 0755 "$RELEASE/proxy/container/install-ca.sh" "$CONFDIR/public/install-ca.sh"
-  sudo install -m 0755 "$RELEASE/proxy/container/trust-proxy-in-builds.sh" "$CONFDIR/public/trust-proxy-in-builds.sh"
-  sudo install -m 0755 "$RELEASE/proxy/container/desolate-net" "$CONFDIR/public/desolate-net"
-  sudo install -m 0755 "$RELEASE/proxy/container/desolate-status" "$CONFDIR/public/desolate-status"
+  # The layout install.sh makes: ca/, the helpers, AGENTS.md.
+  sudo install -d -m 0755 "$CONFDIR/public/ca"
+  sudo install -m 0644 "$CONFDIR/mitmproxy-ca-cert.pem" "$CONFDIR/public/ca/ca.pem"
+  sudo install -m 0755 "$RELEASE/proxy/container/install-ca.sh" "$CONFDIR/public/ca/install-ca.sh"
+  sudo install -m 0755 "$RELEASE/proxy/container/trust-proxy-in-builds.sh" "$CONFDIR/public/ca/trust-proxy-in-builds.sh"
+  sudo install -m 0755 "$RELEASE/proxy/container/desolate-status" "$CONFDIR/public/status"
+  sudo install -m 0755 "$RELEASE/proxy/container/desolate-net" "$CONFDIR/public/net"
+  sudo install -m 0644 "$RELEASE/AGENTS.md" "$CONFDIR/public/AGENTS.md"
   if ! alive "$STATE/ca.pid"; then
     as_proxy "$STATE/ca.log" "$(dirname "$mitmdump")/python3" -m http.server 18081 \
       --directory "$CONFDIR/public" > "$STATE/ca.pid"
@@ -211,8 +217,8 @@ load_ruleset() {
 }
 
 shadow_build_base() {
-  [ -x /desolate-ca/trust-proxy-in-builds.sh ] || die "no /desolate-ca/trust-proxy-in-builds.sh: this is not a desolate devcontainer"
-  /desolate-ca/trust-proxy-in-builds.sh --image "$BUILD_BASE" --shadow >"$STATE/shadow.log" 2>&1 \
+  [ -x "$TRUST_IN_BUILDS" ] || die "no $TRUST_IN_BUILDS: this is not a desolate devcontainer"
+  "$TRUST_IN_BUILDS" --image "$BUILD_BASE" --shadow >"$STATE/shadow.log" 2>&1 \
     || { tail -5 "$STATE/shadow.log"; die "could not derive a CA-trusting $BUILD_BASE"; }
   touch "$STATE/shadowed"
   ok "$BUILD_BASE shadowed with the outer proxy's CA, for the image build"
@@ -372,7 +378,7 @@ down() {
   done
   sudo nft delete table inet desolate 2>/dev/null && ok "nftables table removed"
   if [ -f "$STATE/shadowed" ]; then
-    /desolate-ca/trust-proxy-in-builds.sh --image "$BUILD_BASE" --unshadow >/dev/null 2>&1 \
+    "$TRUST_IN_BUILDS" --image "$BUILD_BASE" --unshadow >/dev/null 2>&1 \
       && ok "$BUILD_BASE unshadowed" && rm -f "$STATE/shadowed"
   fi
   sudo rm -rf "$INGRESS_ROOT"

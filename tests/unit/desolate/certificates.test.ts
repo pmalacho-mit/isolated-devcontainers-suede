@@ -350,8 +350,9 @@ describe("the shadowImages job", () => {
   test("it calls the script that is actually shipped", () => {
     assert.match(
       body,
-      /\/desolate-ca\/trust-proxy-in-builds\.sh --image "\$1" --shadow/,
+      /"\$shadower" --image "\$1" --shadow/,
     );
+    assert.match(body, /shadower=\$\(ca_script trust-proxy-in-builds\.sh\)/, "found in /desolate/ca, or /desolate-ca");
     assert.ok(
       fs.existsSync(
         path.join(RELEASE, "proxy/container/trust-proxy-in-builds.sh"),
@@ -374,15 +375,20 @@ describe("installing the CA, and the daemon restart it forces", () => {
     );
   });
 
-  test("what it does reads as three steps, in this order", () => {
+  test("what it does reads as four steps, in this order", () => {
     // Trust the CA; check there is a daemon that read the old store; put it
     // back on its feet. Any of those failing has exactly one meaning, and none
     // of them is spelled out in more than one place.
     assert.deepEqual(steps, [
-      "/desolate-ca/install-ca.sh >/dev/null 2>&1 || exit 1",
+      "installer=$(ca_script install-ca.sh) || exit 1",
+      '"$installer" >/dev/null 2>&1 || exit 1',
       "this_container_runs_a_daemon || exit 0",
       "restart_and_wait || { report_daemon_never_came_back; exit 1; }",
     ]);
+  });
+
+  test("it finds install-ca.sh where this container has it: /desolate/ca, or before the move /desolate-ca", () => {
+    assert.match(body, /for dir in \/desolate\/ca \/desolate-ca; do/);
   });
 
   test("a daemon that was already running is restarted", () => {

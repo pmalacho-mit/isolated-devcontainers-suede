@@ -100,17 +100,34 @@ else
 fi
 install -d -m 0750 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy
 # Public dir must exist before compose starts (dind bind-mounts it read-only).
-install -d -m 0755 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy/public
-install -m 0755 ../container/install-ca.sh /var/lib/desolate-proxy/public/install-ca.sh
-# Published for DEVELOPERS to run from inside their own devcontainer terminal,
-# where there is no desolate CLI and no access to the outer daemon. The
-# /desolate-ca mount is the only channel into a devcontainer, so anything a
-# developer needs to run in there has to arrive this way.
-install -m 0755 ../container/trust-proxy-in-builds.sh /var/lib/desolate-proxy/public/trust-proxy-in-builds.sh
-install -m 0755 ../container/desolate-net /var/lib/desolate-proxy/public/desolate-net
-install -m 0755 ../container/desolate-status /var/lib/desolate-proxy/public/desolate-status
+# Mounted read-only at /desolate in every container -- the only channel into a
+# devcontainer, so anything a developer or an agent needs in there arrives this
+# way:
+#   ca/ca.pem, ca/install-ca.sh, ca/trust-proxy-in-builds.sh   the proxy's CA
+#   status, net                                                helpers
+#   AGENTS.md                                                  how it all works
+# ca/ca.pem itself is written by desolate-proxy-ca.service, from mitmproxy.
+PUBLIC=/var/lib/desolate-proxy/public
+install -d -m 0755 -o desolate-proxy -g desolate-proxy "$PUBLIC" "$PUBLIC/ca"
+install -m 0755 ../container/install-ca.sh "$PUBLIC/ca/install-ca.sh"
+install -m 0755 ../container/trust-proxy-in-builds.sh "$PUBLIC/ca/trust-proxy-in-builds.sh"
+install -m 0755 ../container/desolate-status "$PUBLIC/status"
+install -m 0755 ../container/desolate-net "$PUBLIC/net"
+install -m 0644 ../../AGENTS.md "$PUBLIC/AGENTS.md"
+# The cert too, when mitmproxy has minted one: the link below points at it, and
+# the unit that normally writes it there may not be restarted by this run.
+if [ -f /var/lib/desolate-proxy/mitmproxy-ca-cert.pem ]; then
+  install -m 0644 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy/mitmproxy-ca-cert.pem "$PUBLIC/ca/ca.pem"
+fi
+# The old flat layout, as links into the new one: a container made before the
+# move still mounts this directory at /desolate-ca and names these paths, and
+# so may a project's own config. Removed in a later release.
+for old in ca.pem:ca/ca.pem install-ca.sh:ca/install-ca.sh trust-proxy-in-builds.sh:ca/trust-proxy-in-builds.sh \
+           desolate-status:status desolate-net:net; do
+  ln -sfn "${old#*:}" "$PUBLIC/${old%%:*}"
+done
 # The factory's helper, retired: a stale copy would still be on every PATH.
-rm -f /var/lib/desolate-proxy/public/desolate-work
+rm -f "$PUBLIC/desolate-work"
 install -m 0755 ssh-allow.sh /opt/desolate-proxy/ssh-allow.sh
 
 # Both bridges, because the stack is split across two networks and BOTH must be

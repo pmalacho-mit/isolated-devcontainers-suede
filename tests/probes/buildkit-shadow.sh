@@ -113,9 +113,9 @@ RUNTIME=(--runtime sysbox-runc)
 docker info --format '{{json .Runtimes}}' | grep -q sysbox-runc || RUNTIME=(--privileged)
 MIRROR=desolate-probe-mirror
 docker rm -f "$MIRROR" >/dev/null 2>&1
-docker run -d "${RUNTIME[@]}" --name "$MIRROR" -v /var/lib/desolate-proxy/public:/desolate-ca:ro --entrypoint sh docker:29-dind -c \
+docker run -d "${RUNTIME[@]}" --name "$MIRROR" -v /var/lib/desolate-proxy/public:/desolate:ro --entrypoint sh docker:29-dind -c \
   'mkdir -p /etc/docker && printf "%s" "{\"registry-mirrors\":[\"http://127.0.0.1:5000\"],\"insecure-registries\":[\"127.0.0.1:5000\"]}" > /etc/docker/daemon.json \
-   && { [ -f /desolate-ca/ca.pem ] && cp /desolate-ca/ca.pem /usr/local/share/ca-certificates/desolate.crt && update-ca-certificates >/dev/null 2>&1; true; } \
+   && { [ -f /desolate/ca/ca.pem ] && cp /desolate/ca/ca.pem /usr/local/share/ca-certificates/desolate.crt && update-ca-certificates >/dev/null 2>&1; true; } \
    && exec dockerd-entrypoint.sh' >/dev/null
 trap 'restore; docker rm -f "$MIRROR" >/dev/null 2>&1' EXIT
 for _ in $(seq 1 60); do docker exec "$MIRROR" docker info >/dev/null 2>&1 && break; sleep 2; done

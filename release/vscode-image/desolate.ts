@@ -65,6 +65,8 @@ import {
 } from "./docker.ts";
 import {
   CA_DIR,
+  DESOLATE_DIR,
+  LEGACY_VIEW,
   OVERLAY_KEY_LABEL,
   SERVER_DST,
   SHARED_DIRECTORIES,
@@ -890,13 +892,13 @@ const worktreeSandbox = (target: Target, mounts: string[]) => {
 
 function populateWorktree(target: Target): void {
   if (!worktrees.awaitsCheckout(target)) return;
-  const ca = SHARED_DIRECTORIES.find((mount) => mount.target === CA_DIR)!;
+  const ca = SHARED_DIRECTORIES.find((mount) => mount.target === DESOLATE_DIR)!;
 
   desolog(`checking out ${target.name} in a sandbox (first start) ...`);
   const code = docker.checkoutWorktree({
     ...worktreeSandbox(
       target,
-      worktrees.checkoutMounts(target, overlay.ensureVolume(target, ca), CA_DIR),
+      worktrees.checkoutMounts(target, overlay.ensureVolume(target, ca), DESOLATE_DIR),
     ),
     caFile: `${CA_DIR}/ca.pem`,
   });
@@ -1624,9 +1626,10 @@ function purgeTarget(target: Target): void {
   const id = devcontainerId(target.dir, /* includeStopped */ true);
   if (id) docker.container.remove([id]);
 
+  // The view of /desolate-ca too, from before the move, if this one has it.
   docker.volume.remove(
-    SHARED_DIRECTORIES.flatMap((mount) =>
-      Object.values(overlayVolumes(target, mount.name)),
+    [...SHARED_DIRECTORIES.map((mount) => mount.name), LEGACY_VIEW].flatMap((name) =>
+      Object.values(overlayVolumes(target, name)),
     ),
   );
 
