@@ -1481,7 +1481,11 @@ and is bound to the one project that may spend it:
 ```
 
 Every target of the project -- `main` and each worktree -- starts logged in; a
-worker in another project cannot spend it.
+worker in another project cannot spend it. For Claude Code on a subscription,
+`examples/factory/claude-harness.sh` does this per session instead. It keeps
+an `ANTHROPIC_API_KEY`, or a repository's own `apiKeyHelper`, from taking Claude
+off the subscription, because both outrank the OAuth token
+([docs/agents.md](../docs/agents.md)).
 
 **What is and is not a boundary.** A project's agents share one trust domain:
 any of them can write any target's status, so a status is the agent's claim --

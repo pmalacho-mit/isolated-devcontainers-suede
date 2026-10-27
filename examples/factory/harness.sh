@@ -8,8 +8,9 @@
 #
 #   1. no worktree issue-<n> yet: `cli.sh worktree add`, on branch issue/<n>;
 #   2. not running: start it;
-#   3. no agent started here yet: `cli.sh exec` one, in the background, with
-#      the issue as its task and desolate-status as its voice;
+#   3. no agent started here yet: start one with the issue as its task and
+#      desolate-status as its voice -- Claude Code in a tmux session, on your
+#      subscription (claude-harness.sh), unless FACTORY_AGENT names another;
 #   4. its status (`cli.sh desolate --status --json`):
 #        orange, red -- a comment on the issue, once per status;
 #        green       -- `cli.sh bundle` its branch, push it from <clone> (never
@@ -23,8 +24,9 @@
 #
 # Environment:
 #   DESOLATE_CLI         path to cli.sh (default: the one beside this checkout)
-#   FACTORY_AGENT        the agent command, words split on spaces
-#                        (default: claude -p); the task is its last argument
+#   FACTORY_AGENT        instead of claude-harness.sh: a command `cli.sh exec`
+#                        runs in the background, words split on spaces; the
+#                        task is its last argument (e.g. "claude -p")
 #   FACTORY_STATE        where it remembers what it did
 #                        (default: ~/.local/state/desolate-factory)
 set -euo pipefail
@@ -44,13 +46,16 @@ done
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CLI=${DESOLATE_CLI:-$HERE/../../release/cli.sh}
-read -r -a AGENT <<< "${FACTORY_AGENT:-claude -p}"
+AGENT=()
+[ -z "${FACTORY_AGENT:-}" ] || read -r -a AGENT <<< "$FACTORY_AGENT"
 STATE=${FACTORY_STATE:-$HOME/.local/state/desolate-factory}/${PROJECT//\//__}
 mkdir -p "$STATE"
 for tool in gh git jq; do
   command -v "$tool" >/dev/null || { echo "harness: needs $tool" >&2; exit 1; }
 done
 git -C "$CLONE" rev-parse --git-dir >/dev/null || { echo "harness: $CLONE is not a git clone" >&2; exit 1; }
+# Claude's token in the VM before anything starts (it asks, the first time).
+[ ${#AGENT[@]} -gt 0 ] || "$HERE/claude-harness.sh" auth "$PROJECT"
 DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
 
 log() { printf '%s harness: %s\n' "$(date +%H:%M:%S)" "$*"; }
@@ -93,9 +98,15 @@ tick() {
     fi
     if [ ! -e "$STATE/$name.agent" ]; then
       log "#$n: an agent"
+      if [ ${#AGENT[@]} -gt 0 ]; then
+        nohup "$CLI" exec "$PROJECT" --worktree "$name" -- "${AGENT[@]}" "$(task "$n" "$title" "$body")" \
+          </dev/null > "$STATE/$name.log" 2>&1 &
+      elif ! "$HERE/claude-harness.sh" start "$PROJECT" --worktree "$name" --task "$(task "$n" "$title" "$body")" \
+          </dev/null > "$STATE/$name.log" 2>&1; then
+        log "#$n: claude did not start ($(tail -n 1 "$STATE/$name.log")); trying again next tick"
+        continue
+      fi
       date -u +%FT%TZ > "$STATE/$name.agent"
-      nohup "$CLI" exec "$PROJECT" --worktree "$name" -- "${AGENT[@]}" "$(task "$n" "$title" "$body")" \
-        </dev/null > "$STATE/$name.log" 2>&1 &
       continue
     fi
 

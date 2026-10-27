@@ -112,11 +112,38 @@ Those choices belong to the harness, which is where they can change without chan
 The loop `examples/factory/harness.sh` sketches, per labelled issue:
 
 1. If there is no worktree `issue-<n>`: `worktree add` it, then start it.
-2. If no agent is running there: `exec` one in the background, with the task and a pointer to `desolate-status`.
+2. If no agent is running there, start one with the task and a pointer to `desolate-status`. By default that is `examples/factory/claude-harness.sh start`, below.
 3. Each tick, read `./cli.sh desolate --status --json`:
    - `orange` or `red`: tell a human (a comment on the issue, a notification);
    - `green`: `bundle` the branch, push it from the Mac's clone, and `gh pr create --draft`.
 4. When the PR is merged or the issue closed: `worktree remove` (refused while it holds uncommitted work).
+
+### Claude Code on your subscription: `examples/factory/claude-harness.sh`
+
+```bash
+examples/factory/claude-harness.sh auth   acme/widgets                      # once: the token, into the VM
+examples/factory/claude-harness.sh start  acme/widgets --worktree issue-42 --task "Fix #42: ..."
+examples/factory/claude-harness.sh attach acme/widgets --worktree issue-42  # watch it; ctrl-b d to leave
+examples/factory/claude-harness.sh verify acme/widgets                      # which secret each request carried
+```
+
+**`auth`** stores a `claude setup-token` token as the secret `DESOLATE-CLAUDE-<project>-OAUTH`. The secret is substituted only toward `api.anthropic.com`, and only for that project's own daemon.
+
+**`start`** runs `claude` in a detached tmux session in the target, with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. Several things outrank that token, measured on Claude Code 2.1.311:
+- `ANTHROPIC_API_KEY`;
+- `ANTHROPIC_AUTH_TOKEN`;
+- an `apiKeyHelper`, including one in the repository's own committed `.claude/settings.json`, which wins silently once the folder is trusted.
+
+So the launcher:
+- unsets those variables in Claude's environment;
+- blanks them through `--settings`, which beats the repository's settings;
+- hands the project's own `ANTHROPIC_API_KEY` back to Claude's shell commands only, so the code under test keeps it.
+
+It also pre-answers onboarding and the folder's trust dialog. Claude's own events become the target's status:
+- a failure, such as a failed login, sets red;
+- a permission prompt, or Claude idling while it waits for you, sets orange.
+
+**`verify`** reads the proxy's audit to check that the subscription token really was the one used.
 
 ## What changed to get here
 
