@@ -696,11 +696,16 @@ for dind in $(docker ps --filter label=desolate.dind --format '{{.Names}}'); do
 done
 [ -z "$published" ] && ok "no project dind publishes a port" \
   || bad "project dinds publish ports:$published -- every port goes through the ingress"
-if vm_ssh sudo nft list chain inet desolate output 2>/dev/null \
-     | grep -q "meta skuid $(vm_ssh id -u desolate-ingress 2>/dev/null | tr -d '\r') counter packets"; then
+# One after the other, stdin closed: a second `colima ssh` expanded inside the
+# first's pipeline ran beside it on the same terminal and could come back
+# empty -- and an empty uid matches no rule, failing a ruleset that was fine.
+INGRESS_UID=$(vm_ssh id -u desolate-ingress </dev/null 2>/dev/null | tr -dc '0-9')
+INGRESS_RULES=$(vm_ssh sudo nft list chain inet desolate output </dev/null 2>/dev/null)
+if [ -n "$INGRESS_UID" ] && printf '%s\n' "$INGRESS_RULES" | grep -Eq "meta skuid $INGRESS_UID counter packets [0-9]+ bytes [0-9]+ drop"; then
   ok "the ingress uid's output rule is loaded, with its counter"
 else
-  bad "no nftables output rule bounds the ingress uid"
+  bad "no nftables output rule bounds the ingress uid (uid '${INGRESS_UID:-unknown}')"
+  printf '%s\n' "$INGRESS_RULES" | grep 'skuid' | sed 's/^[[:space:]]*/        saw: /'
   note "re-arm it: ./cli.sh vm install --proxy-only"
 fi
 
