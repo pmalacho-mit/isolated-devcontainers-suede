@@ -102,11 +102,12 @@ EOF
 # escaping its quotes, which made it invalid jq -- \" is not legal inside a
 # \(...) interpolation -- so `secret list` never worked at all. Emitting TSV and
 # formatting on the Mac leaves the remote side nothing to misparse.
-# Each row: the name, how many projects it is scoped to (0: every source), those
-# projects, then its hosts -- a count rather than a joined list, since joining
-# needs a quoted separator.
+# Each row: the name, how many projects it is scoped to (0: every source), how
+# many headers it is confined to (0: anywhere in a request), those projects,
+# those headers, then its hosts -- counts rather than joined lists, since
+# joining needs a quoted separator.
 # tests/static/05-cli-queries.sh executes this against a fixture.
-SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length)]+(.value.projects//[])+.value.hosts|@tsv'
+SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length),(.value.headers//[]|length)]+(.value.projects//[])+(.value.headers//[])+.value.hosts|@tsv'
 # The proxy's AUDIT lines, as journald holds them. mitmdump under systemd
 # prefixes each with its time -- `[12:03:33.715] AUDIT verdict=...` -- and
 # every reader here once anchored on `^AUDIT`, so on the VM `proxy audit`
@@ -1025,15 +1026,33 @@ case "$CMD" in
              SUB="${1:-list}"; shift || true
              case "$SUB" in
                add)
-                 NAME="${1:?usage: cli.sh secret add NAME --hosts a.com,b.com [--projects owner/repo,other]}"; shift
-                 HOSTS="" PROJECTS=""
+                 NAME="${1:?usage: cli.sh secret add NAME --hosts a.com,b.com [--projects owner/repo,other] [--headers authorization]}"; shift
+                 HOSTS="" PROJECTS="" HEADERS=""
                  while [ $# -gt 0 ]; do
                    case "$1" in
                      --hosts) HOSTS="$2"; shift 2 ;;
                      --projects) PROJECTS="${2:?--projects takes a comma-separated list}"; shift 2 ;;
+                     --headers) HEADERS="${2:?--headers takes a comma-separated list of header names}"; shift 2 ;;
                      *) shift ;;
                    esac
                  done
+                 # --headers confines substitution to those request headers:
+                 # never a body or URL, where a host that computes on what it
+                 # is sent (any LLM API) could hand the value back transformed
+                 # (addon.py "A SECRET CONFINED TO HEADERS"). Absent: anywhere.
+                 HEADERS_JSON=null
+                 if [ -n "$HEADERS" ]; then
+                   case ",$HEADERS," in *,,*)
+                     echo "cli.sh: --headers has an empty entry (a stray comma?)" >&2; exit 1 ;; esac
+                   IFS=, read -ra PARTS <<<"$HEADERS"
+                   HEADERS_JSON=""
+                   for H in "${PARTS[@]}"; do
+                     printf '%s' "$H" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9-]*' \
+                       || { echo "cli.sh: --headers entry '$H' is not a header name" >&2; exit 1; }
+                     HEADERS_JSON="${HEADERS_JSON:+$HEADERS_JSON,}\"$(printf '%s' "$H" | tr 'A-Z' 'a-z')\""
+                   done
+                   HEADERS_JSON="[$HEADERS_JSON]"
+                 fi
                  # --projects binds the secret to requests from those projects'
                  # own daemons (addon.py "WHICH PROJECT"); absent, any source.
                  PROJECTS_JSON=null
@@ -1074,8 +1093,16 @@ case "$CMD" in
                      exit 1; }
                  done
                  HOSTS_JSON=$(printf '%s' "$HOSTS" | awk -F, '{printf "["; for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}; printf "]"}')
-                 printf 'value for %s (input hidden): ' "$NAME" >&2
-                 stty -echo 2>/dev/null; IFS= read -r VALUE; stty echo 2>/dev/null; echo >&2
+                 # From a terminal, typed unseen; from a pipe (a script handing
+                 # over a token), read as it comes. Not `stty ... 2>/dev/null;`
+                 # alone: under set -e a failing stty, with no terminal to set,
+                 # ended the command with nothing said.
+                 if [ -t 0 ]; then
+                   printf 'value for %s (input hidden): ' "$NAME" >&2
+                   stty -echo; IFS= read -r VALUE || true; stty echo; echo >&2
+                 else
+                   IFS= read -r VALUE || true
+                 fi
                  [ -n "$VALUE" ] || { echo "cli.sh: empty value" >&2; exit 1; }
                  # `read -r` strips the trailing newline but KEEPS a carriage
                  # return, so a key pasted from anything CRLF-flavoured is stored
@@ -1117,10 +1144,10 @@ case "$CMD" in
                      echo "        value, with the leftover characters glued on. Pick a name that" >&2
                      echo "        neither contains nor is contained by those." >&2
                      exit 1; }
-                   jq --arg n "$1" --arg v "$V" --argjson h "$2" --argjson p "$4" \
-                      ".secrets[\$n] = ({value: \$v, hosts: \$h} + (if \$p == null then {} else {projects: \$p} end))" "$F" > "$T" \
+                   jq --arg n "$1" --arg v "$V" --argjson h "$2" --argjson p "$4" --argjson c "$5" \
+                      ".secrets[\$n] = ({value: \$v, hosts: \$h} + (if \$p == null then {} else {projects: \$p} end) + (if \$c == null then {} else {headers: \$c} end))" "$F" > "$T" \
                      && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" \
-                     && echo "stored"' _ "$NAME" "$HOSTS_JSON" "$SECRET_COLLISION_JQ" "$PROJECTS_JSON"
+                     && echo "stored"' _ "$NAME" "$HOSTS_JSON" "$SECRET_COLLISION_JQ" "$PROJECTS_JSON" "$HEADERS_JSON"
                  echo "Use it by putting the PLACEHOLDER in your devcontainer.json:"
                  echo "  \"containerEnv\": { \"YOUR_ENV_VAR\": \"$NAME\" }"
                  ;;
@@ -1142,11 +1169,14 @@ case "$CMD" in
                    echo "  (no secrets stored yet)"
                  else
                    # Formatting happens HERE, on the Mac, where quoting is ours.
+                   # "  NAME  ->  hosts   [headers: h]   (only for: p, q)" -- the
+                   # scope last, which examples/factory/claude reads.
                    printf '%s\n' "$OUT" | awk -F'\t' '{
-                     n = $2; scope = ""; hosts = ""
-                     for (i = 3; i < 3 + n; i++) scope = scope (scope == "" ? "" : ", ") $i
-                     for (i = 3 + n; i <= NF; i++) hosts = hosts (hosts == "" ? "" : ", ") $i
-                     printf "  %s  ->  %s%s\n", $1, hosts, (n > 0 ? "   (only for: " scope ")" : "")
+                     n = $2; m = $3; scope = ""; headers = ""; hosts = ""
+                     for (i = 4; i < 4 + n; i++) scope = scope (scope == "" ? "" : ", ") $i
+                     for (i = 4 + n; i < 4 + n + m; i++) headers = headers (headers == "" ? "" : ", ") $i
+                     for (i = 4 + n + m; i <= NF; i++) hosts = hosts (hosts == "" ? "" : ", ") $i
+                     printf "  %s  ->  %s%s%s\n", $1, hosts, (m > 0 ? "   [headers: " headers "]" : ""), (n > 0 ? "   (only for: " scope ")" : "")
                    }'
                  fi
                  ;;
@@ -1165,7 +1195,7 @@ case "$CMD" in
                    jq --arg n "$1" "del(.secrets[\$n])" "$F" > "$T" \
                    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" && echo removed' _ "$NAME"
                  ;;
-               *) echo "usage: cli.sh secret {add NAME --hosts a,b [--projects p,q] | list | rm NAME [--force]}" >&2; exit 1 ;;
+               *) echo "usage: cli.sh secret {add NAME --hosts a,b [--projects p,q] [--headers h] | list | rm NAME [--force]}" >&2; exit 1 ;;
              esac ;;
 
   vm)        SUB="${1:-status}"; shift || true

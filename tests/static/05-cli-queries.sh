@@ -40,14 +40,16 @@ assert_contains "it lists a secret with its allowlist" "$OUT" "MYAPP-OPENAI-KEY"
 assert_contains "it includes every host, not just the first" "$OUT" "*.example.com"
 assert_contains "it lists every secret" "$OUT" "OTHER-KEY"
 
-# A scope travels as a count, then the projects, then the hosts -- so a scoped
-# and an unscoped secret are told apart, and no project reads as a host.
-SCOPED_FIXTURE='{"secrets":{"DEPLOY-KEY":{"value":"x","hosts":["api.github.com"],"projects":["acme/widgets","solo"]},"OPEN-KEY":{"value":"y","hosts":["b.com"]}}}'
+# A scope and a header confinement travel as counts, then the projects, the
+# headers, the hosts -- so each is told apart, and nothing reads as a host.
+SCOPED_FIXTURE='{"secrets":{"DEPLOY-KEY":{"value":"x","hosts":["api.github.com"],"projects":["acme/widgets","solo"]},"OPEN-KEY":{"value":"y","hosts":["b.com"]},"OAUTH":{"value":"z","hosts":["api.anthropic.com"],"headers":["authorization"]}}}'
 SCOPED_OUT=$(printf '%s' "$SCOPED_FIXTURE" | jq -r "$PROG" 2>&1)
-assert_eq "a scoped secret's row: name, count, projects, hosts" \
-  "$(printf '%s\n' "$SCOPED_OUT" | grep '^DEPLOY-KEY')" "$(printf 'DEPLOY-KEY\t2\tacme/widgets\tsolo\tapi.github.com')"
-assert_eq "an unscoped one's: a zero, then its hosts" \
-  "$(printf '%s\n' "$SCOPED_OUT" | grep '^OPEN-KEY')" "$(printf 'OPEN-KEY\t0\tb.com')"
+assert_eq "a scoped secret's row: name, counts, projects, hosts" \
+  "$(printf '%s\n' "$SCOPED_OUT" | grep '^DEPLOY-KEY')" "$(printf 'DEPLOY-KEY\t2\t0\tacme/widgets\tsolo\tapi.github.com')"
+assert_eq "an unscoped one's: two zeros, then its hosts" \
+  "$(printf '%s\n' "$SCOPED_OUT" | grep '^OPEN-KEY')" "$(printf 'OPEN-KEY\t0\t0\tb.com')"
+assert_eq "a confined one's: its headers before its hosts" \
+  "$(printf '%s\n' "$SCOPED_OUT" | grep '^OAUTH')" "$(printf 'OAUTH\t0\t1\tauthorization\tapi.anthropic.com')"
 
 # The whole point of the TSV shape: nothing for a remote shell to re-parse.
 case "$PROG" in
@@ -315,5 +317,37 @@ cli desolate --status --json acme/widgets >/dev/null
 assert_eq "desolate --status is the editor's to read, not the orchestrator's" "$(execs)" \
   "exec|-e|DESOLATE_PLANE=mac|desolate-vscode|desolate|--status|--json|acme/widgets| "
 rm -rf "$STUB"
+
+group "secret add --headers, through a stand-in VM"
+# `secret add` runs its store in the VM over `colima ssh`. A stand-in colima
+# runs that same script here, against a scratch store: the one change it makes
+# is where the store lives (and who owns it).
+VMSTUB=$(mktemp -d)
+cat > "$VMSTUB/colima" <<EOF
+#!/usr/bin/env bash
+while [ "\$1" != -- ]; do shift; done; shift
+[ "\$1" = sudo ] && shift
+args=("\$@")
+for i in "\${!args[@]}"; do
+  a=\${args[\$i]}; a=\${a//\/etc\/desolate-proxy\/settings.json/$VMSTUB/settings.json}; a=\${a//-o desolate-proxy -g desolate-proxy/}
+  args[\$i]=\$a
+done
+exec "\${args[@]}"
+EOF
+chmod +x "$VMSTUB/colima"
+vmcli() { PATH="$VMSTUB:$PATH" DESOLATE_NO_COMPLETION_INSTALL=1 "$RELEASE/cli.sh" secret "$@" 2>&1; }
+OUT=$(printf 'sk-ant-oat01-x\n' | vmcli add DESOLATE-CLAUDE-OAUTH --hosts api.anthropic.com --headers Authorization)
+assert_contains "it is stored" "$OUT" "stored"
+assert_eq "confined to the header it names, lower-cased" \
+  "$(jq -c '.secrets["DESOLATE-CLAUDE-OAUTH"].headers' "$VMSTUB/settings.json")" '["authorization"]'
+printf 'v\n' | vmcli add OPEN-KEY --hosts b.com >/dev/null
+assert_eq "without --headers, no confinement is written" "$(jq -c '.secrets["OPEN-KEY"] | has("headers")' "$VMSTUB/settings.json")" "false"
+LIST=$(vmcli list)
+assert_contains "list shows the confinement" "$LIST" "DESOLATE-CLAUDE-OAUTH  ->  api.anthropic.com   [headers: authorization]"
+assert_contains "and nothing for one without" "$LIST" "OPEN-KEY  ->  b.com"
+OUT=$(printf 'v\n' | vmcli add BAD-KEY --hosts b.com --headers 'x y')
+assert_contains "a header that is no header name is refused" "$OUT" "is not a header name"
+assert_eq "  and nothing is stored" "$(jq -c '.secrets | has("BAD-KEY")' "$VMSTUB/settings.json")" "false"
+rm -rf "$VMSTUB"
 
 summary

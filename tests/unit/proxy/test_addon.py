@@ -1378,3 +1378,122 @@ def test_attribution_follows_a_dind_that_moved(tmp_path):
     os.replace(dinds / "desolate-dind-acme__widgets.new", dinds / "desolate-dind-acme__widgets")
     assert addon.project_of(from_(A_ADDRESS)) is None, "its old address attributes nothing"
     assert addon.project_of(from_("172.30.0.7")) == "acme/widgets"
+
+
+# ===========================================================================
+# A secret confined to headers ("A SECRET CONFINED TO HEADERS" in addon.py)
+# ===========================================================================
+# What it closes: test_scrubbing_does_not_survive_a_transforming_endpoint. A
+# secret substituted into a body is handed to whatever computes on that body
+# -- every LLM API -- and comes back transformed, past the scrub. Confined to
+# the header the host reads credentials from, it never reaches a body at all.
+
+CONFINED = "DESOLATE-CLAUDE-OAUTH"
+CONFINED_VALUE = "sk-ant-oat01-real-subscription-token"
+
+
+def confined_addon(tmp_path, **entry):
+    mod, addon, path = load_addon(tmp_path, {
+        "default_action": "allow",
+        "secrets": {
+            CONFINED: {"value": CONFINED_VALUE, "hosts": ["api.anthropic.com"], "headers": ["authorization"], **entry},
+            SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.anthropic.com", "api.openai.com"]},
+        },
+        "network": [{"action": "allow", "host": "*"}],
+    })
+    return mod, addon
+
+
+def to_anthropic(**kwargs):
+    return make_flow(sni="api.anthropic.com", host_header="api.anthropic.com", method="POST",
+                     path=kwargs.pop("path", "/v1/messages"), dest="160.79.104.10", **kwargs)
+
+
+@pytest.mark.parametrize("header", ["Authorization", "authorization", "AUTHORIZATION"])
+def test_a_confined_secret_is_substituted_in_its_header(tmp_path, header):
+    _, addon = confined_addon(tmp_path)
+    f = to_anthropic(headers={header: f"Bearer {CONFINED}"})
+    addon.request(f)
+    assert not blocked(f)
+    assert f.request.headers["Authorization"] == f"Bearer {CONFINED_VALUE}"
+
+
+def test_a_confined_secret_is_never_handed_to_a_body(tmp_path):
+    """The recovery the scrub cannot stop, and that confinement does."""
+    _, addon = confined_addon(tmp_path)
+    f = to_anthropic(headers={"Authorization": f"Bearer {CONFINED}"},
+                     content=f'{{"prompt":"reverse this: {CONFINED}"}}'.encode())
+    addon.request(f)
+    assert not blocked(f)
+    assert f.request.headers["Authorization"] == f"Bearer {CONFINED_VALUE}", "its header still is"
+    handed_to_the_model = f.request.content.decode()
+    assert CONFINED_VALUE not in handed_to_the_model
+    assert CONFINED in handed_to_the_model, "the name goes as written"
+    # Whatever the host does with what it was handed, it was handed a name.
+    f.response = tutils.tresp(content=handed_to_the_model[::-1].encode())
+    addon.response(f)
+    assert CONFINED_VALUE not in f.response.content.decode()[::-1]
+
+
+@pytest.mark.parametrize("where", ["query", "path", "another header", "a gzipped body"])
+def test_a_confined_secret_is_substituted_nowhere_else(tmp_path, where):
+    _, addon = confined_addon(tmp_path)
+    kwargs = {
+        "query": {"path": f"/v1/messages?key={CONFINED}"},
+        "path": {"path": f"/v1/files/{CONFINED}"},
+        "another header": {"headers": {"X-Echo": CONFINED}},
+        "a gzipped body": {"content": _gzip(f'{{"p":"{CONFINED}"}}'.encode()), "headers": {"Content-Encoding": "gzip"}},
+    }[where]
+    f = to_anthropic(**kwargs)
+    addon.request(f)
+    assert not blocked(f)
+    assert not carries_value(f, CONFINED_VALUE)
+
+
+def test_outside_its_headers_it_is_only_a_name(tmp_path, caplog):
+    """Not the secret there: no plaintext refusal, no leak verdict, no scope."""
+    _, addon = confined_addon(tmp_path, projects=["acme/widgets"])
+    with caplog.at_level(logging.INFO):
+        plain = make_flow(host_header="example.com", method="POST", dest="93.184.216.34", content=CONFINED.encode())
+        addon.request(plain)
+        elsewhere = make_flow(sni="example.com", host_header="example.com", dest="93.184.216.34",
+                              headers={"Authorization": f"Bearer {CONFINED}"}, path="/x")
+        addon.request(elsewhere)
+    assert not blocked(plain), "a name in a body over plaintext is not a secret over plaintext"
+    assert not blocked(elsewhere)
+    assert [x["verdict"] for x in audit_fields(caplog)] == ["ALLOW", "LEAK-SUSPECT"], \
+        "in its own header toward another host, it is still the secret, and still suspect"
+
+
+def test_a_confined_secret_keeps_its_project_scope(tmp_path):
+    mod, addon = confined_addon(tmp_path, projects=["acme/widgets"])
+    mod.DINDS_DIR = str(dinds_fixture(tmp_path))
+    mine = to_anthropic(headers={"Authorization": f"Bearer {CONFINED}"})
+    mine.client_conn.peername = (A_ADDRESS, 40000)
+    addon.request(mine)
+    assert carries_value(mine, CONFINED_VALUE)
+    theirs = to_anthropic(headers={"Authorization": f"Bearer {CONFINED}"})
+    theirs.client_conn.peername = (B_ADDRESS, 40000)
+    addon.request(theirs)
+    assert blocked(theirs) and not carries_value(theirs, CONFINED_VALUE)
+
+
+def test_an_unconfined_secret_beside_it_is_substituted_as_before(tmp_path):
+    _, addon = confined_addon(tmp_path)
+    f = to_anthropic(headers={"Authorization": f"Bearer {CONFINED}"},
+                     content=f'{{"a":"{SECRET_NAME}","b":"{CONFINED}"}}'.encode())
+    addon.request(f)
+    assert f.request.headers["Authorization"] == f"Bearer {CONFINED_VALUE}"
+    body = f.request.content.decode()
+    assert SECRET_VALUE in body and CONFINED in body and CONFINED_VALUE not in body
+
+
+@pytest.mark.parametrize("headers", ["authorization", [], ["bad header"], [""], [7]],
+                         ids=["a string", "empty", "a space", "an empty name", "not a string"])
+def test_a_confinement_that_cannot_be_read_drops_the_secret(tmp_path, caplog, headers):
+    _, addon = confined_addon(tmp_path, headers=headers)
+    with caplog.at_level(logging.ERROR):
+        addon._maybe_reload()
+    assert CONFINED not in addon.secrets, "never widened to everywhere"
+    assert SECRET_NAME in addon.secrets
+    assert "not a list of header names" in caplog.text

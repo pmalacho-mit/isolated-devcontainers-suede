@@ -13,9 +13,13 @@
 # claude-dispatcher.sh beside it; usable on its own.
 #
 # auth   Makes sure the VM holds a subscription token: the placeholder
-#        DESOLATE-CLAUDE-OAUTH, substituted only toward api.anthropic.com, for
-#        any source -- or, with --scoped, DESOLATE-CLAUDE-<project>-OAUTH, only
-#        for requests from that project's own daemon (which it then needs).
+#        DESOLATE-CLAUDE-OAUTH, substituted only toward api.anthropic.com, and
+#        only in a request's Authorization header -- never a body, where the
+#        model could be asked to hand the real value back transformed (addon.py
+#        "A SECRET CONFINED TO HEADERS"). For any source -- or, with --scoped,
+#        DESOLATE-CLAUDE-<project>-OAUTH, only for requests from that project's
+#        own daemon (which it then needs). A token stored without the
+#        confinement is not used: auth --renew stores a new one, confined.
 #        Missing, or with --renew, it runs `claude setup-token` here (a
 #        browser; a Pro, Max, Team or Enterprise plan) and asks you to paste
 #        what it prints -- into `cli.sh secret add`, never into a file or argv.
@@ -102,6 +106,7 @@ secrets() { printf '%s\n' "$SECRETS"; }
 secret_line() { secrets | awk -v n="$1" '$1 == n'; }
 scoped_to_project() { case "$1" in *"(only for: "*) printf '%s' "${1#*(only for: }" | tr -d ')' | tr ',' '\n' | sed 's/^ *//' | grep -qxF "$PROJECT" ;; *) return 1 ;; esac; }
 reaches_project() { [[ "$1" != *"(only for: "* ]] || scoped_to_project "$1"; }
+confined() { [[ "$1" == *"[headers: authorization]"* ]]; }
 
 # The placeholder this project's Claude uses: its own, if it has one.
 in_use() {
@@ -124,11 +129,20 @@ auth() {
   local name line
   if [ -n "$SCOPED" ]; then name=$SCOPED_NAME; else name=$(in_use); name=${name:-$SHARED}; fi
   line=$(secret_line "$name")
+  if [ -n "$line" ] && [ -z "$RENEW" ] && ! confined "$line"; then
+    # Stored before the proxy could confine it: substituted into bodies too, so
+    # any container that could spend it could also have recovered it.
+    echo "claude-helper: $name is stored, but not confined to the Authorization header -- any container that could spend it could also recover it. Storing a NEW token, confined (revoke the old one in your Claude account)." >&2
+    RENEW=1
+  fi
   if [ -n "$line" ] && [ -z "$RENEW" ]; then
     reaches_project "$line" || die "$name is stored but scoped to other projects: $line"
-    if [[ "$line" == *"(only for: "* ]]; then say "$name is stored, for $PROJECT only"; else say "$name is stored, for any project"; fi
+    if [[ "$line" == *"(only for: "* ]]; then say "$name is stored, for $PROJECT only, in Authorization alone"; else say "$name is stored, for any project, in Authorization alone"; fi
   else
-    [ -t 0 ] || die "${RENEW:+a new token for }$name ${RENEW:-is not stored}; run: $0 auth $PROJECT${SCOPED:+ --scoped}${RENEW:+ --renew} (in a terminal)"
+    if [ ! -t 0 ]; then
+      if [ -n "$RENEW" ]; then die "$name needs a new token; run: $0 auth $PROJECT${SCOPED:+ --scoped} --renew (in a terminal)"; fi
+      die "$name is not stored; run: $0 auth $PROJECT${SCOPED:+ --scoped} (in a terminal)"
+    fi
     if command -v claude >/dev/null; then
       say "running 'claude setup-token' -- finish it in the browser; it prints a token valid for a year."
       claude setup-token || die "claude setup-token failed"
@@ -141,10 +155,10 @@ auth() {
     [ -n "$token" ] || die "no token"
     case "$token" in sk-ant-oat*) ;; sk-ant-api*) die "that is an API key, which bills per token -- this wants the setup-token OAuth token" ;; *) echo "claude-helper: that does not look like an OAuth token (sk-ant-oat...); storing it anyway" >&2 ;; esac
     local scope=(); [ "$name" != "$SCOPED_NAME" ] || scope=(--projects "$PROJECT")
-    printf '%s\n' "$token" | "$CLI" secret add "$name" --hosts api.anthropic.com ${scope[@]+"${scope[@]}"} >/dev/null \
+    printf '%s\n' "$token" | "$CLI" secret add "$name" --hosts api.anthropic.com --headers authorization ${scope[@]+"${scope[@]}"} >/dev/null \
       || die "could not store $name"
     unset token
-    say "stored $name for ${scope[1]:-any source}, toward api.anthropic.com"
+    say "stored $name for ${scope[1]:-any source}, toward api.anthropic.com, in Authorization alone"
     [ -z "$RENEW" ] || say "the old token still works until you revoke it in your Claude account"
     load_secrets
   fi
@@ -295,6 +309,7 @@ start() {
   name=$(in_use)
   [ -n "$name" ] || die "no token stored for $PROJECT; run: $0 auth $PROJECT"
   line=$(secret_line "$name")
+  confined "$line" || die "$name is not confined to the Authorization header, so a container could recover it; run: $0 auth $PROJECT --renew"
   row=$(running_row)
   if [ -z "$row" ]; then
     say "starting $PROJECT${WT[1]:+@${WT[1]}}"

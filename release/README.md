@@ -156,7 +156,9 @@ destinations, and nothing is ever stored in a container. What is bounded is
 bounded is whether a compromised project can learn the value: an allowlisted
 host that will transform what you send it can be asked to hand the key back in
 a form the response scrubber does not match. See
-[What this does not give you](#what-this-does-not-give-you).
+[What this does not give you](#what-this-does-not-give-you) -- and
+[Confining a secret to headers](#confining-a-secret-to-headers), which closes
+that for a credential that only ever travels in a header.
 
 ### 4. The VM and your Mac
 
@@ -1576,6 +1578,26 @@ breaks either is refused rather than stored, or dropped rather than loaded:
 The `network` rules in `settings.json` are a separate list with a separate job
 and still accept `{"host": "*"}` -- see "What this does not give you" below.
 
+### Confining a secret to headers
+
+Most credentials travel in a header (`Authorization`, `x-api-key`) and need
+nothing else. Name it, and the proxy substitutes the secret there alone --
+never in a body or URL, where a host that computes on what it is sent could be
+asked to return it transformed:
+
+```bash
+./cli.sh secret add DESOLATE-CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization
+./cli.sh secret list      # ... [headers: authorization]
+```
+
+Anywhere else in a request, the placeholder is only its name: a prompt saying
+"reverse this: DESOLATE-CLAUDE-OAUTH" hands the model the name, and that is all
+that comes back. What remains is what a host does with the header itself; pick
+one it reads and does not repeat. A secret that must reach a body or a query
+string (a form-posted client secret, a `?key=` API) cannot be confined, and
+keeps the limit below. `examples/factory/claude/claude-helper.sh` stores
+Claude's token this way, and will not use one stored without it.
+
 ### Scoping a secret to projects
 
 A project with a daemon of its own (`docker-outside-of-docker`) reaches the
@@ -1699,7 +1721,9 @@ are not will bite:
   What still holds is the bound: the real value can only ever be **sent to that
   secret's allowlisted hosts**. Bounding where a secret may go is the guarantee
   this design makes. Keeping it unknown to a compromised container is not, and
-  the scrubber should not be read as making that promise.
+  the scrubber should not be read as making that promise -- except for a
+  secret [confined to headers](#confining-a-secret-to-headers), which never
+  reaches what a host computes on.
 - **Secrets are not scoped per project.** The proxy sees requests from the
   whole stack and cannot tell which devcontainer sent one. Any project can
   _use_ any other project's placeholder toward that secret's allowlisted hosts

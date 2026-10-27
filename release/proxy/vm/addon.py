@@ -9,6 +9,9 @@ devcontainers put in .env files:
     settings.json in the VM:    "MY-AWESOME-PROJECT-OPENAI-KEY":
                                     {"value": "sk-...", "hosts": ["api.openai.com"]}
 
+and, optionally, `"headers": ["authorization"]`: substituted in those request
+headers ONLY -- see "A SECRET CONFINED TO HEADERS" below.
+
 Behavior per request:
   0. Refuse any request whose destination ADDRESS is internal (see below).
   1. Establish the PROVEN destination (see below).
@@ -16,8 +19,9 @@ Behavior per request:
      name WHERE THERE IS ONE. Plaintext has none, so that path falls back to
      the Host header and the policy is only as good as a name the client chose
      -- see "WHAT THE NETWORK POLICY DOES NOT DECIDE" below.
-  3. Scan URL + headers + body for any configured placeholder. One kind of
-     entry is scanned for more narrowly -- see "THE SELF-TEST FIXTURE" below.
+  3. Scan URL + headers + body for any configured placeholder. Two kinds of
+     entry are scanned for more narrowly -- a secret confined to headers, in
+     those headers alone, and see "THE SELF-TEST FIXTURE" below.
   4. A placeholder whose allowlist does NOT cover the proven destination is
      left exactly as written and the request passes, with an AUDIT line
      `verdict=LEAK-SUSPECT` naming it (leak detection / honeypot defense). A
@@ -110,6 +114,38 @@ property of substitution itself, not a defect in the scrubber, and no amount of
 work here fixes it. What survives is the BOUND: the real value can only ever be
 sent to that secret's allowlisted hosts. Bounding where a secret goes is the
 guarantee; keeping it unknown to a compromised container is not.
+
+---------------------------------------------------------------------------
+A SECRET CONFINED TO HEADERS
+---------------------------------------------------------------------------
+The recovery above needs the real value somewhere the host computes on: a
+body, or a URL. A credential only ever needs to travel where the host reads
+credentials -- for Claude Code's subscription token, measured, that is the
+`Authorization` header and nowhere else -- so a secret may name the request
+headers it belongs in:
+
+    "DESOLATE-CLAUDE-OAUTH": {"value": "sk-ant-oat01-...",
+                              "hosts": ["api.anthropic.com"],
+                              "headers": ["authorization"]}
+
+Then it is substituted in those headers (matched by name, case-insensitively)
+and in nothing else. The same placeholder in a body, a URL or another header
+is not this secret at all: it goes out as written, the name the model sees,
+and nothing about the request is decided by it -- not leak detection, not the
+plaintext refusal, not the project scope. So `{"prompt": "reverse this:
+DESOLATE-CLAUDE-OAUTH"}` hands the model a name, and the name is all a
+container can get back.
+
+What stays open is only what an allowlisted host does with a header it is
+sent: an endpoint that answered with the request's own Authorization header,
+transformed, would undo this the way a model undoes a body. The exact echo is
+still scrubbed. So confine a secret to a header its host reads and does not
+repeat -- Authorization, an API-key header -- not, say, a cookie a service
+reflects into a page.
+
+A `headers` value that is not a non-empty list of header names drops the
+secret, loudly: a confinement that cannot be read is not widened to
+everywhere.
 
 ---------------------------------------------------------------------------
 WHY INTERNAL DESTINATIONS ARE REFUSED BEFORE ANYTHING ELSE
@@ -250,6 +286,8 @@ DINDS_DIR = os.environ.get("DESOLATE_DINDS_DIR", "/run/desolate-ingress/dinds")
 PROJECT_DIND = re.compile(r"desolate-dind-([A-Za-z0-9][A-Za-z0-9._-]*)")
 # projects.ts's validName: `name` or `owner/name`.
 PROJECT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?")
+# A header a secret may be confined to ("A SECRET CONFINED TO HEADERS").
+HEADER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 
 # There is deliberately NO size cap on body inspection.
 #
@@ -373,7 +411,7 @@ log = logging.getLogger("desolate-proxy")
 class DesolateProxy:
     def __init__(self):
         self._mtime = None
-        self.secrets = {}          # placeholder -> {"value": str, "hosts": [glob...]}
+        self.secrets = {}          # placeholder -> {"value", "hosts": [glob...], "projects", "headers"}
         self.network = []          # [{"action","host","method"?}, ...]
         self.default_action = "allow"
         self.scrub_responses = True
@@ -446,9 +484,17 @@ class DesolateProxy:
                 log.error(f"secret {name!r}: projects {projects!r} is not a list of project names; "
                           f"skipping (a scope that cannot be read is not widened to everyone)")
                 continue
+            headers = entry.get("headers")
+            if headers is not None and (
+                    not isinstance(headers, list) or not headers
+                    or not all(isinstance(h, str) and HEADER_NAME.fullmatch(h) for h in headers)):
+                log.error(f"secret {name!r}: headers {headers!r} is not a list of header names; "
+                          f"skipping (a confinement that cannot be read is not widened to everywhere)")
+                continue
             secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts],
                              "selftest": is_selftest_fixture(entry),
-                             "projects": None if projects is None else frozenset(projects)}
+                             "projects": None if projects is None else frozenset(projects),
+                             "headers": None if headers is None else frozenset(h.lower() for h in headers)}
 
         for name in self._overlapping(secrets):
             del secrets[name]
@@ -677,8 +723,19 @@ class DesolateProxy:
             return set()
         url = flow.request.url
         headers = "\n".join(f"{k}: {v}" for k, v in flow.request.headers.items(multi=True))
-        body = self.decoded_body(flow.request)
-        return {n for n in names if n in url or n in headers or n.encode() in body}
+        # A secret confined to headers is in a request only where it may be
+        # substituted. Never decoded for: a body cannot carry one.
+        confined = {n for n, e in names.items() if e.get("headers") is not None}
+        found = {n for n in confined if self._in_its_headers(flow, n)}
+        rest = [n for n in names if n not in confined]
+        if rest:
+            body = self.decoded_body(flow.request)
+            found |= {n for n in rest if n in url or n in headers or n.encode() in body}
+        return found
+
+    def _in_its_headers(self, flow, name):
+        allowed = self.secrets[name].get("headers")
+        return any(name in v for k, v in flow.request.headers.items(multi=True) if k.lower() in allowed)
 
     # ---------- mitmproxy hooks ----------
 
@@ -783,10 +840,19 @@ class DesolateProxy:
         # The body is decoded once, substituted into for every secret, and
         # written back once. Assigning `.content` per secret would re-encode
         # the whole body and rewrite Content-Length once per name.
-        body = self.decoded_body(flow.request) if found else b""
+        unconfined = [n for n in found if self.secrets[n].get("headers") is None]
+        body = self.decoded_body(flow.request) if unconfined else b""
         substituted = body
         for name in found:
             value = self.secrets[name]["value"]
+            allowed = self.secrets[name].get("headers")
+            if allowed is not None:
+                # In its own headers and NOWHERE else: not the path, not the
+                # body, not another header. "A SECRET CONFINED TO HEADERS".
+                for k, v in list(flow.request.headers.items(multi=True)):
+                    if k.lower() in allowed and name in v:
+                        flow.request.headers[k] = v.replace(name, value)
+                continue
             # .path, NOT .url -- and this is load-bearing, not style.
             #
             # Assigning flow.request.url re-parses it into scheme/host/port/path

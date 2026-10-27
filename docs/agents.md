@@ -139,14 +139,16 @@ examples/factory/claude/claude-helper.sh resume acme/widgets --worktree issue-42
 examples/factory/claude/claude-helper.sh verify acme/widgets                      # which secret each request carried
 ```
 
-**`auth`** stores a `claude setup-token` token as the secret `DESOLATE-CLAUDE-OAUTH`, substituted only toward `api.anthropic.com`. By default it works for any project.
+**`auth`** stores a `claude setup-token` token as the secret `DESOLATE-CLAUDE-OAUTH`. It is substituted only toward `api.anthropic.com`, and only in a request's `Authorization` header (`--headers authorization`). By default it works for any project.
 
-**What a container that can spend it can do.** It can use your subscription. And because the proxy substitutes inside request bodies too, it can recover the token itself, by asking the model to transform it; addon.py, "What scrubbing is, and what it is not", explains why. Once recovered, the token works anywhere until you revoke it. A `setup-token` token can only make model requests, so the damage is to your account rather than your data:
+**What a container that can spend it can do.** It can use your subscription while it runs in the stack. A `setup-token` token can only make model requests, so the damage is to your account rather than your data:
 - your plan's usage limits;
 - extra usage, if it is enabled on your account;
 - whatever gets sent under your name.
 
-`--scoped` limits that to one project (`DESOLATE-CLAUDE-<project>-OAUTH`), and then that project needs a daemon of its own.
+**What it cannot do is learn the token.** A secret substituted into bodies too could be recovered by asking the model to transform it (addon.py, "What scrubbing is, and what it is not"). Confined to the header, the placeholder in a prompt reaches the model as its name, and only the name can come back (addon.py, "A secret confined to headers"). `auth` replaces a token stored without the confinement with a new one, and `start` refuses to use such a token.
+
+`--scoped` limits spending to one project (`DESOLATE-CLAUDE-<project>-OAUTH`), and then that project needs a daemon of its own.
 
 **`start`** runs `claude` in a detached tmux session in the target, with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. If tmux or claude is missing, it installs them:
 - tmux through the image's package manager, as root or with passwordless sudo;
