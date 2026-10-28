@@ -27,8 +27,10 @@
 #
 # start  Starts `claude` in a detached tmux session in the running target, as
 #        its user, in its workspace folder, with the task as its first prompt.
-#        In auto permission mode (it judges what is safe, and asks for the
-#        rest), unless `-- --permission-mode <mode>` says otherwise.
+#        In auto permission mode (a classifier judges what is safe, and it
+#        asks for the rest), unless `-- --permission-mode <mode>` says
+#        otherwise; /desolate is readable without asking (--add-dir), and
+#        git add, git commit and /desolate/status are allowed outright.
 #        No tmux or claude there: installs them (tmux with the image's package
 #        manager, as root or through passwordless sudo; claude with its native
 #        installer, into ~/.local/bin), and tells the agent, in its task, that
@@ -257,6 +259,10 @@ chmod +x "$dir/hook"
 cat > "$dir/settings.json" <<JSON
 {
   "apiKeyHelper": "",
+  "permissions": {
+    "additionalDirectories": ["/desolate"],
+    "allow": ["Read(//desolate/**)", "Bash(git add *)", "Bash(git commit *)", "Bash(/desolate/status *)"]
+  },
   "env": { "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "", "CLAUDE_CODE_USE_BEDROCK": "",
            "CLAUDE_CODE_USE_VERTEX": "", "CLAUDE_CODE_USE_FOUNDRY": "" },
   "hooks": {
@@ -331,6 +337,9 @@ start() {
   local mode_given="" arg
   for arg in ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}; do case "$arg" in --permission-mode|--permission-mode=*) mode_given=1 ;; esac; done
   [ -n "$mode_given" ] || CLAUDE_ARGS=(--permission-mode auto ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"})
+  # desolate's own directory -- AGENTS.md, the status helper -- read without
+  # the first-read prompt a path outside the project otherwise gets.
+  CLAUDE_ARGS=(--add-dir /desolate "${CLAUDE_ARGS[@]}")
   local remote=(bash -c "$REMOTE" claude-helper "$SESSION" "$name" "$STATUS_HELPER" "${HAS_TASK:-0}" "${RESUME:-0}" "${CLAUDE_VERSION:-}" ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"})
   if [ -n "$HAS_TASK" ]; then
     printf '%s' "$TASK" | "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- "${remote[@]}"

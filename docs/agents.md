@@ -173,7 +173,7 @@ examples/factory/claude/claude-helper.sh verify acme/widgets                    
 
 `--scoped` limits spending to one project (`DESOLATE-CLAUDE-<project>-OAUTH`), and then that project needs a daemon of its own.
 
-**`start`** runs `claude` in a detached tmux session in the target, in auto permission mode (`-- --permission-mode <mode>` for another), with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. If tmux or claude is missing, it installs them:
+**`start`** runs `claude` in a detached tmux session in the target, in auto permission mode (`-- --permission-mode <mode>` for another; `/desolate` readable and `git add`/`git commit`/`/desolate/status` allowed without asking), with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. If tmux or claude is missing, it installs them:
 - tmux through the image's package manager, as root or with passwordless sudo;
 - claude with its native installer.
 
