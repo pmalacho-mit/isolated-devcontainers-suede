@@ -91,7 +91,7 @@ import * as relay from "./relays.ts";
 import * as shutdown from "./shutdown.ts";
 import { ingressDirectory, IngressMissingError, ownedForwards } from "./ingress-files.ts";
 import { ask as askSupervisor } from "./supervisor-client.ts";
-import { snapshotDirectory, snapshot, initDirectory } from "./snapshot.ts";
+import { snapshotDirectory, snapshot, ensureDirectory } from "./snapshot.ts";
 import {
   allocatePorts,
   ingressPorts,
@@ -1982,7 +1982,8 @@ function stopFromArguments(args: Args): void {
 }
 
 async function main(): Promise<void> {
-  initDirectory(DIRECT_SPEC_DIR);
+  // Ensured, never emptied: other runners' starts have their snapshots in it.
+  ensureDirectory(DIRECT_SPEC_DIR);
 
   const args = dieOnError(() => parseArgs(process.argv.slice(2), WORKSPACES));
 

@@ -9,6 +9,7 @@ would otherwise still be a live file at build time.
 */
 /// <reference types="node" />
 import {
+  chmodSync,
   closeSync,
   constants,
   fstatSync,
@@ -187,6 +188,26 @@ export const snapshotFile = (root: string, from: string, to: string) => {
 export const initDirectory = (location: string) => {
   rmSync(location, { recursive: true, force: true });
   mkdirSync(location, { recursive: true, mode: SNAPSHOT_DIRECTORY_MODE });
+};
+
+/**
+ * The directory, made if it is not there -- and never emptied. For the direct
+ * runner's snapshots (desolate.ts), which EVERY invocation ensures, `--list`
+ * included: emptying it there wiped a start's snapshot between its write and
+ * its read whenever anything else ran meanwhile -- the editor's panel asks
+ * `--list` every 10 s -- and the start failed reading it. Nothing stale is read
+ * this way: each start replaces its own target's snapshot first (`snapshot`).
+ * One that is not a directory of this uid's -- a link, say -- is replaced.
+ */
+export const ensureDirectory = (location: string) => {
+  try {
+    const stat = lstatSync(location);
+    if (stat.isDirectory() && (typeof process.getuid !== "function" || stat.uid === process.getuid())) {
+      chmodSync(location, SNAPSHOT_DIRECTORY_MODE);
+      return;
+    }
+  } catch { /* not there yet */ }
+  initDirectory(location);
 };
 
 export interface SnapshotOptions {
