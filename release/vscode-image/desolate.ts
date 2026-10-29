@@ -55,10 +55,12 @@ import { directory as stateDirectory, stateFile } from "./state.ts";
 import * as worktrees from "./worktrees.ts";
 import { parse as parseJsonc } from "./jsonc.ts";
 import { isEntryPoint, isWithin, run, sha16, type JSONValue } from "./utils.ts";
-import { parseArgs, USAGE, type Args } from "./args.ts";
+import { parseArgs, USAGE, type Args, type Command } from "./args.ts";
+import { BUSY_EXIT, hold, holderOf } from "./locks.ts";
 import { hint } from "./hints.ts";
 import {
   createDocker,
+  LOGIN_EXEC,
   parseWorktreeChanges,
   type NetworkAttachment,
   type Runner,
@@ -133,6 +135,40 @@ const HELPER_IMAGE = "alpine:3"; // tiny, for volume setup + verification
 const die = (msg: string): never => {
   console.error(`desolate: ${msg}`);
   process.exit(1);
+};
+
+/** What a command does to its target, in words: what a second one is told.
+ *  A command not here holds nothing -- it reads, or acts on no one target. */
+const DOING: Partial<Record<Command, string>> = {
+  run: "starting",
+  populate: "checking out",
+  stop: "stopping",
+  purge: "purging",
+  "remove-worktree": "removing",
+  "create-worktree": "creating",
+  reclaim: "reclaiming",
+  uncommitted: "checking for uncommitted work",
+  bundle: "pushing",
+  pull: "pulling",
+  review: "reviewing",
+  "suede-report": "reporting its suede dependencies",
+  "suede-build": "building a suede proposal",
+};
+
+/** While one of these runs, nothing is exec'd in the target: it is coming up
+ *  or going away, and a command run now would race it. */
+const COMING_OR_GOING = new Set(["starting", "rebuilding", "checking out", "stopping", "purging", "removing"]);
+
+/** The target, held for this command until this process exits (locks.ts) --
+ *  or, when another holds it, said and refused with BUSY_EXIT. */
+const holdTarget = (target: Target, command: Command, rebuild = false) => {
+  const what = command === "run" && rebuild ? "rebuilding" : DOING[command];
+  if (!what) return;
+  const got = hold(target.namespace, what);
+  if (got.held) return;
+  console.error(`desolate: ${target.name} is in use: ${got.holder.what}, since ${got.holder.since || "?"} ` +
+    `(pid ${got.holder.pid} in the orchestrator). Try again once that is done.`);
+  process.exit(BUSY_EXIT);
 };
 
 /** Run `produce`, turning any throw into desolate's own exit.
@@ -750,11 +786,19 @@ function deriveRunConfig(
 
   if (!src) return die(`Unable to locate devcontainer config for ${name}`);
 
+  // Told apart: a copy that is gone is not a spec that does not parse.
+  let text: string;
+  try {
+    text = fs.readFileSync(src, "utf8");
+  } catch (err: any) {
+    return die(`could not read ${name}'s devcontainer config at ${src} (${err?.code ?? err?.message ?? err}):
+      it was there when the spec was checked, moments ago -- was it removed meanwhile?`);
+  }
   let spec: ResolvedSpec["configuration"];
   try {
-    spec = parseJsonc(fs.readFileSync(src, "utf8"));
-  } catch {
-    return die(`Failed to parse devcontainer config for ${name}`);
+    spec = parseJsonc(text);
+  } catch (err: any) {
+    return die(`Failed to parse devcontainer config for ${name} (${src}): ${err?.message ?? err}`);
   }
 
   if (typeof spec !== "object" || spec === null)
@@ -1636,6 +1680,11 @@ async function depsBuild(target: Target, ref: string, dir: string, name: string)
  * may have moved on.
  */
 function execTarget(target: Target, argv: string[]): never {
+  const holder = holderOf(target.namespace);
+  if (holder && COMING_OR_GOING.has(holder.what)) {
+    console.error(`desolate: ${target.name} is ${holder.what}, since ${holder.since || "?"}; run this once that is done.`);
+    process.exit(BUSY_EXIT);
+  }
   if (!driveSaved(target))
     return die(`${target.name}'s own daemon is not running. Start it: ${hint.desolate(invocation(target))}`);
   const id = devcontainerId(target.dir);
@@ -1645,7 +1694,7 @@ function execTarget(target: Target, argv: string[]): never {
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const result = spawnSync("docker", [
     "exec", "-i", ...(tty ? ["-t"] : []), ...(user ? ["-u", user] : []), "-w", folder, id,
-    "sh", "-lc", 'exec "$@"', "sh", ...argv,
+    "sh", "-c", LOGIN_EXEC, "desolate-exec", ...argv,
   ], { stdio: "inherit" });
   process.exit(result.status ?? 1);
 }
@@ -1927,7 +1976,9 @@ function stopFromArguments(args: Args): void {
   if (meansEveryTarget(WORKSPACES, args.project)) return stopAll();
 
   if (args.project === EVERY_TARGET) console.log(ALL_IS_ALSO_A_PROJECT);
-  stopTarget(targetOf(args));
+  const target = targetOf(args);
+  holdTarget(target, "stop");
+  stopTarget(target);
 }
 
 async function main(): Promise<void> {
@@ -1941,10 +1992,13 @@ async function main(): Promise<void> {
 
   if (args.command === "create-worktree") {
     const target = targetFromArguments(args.project!, args.worktree, /* absent */ true);
+    holdTarget(target, "create-worktree");
     return createWorktree(target, args.branch ?? args.worktree!, args.from);
   }
 
   const target = targetOf(args);
+  // One operation on a target at a time (locks.ts): held until this exits.
+  holdTarget(target, args.command, args.rebuild);
   if (args.command === "remove-worktree") {
     // Its purge has to reach the target's containers and volumes, as
     // --purge's does, so its own daemon is brought up for it.

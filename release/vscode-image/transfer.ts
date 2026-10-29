@@ -44,6 +44,7 @@ import { join } from "node:path";
 import { ask } from "./broker-client.ts";
 import { openContained } from "./status.ts";
 import { remoteCacheRoot } from "./caches.ts";
+import { BUSY_EXIT } from "./locks.ts";
 
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 /** newrepo.ts's: the per-repository host aliases live there. */
@@ -52,7 +53,14 @@ const KEYRING_RUN = process.env.DESOLATE_KEYRING_RUN ?? "/run/keyring";
 /** The editor's own: a project never mounts it. */
 const CACHE_ROOT = remoteCacheRoot();
 
-export class TransferError extends Error {}
+export class TransferError extends Error {
+  /** The target was busy with something else (locks.ts): try again, not fix. */
+  readonly busy: boolean;
+  constructor(message: string, busy = false) {
+    super(message);
+    this.busy = busy;
+  }
+}
 const fail = (message: string): never => { throw new TransferError(message); };
 
 /** Where this project's branches go: what `repo add owner/repo` set up. */
@@ -317,6 +325,7 @@ export async function push(project: string, options: Options = {}): Promise<stri
         return !said;
       },
     );
+    if (code === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); push again once that is done", true);
     if (code !== 0 || !bundled) return fail(`its sandbox did not bundle the branch (exit ${code})`);
     const { branch, commit } = bundled;
 
@@ -403,6 +412,7 @@ export async function pull(project: string, options: Options = {}): Promise<stri
           return !said;
         },
       );
+      if (code === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); pull again once that is done", true);
       if (code !== 0 || !pulled) return fail(`its sandbox did not take the fetched branches (exit ${code})`);
       return pulled;
     };

@@ -2,7 +2,8 @@
 # examples/factory's dispatcher (lib/gh-dispatch.sh), executed against stand-in
 # `gh` and `cli.sh`: --all over the stack's projects, an issue whose marker
 # names an existing PR's branch, and what green and gray do with it; a PR you
-# opened yourself, issues that cannot be read, and worktrees of closed issues.
+# opened yourself, issues that cannot be read, and worktrees of closed issues;
+# a target busy or not answering yet, and a ^C mid-start.
 #
 # The stand-ins answer from files in $STUB_DIR, and record every call; the
 # dispatcher's agent is `true`, so nothing starts.
@@ -40,6 +41,10 @@ case "$1 $2" in
   "desolate --status") cat "$STUB_DIR/statuses" ;;
   "desolate --list") echo '[]' ;;
   "worktree remove") [ ! -e "$STUB_DIR/remove-fails" ] || { echo "desolate: issue-3 has uncommitted changes" >&2; exit 1; } ;;
+  "desolate acme/app")
+    [ ! -e "$STUB_DIR/start-busy" ] || exit 75
+    [ ! -e "$STUB_DIR/start-slow" ] || sleep 30 ;;
+  "exec acme/app") [ ! -e "$STUB_DIR/exec-fails" ] || exit 1 ;;
 esac
 exit 0
 EOF
@@ -157,5 +162,42 @@ jq -n --arg body '<!-- desolate-dispatch: {"pr":"12; rm -rf /"} -->' '[{number: 
 statuses "" ""
 tick
 assert_contains "a pr that is no number is no pr: the worktree gets issue/8" "$(cat "$STUB/calls")" "cli worktree add acme/widget issue-8 issue/8"
+
+group "a target being started already, or not answering yet: the agent waits"
+rm -rf "$STUB/state"; mkdir -p "$STUB/state"
+echo '[]' > "$STUB/widget-issues"; echo '[{"number":3,"title":"Plain work","body":"do it"}]' > "$STUB/app-issues"
+statuses "" ""
+touch "$STUB/start-busy"
+tick
+assert_contains "busy (exit 75): said, and waited for" "$(cat "$STUB/out")" "#3: it is being started or changed already; waiting for that"
+assert_not_contains "  and no agent" "$(ls "$STUB/state/acme__app")" "issue-3.agent"
+rm -f "$STUB/start-busy"; touch "$STUB/exec-fails"
+tick
+assert_contains "started, but nothing runs in it yet: the agent waits" "$(cat "$STUB/out")" "#3: not answering yet; the agent waits a tick"
+assert_not_contains "  and no agent" "$(ls "$STUB/state/acme__app")" "issue-3.agent"
+rm -f "$STUB/exec-fails"
+tick
+assert_contains "it answers: asked with exec -- true" "$(cat "$STUB/calls")" "cli exec acme/app --worktree issue-3 -- true"
+assert_contains "  and the agent starts" "$(ls "$STUB/state/acme__app")" "issue-3.agent"
+
+group "a ^C mid-start stops it cleanly, and says the start goes on"
+if command -v setsid >/dev/null; then
+  rm -rf "$STUB/state"; mkdir -p "$STUB/state"; touch "$STUB/start-slow"; : > "$STUB/calls"
+  # Its own process group, as a terminal's foreground job is: a ^C reaches
+  # the dispatcher and the command it is waiting on alike. TERM, which the trap
+  # takes as it takes INT: a background job here starts with INT ignored.
+  PATH="$STUB/bin:$PATH" DESOLATE_CLI="$STUB/bin/cli" FACTORY_STATE="$STUB/state" FACTORY_AGENT=true \
+    setsid bash "$ROOT/examples/factory/gh-dispatcher.sh" --all --once </dev/null > "$STUB/out" 2>&1 &
+  pid=$!
+  for _ in $(seq 100); do grep -q "#3: starting it" "$STUB/out" 2>/dev/null && break; sleep 0.1; done
+  kill -TERM -- "-$pid"
+  wait "$pid"; code=$?
+  assert_eq "it exits 130, at once" "$code" "130"
+  assert_contains "  saying a start under way goes on in the stack" "$(cat "$STUB/out")" "stopped. A start under way goes on in the stack"
+  assert_not_contains "  and not going on to the agent" "$(cat "$STUB/out")" "#3: an agent"
+  rm -f "$STUB/start-slow"
+else
+  skip "a ^C mid-start" "no setsid"
+fi
 
 summary

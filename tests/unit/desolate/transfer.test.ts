@@ -129,6 +129,18 @@ describe("push", () => {
     }
   });
 
+  test("a target busy with something else is said as busy, not as a failure (locks.ts)", async () => {
+    const busy = async (_request: Record<string, unknown>, onLog: (line: string) => boolean) => {
+      onLog("desolate: acme/widgets is in use: starting, since 2026-10-29T14:28:47Z (pid 12 in the orchestrator). Try again once that is done.");
+      return 75;
+    };
+    await assert.rejects(push("acme/widgets", { registration, ask: busy }), (err: Error) =>
+      err instanceof TransferError && err.busy && /busy with something else/.test(err.message));
+    await assert.rejects(pull("acme/widgets", { registration, ask: busy }), (err: Error) =>
+      err instanceof TransferError && err.busy);
+    assert.deepEqual(leftovers(), [], "nothing is left in the project");
+  });
+
   test("a bundle that is a link out of the project is not read", async () => {
     const other = join(workspaces, "other");
     mkdirSync(other, { recursive: true });

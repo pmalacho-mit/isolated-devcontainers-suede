@@ -357,6 +357,16 @@ export const pullScript = [
 ].join("; ");
 
 /**
+ * How `cli.sh exec` runs a command in a devcontainer (desolate.ts execTarget):
+ * in a login shell, so the PATH its features set up is there. bash's when the
+ * container has bash, as its own terminals are -- features write their login
+ * scripts for bash, and git-subrepo's loads a bash-only .rc that a login `sh`
+ * (dash) chokes on, leaving git-subrepo off PATH -- and sh's otherwise. The
+ * command is "$@", never spliced into the script.
+ */
+export const LOGIN_EXEC = String.raw`if command -v bash >/dev/null 2>&1; then exec bash -lc 'exec "$@"' bash "$@"; fi; exec sh -lc 'exec "$@"' sh "$@"`;
+
+/**
  * What `desolate --push` would send, for a person to read first (`desolate
  * --review`): the branch checked out in $1, what it is compared with, the
  * commits and files that differ, and each file's two sides -- read-only, in

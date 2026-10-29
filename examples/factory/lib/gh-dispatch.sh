@@ -20,10 +20,13 @@
 #      issue/<n> started from B (--base: a branch or ref of the project's,
 #      `v2` or `origin/v2`; default: the project's HEAD), and its draft PR
 #      targets B too (without `origin/`; default: the repo's default branch);
-#   2. not running: start it;
-#   3. no agent started here yet: agent_start, with the issue as its task and
-#      desolate-status as its voice -- unless --max-agents (default 3) are
-#      already working, across every project: then it waits a tick;
+#   2. not running: start it -- or, when desolate says it is being started or
+#      changed already (exit 75: by the panel, or by a start a ^C left running
+#      in the stack), wait a tick;
+#   3. no agent started here yet, and the target answers (`cli.sh exec -- true`):
+#      agent_start, with the issue as its task and desolate-status as its voice
+#      -- unless --max-agents (default 3) are already working, across every
+#      project: then it waits a tick;
 #   4. its status (`cli.sh desolate --status --json`):
 #        the agent's own access broken (agent_blocked: a failed login, say) --
 #                       you are told, here and by a notification, and asked to
@@ -232,7 +235,16 @@ dispatch_tick() {
       fi
       if ! jq -e --arg w "$name" 'any(.[]?; .worktree == $w)' <<< "${running:-[]}" >/dev/null; then
         log "#$n: starting it"
-        "$CLI" desolate "$PROJECT" --worktree "$name" </dev/null || { log "#$n: start failed"; continue; }
+        local code=0
+        "$CLI" desolate "$PROJECT" --worktree "$name" </dev/null || code=$?
+        if [ "$code" -eq 75 ]; then log "#$n: it is being started or changed already; waiting for that"; continue; fi
+        [ "$code" -eq 0 ] || { log "#$n: start failed"; continue; }
+      fi
+      # Up as far as an agent needs: a command runs in it. A start still under
+      # way -- one a ^C left running in the stack, say -- answers 75.
+      if ! "$CLI" exec "$PROJECT" --worktree "$name" -- true </dev/null >/dev/null 2>&1; then
+        log "#$n: not answering yet; the agent waits a tick"
+        continue
       fi
       log "#$n: an agent"
       if agent_start "$PROJECT" "$name" "$(dispatch_task "$n" "$title" "$body" "$branch" "$pr")" </dev/null > "$STATE/$name.log" 2>&1; then
@@ -352,6 +364,9 @@ dispatch_main() {
     esac
   done
   [ -z "$ALL" ] || [ -z "$BASE" ] || { echo "$DISPATCHER: --base is one project's; with --all, an issue's marker says it" >&2; exit 2; }
+  # A ^C stops this, not half of it: `docker exec` passes no signal on, so a
+  # start already under way goes on in the stack, and the next run finds it.
+  trap 'echo >&2; log "stopped. A start under way goes on in the stack; the next run of this picks it up." >&2; exit 130' INT TERM
   local tool project
   for tool in gh jq; do
     command -v "$tool" >/dev/null || { echo "$DISPATCHER: needs $tool" >&2; exit 1; }

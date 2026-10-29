@@ -29,6 +29,7 @@ import { EVERY_TARGET, meansEveryTarget } from "./projects.ts";
 import { statusRows } from "./status.ts";
 import { pull, push, TransferError } from "./transfer.ts";
 import { describeReview, keepReview, parseReview, REVIEWED, reviewDirectory } from "./review.ts";
+import { BUSY_EXIT } from "./locks.ts";
 
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
@@ -127,6 +128,10 @@ if (argv[0] === "--push" || argv[0] === "--pull") {
     .then((said) => { console.log(`desolate: ${said}`); process.exit(0); })
     .catch((err) => {
       if (!(err instanceof TransferError)) throw err;
+      if (err.busy) {
+        console.error(`desolate: ${err.message}`);
+        process.exit(BUSY_EXIT);
+      }
       refuse(err.message);
     });
 } else if (argv[0] === "--review") {
@@ -152,6 +157,10 @@ if (argv[0] === "--push" || argv[0] === "--pull") {
     return !json;
   }).then((code) => {
     const { review, blobs, ended } = parseReview(said);
+    if (code === BUSY_EXIT) {
+      console.error("desolate: its target is busy with something else (above); review again once that is done");
+      process.exit(BUSY_EXIT);
+    }
     if (code !== 0 || !ended) refuse(`the review of ${projects[0]}${worktree ? `@${worktree}` : ""} did not finish (exit ${code})`);
     const kept = keepReview(review, blobs, reviewDirectory(projects[0], worktree));
     console.log(json ? JSON.stringify(kept) : describeReview(kept));

@@ -325,8 +325,12 @@ export function activate(context: vscode.ExtensionContext) {
     try {
       return await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: `desolate: ${what}` }, async () => {
         const result = await run(command, args);
-        if (result.code !== 0) {
-          const last = result.output.trim().split("\n").filter(Boolean).pop() ?? "";
+        const last = result.output.trim().split("\n").filter(Boolean).pop() ?? "";
+        if (result.code === 75) {
+          // Busy, not broken (locks.ts): something else is doing this target now.
+          const why = result.output.split("\n").find((line) => line.includes(" is in use: ")) ?? last;
+          void vscode.window.showWarningMessage(`desolate: not now -- ${plain(why).replace(/^desolate: /, "").slice(0, 300)}`);
+        } else if (result.code !== 0) {
           void vscode.window.showErrorMessage(`desolate: ${what} failed${last ? ` -- ${plain(last).slice(0, 300)}` : ` (exit ${result.code})`}`, "Show log")
             .then((button) => button && log.show(true));
         }

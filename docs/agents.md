@@ -30,7 +30,7 @@ needs nothing else. `examples/factory/` holds such harnesses, as sketches.
 It runs the command inside the target's devcontainer, which must be running, with `docker exec` on the daemon it runs on:
 - as its remote user (from the container's devcontainer metadata);
 - in its workspace folder;
-- through a login shell, so the PATH its features set up is there;
+- through a login shell, so the PATH its features set up is there: bash's when the container has bash, as its own terminals are, since features write their login scripts for bash; `sh`'s otherwise;
 - with the container's environment, including any placeholder secrets in `containerEnv`.
 
 Not `devcontainer exec`: that finds the container by the config it was started with, and a harness's exec can come after the spec has moved on.
@@ -38,6 +38,12 @@ Not `devcontainer exec`: that finds the container by the config it was started w
 stdin and stdout are the caller's, and a TTY when there is one, so it works both for a one-shot `claude -p` and for an interactive shell. A harness backgrounds it however it likes.
 
 It is the Mac's alone. The editor has no daemon access, and giving it a way into every devcontainer would make it the most powerful thing in the stack.
+
+### One operation on a target at a time
+
+A start, stop, rebuild, push, pull or review of a target holds that target until it ends, whether the panel, the editor's terminal or the Mac asked for it. A second one is refused, saying what holds it and since when, and exits **75** ("busy, try again"), so a harness can tell busy from failed. `exec` is refused the same way while the target is starting, stopping or being removed.
+
+Holding the target is the runner's job, not the caller's, because a start outlives a `^C` on the Mac: `docker exec` doesn't pass the signal on, so the start carries on in the stack. A holder that died is taken over.
 
 ### Status, through `.git`
 
