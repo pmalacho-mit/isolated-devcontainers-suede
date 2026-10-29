@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # examples/factory's dispatcher (lib/gh-dispatch.sh), executed against stand-in
 # `gh` and `cli.sh`: --all over the stack's projects, an issue whose marker
-# names an existing PR's branch, and what green and gray do with it.
+# names an existing PR's branch, and what green and gray do with it; a PR you
+# opened yourself, issues that cannot be read, and worktrees of closed issues.
 #
 # The stand-ins answer from files in $STUB_DIR, and record every call; the
 # dispatcher's agent is `true`, so nothing starts.
@@ -22,8 +23,12 @@ cat > "$STUB/bin/gh" <<'EOF'
 printf 'gh %s\n' "$*" >> "$STUB_DIR/calls"
 case "$1 $2" in
   "repo view") echo main ;;
-  "issue list") case "$*" in *acme/widget*) cat "$STUB_DIR/widget-issues" ;; *) cat "$STUB_DIR/app-issues" ;; esac ;;
+  "issue list")
+    case "$*" in *acme/widget*) f=widget ;; *) f=app ;; esac
+    [ ! -e "$STUB_DIR/$f-issues-fail" ] || { cat "$STUB_DIR/$f-issues-fail" >&2; exit 1; }
+    cat "$STUB_DIR/$f-issues" ;;
   "api repos/acme/app/git/ref/heads/issue/3") [ -e "$STUB_DIR/app-pushed" ]; exit $? ;;
+  "pr list") cat "$STUB_DIR/open-pr" 2>/dev/null || echo '[]' ;;
   "pr create") echo "https://github.com/acme/app/pull/9" ;;
 esac
 exit 0
@@ -34,6 +39,7 @@ printf 'cli %s\n' "$*" >> "$STUB_DIR/calls"
 case "$1 $2" in
   "desolate --status") cat "$STUB_DIR/statuses" ;;
   "desolate --list") echo '[]' ;;
+  "worktree remove") [ ! -e "$STUB_DIR/remove-fails" ] || { echo "desolate: issue-3 has uncommitted changes" >&2; exit 1; } ;;
 esac
 exit 0
 EOF
@@ -83,6 +89,19 @@ tick
 assert_contains "the plain issue's PR is opened once its branch is there" "$(cat "$STUB/calls")" \
   "gh pr create -R acme/app --draft --head issue/3 --base main"
 
+group "green, with a PR you opened yourself: that one is taken, and made to close the issue"
+rm -f "$STUB/state/acme__app/issue-3.pr"
+echo '[{"number":27,"url":"https://github.com/acme/app/pull/27","body":"my own words"}]' > "$STUB/open-pr"
+tick
+assert_not_contains "no second PR is opened" "$(cat "$STUB/calls")" "gh pr create"
+assert_contains "  it is the one recorded" "$(cat "$STUB/state/acme__app/issue-3.pr")" "https://github.com/acme/app/pull/27"
+assert_contains "  and it now closes #3, so merging it ends the worktree" "$(cat "$STUB/calls")" "gh pr edit 27 -R acme/app --body my own words"
+rm -f "$STUB/state/acme__app/issue-3.pr"
+echo '[{"number":27,"url":"https://github.com/acme/app/pull/27","body":"Fixes #3."}]' > "$STUB/open-pr"
+tick
+assert_not_contains "one that closes it already is left as it is" "$(cat "$STUB/calls")" "gh pr edit"
+rm -f "$STUB/open-pr"
+
 group "gray: withdrawn, said on the issue and its PR, once"
 statuses gray ""
 tick
@@ -91,6 +110,36 @@ assert_contains "on the issue" "$CALLS" "gh issue comment 7 -R acme/widget --bod
 assert_contains "on its PR" "$CALLS" "gh pr comment 12 -R acme/widget"
 tick
 assert_not_contains "and not again for the same status" "$(cat "$STUB/calls")" "gh issue comment 7"
+
+group "issues that cannot be read: the tick ends, and nothing is removed"
+statuses green green
+echo "HTTP 502: Bad Gateway" > "$STUB/app-issues-fail"
+tick
+assert_contains "it says why" "$(cat "$STUB/out")" "acme/app: issues not read: HTTP 502: Bad Gateway"
+assert_not_contains "and does not take the issue for closed" "$(cat "$STUB/calls")" "worktree remove acme/app"
+echo "the 'acme/app' repository has disabled issues" > "$STUB/app-issues-fail"
+tick
+assert_contains "issues turned off: said once" "$(cat "$STUB/out")" "acme/app has issues turned off; skipped while it does"
+tick
+assert_not_contains "  and not every tick" "$(cat "$STUB/out")" "acme/app"
+rm -f "$STUB/app-issues-fail"
+
+group "a closed issue's worktree: removed; one that will not go is left to you, said once"
+echo '[]' > "$STUB/app-issues"
+touch "$STUB/remove-fails"
+tick
+assert_contains "it is stopped and removed" "$(cat "$STUB/calls")" "cli worktree remove acme/app issue-3"
+assert_contains "  the refusal is said, as it was given" "$(cat "$STUB/out")" "issue-3 was not removed (desolate: issue-3 has uncommitted changes) -- it is yours now"
+assert_contains "  and its agent no longer counts as working" "$(ls "$STUB/state/acme__app")" "issue-3.agent.kept"
+tick
+assert_not_contains "  not tried again" "$(cat "$STUB/calls")" "worktree remove"
+rm -f "$STUB/remove-fails"
+echo '[]' > "$STUB/widget-issues"; statuses "" ""
+tick
+assert_contains "one gone already is done, not retried" "$(cat "$STUB/out")" "#7: no longer open, and issue-7 is gone already"
+assert_not_contains "  nothing is removed" "$(cat "$STUB/calls")" "worktree remove"
+assert_contains "  and its agent no longer counts" "$(ls "$STUB/state/acme__widget")" "issue-7.agent.done"
+echo '[{"number":3,"title":"Plain work","body":"do it"}]' > "$STUB/app-issues"
 
 group "--max-agents: no more agents start while that many are working"
 rm -rf "$STUB/state"; mkdir -p "$STUB/state"

@@ -2,8 +2,10 @@
 # examples/factory/suede/suede-factory.sh, executed tick by tick against
 # stand-in `gh` and `cli.sh` (docs/suede-factory.md): a consumer's main moving,
 # the proposal pushed, suede's PR appearing and the issue filed for it, the
-# same change not proposed twice, a new change replacing the old proposal, a
-# release and the syncs it calls for, a dependency outside the stack, --dry-run.
+# same change not proposed twice -- nor again once merged or declined, nor
+# matched to an older PR on the same branch name -- a new change replacing the
+# old proposal, a release and the syncs it calls for, a dependency outside the
+# stack, --dry-run.
 #
 # The stand-ins answer from files in $STUB_DIR and record every call.
 set -uo pipefail
@@ -82,9 +84,14 @@ tick() {
     bash "$ROOT/examples/factory/suede/suede-factory.sh" run --once "$@" </dev/null > "$STUB/out" 2>&1
 }
 calls() { cat "$STUB/calls"; }
-pr_appears() { # <head> <number>
-  jq -cn --argjson n "$2" '{number: $n, state: "OPEN", url: "u", title: "t", body: "suede rebuilt it.\nFrom acme/app."}' \
+pr_appears() { # <head> <number> [<created, default now> [<state>]]
+  jq -cn --argjson n "$2" --arg at "${3:-$(date -u +%FT%TZ)}" --arg s "${4:-OPEN}" \
+    '[{number: $n, state: $s, url: "u", title: "t", body: "suede rebuilt it.\nFrom acme/app.", createdAt: $at}]' \
     > "$STUB/pr-for-downstream_acme_app-$1"
+}
+closed_issue() { # <issue file> <number> <reason>: as gh lists it, closed
+  jq -cn --arg m "$(sed -n 's/.*\(<!-- suede-factory: {.*} -->\).*/\1/p' "$1")" --argjson n "$2" --arg r "$3" \
+    '{number: $n, closedAt: "2026-10-29T10:00:01Z", stateReason: $r, body: ("x\n" + $m)}'
 }
 
 group "a consumer's main moved: its changes are proposed, once"
@@ -147,9 +154,9 @@ stack "acme/app acme/widget acme/lib acme/rel"
 tick
 assert_contains "the new consumers are looked at" "$(calls)" "suede report acme/lib"
 # #32 (PR #15, acme/app's) was merged, and closed its issue; #31 was replaced.
-jq -cn --arg m "$(sed -n 's/.*\(<!-- suede-factory: {.*} -->\).*/\1/p' "$STUB/issue-32")" \
-  '[{number: 32, closedAt: "2026-10-29T10:00:01Z", stateReason: "COMPLETED", body: ("x\n" + $m)},
-    {number: 31, closedAt: "2026-10-29T10:00:01Z", stateReason: "NOT_PLANNED", body: "replaced"}]' > "$STUB/widget-closed-issues"
+echo '[]' > "$STUB/widget-open-issues"
+jq -s . <(closed_issue "$STUB/issue-32" 32 COMPLETED) \
+  <(jq -cn '{number: 31, closedAt: "2026-10-29T10:00:01Z", stateReason: "NOT_PLANNED", body: "replaced"}') > "$STUB/widget-closed-issues"
 echo "$REL2" > "$STUB/widget-release"
 tick
 ISSUE=$(cat "$STUB/issue-33" 2>/dev/null)
@@ -191,6 +198,35 @@ rm -f "$STUB/issue-35"
 tick --sync all
 assert_contains "the development consumer is synced too" "$(cat "$STUB"/issue-* | grep -c 'issue create -R acme/lib --title Sync widget')" "1"
 
+group "merged, before the sync brings it back: the same change is not proposed again"
+# acme/app's copy still differs by patch2, the change #32 proposed and PR #15 merged.
+echo "$(printf '5%.0s' $(seq 40))" > "$STUB/app-head"
+tick
+assert_contains "its main is looked at" "$(calls)" "suede report acme/app"
+assert_not_contains "but the merged change is not pushed again" "$(calls)" "suede upstream"
+assert_contains "  and it says why" "$(cat "$STUB/out")" "widget's change was merged (PR #15, #32); it comes back with the sync after acme/widget's next release"
+
+group "closed without merging: that change is not proposed again, a different one is"
+closed_issue "$STUB/issue-32" 32 NOT_PLANNED | jq -s . > "$STUB/widget-closed-issues"
+echo "$(printf '6%.0s' $(seq 40))" > "$STUB/app-head"
+tick
+assert_not_contains "the declined change is not pushed" "$(calls)" "suede upstream"
+assert_contains "  and it says why" "$(cat "$STUB/out")" "widget's change was closed without being merged (#32)"
+H7=$(printf '7%.0s' $(seq 40)); echo "$H7" > "$STUB/app-head"; report patch3
+tick
+assert_contains "a different change is" "$(calls)" "suede upstream acme/app widget"
+
+group "an older PR on the same branch name is not the proposal's"
+# Merged long before this push, its branch deleted, the name pushed again.
+pr_appears "$H7" 3 2026-01-01T00:00:00Z MERGED
+tick
+assert_not_contains "no issue is filed for it" "$(calls)" "issue create"
+assert_contains "the proposal still waits for its PR" "$(PATH="$STUB/bin:$PATH" SUEDE_FACTORY_STATE="$STUB/state" bash "$ROOT/examples/factory/suede/suede-factory.sh" status)" \
+  "acme/widget: downstream/acme/app-$H7"
+pr_appears "$H7" 40
+tick
+assert_contains "the PR suede opened after the push is" "$(calls)" "gh pr edit 40 -R acme/widget"
+
 group "a dependency outside the stack: asked once, added once approved"
 stack "acme/app acme/widget"; echo "$(printf '4%.0s' $(seq 40))" > "$STUB/app-head"
 report patch2 '{"dir": "other", "repo": "acme/other", "remote": "r", "pin": "p", "kind": "app", "state": "nopin", "files": []}'
@@ -199,9 +235,11 @@ assert_contains "you are asked, with the command" "$(cat "$STUB/out")" "suede-fa
 assert_not_contains "nothing is added without you" "$(calls)" "repo add"
 tick
 assert_not_contains "and you are not asked again" "$(cat "$STUB/out")" "approve acme/other"
+assert_not_contains "  nor is the consumer looked at again while it waits on you" "$(calls)" "suede report acme/app"
 PATH="$STUB/bin:$PATH" SUEDE_FACTORY_STATE="$STUB/state" bash "$ROOT/examples/factory/suede/suede-factory.sh" approve acme/other >/dev/null
 tick
-assert_contains "once approved, it is added to the stack" "$(calls)" "cli repo add acme/other"
+assert_contains "once approved, the consumer is looked at again" "$(calls)" "suede report acme/app"
+assert_contains "  and the dependency is added to the stack" "$(calls)" "cli repo add acme/other"
 
 group "--dry-run: everything read, nothing pushed, filed or changed"
 rm -rf "$STUB/state" "$STUB"/issue-* "$STUB/next-issue" "$STUB"/pr-for-*; rm -f "$STUB/widget-open-issues"

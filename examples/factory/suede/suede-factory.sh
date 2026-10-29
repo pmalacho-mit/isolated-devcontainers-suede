@@ -15,9 +15,11 @@
 #      project lacks. A dependency not in the stack is asked about once
 #      (`approve` adds it with `cli.sh repo add`).
 #   2. A dependency whose folder differs from its pin, unless that exact change
-#      (its patch-id) is already proposed: `cli.sh suede upstream` pushes it as
-#      suede's downstream/<consumer>-<commit> branch, and suede's own workflow
-#      in the dependency opens the PR.
+#      (its patch-id) is already proposed, or was -- merged, and waiting for a
+#      release and the sync that brings it back, or closed unmerged, which is
+#      your answer: `cli.sh suede upstream` pushes it as suede's
+#      downstream/<consumer>-<commit> branch, and suede's own workflow in the
+#      dependency opens the PR.
 #   3. That PR appeared: an issue in the dependency, for an agent to decide
 #      whether and how to integrate it -- how pressing, by how the consumer uses
 #      it -- and the PR is edited to close it. A proposal it replaces (the same
@@ -84,13 +86,15 @@ stack_projects() {
 }
 in_stack() { printf '%s\n' "$PROJECTS" | grep -qxF "$1"; }
 
-# 0 when <dependency> is in the stack -- added now, if you approved it before.
+# 0 when <dependency> is in the stack -- added now, if you approved it before;
+# 1 while it waits on your approval (`approve` has its consumers looked at
+# again); 2 when it could not be added now.
 ensure_dependency() { # <dependency> <consumer>
   in_stack "$1" && return 0
   if grep -qxF "$1" "$STATE/approved" 2>/dev/null; then
-    [ -z "$DRY" ] || { log "would: add $1 to the stack (approved)"; return 1; }
+    [ -z "$DRY" ] || { log "would: add $1 to the stack (approved)"; return 2; }
     log "$1: approved; adding it to the stack"
-    "$CLI" repo add "$1" </dev/null || { log "$1: repo add failed; trying again next tick"; return 1; }
+    "$CLI" repo add "$1" </dev/null || { log "$1: repo add failed; trying again next tick"; return 2; }
     PROJECTS=$(stack_projects)
     return 0
   fi
@@ -129,16 +133,21 @@ ensure_labels() { # <repo>
 # --- looking at a consumer ---------------------------------------------------
 # Its suede dependencies at origin/<main>, now: origin/* refreshed (fetch only),
 # history it lacks delivered for what is in the stack, the report kept for the
-# release side. Prints the report; returns 1 when there is none, 2 when it is
-# complete only for what is in the stack.
+# release side. Prints the report; returns 1 when there is none, 2 when
+# something it called for failed, 3 when only your approval of a dependency is
+# missing.
 fresh_report() { # <project> <main>
-  local project=$1 main=$2 rep dep delivered="" complete=0
+  local project=$1 main=$2 rep dep delivered="" complete=0 code
   "$CLI" pull "$project" --fetch-only </dev/null >/dev/null || { log "$project: could not refresh origin/*"; return 1; }
   rep=$(report "$project" "origin/$main")
   [ -n "$rep" ] || { log "$project: no report from its sandbox"; return 1; }
   for dep in $(jq -r '.dependencies[] | select(.state == "nopin") | .repo // empty' <<< "$rep" | sort -u); do
-    ensure_dependency "$dep" "$project" || { complete=2; continue; }
-    "$CLI" suede deliver "$project" "$dep" </dev/null >/dev/null && delivered=1 || { log "$project: could not deliver $dep"; complete=2; }
+    code=0; ensure_dependency "$dep" "$project" || code=$?
+    case "$code" in
+      0) "$CLI" suede deliver "$project" "$dep" </dev/null >/dev/null && delivered=1 || { log "$project: could not deliver $dep"; complete=2; } ;;
+      1) [ "$complete" -eq 2 ] || complete=3 ;;
+      *) complete=2 ;;
+    esac
   done
   [ -z "$delivered" ] || rep=$(report "$project" "origin/$main")
   [ -n "$rep" ] || return 1
@@ -157,30 +166,51 @@ consumer_tick() { # <project>
   log "$project: $main is at ${head:0:12}; looking at its suede dependencies"
   rep=$(fresh_report "$project" "$main") || code=$?
   [ "$code" -ne 1 ] || return 0
-  [ "$code" -eq 0 ] || ok=""
+  [ "$code" -ne 2 ] || ok=""
   while IFS= read -r dependency; do
     propose "$project" "$main" "$dependency" || ok=""
   done < <(jq -c '.dependencies[] | select(.state == "diff" and .repo != null)' <<< "$rep")
   # Seen only once everything it called for was done: otherwise next tick retries.
+  # Waiting on your approval is not undone: `approve` has it looked at again.
   [ -z "$ok" ] || [ -n "$DRY" ] || put "heads/$(tag_of "$project").main" "$head"
 }
 
 propose() { # <consumer> <main> <dependency report>
-  local consumer=$1 main=$2 d=$3 dep dir patch open same pending out branch
+  local consumer=$1 main=$2 d=$3 dep dir patch open same pending closed out branch at code=0
   dep=$(jq -r .repo <<< "$d"); dir=$(jq -r .dir <<< "$d"); patch=$(jq -r .patch <<< "$d")
-  ensure_dependency "$dep" "$consumer" || return 1
+  ensure_dependency "$dep" "$consumer" || code=$?
+  [ "$code" -eq 0 ] || { [ "$code" -eq 1 ] && return 0; return 1; }
   # Already proposed, the same change: open, or pushed and waiting for its PR.
-  open=$(marked_issues "$dep" "$UPSTREAM_LABEL" open | jq -c --arg c "$consumer" --arg d "$dir" '[.[] | select(.marker.consumer == $c and .marker.dir == $d)]')
+  # Unread is not none: it is tried again next tick.
+  open=$(marked_issues "$dep" "$UPSTREAM_LABEL" open | jq -c --arg c "$consumer" --arg d "$dir" '[.[] | select(.marker.consumer == $c and .marker.dir == $d)]') \
+    || { log "$dep: its issues were not read; $consumer's $dir waits a tick"; return 1; }
   same=$(jq -r --arg p "$patch" '[.[] | select(.marker.patch == $p)][0].url // empty' <<< "$open")
   [ -z "$same" ] || { log "$consumer: $dir's change is already proposed ($same)"; return 0; }
   for pending in "$STATE/pending/$(tag_of "$dep")"/*.json; do
     [ -e "$pending" ] || continue
     jq -e --arg c "$consumer" --arg d "$dir" --arg p "$patch" '.consumer == $c and .dir == $d and .patch == $p' "$pending" >/dev/null && return 0
   done
+  # Or proposed before and closed: merged, it comes back with the sync after a
+  # release, and until then the copy still differs; unmerged, that was your answer.
+  closed=$(marked_closed_issues "$dep" | jq -c --arg c "$consumer" --arg d "$dir" --arg p "$patch" \
+    '[.[] | select(.marker.consumer == $c and .marker.dir == $d and .marker.patch == $p)] | (map(select(.reason == "COMPLETED")) + .)[0] // empty') \
+    || { log "$dep: its closed issues were not read; $consumer's $dir waits a tick"; return 1; }
+  if [ -n "$closed" ]; then
+    local issue pr
+    issue=$(jq -r .number <<< "$closed"); pr=$(jq -r '.marker.pr // empty' <<< "$closed")
+    if [ "$(jq -r .reason <<< "$closed")" = COMPLETED ] && [ -n "$pr" ] \
+       && [ -n "$(gh pr view "$pr" -R "$dep" --json mergedAt --jq '.mergedAt // empty' 2>/dev/null)" ]; then
+      log "$consumer: $dir's change was merged (PR #$pr, #$issue); it comes back with the sync after $dep's next release"
+    else
+      log "$consumer: $dir's change was closed without being merged (#$issue); it is not proposed again unless it changes"
+    fi
+    return 0
+  fi
   if [ -n "$DRY" ]; then
     log "would: propose $consumer's changes to $dir upstream to $dep ($(jq -r '.files | length' <<< "$d") file(s))"
     return 0
   fi
+  at=$(date -u +%s)
   out=$("$CLI" suede upstream "$consumer" "$dir" --ref "origin/$main" </dev/null 2>&1) || { log "$consumer: proposing $dir failed: $(printf '%s' "$out" | tail -n 1)"; return 1; }
   branch=$(printf '%s\n' "$out" | sed -n 's/^UPSTREAMED [^ ]* \([^ ]*\) .*/\1/p')
   [ -n "$branch" ] || { log "$consumer: $dir has nothing to propose"; return 0; }
@@ -188,7 +218,7 @@ propose() { # <consumer> <main> <dependency report>
   put "pending/$(tag_of "$dep")/$(printf '%s' "$branch" | tr '/' '_').json" "$(jq -cn \
     --arg dep "$dep" --arg branch "$branch" --arg consumer "$consumer" --arg dir "$dir" --argjson d "$d" \
     --argjson supersedes "$(jq -c '[.[] | {issue: .number, pr: .marker.pr, branch: .marker.branch}]' <<< "$open")" \
-    --arg at "$(date -u +%s)" \
+    --arg at "$at" \
     '{dep: $dep, branch: $branch, consumer: $consumer, dir: $dir, kind: $d.kind, patch: $d.patch, pin: $d.pin, files: $d.files, supersedes: $supersedes, at: ($at | tonumber)}')"
 }
 
@@ -198,7 +228,11 @@ pending_tick() { # <dependency>
   for file in "$STATE/pending/$(tag_of "$dep")"/*.json; do
     [ -e "$file" ] || continue
     branch=$(jq -r .branch "$file")
-    pr=$(gh pr list -R "$dep" --head "$branch" --state all --json number,state,url,title,body --jq '.[0] // empty' 2>/dev/null || true)
+    # Opened since the push (a minute's slack for the clocks): a PR on the same
+    # branch name from before is an earlier proposal's -- merged, and its branch
+    # deleted, then pushed again.
+    pr=$(gh pr list -R "$dep" --head "$branch" --state all --json number,state,url,title,body,createdAt 2>/dev/null \
+      | jq -c --argjson since "$(( $(jq -r .at "$file") - 60 ))" '[.[] | select((.createdAt | fromdateiso8601) >= $since)][0] // empty' 2>/dev/null || true)
     if [ -z "$pr" ]; then
       if ! gh api "repos/$dep/branches/$branch" --silent 2>/dev/null \
          && [ $(( $(date -u +%s) - $(jq -r .at "$file") )) -gt 600 ]; then
@@ -484,10 +518,15 @@ case "$COMMAND" in
     [ $# -eq 1 ] && [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || usage
     mkdir -p "$STATE"
     grep -qxF "$1" "$STATE/approved" 2>/dev/null || echo "$1" >> "$STATE/approved"
+    # The consumers that were waiting on it are looked at again.
+    for f in "$STATE"/deps/*.json; do
+      [ -e "$f" ] || continue
+      jq -e --arg r "$1" 'any(.dependencies[]; .repo == $r)' "$f" >/dev/null && rm -f "$STATE/heads/$(basename "$f" .json).main"
+    done
     echo "$ME: $1 approved; it is added to the stack on the next tick" ;;
   status)
-    echo "approved: $(tr '\n' ' ' < "$STATE/approved" 2>/dev/null)"
-    echo "asked:    $(tr '\n' ' ' < "$STATE/asked" 2>/dev/null)"
+    echo "approved: $(cat "$STATE/approved" 2>/dev/null | tr '\n' ' ')"
+    echo "asked:    $(cat "$STATE/asked" 2>/dev/null | tr '\n' ' ')"
     echo "waiting for suede to open a PR:"
     for f in "$STATE"/pending/*/*.json; do [ -e "$f" ] && jq -r '"  \(.dep): \(.branch) (\(.consumer)/\(.dir))"' "$f"; done
     echo "consumers' dependencies:"

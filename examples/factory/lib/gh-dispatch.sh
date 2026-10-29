@@ -31,12 +31,16 @@
 #        orange, red -- a comment on the issue, once per status;
 #        green       -- you are told to review and push it (`desolate --push`,
 #                       or the panel's Push); once GitHub has issue/<n>, a
-#                       draft PR is opened for it;
+#                       draft PR is opened for it -- or the one already open
+#                       for that branch is taken, and made to close the issue;
 #        gray        -- withdrawn: the agent recommends this not be merged;
 #                       said on the issue (and its PR), once per status;
 #
 # and for every worktree it started whose issue is no longer open: stop it and
-# `cli.sh worktree remove` it, which refuses one holding uncommitted work.
+# `cli.sh worktree remove` it, which refuses one holding uncommitted work. One
+# that will not go is left to you, said once; either way its agent no longer
+# counts as working. A repository with issues turned off is skipped, quietly;
+# issues that could not be read skip the tick -- unread is not closed.
 #
 # A status is the agent's claim (docs/agents.md): you look before you push,
 # and review the draft after.
@@ -133,11 +137,31 @@ dispatch_pull_request() { # <n> <name> <title> <message> <updated> <branch> <bas
     echo "$updated" > "$STATE/$name.push"
     return
   fi
-  gh pr create -R "$REPO" --draft --head "$branch" --base "$base" \
+  # One already open for the branch (opened by hand, say) is taken -- and made
+  # to close the issue, which is what ends the worktree.
+  local open
+  open=$(gh pr list -R "$REPO" --head "$branch" --state open --json number,url,body 2>/dev/null | jq -c '.[0] // empty' 2>/dev/null || true)
+  if [ -n "$open" ]; then
+    jq -r .url <<< "$open" > "$STATE/$name.pr"
+    log "#$n: $branch already has a PR: $(cat "$STATE/$name.pr")"
+    if ! jq -e --arg n "$n" '.body // "" | test("\\b(close[sd]?|fix(e[sd])?|resolve[sd]?) #" + $n + "\\b"; "i")' <<< "$open" >/dev/null; then
+      gh pr edit "$(jq -r .number <<< "$open")" -R "$REPO" --body "$(jq -r '.body // ""' <<< "$open")
+
+Closes #$n" >/dev/null 2>&1 && log "#$n: that PR now closes it" || log "#$n: could not make that PR close it; merging it will not end the worktree"
+    fi
+    return
+  fi
+  if gh pr create -R "$REPO" --draft --head "$branch" --base "$base" \
     --title "$title" --body "$message
 
-Closes #$n" > "$STATE/$name.pr"
-  log "#$n: draft PR $(cat "$STATE/$name.pr")"
+Closes #$n" > "$STATE/$name.pr" 2> "$STATE/$name.pr-error"; then
+    log "#$n: draft PR $(cat "$STATE/$name.pr")"
+  else
+    rm -f "$STATE/$name.pr"
+    [ "$(cat "$STATE/$name.pr-tried" 2>/dev/null)" = "$updated" ] \
+      || log "#$n: no draft PR: $(tail -n 1 "$STATE/$name.pr-error") -- tried again each tick"
+    echo "$updated" > "$STATE/$name.pr-tried"
+  fi
 }
 
 # Agents whose own access broke: say so once per status, fix it if a person is
@@ -167,8 +191,20 @@ dispatch_unblock() { # <statuses json>
 
 dispatch_tick() {
   local issues statuses running
-  issues=$(gh issue list -R "$REPO" --label "$LABEL" --state open --limit 100 --json number,title,body)
-  statuses=$("$CLI" desolate --status --json "$PROJECT")
+  # What is not read is not closed: worktrees are removed below for the issues
+  # missing from this, so a failed read ends the tick.
+  if ! issues=$(gh issue list -R "$REPO" --label "$LABEL" --state open --limit 100 --json number,title,body 2> "$STATE/.issues-error"); then
+    if grep -q "has disabled issues" "$STATE/.issues-error"; then
+      [ -e "$STATE/.issues-off" ] || log "$REPO has issues turned off; skipped while it does"
+      : > "$STATE/.issues-off"
+      return 0
+    fi
+    log "$REPO: issues not read: $(tail -n 1 "$STATE/.issues-error")"
+    return 1
+  fi
+  rm -f "$STATE/.issues-off"
+  statuses=$("$CLI" desolate --status --json "$PROJECT" </dev/null) && jq -e 'type == "array"' <<< "$statuses" >/dev/null 2>&1 \
+    || { log "$PROJECT: its worktrees not read"; return 1; }
   running=$("$CLI" desolate --list --json | sed -n '/^\[/p' | tail -n 1)
   local can_start=1
   dispatch_unblock "$statuses" || can_start=""
@@ -234,18 +270,25 @@ dispatch_tick() {
     esac
   done < <(jq -c '.[]' <<< "$issues")
 
-  # Worktrees this started, for issues no longer open: done with.
-  local started
+  # Worktrees this started, for issues no longer open: done with. One that is
+  # gone already is done; one that will not go is left to you, said once.
+  local started out
   for started in "$STATE"/issue-*.agent; do
     [ -e "$started" ] || continue
     name=$(basename "$started" .agent); n=${name#issue-}
     jq -e --argjson n "$n" 'any(.[]; .number == $n)' <<< "$issues" >/dev/null && continue
+    if ! jq -e --arg w "$name" 'any(.[]; .worktree == $w)' <<< "$statuses" >/dev/null; then
+      log "#$n: no longer open, and $name is gone already"
+      mv "$started" "$started.done"
+      continue
+    fi
     log "#$n: no longer open; stopping and removing $name"
     "$CLI" desolate "$PROJECT" --worktree "$name" --stop </dev/null || true
-    if "$CLI" worktree remove "$PROJECT" "$name"; then
+    if out=$("$CLI" worktree remove "$PROJECT" "$name" </dev/null 2>&1); then
       mv "$started" "$started.done"
     else
-      log "#$n: $name kept (uncommitted work?) -- remove it yourself"
+      log "#$n: $name was not removed ($(printf '%s\n' "$out" | tail -n 1)) -- it is yours now: ./cli.sh worktree remove $PROJECT $name [--force]"
+      mv "$started" "$started.kept"
     fi
   done
 }
@@ -269,7 +312,8 @@ dispatch_project() { # <project> <repo>
 }
 
 # Agents this has started that are still on an open issue: an .agent file is
-# moved aside (.done) once its worktree is removed.
+# moved aside once its issue closes -- .done when its worktree is removed or
+# gone, .kept when the worktree was left to you.
 working_agents() {
   local count=0 file
   for file in "${FACTORY_STATE:-$HOME/.local/state/desolate-factory}"/*/issue-*.agent; do

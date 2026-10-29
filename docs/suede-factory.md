@@ -68,9 +68,12 @@ Each tick of `suede-factory.sh`:
 1. **A consumer's `main` moved.** The factory:
    - refreshes `origin/*` (`cli.sh pull --fetch-only`);
    - reports its suede dependencies at `origin/<main>` (`cli.sh suede report`);
-   - delivers the history of any it lacks (`cli.sh suede deliver`). A dependency that isn't in the stack is asked about once, by notification: `suede-factory.sh approve <owner/repo>` adds it, with `cli.sh repo add`, which clones it and creates a write deploy key on it.
-2. **A dependency differs from its pin.** Unless that exact change is already proposed, compared by `git patch-id`, `cli.sh suede upstream` pushes it to the dependency as `downstream/<consumer>-<commit>`. That is suede's own branch, so suede's own workflow there opens the PR into `main`.
-3. **That PR appeared.** The factory files an issue in the dependency, labelled `desolate:run` and `suede:upstream`, and edits the PR to `Closes #<issue>`. The issue holds:
+   - delivers the history of any it lacks (`cli.sh suede deliver`). A dependency that isn't in the stack is asked about once, by notification: `suede-factory.sh approve <owner/repo>` adds it, with `cli.sh repo add`, which clones it and creates a write deploy key on it. Until you approve, the consumer isn't looked at again; approving has every consumer of that dependency looked at on the next tick.
+2. **A dependency differs from its pin.** `cli.sh suede upstream` pushes the change to the dependency as `downstream/<consumer>-<commit>`. That is suede's own branch, so suede's own workflow there opens the PR into `main`. The change is compared by `git patch-id`, and it isn't pushed when that exact change, from that consumer and folder:
+   - **is already proposed:** its issue is open, or it was pushed and is waiting for its PR;
+   - **was merged:** its issue closed as completed and its PR merged. The consumer's copy keeps differing until the release and the sync bring the change back, and that is not a new change;
+   - **was closed without merging:** that was your answer. It is proposed again only once the change itself changes.
+3. **That PR appeared**, opened since the push: an older PR on the same branch name belongs to an earlier proposal. The factory files an issue in the dependency, labelled `desolate:run` and `suede:upstream`, and edits the PR to `Closes #<issue>`. The issue holds:
    - the task, framed by kind;
    - the files, and the PR's own text;
    - every other open proposal into the dependency;
