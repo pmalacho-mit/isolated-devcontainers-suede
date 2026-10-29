@@ -4,7 +4,7 @@
 # `dispatch_main "$@"` (see ../gh-dispatcher.sh, ../claude/claude-dispatcher.sh).
 #
 #   <dispatcher> <project> [<owner/repo>] [--base B] [--label L] [--interval S] [--once]
-#   <dispatcher> --all [--label L] [--interval S] [--once]
+#   <dispatcher> --all [--label L] [--interval S] [--once] [--max-agents N]
 #
 # <project> is desolate's name for it -- its path under /workspaces, what
 # `./cli.sh desolate <project>` takes. <owner/repo> is its GitHub repository,
@@ -22,7 +22,8 @@
 #      targets B too (without `origin/`; default: the repo's default branch);
 #   2. not running: start it;
 #   3. no agent started here yet: agent_start, with the issue as its task and
-#      desolate-status as its voice;
+#      desolate-status as its voice -- unless --max-agents (default 3) are
+#      already working, across every project: then it waits a tick;
 #   4. its status (`cli.sh desolate --status --json`):
 #        the agent's own access broken (agent_blocked: a failed login, say) --
 #                       you are told, here and by a notification, and asked to
@@ -182,6 +183,10 @@ dispatch_tick() {
 
     if [ ! -e "$STATE/$name.agent" ]; then
       [ -n "$can_start" ] || continue
+      if [ "$(working_agents)" -ge "$MAX_AGENTS" ]; then
+        log "#$n: waiting -- $MAX_AGENTS agents are working (--max-agents)"
+        continue
+      fi
       if ! jq -e --arg w "$name" 'any(.[]; .worktree == $w)' <<< "$statuses" >/dev/null; then
         if [ "$fetch" = true ]; then
           "$CLI" pull "$PROJECT" --fetch-only </dev/null >/dev/null || { log "#$n: could not refresh $PROJECT's origin/*"; continue; }
@@ -263,6 +268,16 @@ dispatch_project() { # <project> <repo>
   dispatch_tick || log "$PROJECT: tick failed; trying again next time"
 }
 
+# Agents this has started that are still on an open issue: an .agent file is
+# moved aside (.done) once its worktree is removed.
+working_agents() {
+  local count=0 file
+  for file in "${FACTORY_STATE:-$HOME/.local/state/desolate-factory}"/*/issue-*.agent; do
+    [ -e "$file" ] && count=$((count + 1))
+  done
+  echo "$count"
+}
+
 # Every project in the stack whose name is owner/repo.
 stack_projects() {
   "$CLI" desolate --status --json </dev/null \
@@ -281,13 +296,14 @@ dispatch_main() {
     case "${1:-}" in ""|-*) ;; *) REPO=$1; shift ;; esac
     case "$REPO" in */*) ;; *) echo "$DISPATCHER: $PROJECT is no owner/repo; name its GitHub repository after it" >&2; exit 2 ;; esac
   fi
-  LABEL=desolate:run INTERVAL=60 ONCE= BASE=
+  LABEL=desolate:run INTERVAL=60 ONCE= BASE= MAX_AGENTS=3
   while [ $# -gt 0 ]; do
     case "$1" in
       --label) LABEL=${2:?}; shift 2 ;;
       --base) BASE=${2:?--base takes a branch, e.g. v2}; shift 2 ;;
       --interval) INTERVAL=${2:?}; shift 2 ;;
       --once) ONCE=1; shift ;;
+      --max-agents) MAX_AGENTS=${2:?}; shift 2; case "$MAX_AGENTS" in ""|*[!0-9]*) echo "$DISPATCHER: --max-agents takes a number" >&2; exit 2 ;; esac ;;
       *) echo "$DISPATCHER: unknown option '$1'" >&2; exit 2 ;;
     esac
   done

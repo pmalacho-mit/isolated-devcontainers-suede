@@ -92,6 +92,17 @@ assert_contains "on its PR" "$CALLS" "gh pr comment 12 -R acme/widget"
 tick
 assert_not_contains "and not again for the same status" "$(cat "$STUB/calls")" "gh issue comment 7"
 
+group "--max-agents: no more agents start while that many are working"
+rm -rf "$STUB/state"; mkdir -p "$STUB/state"
+jq -n --arg body "x" '[{number: 7, title: "a", body: $body}]' > "$STUB/widget-issues"
+statuses "" ""
+: > "$STUB/calls"
+PATH="$STUB/bin:$PATH" DESOLATE_CLI="$STUB/bin/cli" FACTORY_STATE="$STUB/state" FACTORY_AGENT=true \
+  bash "$ROOT/examples/factory/gh-dispatcher.sh" --all --once --max-agents 1 </dev/null > "$STUB/out" 2>&1
+assert_contains "the first starts (projects in name order: acme/app)" "$(cat "$STUB/calls")" "cli worktree add acme/app issue-3"
+assert_not_contains "the second waits" "$(cat "$STUB/calls")" "cli worktree add acme/widget"
+assert_contains "  and says why" "$(cat "$STUB/out")" "waiting -- 1 agents are working"
+
 group "a marker is checked, not trusted"
 jq -n --arg body '<!-- desolate-dispatch: {"pr":"12; rm -rf /"} -->' '[{number: 8, title: "x", body: $body}]' > "$STUB/widget-issues"
 statuses "" ""

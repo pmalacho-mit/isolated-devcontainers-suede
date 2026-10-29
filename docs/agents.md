@@ -196,6 +196,10 @@ It also pre-answers onboarding and the folder's trust dialog. Claude's own event
 
 **`verify`** reads the proxy's audit to check that the subscription token really was the one used.
 
+### The suede factory
+
+`examples/factory/suede/suede-factory.sh` builds on all of this for suede dependencies. A consumer's changes to a dependency are proposed upstream, an agent decides whether and how to integrate them, and releases fan back out to every consumer as syncs. See [suede-factory.md](suede-factory.md).
+
 ## What changed to get here
 
 The first factory, `cli.sh work` and `cli.sh forge`, built this workflow into desolate. It had:
