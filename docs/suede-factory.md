@@ -17,6 +17,7 @@ examples/factory/claude/claude-dispatcher.sh --all            # agents for every
 examples/factory/suede/suede-factory.sh run --dry-run --once   # first: what it would do
 examples/factory/suede/suede-factory.sh run                    # then: every 60 s
 examples/factory/suede/suede-factory.sh status                 # what it is waiting on
+examples/factory/suede/suede-factory.sh sync acme/app          # ask for syncs by hand (below)
 ```
 
 ## What counts as a suede dependency
@@ -55,7 +56,11 @@ Each tick of `suede-factory.sh`:
 4. **The agent works.** It runs in a worktree of the dependency, on the PR's branch. Other agents working on proposals into the same dependency are in the same repository, and coordinate through `/desolate/status board` and `note`. One can carry another's change; the one that hands its change over finishes `gray "withdrawn: …"`. When an agent finishes:
    - **green:** you're asked to review it and push it to the PR (the panel's Push, or `desolate --push --worktree <name> <project>`), then merge it;
    - **gray:** withdrawn; it's said on the issue and the PR.
-5. **The dependency released**, i.e. its `release` branch moved, which happens after a merge publishes. Every consumer in the stack whose pin is now behind gets a sync issue, `suede:sync`, with release dependencies first. The release is delivered beforehand, and the issue spells out the offline sync:
+5. **The dependency released**, i.e. its `release` branch moved, which happens after a merge publishes. Two kinds of consumer get a sync issue, `suede:sync`, release dependencies first:
+   - **proposers:** consumers whose proposal was merged into this release. Their issue was closed as completed, and its PR is merged.
+   - **blocked consumers:** those that ship the dependency as a release dependency while their copy still differs from its pin. They can't publish until they sync, even when their change was carried into someone else's PR.
+
+   Nobody else is synced automatically; use `sync` for that, below. The release is delivered beforehand, and the issue spells out the offline sync:
 
    ```bash
    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.$bundle.insteadOf" GIT_CONFIG_VALUE_0="$remote" bash <dir>/.suede/core/sync
@@ -74,15 +79,29 @@ Each tick of `suede-factory.sh`:
 
 `--dry-run` does none of that. It says what it would do, and records nothing as done.
 
-## Fan-out: who syncs when a dependency releases
+## Who syncs, and when
 
-**Implemented:**
-- **`--sync all`**, the default: every consumer whose pin is behind gets a sync issue. The dispatcher's `--max-agents` (default 3) bounds how many agents work at once, and the rest wait their turn.
-- **`--sync issues-only`:** the sync issues are filed without `desolate:run`, so nothing starts until you add the label.
+**On a release** (`run --sync <mode>`):
+- **`proposers`, the default:** the consumers whose proposal was merged into it, plus those blocked on it, as in step 5. The work in flight stays easy to follow: only consumers already involved in this change get an agent.
+- **`all`:** every consumer in the stack whose pin is behind.
+- **`none`:** nothing on a release; only `sync` by hand.
 
-**Alternatives, not built:**
-- **Only the proposers:** sync only the consumers whose proposal went into this release, plus any blocked on it. Less churn; slower fan-out.
-- **Debounce:** wait N minutes after a release, so several releases batch into one sync per consumer.
+**By hand, whenever you choose,** through the same issues, labels and agents:
+
+```bash
+examples/factory/suede/suede-factory.sh sync acme/app --dep acme/widget            # one consumer, one dependency
+examples/factory/suede/suede-factory.sh sync acme/app                              # one consumer, all its dependencies
+examples/factory/suede/suede-factory.sh sync acme/app acme/lib --dep acme/widget   # several consumers, one dependency
+examples/factory/suede/suede-factory.sh sync acme/app acme/lib                     # several consumers, everything
+examples/factory/suede/suede-factory.sh sync --all --dep acme/widget               # every project in the stack, one dependency
+examples/factory/suede/suede-factory.sh sync --all                                 # every project, everything
+```
+
+`--dep` repeats. Each consumer named is looked at now, at its `origin/<main>`, and each of its suede dependencies (or only those `--dep` names) whose pin is behind its release gets a sync issue. An open sync for the same folder isn't filed twice. `--dry-run` says what it would file.
+
+Every mode is bounded by the dispatcher's `--max-agents` (default 3): the rest wait their turn.
+
+**Not built:** debounce, i.e. waiting N minutes after a release so several releases batch into one sync per consumer.
 
 A dependency's first release seen is recorded, not acted on. Syncs follow the releases after that.
 

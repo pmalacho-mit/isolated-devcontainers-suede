@@ -27,11 +27,21 @@ args="$*"
 case "$args" in
   "repo view "*) echo main ;;
   "api repos/acme/app/commits/main"*) cat "$STUB_DIR/app-head" ;;
+  "api repos/acme/lib/commits/main"*) echo "$(printf 'd%.0s' $(seq 40))" ;;
+  "api repos/acme/rel/commits/main"*) echo "$(printf 'e%.0s' $(seq 40))" ;;
+  "issue list -R acme/widget --label suede:upstream --state closed"*) cat "$STUB_DIR/widget-closed-issues" 2>/dev/null || echo '[]' ;;
+  "pr view 15 -R acme/widget --json mergedAt"*) echo "2026-10-29T10:00:00Z" ;;
+  "pr view "*) ;;
   "api repos/acme/widget/branches/release "*) cat "$STUB_DIR/widget-release" ;;
   "api repos/acme/widget/branches/downstream/"*) exit 0 ;;
   "api repos/acme/widget/pulls/12/commits"*) echo "  - cccccccccccc the agent's fix (Claude)" ;;
   "issue list -R acme/widget --label suede:upstream --state open"*) cat "$STUB_DIR/widget-open-issues" 2>/dev/null || echo '[]' ;;
-  "issue list -R acme/app --label suede:sync --state open"*) echo '[]' ;;
+  "issue list -R "*" --label suede:sync --state open"*)
+    repo=$(printf '%s\n' "$args" | sed -n 's/^issue list -R \([^ ]*\) .*/\1/p')
+    for f in "$STUB_DIR"/issue-*; do
+      [ -e "$f" ] || continue
+      grep -q -- "^issue create -R $repo " "$f" && grep -q -- "--label suede:sync" "$f" && jq -n --arg b "$(cat "$f")" --arg n "${f##*-}" '{number: ($n | tonumber), url: ("u/" + $n), body: $b}'
+    done | jq -s . ;;
   "pr list -R acme/widget --head "*)
     branch=$(printf '%s\n' "$args" | sed -n 's/.*--head \([^ ]*\).*/\1/p')
     [ -f "$STUB_DIR/pr-for-$(printf '%s' "$branch" | tr '/' '_')" ] && cat "$STUB_DIR/pr-for-$(printf '%s' "$branch" | tr '/' '_')" ;;
@@ -49,6 +59,8 @@ printf 'cli %s\n' "$*" >> "$STUB_DIR/calls"
 case "$*" in
   "desolate --status --json") cat "$STUB_DIR/stack" ;;
   "deps report acme/app --ref origin/main") echo "desolate: driving its daemon"; printf 'DEPS %s\n' "$(cat "$STUB_DIR/report")" ;;
+  "deps report acme/lib --ref origin/main") printf 'DEPS %s\n' "$(cat "$STUB_DIR/report-lib")" ;;
+  "deps report acme/rel --ref origin/main") printf 'DEPS %s\n' "$(cat "$STUB_DIR/report-rel")" ;;
   "deps upstream acme/app widget --ref origin/main")
     echo "UPSTREAMED acme/widget downstream/acme/app-$(cat "$STUB_DIR/app-head") $(printf 'c%.0s' $(seq 40)) $(cat "$STUB_DIR/patch")" ;;
 esac
@@ -64,6 +76,7 @@ report() { # <patch> [<extra dependency json>]
      files: [{status: "M", path: "lib.ts"}]}] + (if $extra then [$extra] else [] end))}' > "$STUB/report"
 }
 tick() {
+  [ ! -s "$STUB/calls" ] || cat "$STUB/calls" >> "$STUB/calls.all"
   : > "$STUB/calls"
   PATH="$STUB/bin:$PATH" DESOLATE_CLI="$STUB/bin/cli" SUEDE_FACTORY_STATE="$STUB/state" \
     bash "$ROOT/examples/factory/suede/suede-factory.sh" run --once "$@" </dev/null > "$STUB/out" 2>&1
@@ -120,19 +133,63 @@ ISSUE=$(cat "$STUB/issue-32" 2>/dev/null)
 assert_contains "its issue lists what the old PR had added, to carry over" "$ISSUE" "cccccccccccc the agent's fix (Claude)"
 assert_contains "  and where to look" "$ISSUE" "git log origin/main..origin/downstream/acme/app-$H1"
 assert_contains "the old PR is closed, pointing at the new" "$(calls)" "gh pr close 12 -R acme/widget --comment Replaced by #15"
-assert_contains "the old issue is closed" "$(calls)" "gh issue close 31 -R acme/widget --comment Replaced by #32."
+assert_contains "the old issue is closed, as not planned: it was not merged" "$(calls)" "gh issue close 31 -R acme/widget --reason not planned --comment Replaced by #32."
 
-group "a release: every consumer whose pin is behind gets a sync"
+group "a release: the consumers that proposed into it, and those blocked on it, sync -- no one else"
+# Two more consumers of widget: acme/lib uses it as a development dependency,
+# unchanged; acme/rel ships it as a release dependency and its copy differs.
+dep_report() { # <file> <kind> <state>
+  jq -cn --arg pin "$PIN" --arg k "$2" --arg s "$3" '{commit: "x", suede: true, dependencies: [
+    {dir: "widget", repo: "acme/widget", remote: "r", pin: $pin, kind: $k, state: $s, patch: "patchR", files: []}]}' > "$STUB/$1"
+}
+dep_report report-lib development same; dep_report report-rel release diff
+stack "acme/app acme/widget acme/lib acme/rel"
+tick
+assert_contains "the new consumers are looked at" "$(calls)" "deps report acme/lib"
+# #32 (PR #15, acme/app's) was merged, and closed its issue; #31 was replaced.
+jq -cn --arg m "$(sed -n 's/.*\(<!-- suede-factory: {.*} -->\).*/\1/p' "$STUB/issue-32")" \
+  '[{number: 32, closedAt: "2026-10-29T10:00:01Z", stateReason: "COMPLETED", body: ("x\n" + $m)},
+    {number: 31, closedAt: "2026-10-29T10:00:01Z", stateReason: "NOT_PLANNED", body: "replaced"}]' > "$STUB/widget-closed-issues"
 echo "$REL2" > "$STUB/widget-release"
 tick
 ISSUE=$(cat "$STUB/issue-33" 2>/dev/null)
-assert_contains "the release is delivered to the consumer first" "$(calls)" "cli deps deliver acme/app acme/widget"
-assert_contains "the sync issue is in the consumer, for the dispatcher" "$ISSUE" "issue create -R acme/app --title Sync widget to acme/widget's latest release"
+assert_contains "the release is delivered to the consumer first" "$(calls)" "cli deps deliver acme/rel acme/widget"
+assert_contains "the blocked one first: its sync, in the consumer, for the dispatcher" "$ISSUE" "issue create -R acme/rel --title Sync widget to acme/widget's latest release"
 assert_contains "  labelled" "$ISSUE" "--label suede:sync --label desolate:run"
+assert_contains "  told it is what unblocks its publish" "$ISSUE" "ships acme/widget as a release dependency"
 assert_contains "  with the offline sync" "$ISSUE" "GIT_CONFIG_KEY_0=\"url.\$bundle.insteadOf\" GIT_CONFIG_VALUE_0=\"\$remote\" bash 'widget/.suede/core/sync'"
 assert_contains "  its worktree from a fresh origin/main" "$ISSUE" '<!-- desolate-dispatch: {"start":"origin/main","fetch":true,"base":"main"} -->'
+assert_contains "then the one whose proposal was merged into it" "$(cat "$STUB/issue-34" 2>/dev/null)" "issue create -R acme/app --title Sync widget"
+assert_not_contains "a consumer that neither proposed nor is blocked is left alone" "$(calls)" "issue create -R acme/lib"
 tick
 assert_not_contains "the same release is not synced twice" "$(calls)" "issue create"
+
+group "sync by hand: the consumers named, each dependency behind"
+tick_sync() {
+  : > "$STUB/calls"
+  PATH="$STUB/bin:$PATH" DESOLATE_CLI="$STUB/bin/cli" SUEDE_FACTORY_STATE="$STUB/state" \
+    bash "$ROOT/examples/factory/suede/suede-factory.sh" sync "$@" </dev/null > "$STUB/out" 2>&1
+}
+tick_sync acme/lib --dep acme/widget
+assert_contains "the consumer is looked at now" "$(calls)" "deps report acme/lib --ref origin/main"
+assert_contains "and its dependency that is behind gets an issue" "$(cat "$STUB/issue-35" 2>/dev/null)" "issue create -R acme/lib --title Sync widget"
+tick_sync acme/app acme/lib acme/rel --dep acme/widget
+assert_not_contains "a sync already open is not filed again" "$(calls)" "issue create"
+assert_contains "  and says so" "$(cat "$STUB/out")" "a sync of widget is already open"
+tick_sync --all --dep acme/nothing
+assert_contains "a dependency a consumer does not have is said, not guessed at" "$(cat "$STUB/out")" "acme/lib has no suede dependency acme/nothing"
+dep_report report-lib development same
+jq -cn --arg pin "$REL2" '{commit: "x", suede: true, dependencies: [{dir: "widget", repo: "acme/widget", remote: "r", pin: $pin, kind: "development", state: "same", files: []}]}' > "$STUB/report-lib"
+tick_sync acme/lib
+assert_contains "a dependency at its latest release is left alone" "$(cat "$STUB/out")" "acme/lib: widget is at acme/widget's latest release"
+assert_contains "--all and names are not both" "$(tick_sync --all acme/lib; cat "$STUB/out")" "name consumers or --all, not both"
+
+group "--sync all: every consumer whose pin is behind"
+REL3=$(printf 'f%.0s' $(seq 40)); echo "$REL3" > "$STUB/widget-release"
+jq -cn --arg pin "$PIN" '{commit: "x", suede: true, dependencies: [{dir: "widget", repo: "acme/widget", remote: "r", pin: $pin, kind: "development", state: "same", files: []}]}' > "$STUB/report-lib"
+rm -f "$STUB/issue-35"
+tick --sync all
+assert_contains "the development consumer is synced too" "$(cat "$STUB"/issue-* | grep -c 'issue create -R acme/lib --title Sync widget')" "1"
 
 group "a dependency outside the stack: asked once, added once approved"
 stack "acme/app acme/widget"; echo "$(printf '4%.0s' $(seq 40))" > "$STUB/app-head"

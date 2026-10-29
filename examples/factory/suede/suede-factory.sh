@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # examples/factory/suede/suede-factory.sh -- suede upstreaming and syncing, automated.
 #
-#   suede-factory.sh run [--interval S] [--once] [--dry-run] [--sync all|issues-only]
+#   suede-factory.sh run [--interval S] [--once] [--dry-run] [--sync proposers|all|none]
+#   suede-factory.sh sync [--dry-run] (<consumer>... | --all) [--dep <owner/repo>]...
 #   suede-factory.sh approve <owner/repo>
 #   suede-factory.sh status
 #
@@ -22,10 +23,21 @@
 #      it -- and the PR is edited to close it. A proposal it replaces (the same
 #      consumer and folder, a different change) has its PR and issue closed,
 #      and the commits added there are listed for the agent to carry over.
-#   4. A dependency released: every consumer in the stack whose pin is behind
-#      gets an issue to sync it -- release dependencies first -- with the
-#      release delivered, so the sync needs no network (--sync issues-only files
-#      them without the dispatcher's label, for you to start by hand).
+#   4. A dependency released: an issue to sync it, for the consumers whose
+#      proposal was merged into that release and those blocked on it (a release
+#      dependency whose copy still differs) -- release dependencies first --
+#      with the release delivered, so the sync needs no network. `--sync all`:
+#      every consumer whose pin is behind; `--sync none`: no syncs on a release.
+#
+# `sync` asks for syncs by hand, through the same issues: each consumer named
+# (or --all: every project in the stack) is looked at now, and every suede
+# dependency of its that is behind its release -- or only those --dep names --
+# gets an issue for an agent. So:
+#   sync acme/app --dep acme/widget             one consumer, one dependency
+#   sync acme/app                               one consumer, all of them
+#   sync acme/app acme/lib --dep acme/widget    several consumers, one dependency
+#   sync --all --dep acme/widget                everywhere, one dependency
+#   sync --all                                  everywhere, everything
 #
 # What it changes on GitHub: downstream/* branches (through desolate), issues,
 # labels, PR descriptions, and closing what a new proposal replaces. Merging is
@@ -43,15 +55,16 @@ STATE=${SUEDE_FACTORY_STATE:-$HOME/.local/state/suede-factory}
 ME=suede-factory
 UPSTREAM_LABEL=suede:upstream SYNC_LABEL=suede:sync DISPATCH_LABEL=desolate:run
 
-log() { printf '%s %s: %s\n' "$(date +%H:%M:%S)" "$ME" "$*"; }
+# To stderr: some functions print data (a report) that callers capture.
+log() { printf '%s %s: %s\n' "$(date +%H:%M:%S)" "$ME" "$*" >&2; }
 notify() {
   log "$*"
-  printf '\a'
+  printf '\a' >&2
   if command -v osascript >/dev/null; then
     osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "suede factory"' -e 'end run' "$*" >/dev/null 2>&1 || true
   fi
 }
-usage() { sed -n '4,6p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '4,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 # --- state ---------------------------------------------------------------
 tag_of() { printf '%s' "${1//\//__}"; }
@@ -113,26 +126,38 @@ ensure_labels() { # <repo>
   put "labels/$(tag_of "$1")" ok
 }
 
+# --- looking at a consumer ---------------------------------------------------
+# Its suede dependencies at origin/<main>, now: origin/* refreshed (fetch only),
+# history it lacks delivered for what is in the stack, the report kept for the
+# release side. Prints the report; returns 1 when there is none, 2 when it is
+# complete only for what is in the stack.
+fresh_report() { # <project> <main>
+  local project=$1 main=$2 rep dep delivered="" complete=0
+  "$CLI" pull "$project" --fetch-only </dev/null >/dev/null || { log "$project: could not refresh origin/*"; return 1; }
+  rep=$(report "$project" "origin/$main")
+  [ -n "$rep" ] || { log "$project: no report from its sandbox"; return 1; }
+  for dep in $(jq -r '.dependencies[] | select(.state == "nopin") | .repo // empty' <<< "$rep" | sort -u); do
+    ensure_dependency "$dep" "$project" || { complete=2; continue; }
+    "$CLI" deps deliver "$project" "$dep" </dev/null >/dev/null && delivered=1 || { log "$project: could not deliver $dep"; complete=2; }
+  done
+  [ -z "$delivered" ] || rep=$(report "$project" "origin/$main")
+  [ -n "$rep" ] || return 1
+  put "deps/$(tag_of "$project").json" "$rep"
+  printf '%s\n' "$rep"
+  return "$complete"
+}
+
 # --- 1 and 2: a consumer's main moved --------------------------------------
 consumer_tick() { # <project>
-  local project=$1 main head seen rep dep ok=1 dependency
+  local project=$1 main head seen rep ok=1 dependency code=0
   main=$(default_branch "$project") || { log "$project: not reachable with gh; skipped"; return 0; }
   head=$(head_of "$project" "$main") || { log "$project: could not read $main's head"; return 0; }
   seen=$(get "heads/$(tag_of "$project").main")
   [ "$head" != "$seen" ] || return 0
   log "$project: $main is at ${head:0:12}; looking at its suede dependencies"
-  "$CLI" pull "$project" --fetch-only </dev/null >/dev/null || { log "$project: could not refresh origin/*"; return 0; }
-  rep=$(report "$project" "origin/$main")
-  [ -n "$rep" ] || { log "$project: no report from its sandbox"; return 0; }
-  # History the sandbox lacks: delivered, for what is in the stack.
-  local delivered=""
-  for dep in $(jq -r '.dependencies[] | select(.state == "nopin") | .repo // empty' <<< "$rep" | sort -u); do
-    ensure_dependency "$dep" "$project" || { ok=""; continue; }
-    "$CLI" deps deliver "$project" "$dep" </dev/null >/dev/null && delivered=1 || { log "$project: could not deliver $dep"; ok=""; }
-  done
-  [ -z "$delivered" ] || rep=$(report "$project" "origin/$main")
-  [ -n "$rep" ] || return 0
-  put "deps/$(tag_of "$project").json" "$rep"
+  rep=$(fresh_report "$project" "$main") || code=$?
+  [ "$code" -ne 1 ] || return 0
+  [ "$code" -eq 0 ] || ok=""
   while IFS= read -r dependency; do
     propose "$project" "$main" "$dependency" || ok=""
   done < <(jq -c '.dependencies[] | select(.state == "diff" and .repo != null)' <<< "$rep")
@@ -271,29 +296,61 @@ Closes #$issue" >/dev/null 2>&1 || log "$dep: could not link #$number to #$issue
     local old_pr old_issue
     old_pr=$(jq -r '.pr // empty' <<< "$old"); old_issue=$(jq -r .issue <<< "$old")
     [ -z "$old_pr" ] || gh pr close "$old_pr" -R "$dep" --comment "Replaced by #$number: a newer change from $consumer to the same folder. Its branch is kept; what was added here is listed in #$issue." >/dev/null 2>&1 || true
-    gh issue close "$old_issue" -R "$dep" --comment "Replaced by #$issue." >/dev/null 2>&1 || true
+    # Not planned: a replaced proposal never counts as merged into a release.
+    gh issue close "$old_issue" -R "$dep" --reason "not planned" --comment "Replaced by #$issue." >/dev/null 2>&1 || true
   done < <(jq -c '.supersedes[]?' "$file")
   log "$dep: #$issue filed for $consumer's $dir (PR #$number)"
 }
 
 # --- 4: a dependency released ----------------------------------------------
-sync_tick() { # <dependency>
-  local dep=$1 head seen file consumer d dir pin kind main open rows
-  head=$(gh api "repos/$dep/branches/release" --jq .commit.sha 2>/dev/null) || return 0
-  seen=$(get "heads/$(tag_of "$dep").release")
-  [ "$head" != "$seen" ] || return 0
-  if [ -z "$seen" ]; then
-    # First sight: recorded, nothing filed. Syncs follow releases from here on.
-    [ -n "$DRY" ] || put "heads/$(tag_of "$dep").release" "$head"
-    return 0
-  fi
-  log "$dep: released ${head:0:12}"
-  rows=$(for file in "$STATE"/deps/*.json; do
+now_utc() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Consumers whose proposal into <dependency> was merged since <since>: its issue
+# closed as completed (the PR closed it) and the PR merged. One per line,
+# `consumer<TAB>dir`. A proposal that was replaced is closed as not planned.
+proposers() { # <dependency> <since>
+  marked_closed_issues "$1" \
+    | jq -r --arg s "$2" '.[] | select(.reason == "COMPLETED" and .closed >= $s) | [.marker.consumer, .marker.dir, (.marker.pr | tostring)] | @tsv' \
+    | while IFS=$'\t' read -r consumer dir pr; do
+        [ -n "$(gh pr view "$pr" -R "$1" --json mergedAt --jq '.mergedAt // empty' 2>/dev/null)" ] && printf '%s\t%s\n' "$consumer" "$dir"
+      done
+}
+marked_closed_issues() { # <repo>
+  gh issue list -R "$1" --label "$UPSTREAM_LABEL" --state closed --limit 200 --json number,body,closedAt,stateReason 2>/dev/null \
+    | jq -c '[.[] | {number, closed: (.closedAt // ""), reason: (.stateReason // ""), marker: ((.body // "") | capture("<!-- suede-factory: (?<m>\\{.*\\}) -->").m? // empty | fromjson? // empty)} | select(.marker != null)]'
+}
+
+# Consumers blocked on <dependency>: they ship it as a release dependency and
+# their copy differs from its pin, so they cannot publish until they sync.
+blocked() { # <dependency>
+  local file
+  for file in "$STATE"/deps/*.json; do
     [ -e "$file" ] || continue
-    jq -c --arg r "$dep" --arg h "$head" '.dependencies[] | select(.repo == $r and .pin != $h)' "$file" \
-      | while IFS= read -r d; do printf '%s\t%s\n' "$(basename "$file" .json | sed 's/__/\//')" "$d"; done
-  done | awk -F'\t' '{ print ($2 ~ /"kind":"release"/ ? 0 : 1) "\t" $0 }' | sort -s -k1,1 | cut -f2-)
-  while IFS="$(printf '\t')" read -r consumer d; do
+    jq -r --arg r "$1" --arg c "$(basename "$file" .json | sed 's/__/\//')" \
+      '.dependencies[] | select(.repo == $r and .kind == "release" and .state == "diff") | [$c, .dir] | @tsv' "$file"
+  done
+}
+
+# Consumers whose pin of <dependency> is behind <release>, as `consumer<TAB>report
+# of it`, release dependencies first -- only those in <only> (`consumer<TAB>dir`
+# lines) when it is given.
+behind() { # <dependency> <release> [<only>]
+  local file consumer
+  for file in "$STATE"/deps/*.json; do
+    [ -e "$file" ] || continue
+    consumer=$(basename "$file" .json | sed 's/__/\//')
+    jq -c --arg r "$1" --arg h "$2" '.dependencies[] | select(.repo == $r and .pin != $h)' "$file" \
+      | while IFS= read -r d; do
+          [ $# -lt 3 ] || printf '%s\n' "$3" | grep -qxF "$consumer"$'\t'"$(jq -r .dir <<< "$d")" || continue
+          printf '%s\t%s\n' "$consumer" "$d"
+        done
+  done | awk -F'\t' '{ print ($2 ~ /"kind":"release"/ ? 0 : 1) "\t" $0 }' | sort -s -k1,1 | cut -f2-
+}
+
+# A sync issue for each row of `behind`, unless one is open already.
+file_syncs() { # <dependency> <release> <rows>
+  local dep=$1 head=$2 consumer d dir pin kind main open
+  while IFS=$'\t' read -r consumer d; do
     [ -n "$consumer" ] || continue
     in_stack "$consumer" || continue
     dir=$(jq -r .dir <<< "$d"); pin=$(jq -r .pin <<< "$d"); kind=$(jq -r .kind <<< "$d")
@@ -304,9 +361,59 @@ sync_tick() { # <dependency>
       continue
     fi
     main=$(default_branch "$consumer") || continue
-    file_sync_issue "$consumer" "$dep" "$dir" "$pin" "$head" "$kind" "$main" || return 0
-  done <<< "$rows"
-  [ -n "$DRY" ] || put "heads/$(tag_of "$dep").release" "$head"
+    file_sync_issue "$consumer" "$dep" "$dir" "$pin" "$head" "$kind" "$main" || return 1
+  done <<< "$3"
+}
+
+sync_tick() { # <dependency>
+  local dep=$1 head seen since now rows=""
+  head=$(gh api "repos/$dep/branches/release" --jq .commit.sha 2>/dev/null) || return 0
+  seen=$(get "heads/$(tag_of "$dep").release")
+  [ "$head" != "$seen" ] || return 0
+  now=$(now_utc)
+  if [ -z "$seen" ]; then
+    # First sight: recorded, nothing filed. Syncs follow releases from here on.
+    [ -n "$DRY" ] || { put "heads/$(tag_of "$dep").release" "$head"; put "heads/$(tag_of "$dep").release.at" "$now"; }
+    return 0
+  fi
+  since=$(get "heads/$(tag_of "$dep").release.at")
+  log "$dep: released ${head:0:12}"
+  case "$SYNC_MODE" in
+    all) rows=$(behind "$dep" "$head") ;;
+    proposers)
+      local who
+      who=$( { proposers "$dep" "$since"; blocked "$dep"; } | sort -u)
+      [ -z "$who" ] || rows=$(behind "$dep" "$head" "$who")
+      [ -n "$rows" ] || log "$dep: no consumer proposed into this release or is blocked on it; nothing to sync (\`sync\` asks by hand)" ;;
+  esac
+  file_syncs "$dep" "$head" "$rows" || return 0
+  [ -n "$DRY" ] || { put "heads/$(tag_of "$dep").release" "$head"; put "heads/$(tag_of "$dep").release.at" "$now"; }
+}
+
+# `sync`: the consumers named, looked at now; each dependency behind its
+# release -- or each --dep names -- gets an issue.
+sync_by_hand() { # <consumers> <dependencies, or nothing for all>
+  local consumer main rep code dep head d dir rows
+  for consumer in $1; do
+    in_stack "$consumer" || { log "$consumer is not a project in the stack"; continue; }
+    main=$(default_branch "$consumer") || { log "$consumer: not reachable with gh"; continue; }
+    code=0; rep=$(fresh_report "$consumer" "$main") || code=$?
+    [ "$code" -ne 1 ] || continue
+    while IFS= read -r d; do
+      dep=$(jq -r .repo <<< "$d"); dir=$(jq -r .dir <<< "$d")
+      [ -z "$2" ] || printf '%s\n' "$2" | grep -qxF "$dep" || continue
+      in_stack "$dep" || { ensure_dependency "$dep" "$consumer" || true; continue; }
+      head=$(gh api "repos/$dep/branches/release" --jq .commit.sha 2>/dev/null) || { log "$dep: its release branch could not be read"; continue; }
+      if [ "$(jq -r .pin <<< "$d")" = "$head" ]; then log "$consumer: $dir is at $dep's latest release"; continue; fi
+      rows=$(printf '%s\t%s\n' "$consumer" "$d")
+      file_syncs "$dep" "$head" "$rows" || true
+    done < <(jq -c '.dependencies[] | select(.repo != null)' <<< "$rep")
+    if [ -n "$2" ]; then
+      for dep in $2; do
+        jq -e --arg r "$dep" 'any(.dependencies[]; .repo == $r)' <<< "$rep" >/dev/null || log "$consumer has no suede dependency $dep"
+      done
+    fi
+  done
 }
 
 sync_body() {
@@ -337,7 +444,7 @@ EOF
 }
 
 file_sync_issue() { # <consumer> <dependency> <dir> <pin> <release> <kind> <main>
-  local consumer=$1 dep=$2 dir=$3 pin=$4 release=$5 kind=$6 main=$7 body tag issue labels
+  local consumer=$1 dep=$2 dir=$3 pin=$4 release=$5 kind=$6 main=$7 body tag issue
   tag=$(tag_of "$dep")
   if [ -n "$DRY" ]; then log "would: file an issue in $consumer to sync $dir to $dep's ${release:0:12}"; return 0; fi
   "$CLI" deps deliver "$consumer" "$dep" </dev/null >/dev/null || { log "$consumer: could not deliver $dep"; return 1; }
@@ -351,9 +458,7 @@ file_sync_issue() { # <consumer> <dependency> <dir> <pin> <release> <kind> <main
   factory=$(jq -cn --arg r "$dep" --arg d "$dir" --arg h "$release" '{kind: "sync", dependency: $r, dir: $d, release: $h}')
   body=$(sync_body)
   ensure_labels "$consumer"
-  labels=(--label "$SYNC_LABEL")
-  [ "$SYNC_MODE" = issues-only ] || labels+=(--label "$DISPATCH_LABEL")
-  issue=$(gh issue create -R "$consumer" --title "Sync $dir to $dep's latest release" --body "$body" "${labels[@]}" 2>/dev/null) \
+  issue=$(gh issue create -R "$consumer" --title "Sync $dir to $dep's latest release" --body "$body" --label "$SYNC_LABEL" --label "$DISPATCH_LABEL" 2>/dev/null) \
     || { log "$consumer: could not file the sync issue"; return 1; }
   log "$consumer: ${issue##*/} filed to sync $dir"
 }
@@ -388,14 +493,33 @@ case "$COMMAND" in
     echo "consumers' dependencies:"
     for f in "$STATE"/deps/*.json; do [ -e "$f" ] && jq -r --arg c "$(basename "$f" .json | sed 's/__/\//')" \
       '.dependencies[] | "  \($c): \(.dir) -> \(.repo // .remote) [\(.kind), \(.state)]"' "$f"; done ;;
+  sync)
+    DRY="" ALL="" CONSUMERS="" DEPS=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --dry-run) DRY=1; shift ;;
+        --all) ALL=1; shift ;;
+        --dep) [[ "${2:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || usage; DEPS="$DEPS $2"; shift 2 ;;
+        -*) usage ;;
+        *) [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || usage; CONSUMERS="$CONSUMERS $1"; shift ;;
+      esac
+    done
+    [ -n "$ALL" ] || [ -n "$CONSUMERS" ] || usage
+    [ -z "$ALL" ] || [ -z "$CONSUMERS" ] || { echo "$ME: name consumers or --all, not both" >&2; exit 2; }
+    for tool in gh jq; do command -v "$tool" >/dev/null || { echo "$ME: needs $tool" >&2; exit 1; }; done
+    mkdir -p "$STATE"
+    PROJECTS=$(stack_projects) || { echo "$ME: could not read the stack" >&2; exit 1; }
+    [ -z "$ALL" ] || CONSUMERS=$PROJECTS
+    [ -z "$DRY" ] || log "dry run: nothing is filed or changed on GitHub"
+    sync_by_hand "$CONSUMERS" "$(printf '%s\n' $DEPS)" ;;
   run)
-    INTERVAL=60 ONCE="" DRY="" SYNC_MODE=all
+    INTERVAL=60 ONCE="" DRY="" SYNC_MODE=proposers
     while [ $# -gt 0 ]; do
       case "$1" in
         --interval) INTERVAL=${2:?}; shift 2 ;;
         --once) ONCE=1; shift ;;
         --dry-run) DRY=1; shift ;;
-        --sync) SYNC_MODE=${2:?}; shift 2; case "$SYNC_MODE" in all|issues-only) ;; *) usage ;; esac ;;
+        --sync) SYNC_MODE=${2:?}; shift 2; case "$SYNC_MODE" in proposers|all|none) ;; *) usage ;; esac ;;
         *) usage ;;
       esac
     done
