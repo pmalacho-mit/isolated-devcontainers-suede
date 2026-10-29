@@ -67,12 +67,12 @@ export type Command =
    *  fetched into origin/*, in the target's sandbox, and fast-forward. */
   | "pull"
   /** The project's suede dependencies, and how each differs from its pin,
-   *  at a commit (`cli.sh deps report`; docs/suede-factory.md). The Mac's:
+   *  at a commit (`cli.sh suede report`; docs/suede-factory.md). The Mac's:
    *  the broker does not speak it. */
-  | "deps-report"
+  | "suede-report"
   /** The commit that proposes one suede dependency's changes upstream,
-   *  bundled in the project's git dir (`cli.sh deps upstream`). The Mac's. */
-  | "deps-build";
+   *  bundled in the project's git dir (`cli.sh suede upstream`). The Mac's. */
+  | "suede-build";
 
 export type Args = {
   command: Command;
@@ -122,13 +122,13 @@ export type Args = {
   json: boolean;
   /** `exec`'s command line: everything after `--`. */
   execArgv?: string[];
-  /** `bundle`, `pull` and `deps-build`: the bundle's file name in the project's git dir. */
+  /** `bundle`, `pull` and `suede-build`: the bundle's file name in the project's git dir. */
   transfer?: string;
   /** `pull`: set origin/* and move nothing checked out. */
   fetchOnly?: boolean;
-  /** `deps-report` and `deps-build`: the commit to look at. */
+  /** `suede-report` and `suede-build`: the commit to look at. */
   ref?: string;
-  /** `deps-build`: the dependency's folder, relative to the project. */
+  /** `suede-build`: the dependency's folder, relative to the project. */
   subrepo?: string;
 };
 
@@ -288,14 +288,14 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--fetch-only":
         fetchOnly = true;
         break;
-      case "--deps-report":
-        command = "deps-report";
+      case "--suede-report":
+        command = "suede-report";
         break;
-      case "--deps-build":
-        command = "deps-build";
+      case "--suede-build":
+        command = "suede-build";
         subrepo = queue.shift() ?? "";
         if (!relativeWithin(subrepo) || subrepo.startsWith("-"))
-          throw new UsageError(`--deps-build takes a dependency folder inside the project, got '${subrepo}'`);
+          throw new UsageError(`--suede-build takes a dependency folder inside the project, got '${subrepo}'`);
         break;
       case "--transfer":
         transfer = queue.shift() ?? "";
@@ -362,12 +362,12 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   if (command === "exec" && !execArgv?.length)
     throw new UsageError("--exec takes a command after '--'");
   if (fetchOnly && command !== "pull") throw new UsageError("--fetch-only only means something with --pull");
-  if (ref !== undefined && command !== "deps-report" && command !== "deps-build")
-    throw new UsageError("--ref only means something with --deps-report or --deps-build");
-  if (command === "deps-build" && transfer === undefined)
-    throw new UsageError("--deps-build takes --transfer <bundle name>");
-  if (transfer !== undefined && !["bundle", "pull", "deps-build"].includes(command))
-    throw new UsageError("--transfer only means something with --deps-build");
+  if (ref !== undefined && command !== "suede-report" && command !== "suede-build")
+    throw new UsageError("--ref only means something with --suede-report or --suede-build");
+  if (command === "suede-build" && transfer === undefined)
+    throw new UsageError("--suede-build takes --transfer <bundle name>");
+  if (transfer !== undefined && !["bundle", "pull", "suede-build"].includes(command))
+    throw new UsageError("--transfer only means something with --suede-build");
   if (reclaimPath !== undefined && command !== "reclaim")
     throw new UsageError("--path only means something with --reclaim");
   if (reclaimPath !== undefined && !relativeWithin(reclaimPath))

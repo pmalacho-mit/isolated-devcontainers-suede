@@ -132,7 +132,7 @@ Those choices belong to the harness, which is where they can change without chan
 
 ## How a harness uses them
 
-`examples/factory/` holds two dispatchers built on these primitives. Both share one loop, `lib/gh-dispatch.sh`:
+`examples/factory/` holds two dispatchers built on these primitives; its [README](../examples/factory/README.md) shows how the pieces fit, with diagrams. Both share one loop, `lib/gh-dispatch.sh`:
 - `gh-dispatcher.sh` runs any agent command (`FACTORY_AGENT`);
 - `claude/claude-dispatcher.sh` runs Claude Code through `claude/claude-helper.sh`.
 

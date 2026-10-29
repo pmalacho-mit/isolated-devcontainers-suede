@@ -1,5 +1,5 @@
 /// <reference types="node" />
-// `deps report` and `deps build` (docker.ts depsScript), run as the sandbox
+// `suede report` and `deps build` (docker.ts depsScript), run as the sandbox
 // runs them, against real repositories made with git-subrepo: a consumer that
 // is itself a suede dependency, with a release-declared dependency, one that
 // holds a nested dependency, a tooling subrepo, and its own release/.
@@ -85,7 +85,7 @@ before(() => {
 
 after(() => process.env.KEEP ? console.log("kept " + root) : rmSync(root, { recursive: true, force: true }));
 
-describe("deps report", { skip: !subrepoAvailable && "git-subrepo is not installed" }, () => {
+describe("suede report", { skip: !subrepoAvailable && "git-subrepo is not installed" }, () => {
   test("lists the suede dependencies only: not release/, not tooling", () => {
     const found = report(clone);
     assert.equal(found.suede, true, "the consumer is itself a suede dependency");

@@ -58,10 +58,10 @@ cat > "$STUB/bin/cli" <<'EOF'
 printf 'cli %s\n' "$*" >> "$STUB_DIR/calls"
 case "$*" in
   "desolate --status --json") cat "$STUB_DIR/stack" ;;
-  "deps report acme/app --ref origin/main") echo "desolate: driving its daemon"; printf 'DEPS %s\n' "$(cat "$STUB_DIR/report")" ;;
-  "deps report acme/lib --ref origin/main") printf 'DEPS %s\n' "$(cat "$STUB_DIR/report-lib")" ;;
-  "deps report acme/rel --ref origin/main") printf 'DEPS %s\n' "$(cat "$STUB_DIR/report-rel")" ;;
-  "deps upstream acme/app widget --ref origin/main")
+  "suede report acme/app --ref origin/main") echo "desolate: driving its daemon"; printf 'DEPS %s\n' "$(cat "$STUB_DIR/report")" ;;
+  "suede report acme/lib --ref origin/main") printf 'DEPS %s\n' "$(cat "$STUB_DIR/report-lib")" ;;
+  "suede report acme/rel --ref origin/main") printf 'DEPS %s\n' "$(cat "$STUB_DIR/report-rel")" ;;
+  "suede upstream acme/app widget --ref origin/main")
     echo "UPSTREAMED acme/widget downstream/acme/app-$(cat "$STUB_DIR/app-head") $(printf 'c%.0s' $(seq 40)) $(cat "$STUB_DIR/patch")" ;;
 esac
 exit 0
@@ -91,12 +91,12 @@ group "a consumer's main moved: its changes are proposed, once"
 stack "acme/app acme/widget"; echo "$H1" > "$STUB/app-head"; echo "$PIN" > "$STUB/widget-release"; report patch1
 tick
 assert_contains "origin/* is refreshed, fetch only" "$(calls)" "cli pull acme/app --fetch-only"
-assert_contains "the report is of origin/main" "$(calls)" "cli deps report acme/app --ref origin/main"
-assert_contains "the change is pushed as suede's branch" "$(calls)" "cli deps upstream acme/app widget --ref origin/main"
+assert_contains "the report is of origin/main" "$(calls)" "cli suede report acme/app --ref origin/main"
+assert_contains "the change is pushed as suede's branch" "$(calls)" "cli suede upstream acme/app widget --ref origin/main"
 assert_contains "and waits for suede's PR" "$(PATH="$STUB/bin:$PATH" SUEDE_FACTORY_STATE="$STUB/state" bash "$ROOT/examples/factory/suede/suede-factory.sh" status)" \
   "acme/widget: downstream/acme/app-$H1 (acme/app/widget)"
 tick
-assert_not_contains "the same main is not looked at again" "$(calls)" "deps report"
+assert_not_contains "the same main is not looked at again" "$(calls)" "suede report"
 
 group "suede's PR appeared: an issue for an agent, and the PR closes it"
 pr_appears "$H1" 12
@@ -119,14 +119,14 @@ MARKER31=$(sed -n 's/.*<!-- suede-factory: \({.*}\) -->.*/\1/p' "$STUB/issue-31"
 jq -cn --arg m "<!-- suede-factory: $MARKER31 -->" '[{number: 31, url: "https://github.com/acme/widget/issues/31", body: ("text\n" + $m)}]' > "$STUB/widget-open-issues"
 echo "$H2" > "$STUB/app-head"
 tick
-assert_contains "it is looked at" "$(calls)" "deps report acme/app"
-assert_not_contains "but nothing is pushed" "$(calls)" "deps upstream"
+assert_contains "it is looked at" "$(calls)" "suede report acme/app"
+assert_not_contains "but nothing is pushed" "$(calls)" "suede upstream"
 assert_contains "and it says why" "$(cat "$STUB/out")" "already proposed (https://github.com/acme/widget/issues/31)"
 
 group "a different change from the same consumer replaces the open proposal"
 echo "$H3" > "$STUB/app-head"; report patch2
 tick
-assert_contains "the new change is pushed" "$(calls)" "deps upstream acme/app widget"
+assert_contains "the new change is pushed" "$(calls)" "suede upstream acme/app widget"
 pr_appears "$H3" 15
 tick
 ISSUE=$(cat "$STUB/issue-32" 2>/dev/null)
@@ -145,7 +145,7 @@ dep_report() { # <file> <kind> <state>
 dep_report report-lib development same; dep_report report-rel release diff
 stack "acme/app acme/widget acme/lib acme/rel"
 tick
-assert_contains "the new consumers are looked at" "$(calls)" "deps report acme/lib"
+assert_contains "the new consumers are looked at" "$(calls)" "suede report acme/lib"
 # #32 (PR #15, acme/app's) was merged, and closed its issue; #31 was replaced.
 jq -cn --arg m "$(sed -n 's/.*\(<!-- suede-factory: {.*} -->\).*/\1/p' "$STUB/issue-32")" \
   '[{number: 32, closedAt: "2026-10-29T10:00:01Z", stateReason: "COMPLETED", body: ("x\n" + $m)},
@@ -153,7 +153,7 @@ jq -cn --arg m "$(sed -n 's/.*\(<!-- suede-factory: {.*} -->\).*/\1/p' "$STUB/is
 echo "$REL2" > "$STUB/widget-release"
 tick
 ISSUE=$(cat "$STUB/issue-33" 2>/dev/null)
-assert_contains "the release is delivered to the consumer first" "$(calls)" "cli deps deliver acme/rel acme/widget"
+assert_contains "the release is delivered to the consumer first" "$(calls)" "cli suede deliver acme/rel acme/widget"
 assert_contains "the blocked one first: its sync, in the consumer, for the dispatcher" "$ISSUE" "issue create -R acme/rel --title Sync widget to acme/widget's latest release"
 assert_contains "  labelled" "$ISSUE" "--label suede:sync --label desolate:run"
 assert_contains "  told it is what unblocks its publish" "$ISSUE" "ships acme/widget as a release dependency"
@@ -171,7 +171,7 @@ tick_sync() {
     bash "$ROOT/examples/factory/suede/suede-factory.sh" sync "$@" </dev/null > "$STUB/out" 2>&1
 }
 tick_sync acme/lib --dep acme/widget
-assert_contains "the consumer is looked at now" "$(calls)" "deps report acme/lib --ref origin/main"
+assert_contains "the consumer is looked at now" "$(calls)" "suede report acme/lib --ref origin/main"
 assert_contains "and its dependency that is behind gets an issue" "$(cat "$STUB/issue-35" 2>/dev/null)" "issue create -R acme/lib --title Sync widget"
 tick_sync acme/app acme/lib acme/rel --dep acme/widget
 assert_not_contains "a sync already open is not filed again" "$(calls)" "issue create"
@@ -207,8 +207,8 @@ group "--dry-run: everything read, nothing pushed, filed or changed"
 rm -rf "$STUB/state" "$STUB"/issue-* "$STUB/next-issue" "$STUB"/pr-for-*; rm -f "$STUB/widget-open-issues"
 stack "acme/app acme/widget"; echo "$H1" > "$STUB/app-head"; report patch1
 tick --dry-run
-assert_contains "it reads" "$(calls)" "deps report acme/app"
-assert_not_contains "it does not push" "$(calls)" "deps upstream"
+assert_contains "it reads" "$(calls)" "suede report acme/app"
+assert_not_contains "it does not push" "$(calls)" "suede upstream"
 assert_contains "it says what it would" "$(cat "$STUB/out")" "would: propose acme/app's changes to widget upstream to acme/widget (1 file(s))"
 tick --dry-run
 assert_contains "and says it again next time: nothing was recorded as done" "$(cat "$STUB/out")" "would: propose"

@@ -1594,7 +1594,7 @@ async function pullTarget(target: Target, name: string, fetchOnly = false): Prom
 }
 
 /**
- * `cli.sh deps report` and `deps upstream`'s project half (docs/suede-factory.md):
+ * `cli.sh suede report` and `suede upstream`'s project half (docs/suede-factory.md):
  * the project's own git, in its sandbox, which sees that project alone and has
  * no network -- a dependency's history arrives as a bundle desolate delivered.
  * Always the PROJECT's sandbox and root: a suede dependency is the project's.
@@ -1959,8 +1959,8 @@ async function main(): Promise<void> {
   else if (args.command === "exec") execTarget(target, args.execArgv!);
   else if (args.command === "bundle") await bundleTarget(target, args.transfer!);
   else if (args.command === "pull") await pullTarget(target, args.transfer!, args.fetchOnly);
-  else if (args.command === "deps-report") await depsReport(target, args.ref ?? "HEAD");
-  else if (args.command === "deps-build") await depsBuild(target, args.ref ?? "HEAD", args.subrepo!, args.transfer!);
+  else if (args.command === "suede-report") await depsReport(target, args.ref ?? "HEAD");
+  else if (args.command === "suede-build") await depsBuild(target, args.ref ?? "HEAD", args.subrepo!, args.transfer!);
   else if (args.command === "populate") populateWorktree(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }

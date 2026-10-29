@@ -345,32 +345,32 @@ assert_contains "a header that is no header name is refused" "$OUT" "is not a he
 assert_eq "  and nothing is stored" "$(jq -c '.secrets | has("BAD-KEY")' "$VMSTUB/settings.json")" "false"
 rm -rf "$VMSTUB"
 
-group "cli.sh deps: which half runs where (docs/suede-factory.md)"
+group "cli.sh suede: which half runs where (docs/suede-factory.md)"
 DSTUB=$(mktemp -d)
 cat > "$DSTUB/docker" <<EOF
 #!/bin/sh
 printf '%s|' "\$@" >> "$DSTUB/calls"; echo >> "$DSTUB/calls"
 case "\$*" in
   inspect*) echo running ;;
-  *--deps-build*) echo "desolate: driving its daemon"; echo "BUILT $(printf 'c%.0s' $(seq 40)) $(printf 'p%.0s' $(seq 40)) acme__widget $(printf 'a%.0s' $(seq 40)) patchid /w/.git/x.bundle" ;;
-  *deps.ts\ upstream*) echo "UPSTREAMED downstream/acme/consumer-aaaa" ;;
+  *--suede-build*) echo "desolate: driving its daemon"; echo "BUILT $(printf 'c%.0s' $(seq 40)) $(printf 'p%.0s' $(seq 40)) acme__widget $(printf 'a%.0s' $(seq 40)) patchid /w/.git/x.bundle" ;;
+  *suede.ts\ upstream*) echo "UPSTREAMED downstream/acme/consumer-aaaa" ;;
 esac
 EOF
 chmod +x "$DSTUB/docker"
-dcli() { : > "$DSTUB/calls"; PATH="$DSTUB:$PATH" DESOLATE_NO_COMPLETION_INSTALL=1 "$RELEASE/cli.sh" deps "$@" </dev/null 2>&1; }
+dcli() { : > "$DSTUB/calls"; PATH="$DSTUB:$PATH" DESOLATE_NO_COMPLETION_INSTALL=1 "$RELEASE/cli.sh" suede "$@" </dev/null 2>&1; }
 dexecs() { grep '^exec|' "$DSTUB/calls" | sed -E 's/desolate-transfer-[0-9a-f]{16}\.bundle/NAME/g' | tr '\n' ' '; }
 dcli deliver acme/consumer acme/widget >/dev/null
 assert_eq "deliver: in the editor, where the keys are, by path" "$(dexecs)" \
-  "exec|-e|DESOLATE_PLANE=mac|desolate-vscode|with-ca|tsx|/usr/local/lib/desolate/deps.ts|deliver|acme/consumer|acme/widget| "
+  "exec|-e|DESOLATE_PLANE=mac|desolate-vscode|with-ca|tsx|/usr/local/lib/desolate/suede.ts|deliver|acme/consumer|acme/widget| "
 dcli report acme/consumer --ref origin/main >/dev/null
 assert_eq "report: the orchestrator's runner, in the project's sandbox" "$(dexecs)" \
-  "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--deps-report|--ref|origin/main|acme/consumer| "
+  "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--suede-report|--ref|origin/main|acme/consumer| "
 OUT=$(dcli upstream acme/consumer widget --ref origin/main)
 C40=$(printf 'c%.0s' $(seq 40)); P40=$(printf 'p%.0s' $(seq 40)); A40=$(printf 'a%.0s' $(seq 40))
 assert_eq "upstream: built in the sandbox, pushed from the editor, one bundle name for both" "$(dexecs)" \
-  "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--deps-build|widget|--transfer|NAME|--ref|origin/main|acme/consumer| exec|-e|DESOLATE_PLANE=mac|desolate-vscode|with-ca|tsx|/usr/local/lib/desolate/deps.ts|upstream|acme/consumer|acme/widget|NAME|$C40|$P40|$A40| "
+  "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--suede-build|widget|--transfer|NAME|--ref|origin/main|acme/consumer| exec|-e|DESOLATE_PLANE=mac|desolate-vscode|with-ca|tsx|/usr/local/lib/desolate/suede.ts|upstream|acme/consumer|acme/widget|NAME|$C40|$P40|$A40| "
 assert_eq "  and says what it proposed, where" "$OUT" "UPSTREAMED acme/widget downstream/acme/consumer-aaaa $C40 patchid"
-assert_contains "anything else is refused, with the usage" "$(dcli frobnicate)" "usage: cli.sh deps"
+assert_contains "anything else is refused, with the usage" "$(dcli frobnicate)" "usage: cli.sh suede"
 rm -rf "$DSTUB"
 
 summary

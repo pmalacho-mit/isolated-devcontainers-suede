@@ -271,24 +271,24 @@ describe("--exec (docs/agents.md)", () => {
   });
 });
 
-describe("--deps-report and --deps-build (docs/suede-factory.md)", () => {
+describe("--suede-report and --suede-build (docs/suede-factory.md)", () => {
   const name = "desolate-transfer-0123456789abcdef.bundle";
   test("a report at a ref; a build of one folder, into a named bundle", () => {
-    const report = parse("--deps-report", "--ref", "origin/main", "acme/consumer");
-    assert.equal(report.command, "deps-report");
+    const report = parse("--suede-report", "--ref", "origin/main", "acme/consumer");
+    assert.equal(report.command, "suede-report");
     assert.equal(report.ref, "origin/main");
-    const build = parse("--deps-build", "vendor/widget", "--transfer", name, "--ref", "origin/main", "acme/consumer");
-    assert.equal(build.command, "deps-build");
+    const build = parse("--suede-build", "vendor/widget", "--transfer", name, "--ref", "origin/main", "acme/consumer");
+    assert.equal(build.command, "suede-build");
     assert.equal(build.subrepo, "vendor/widget");
     assert.equal(build.transfer, name);
   });
 
   test("what would reach git or a path as anything else is refused", () => {
-    refuses(["--deps-build", "../other", "--transfer", name, "x"], /a dependency folder inside the project/);
-    refuses(["--deps-build", "/abs", "--transfer", name, "x"], /a dependency folder inside the project/);
-    refuses(["--deps-build", "widget", "x"], /takes --transfer/);
-    refuses(["--deps-report", "--ref", "--upload-pack=x", "x"], /--ref takes a branch/);
-    refuses(["--deps-report", "--ref", "a..b", "x"], /--ref takes a branch/);
+    refuses(["--suede-build", "../other", "--transfer", name, "x"], /a dependency folder inside the project/);
+    refuses(["--suede-build", "/abs", "--transfer", name, "x"], /a dependency folder inside the project/);
+    refuses(["--suede-build", "widget", "x"], /takes --transfer/);
+    refuses(["--suede-report", "--ref", "--upload-pack=x", "x"], /--ref takes a branch/);
+    refuses(["--suede-report", "--ref", "a..b", "x"], /--ref takes a branch/);
     refuses(["--ref", "main", "x"], /--ref only means something/);
     refuses(["--transfer", name, "x"], /--transfer only means something/);
   });

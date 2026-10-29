@@ -11,11 +11,11 @@
 # Run both. Each tick, for every project in the stack:
 #
 #   1. Its main moved: refresh origin/*, report its suede dependencies at
-#      origin/<main> (`cli.sh deps report`), delivering any whose history the
+#      origin/<main> (`cli.sh suede report`), delivering any whose history the
 #      project lacks. A dependency not in the stack is asked about once
 #      (`approve` adds it with `cli.sh repo add`).
 #   2. A dependency whose folder differs from its pin, unless that exact change
-#      (its patch-id) is already proposed: `cli.sh deps upstream` pushes it as
+#      (its patch-id) is already proposed: `cli.sh suede upstream` pushes it as
 #      suede's downstream/<consumer>-<commit> branch, and suede's own workflow
 #      in the dependency opens the PR.
 #   3. That PR appeared: an issue in the dependency, for an agent to decide
@@ -108,7 +108,7 @@ default_branch() { # <repo>
 }
 head_of() { gh api "repos/$1/commits/$2" --jq .sha 2>/dev/null; }   # <repo> <ref>
 
-report() { "$CLI" deps report "$1" --ref "$2" </dev/null | sed -n 's/^DEPS //p' | tail -n 1; }   # <project> <ref>
+report() { "$CLI" suede report "$1" --ref "$2" </dev/null | sed -n 's/^DEPS //p' | tail -n 1; }   # <project> <ref>
 
 # The markers in issues this files: `suede-factory` is ours; `desolate-dispatch`
 # is the dispatcher's (lib/gh-dispatch.sh).
@@ -138,7 +138,7 @@ fresh_report() { # <project> <main>
   [ -n "$rep" ] || { log "$project: no report from its sandbox"; return 1; }
   for dep in $(jq -r '.dependencies[] | select(.state == "nopin") | .repo // empty' <<< "$rep" | sort -u); do
     ensure_dependency "$dep" "$project" || { complete=2; continue; }
-    "$CLI" deps deliver "$project" "$dep" </dev/null >/dev/null && delivered=1 || { log "$project: could not deliver $dep"; complete=2; }
+    "$CLI" suede deliver "$project" "$dep" </dev/null >/dev/null && delivered=1 || { log "$project: could not deliver $dep"; complete=2; }
   done
   [ -z "$delivered" ] || rep=$(report "$project" "origin/$main")
   [ -n "$rep" ] || return 1
@@ -181,7 +181,7 @@ propose() { # <consumer> <main> <dependency report>
     log "would: propose $consumer's changes to $dir upstream to $dep ($(jq -r '.files | length' <<< "$d") file(s))"
     return 0
   fi
-  out=$("$CLI" deps upstream "$consumer" "$dir" --ref "origin/$main" </dev/null 2>&1) || { log "$consumer: proposing $dir failed: $(printf '%s' "$out" | tail -n 1)"; return 1; }
+  out=$("$CLI" suede upstream "$consumer" "$dir" --ref "origin/$main" </dev/null 2>&1) || { log "$consumer: proposing $dir failed: $(printf '%s' "$out" | tail -n 1)"; return 1; }
   branch=$(printf '%s\n' "$out" | sed -n 's/^UPSTREAMED [^ ]* \([^ ]*\) .*/\1/p')
   [ -n "$branch" ] || { log "$consumer: $dir has nothing to propose"; return 0; }
   log "$consumer: proposed $dir to $dep as $branch"
@@ -357,7 +357,7 @@ file_syncs() { # <dependency> <release> <rows>
     open=$(marked_issues "$consumer" "$SYNC_LABEL" open | jq -r --arg r "$dep" --arg d "$dir" '[.[] | select(.marker.dependency == $r and .marker.dir == $d)][0].url // empty')
     if [ -n "$open" ]; then
       log "$consumer: a sync of $dir is already open ($open); its release is redelivered"
-      [ -n "$DRY" ] || "$CLI" deps deliver "$consumer" "$dep" </dev/null >/dev/null || true
+      [ -n "$DRY" ] || "$CLI" suede deliver "$consumer" "$dep" </dev/null >/dev/null || true
       continue
     fi
     main=$(default_branch "$consumer") || continue
@@ -447,7 +447,7 @@ file_sync_issue() { # <consumer> <dependency> <dir> <pin> <release> <kind> <main
   local consumer=$1 dep=$2 dir=$3 pin=$4 release=$5 kind=$6 main=$7 body tag issue
   tag=$(tag_of "$dep")
   if [ -n "$DRY" ]; then log "would: file an issue in $consumer to sync $dir to $dep's ${release:0:12}"; return 0; fi
-  "$CLI" deps deliver "$consumer" "$dep" </dev/null >/dev/null || { log "$consumer: could not deliver $dep"; return 1; }
+  "$CLI" suede deliver "$consumer" "$dep" </dev/null >/dev/null || { log "$consumer: could not deliver $dep"; return 1; }
   local blocking="" deps_check="" dispatch factory
   [ "$kind" != release ] || blocking="
 **$consumer ships $dep as a release dependency:** it publishes again once this sync is merged.

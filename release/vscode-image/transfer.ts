@@ -421,7 +421,7 @@ export async function pull(project: string, options: Options = {}): Promise<stri
 }
 
 /**
- * Suede dependencies (docs/suede-factory.md): what `cli.sh deps` does in the
+ * Suede dependencies (docs/suede-factory.md): what `cli.sh suede` does in the
  * editor, where the keys and caches are. Both are the Mac's to ask for -- the
  * editor's `desolate` and its panel do not offer them -- and both are narrow:
  * the CALLER names the dependency, never project content, and nothing moves
@@ -486,7 +486,7 @@ export const downstreamBranch = (consumer: string, consumerCommit: string) => {
 export interface Built { commit: string; pin: string; consumerCommit: string; name: string }
 
 /**
- * The proposal `deps-build` bundled in `project`'s git dir, pushed to the
+ * The proposal `suede-build` bundled in `project`'s git dir, pushed to the
  * dependency as a NEW `downstream/<consumer>-<commit>` branch -- never one
  * that is there, never main or release -- with the dependency's own key.
  */

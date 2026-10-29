@@ -20,6 +20,29 @@ examples/factory/suede/suede-factory.sh status                 # what it is wait
 examples/factory/suede/suede-factory.sh sync acme/app          # ask for syncs by hand (below)
 ```
 
+## The loop, at a glance
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant APP as acme/app (consumer)
+  participant SF as suede-factory.sh
+  participant W as acme/widget (dependency)
+  participant D as claude-dispatcher + Claude
+  actor You
+  You->>APP: merge a change to widget/ into main
+  SF->>APP: suede report: widget/ differs from its pin
+  SF->>W: suede upstream: push downstream/acme/app-…
+  W->>W: suede's workflow opens a PR
+  SF->>W: issue "Upstream from acme/app" (desolate:run), PR closes it
+  D->>W: an agent on the PR's branch decides whether and how to integrate
+  D->>You: green, so review and push to the PR
+  You->>W: merge, and suede publishes a release
+  SF->>APP: issue "Sync widget" (acme/app proposed into this release)
+  D->>APP: an agent syncs widget/ from the delivered release
+  D->>You: green, so review, push, and merge the draft PR
+```
+
 ## What counts as a suede dependency
 
 A subrepo whose `.gitrepo` tracks `branch = release`. Two kinds of subrepo are excluded:
@@ -43,9 +66,9 @@ Each tick of `suede-factory.sh`:
 
 1. **A consumer's `main` moved.** The factory:
    - refreshes `origin/*` (`cli.sh pull --fetch-only`);
-   - reports its suede dependencies at `origin/<main>` (`cli.sh deps report`);
-   - delivers the history of any it lacks (`cli.sh deps deliver`). A dependency that isn't in the stack is asked about once, by notification: `suede-factory.sh approve <owner/repo>` adds it, with `cli.sh repo add`, which clones it and creates a write deploy key on it.
-2. **A dependency differs from its pin.** Unless that exact change is already proposed, compared by `git patch-id`, `cli.sh deps upstream` pushes it to the dependency as `downstream/<consumer>-<commit>`. That is suede's own branch, so suede's own workflow there opens the PR into `main`.
+   - reports its suede dependencies at `origin/<main>` (`cli.sh suede report`);
+   - delivers the history of any it lacks (`cli.sh suede deliver`). A dependency that isn't in the stack is asked about once, by notification: `suede-factory.sh approve <owner/repo>` adds it, with `cli.sh repo add`, which clones it and creates a write deploy key on it.
+2. **A dependency differs from its pin.** Unless that exact change is already proposed, compared by `git patch-id`, `cli.sh suede upstream` pushes it to the dependency as `downstream/<consumer>-<commit>`. That is suede's own branch, so suede's own workflow there opens the PR into `main`.
 3. **That PR appeared.** The factory files an issue in the dependency, labelled `desolate:run` and `suede:upstream`, and edits the PR to `Closes #<issue>`. The issue holds:
    - the task, framed by kind;
    - the files, and the PR's own text;
@@ -105,26 +128,149 @@ Every mode is bounded by the dispatcher's `--max-agents` (default 3): the rest w
 
 A dependency's first release seen is recorded, not acted on. Syncs follow the releases after that.
 
-## desolate's part
+## desolate's part: `./cli.sh suede`
 
-Three `cli.sh` commands. They aren't offered in the editor's `desolate` or its panel, the dependency is always named by the caller and never read from project content, and devcontainers can't reach any of them.
+The factory asks desolate three things. You can ask them too: they're how you see what the factory sees.
 
-| Command | Where it runs | What it does |
-| --- | --- | --- |
-| `deps deliver <project> <owner/repo>` | editor | the dependency's `release` branch, from its push/pull cache, into `<project>/.git/desolate-dep-<owner>__<repo>.bundle` |
-| `deps report <project> [--ref R]` | the project's sandbox | its suede dependencies at R: kind, pin, changed files, patch-id |
-| `deps upstream <project> <dir> [--ref R]` | sandbox, then editor | one commit on the pin, containing the folder without its `.gitrepo` and nested subrepos, pushed to a new `downstream/*` branch with the dependency's key |
+| Command | In one line |
+| --- | --- |
+| `./cli.sh suede report <project>` | **Look:** which suede dependencies does this project have, and has it changed any? Changes nothing. |
+| `./cli.sh suede deliver <project> <owner/repo>` | **Bring in:** put a dependency's `release` history inside the project, so the look and the sync work with no network. |
+| `./cli.sh suede upstream <project> <folder>` | **Propose:** turn the project's changes to that folder into a branch on the dependency's GitHub repository, where suede opens a PR. |
 
-**Why "the Mac's alone" is only partly enforceable.** The editor already holds every key and cache, so a compromised editor could do by hand what these commands do. What protects you is the narrow scope, and that devcontainers have no channel to desolate at all. A real gate would mean moving keyring access out of the editor.
+All three are on the Mac's `cli.sh` only. The editor's `desolate` and its panel don't offer them, and no devcontainer can reach them.
 
-**What makes it work.**
-- **The upstream push:** suede's dependency workflow rebuilds a submission from `merge-base(release, submission)`, so one commit on the pin is all it needs. No git-subrepo or network is needed in the sandbox. Measured: suede's own `rebuild-pr-branch.sh` accepts it.
-- **The offline sync:** measured, `git -c url.<bundle>.insteadOf=<remote> subrepo pull` pulls offline and leaves `.gitrepo` alone. Don't use `subrepo pull -r <bundle>` for this: it writes the bundle path into `.gitrepo`.
+### The running example
 
-**Also added:**
-- `desolate --pull --fetch-only`;
-- `/desolate/status note` and `board`, explained in `AGENTS.md`;
-- claude-helper installs git-subrepo 0.4.9 for the session when a container lacks it.
+`acme/widget` is a suede dependency. `acme/app` installed it into `widget/`, pinned at widget's release commit `a1b2c3`, and then changed `widget/lib.ts` and merged that to its `main`.
+
+```text
+/workspaces/acme/app/
+├── .git/
+├── src/...
+└── widget/                ← acme/widget's release, as installed
+    ├── .gitrepo           remote = …/acme/widget, branch = release, commit = a1b2c3…
+    └── lib.ts             ← changed by acme/app
+```
+
+### Where each piece runs
+
+```mermaid
+flowchart LR
+  subgraph github["GitHub"]
+    widget_repo["acme/widget<br/>release, main, downstream/*"]
+  end
+  subgraph stack["desolate stack"]
+    subgraph editor["outer editor (deploy keys)"]
+      cache["cache of acme/widget<br/>~/.cache/desolate/remotes"]
+    end
+    subgraph sandbox["acme/app's sandbox<br/>(acme/app only, no network, no keys)"]
+      git["git, on acme/app's .git"]
+    end
+    app_git[("/workspaces/acme/app/.git")]
+  end
+  widget_repo <-->|"fetch, push<br/>(widget's deploy key)"| cache
+  cache -->|"deliver: a bundle file"| app_git
+  git <-->|"report, build"| app_git
+  app_git -->|"upstream: a bundle file"| cache
+```
+
+The project's own git only ever runs in its sandbox, which sees that project alone. The editor, which holds the keys, only moves bundle files in and out of the project's `.git`, and pushes from its own cache.
+
+### `report`: look
+
+```bash
+./cli.sh suede report acme/app --ref origin/main
+```
+
+In acme/app's sandbox, at `origin/main`:
+1. find every subrepo tracking `release` (here `widget/`), skipping the project's own `release/` and suede's tooling;
+2. classify how acme/app uses it (`app`, since acme/app isn't itself a suede dependency);
+3. compare `widget/` with its pinned commit `a1b2c3`, leaving out `widget/.gitrepo` and any dependency nested inside.
+
+It prints one line, `DEPS {…}`. Here it is, pretty-printed:
+
+```json
+{
+  "commit": "5e0c…",
+  "suede": false,
+  "dependencies": [{
+    "dir": "widget", "repo": "acme/widget", "pin": "a1b2c3…",
+    "kind": "app", "state": "diff", "patch": "9f3c…",
+    "files": [{ "status": "M", "path": "lib.ts" }]
+  }]
+}
+```
+
+- **`state`** says what it found:
+  - `same`: the folder matches its pin;
+  - `diff`: acme/app changed it;
+  - `nopin`: the pinned commit isn't in acme/app's history, so it needs a `deliver` first.
+- **`patch`** is a fingerprint of the change (`git patch-id`). The same change has the same fingerprint, whatever commit carries it. That's how the factory knows not to propose it twice.
+
+### `deliver`: bring in
+
+```bash
+./cli.sh suede deliver acme/app acme/widget
+# suede: delivered acme/widget's release (a1b2c3d4e5f6) to acme/app
+```
+
+The editor refreshes its cache of acme/widget, using widget's own deploy key, so this works for private repositories too. It writes widget's `release` branch as one file, `/workspaces/acme/app/.git/desolate-dep-acme__widget.bundle`.
+
+It's read by:
+- **`report` and `upstream`,** for the pinned commit;
+- **a sync agent in acme/app's devcontainer,** which pulls from it instead of the network:
+
+```bash
+# what a sync issue tells the agent to run
+bundle="$(cd "$(git rev-parse --git-common-dir)" && pwd)/desolate-dep-acme__widget.bundle"
+remote="$(git config -f widget/.gitrepo subrepo.remote)"
+GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.$bundle.insteadOf" GIT_CONFIG_VALUE_0="$remote" bash widget/.suede/core/sync
+```
+
+The rewrite redirects the recorded remote to the bundle for that one command, and `widget/.gitrepo` keeps the real remote.
+
+### `upstream`: propose
+
+```bash
+./cli.sh suede upstream acme/app widget --ref origin/main
+# UPSTREAMED acme/widget downstream/acme/app-5e0c… 7d8e… 9f3c…
+#            dependency  the branch it pushed     commit fingerprint
+```
+
+```mermaid
+sequenceDiagram
+  participant SB as acme/app's sandbox
+  participant AG as acme/app .git
+  participant ED as editor (widget's cache)
+  participant GH as GitHub acme/widget
+  SB->>AG: build one commit, parent = pin a1b2c3,<br/>tree = app's widget/ less .gitrepo
+  SB->>AG: bundle it, .git/desolate-transfer-….bundle
+  ED->>AG: read the bundle, check it is that commit on that pin
+  ED->>GH: push NEW branch downstream/acme/app-5e0c…<br/>(widget's deploy key, never forced)
+  GH->>GH: suede's own workflow rebuilds it onto main<br/>and opens a PR
+```
+
+The branch name is exactly the one suede's own `upstream` script would push, so suede's workflow in acme/widget treats it the same: it replays the change onto the latest release, puts it under `release/` on top of `main`, and opens the PR. It refuses a branch that already exists, so the same proposal can't go twice. It only ever creates `downstream/*` branches, never touches `main` or `release`, and never force-pushes.
+
+### Why these are narrow
+
+- **The dependency is always named by the caller** (the factory, or you), never read from the project. A project can't redirect `deliver` to someone else's repository.
+- **The scope is fixed:** only a `release` branch goes in, and only a new `downstream/*` branch goes out.
+- **Devcontainers have no channel to any of this.**
+
+"The Mac's alone" is a convention more than a wall: the editor already holds every key and cache, so a compromised editor could do these steps by hand. A real gate would mean moving keyring access out of the editor.
+
+### What makes it work (measured)
+
+- **The upstream push:** suede's workflow rebuilds a submission from `merge-base(release, submission)`, so one commit on the pin is all it needs, and no git-subrepo or network is needed in the sandbox. Suede's own `rebuild-pr-branch.sh` accepts it: the change lands under `release/`, `main`'s other files are kept, and there are no conflicts.
+- **The offline sync:** `git -c url.<bundle>.insteadOf=<remote> subrepo pull` works with no network, and leaves `.gitrepo` alone. Don't use `subrepo pull -r <bundle>` for this: it writes the bundle's path into `.gitrepo`.
+
+### Also added for the factory
+
+- **`desolate --pull --fetch-only`:** refresh `origin/*` without moving anything checked out;
+- **`/desolate/status note` and `board`:** how agents in one repository coordinate, explained in `AGENTS.md`;
+- **git-subrepo 0.4.9:** claude-helper installs it for the session when a container lacks it.
 
 ## Not yet run for real
 

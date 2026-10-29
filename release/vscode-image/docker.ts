@@ -470,7 +470,7 @@ case "$mode" in
 esac
 `;
 
-/** A suede dependency, as `deps report` found it. */
+/** A suede dependency, as `cli.sh suede report` found it. */
 export interface DependencyReport {
   /** Its folder, relative to the project root. */
   dir: string;
@@ -501,7 +501,7 @@ export interface DepsReport {
   dependencies: DependencyReport[];
 }
 
-/** `deps report`'s records, as one document. */
+/** `cli.sh suede report`'s records, as one document. */
 export const parseDepsReport = (text: string): DepsReport | null => {
   const rows = text.split("\n").filter(Boolean).map((line) => line.split("\t"));
   const commit = rows.find(([kind]) => kind === "REF")?.[1];
