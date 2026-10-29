@@ -130,6 +130,82 @@ _desolate_cli_services() {
 }
 
 # ---------------------------------------------------------------------------
+# Reading the line
+# ---------------------------------------------------------------------------
+#
+# Index loops rather than slices: under zsh's bashcompinit these run with
+# KSH_ARRAYS (0-based, as in bash), and a plain loop means the same in both.
+
+# The project on the line from <index> on: its first word that is neither a
+# flag nor a flag's value, wherever it sits -- before the cursor or after it.
+_desolate_cli_line_project() {
+  local i=$1 skip=0 w
+  while [ "$i" -lt "${#COMP_WORDS[@]}" ]; do
+    w=${COMP_WORDS[i]}
+    if [ "$skip" -gt 0 ]; then skip=$((skip - 1))   # a flag's value, the cursor's word too
+    elif [ "$i" -eq "$COMP_CWORD" ]; then :
+    else
+      case "$w" in
+        --worktree|--branch|--config|--ref|--hosts|--projects|--headers) skip=1 ;;
+        --move) skip=2 ;;
+        -*) ;;
+        *) printf '%s' "$w"; return 0 ;;
+      esac
+    fi
+    i=$((i + 1))
+  done
+}
+
+# Those of the flags given that are not on the line yet (the word being
+# completed aside).
+_desolate_cli_unused() {
+  local f i seen
+  for f in "$@"; do
+    seen= i=1
+    while [ "$i" -lt "${#COMP_WORDS[@]}" ]; do
+      [ "$i" -ne "$COMP_CWORD" ] && [ "${COMP_WORDS[i]}" = "$f" ] && { seen=1; break; }
+      i=$((i + 1))
+    done
+    [ -n "$seen" ] || printf '%s\n' "$f"
+  done
+}
+
+# The first of <ops> on the line, if any.
+_desolate_cli_line_op() {
+  local i=1 op
+  while [ "$i" -lt "${#COMP_WORDS[@]}" ]; do
+    if [ "$i" -ne "$COMP_CWORD" ]; then
+      for op in "$@"; do [ "${COMP_WORDS[i]}" = "$op" ] && { printf '%s' "$op"; return 0; }; done
+    fi
+    i=$((i + 1))
+  done
+}
+
+# The flags <verb> takes at this point of the line. `desolate` is desolate-run's
+# grammar (args.ts) -- the flags a person types, not the broker's wire form --
+# except `--status`, which cli.sh hands to the editor's client. `push` and
+# `pull` are the editor's `desolate --push/--pull` (desolate-client.ts).
+# tests/static/17-completion.sh checks these against both parsers.
+_desolate_cli_flags() {
+  case "$1" in
+    desolate)
+      if [ "$COMP_CWORD" -gt 2 ] && [ "${COMP_WORDS[2]}" = --status ]; then echo "--json"; return; fi
+      case "$(_desolate_cli_line_op --list --dinds --stop --ports --purge)" in
+        --list)  echo "--json" ;;
+        --dinds) ;;
+        --stop)  echo "--all --worktree" ;;
+        --ports) echo "--json --move --worktree" ;;
+        --purge) echo "--worktree" ;;
+        *)       [ "$COMP_CWORD" -eq 2 ] && printf '%s ' --status
+                 echo "--list --dinds --stop --ports --purge --all --json --rebuild --no-cache --worktree --config" ;;
+      esac ;;
+    push) echo "--worktree --allow-default" ;;
+    pull) echo "--worktree --fetch-only" ;;
+    exec) echo "--worktree" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
 # The completion function proper
 # ---------------------------------------------------------------------------
 #
@@ -150,11 +226,36 @@ _desolate_cli() {
     return 0
   fi
 
-  # Position 2: this verb's subcommands, if it has any. `desolate` and
-  # `worktree list` take a project here instead.
+  # A project and its flags, in any order: `desolate`, `push`, `pull`, and
+  # `exec` up to its `--`.
+  case "$verb" in
+    desolate|push|pull|exec)
+      local prev i=2
+      prev="${COMP_WORDS[COMP_CWORD-1]}"
+      if [ "$verb" = exec ]; then
+        while [ "$i" -lt "$COMP_CWORD" ]; do [ "${COMP_WORDS[i]}" = -- ] && return 0; i=$((i + 1)); done
+      fi
+      case "$prev" in
+        --worktree) COMPREPLY=( $(compgen -W "$(_desolate_cli_worktrees "$(_desolate_cli_line_project 2)")" -- "$cur") ); return 0 ;;
+        --config)   COMPREPLY=( $(compgen -f -- "$cur") ); return 0 ;;
+        --move)     COMPREPLY=( $(compgen -W "editor" -- "$cur") ); return 0 ;;
+      esac
+      [ "$COMP_CWORD" -ge 3 ] && [ "${COMP_WORDS[COMP_CWORD-2]}" = --move ] && return 0
+      case "$cur" in
+        -*) COMPREPLY=( $(compgen -W "$(_desolate_cli_unused $(_desolate_cli_flags "$verb"))" -- "$cur") ) ;;
+        *)  [ -z "$(_desolate_cli_line_project 2)" ] || return 0
+            case "$verb $(_desolate_cli_line_op --list --dinds)" in
+              "desolate --list"|"desolate --dinds") ;;
+              *) COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
+            esac ;;
+      esac
+      return 0 ;;
+  esac
+
+  # Position 2: this verb's subcommands, if it has any. `worktree list` takes a
+  # project here instead.
   if [ "$COMP_CWORD" -eq 2 ]; then
     case "$verb" in
-      desolate|exec|push|pull) COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
       logs)     COMPREPLY=( $(compgen -W "$(_desolate_cli_services)" -- "$cur") ) ;;
       # A flag rather than a subcommand, so the grammar extraction above does
       # not see it -- and it is the one flag in this CLI that deletes something.
@@ -171,14 +272,32 @@ _desolate_cli() {
   case "$verb $sub" in
     "secret rm")        COMPREPLY=( $(compgen -W "$(_desolate_cli_secrets)" -- "$cur") ) ;;
     "secret add")
-      # `secret add NAME --hosts a,b`: the name is new (nothing to offer), but
-      # --hosts is required and is the flag people forget.
-      [ "$COMP_CWORD" -eq 4 ] && COMPREPLY=( $(compgen -W "--hosts" -- "$cur") ) ;;
+      # `secret add NAME --hosts a,b [--projects p,q] [--headers authorization]`:
+      # the name is new (nothing to offer); --hosts is required, and is the
+      # flag people forget, so it is offered whatever has been typed.
+      case "${COMP_WORDS[COMP_CWORD-1]}" in
+        --projects) COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
+        --headers)  COMPREPLY=( $(compgen -W "authorization" -- "$cur") ) ;;
+        --hosts)    ;;
+        *) [ "$COMP_CWORD" -ge 4 ] && COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --hosts --projects --headers)" -- "$cur") ) ;;
+      esac ;;
+    "suede deliver")
+      # `suede deliver <project> <owner/repo>`: the dependency is a project too.
+      [ "$COMP_CWORD" -le 4 ] && COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
+    "suede report"|"suede upstream")
+      # `report <project> [--ref <ref>]`, `upstream <project> <dir> [--ref <ref>]`.
+      if [ "$COMP_CWORD" -eq 3 ]; then
+        COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") )
+      elif [ "${COMP_WORDS[COMP_CWORD-1]}" != --ref ]; then
+        case "$cur" in -*) COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --ref)" -- "$cur") ) ;; esac
+      fi ;;
     "worktree list"|"worktree add"|"worktree remove")
       if [ "$COMP_CWORD" -eq 3 ]; then
         COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") )
       elif [ "$COMP_CWORD" -eq 4 ] && [ "$sub" = remove ]; then
         COMPREPLY=( $(compgen -W "$(_desolate_cli_worktrees "${COMP_WORDS[3]}")" -- "$cur") )
+      elif [ "$COMP_CWORD" -eq 5 ] && [ "$sub" = remove ]; then
+        COMPREPLY=( $(compgen -W "--force" -- "$cur") )
       fi ;;
     "vm install")       COMPREPLY=( $(compgen -W "--proxy-only" -- "$cur") ) ;;
     "dind reset")
@@ -191,12 +310,6 @@ _desolate_cli() {
       [ "$COMP_CWORD" -eq 3 ] && \
         COMPREPLY=( $(compgen -W "--all --orphans $(_desolate_cli_projects)" -- "$cur") ) ;;
     "repo add")         : ;;   # owner/repo is remote; nothing local to offer
-    *)
-      # `cli.sh desolate <project> [flags]` -- desolate-run's grammar, which
-      # lives in args.ts. Kept in sync by tests/unit/desolate/args.test.ts.
-      [ "$verb" = desolate ] && \
-        COMPREPLY=( $(compgen -W "--list --stop --all --ports --purge --rebuild --no-cache --worktree --config" -- "$cur") )
-      ;;
   esac
   return 0
 }
