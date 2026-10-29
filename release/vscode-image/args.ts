@@ -65,7 +65,14 @@ export type Command =
   | "bundle"
   /** The project's half of `desolate --pull`: take the bundle the editor
    *  fetched into origin/*, in the target's sandbox, and fast-forward. */
-  | "pull";
+  | "pull"
+  /** The project's suede dependencies, and how each differs from its pin,
+   *  at a commit (`cli.sh deps report`; docs/suede-factory.md). The Mac's:
+   *  the broker does not speak it. */
+  | "deps-report"
+  /** The commit that proposes one suede dependency's changes upstream,
+   *  bundled in the project's git dir (`cli.sh deps upstream`). The Mac's. */
+  | "deps-build";
 
 export type Args = {
   command: Command;
@@ -115,8 +122,12 @@ export type Args = {
   json: boolean;
   /** `exec`'s command line: everything after `--`. */
   execArgv?: string[];
-  /** `bundle` and `pull`: the bundle's file name in the project's git dir. */
+  /** `bundle`, `pull` and `deps-build`: the bundle's file name in the project's git dir. */
   transfer?: string;
+  /** `deps-report` and `deps-build`: the commit to look at. */
+  ref?: string;
+  /** `deps-build`: the dependency's folder, relative to the project. */
+  subrepo?: string;
 };
 
 /** The wire form the broker spawns desolate with. */
@@ -210,6 +221,8 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   const queue = [...argv];
   let execArgv: string[] | undefined;
   let transfer: string | undefined;
+  let ref: string | undefined;
+  let subrepo: string | undefined;
 
   while (queue.length) {
     const arg = queue.shift()!;
@@ -268,6 +281,25 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         if (!TRANSFER_NAME.test(transfer))
           throw new UsageError(`${arg} takes a bundle name (desolate-transfer-<16 hex>.bundle), got '${transfer}'`);
         break;
+      case "--deps-report":
+        command = "deps-report";
+        break;
+      case "--deps-build":
+        command = "deps-build";
+        subrepo = queue.shift() ?? "";
+        if (!relativeWithin(subrepo) || subrepo.startsWith("-"))
+          throw new UsageError(`--deps-build takes a dependency folder inside the project, got '${subrepo}'`);
+        break;
+      case "--transfer":
+        transfer = queue.shift() ?? "";
+        if (!TRANSFER_NAME.test(transfer))
+          throw new UsageError(`--transfer takes a bundle name (desolate-transfer-<16 hex>.bundle), got '${transfer}'`);
+        break;
+      case "--ref":
+        ref = queue.shift() ?? "";
+        if (!/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(ref) || ref.includes(".."))
+          throw new UsageError(`--ref takes a branch, ref or commit, got '${ref}'`);
+        break;
       case "--path":
         reclaimPath = queue.shift() ?? "";
         break;
@@ -322,6 +354,12 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     throw new UsageError("'--' only means something with --exec");
   if (command === "exec" && !execArgv?.length)
     throw new UsageError("--exec takes a command after '--'");
+  if (ref !== undefined && command !== "deps-report" && command !== "deps-build")
+    throw new UsageError("--ref only means something with --deps-report or --deps-build");
+  if (command === "deps-build" && transfer === undefined)
+    throw new UsageError("--deps-build takes --transfer <bundle name>");
+  if (transfer !== undefined && !["bundle", "pull", "deps-build"].includes(command))
+    throw new UsageError("--transfer only means something with --deps-build");
   if (reclaimPath !== undefined && command !== "reclaim")
     throw new UsageError("--path only means something with --reclaim");
   if (reclaimPath !== undefined && !relativeWithin(reclaimPath))
@@ -352,5 +390,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     ...(reclaimPath !== undefined ? { path: reclaimPath } : {}),
     ...(execArgv !== undefined ? { execArgv } : {}),
     ...(transfer !== undefined ? { transfer } : {}),
+    ...(ref !== undefined ? { ref } : {}),
+    ...(subrepo !== undefined ? { subrepo } : {}),
   };
 };

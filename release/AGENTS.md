@@ -154,6 +154,23 @@ Your target -- the project's tree, or this worktree -- has one status, a colour 
 - One line, at most 200 characters; it is shown as plain text.
 - It is a file in your git dir (`desolate-status path`), not in the repository: it is never committed or pushed, and nothing needs cleaning up.
 - It is shown, never acted on. Saying `green` pushes nothing: pushing and merging are a human's, from outside this container. Leave the branch committed and the worktree clean.
+- Unless your task says otherwise, `gray` means *withdrawn*: you finished and recommend this branch **not** be merged. Say why in the message, for example `gray "withdrawn: carried into issue-14's branch"`.
+
+### Coordinating with other agents in this repository: `note` and `board`
+
+Other agents may be working in this same repository at the same time, each in its own worktree on its own branch. For example, several proposals into one dependency might each be prepared by a different agent. You share one `.git`, so you can see each other's work and words:
+
+```bash
+/desolate/status board                 # every target here: its status and its note; yours is marked (you)
+/desolate/status note "text..."        # your note (or pipe it in: ... | /desolate/status note)
+/desolate/status note --clear
+git branch -a                          # their branches, if the human pulled them in (origin/...)
+git diff HEAD...<their branch>         # what they changed
+```
+
+- **Read the board when you start, and again before you finish.** Write your note when you have something another agent should know: what you're changing, what you need from them, what you decided.
+- **Agreeing that one branch carries another's change is normal.** Say it in both notes. The one that hands its change over finishes `gray "withdrawn: carried by <worktree>"`, and the one carrying it says what it took in its own note.
+- Notes are prose for other agents. They're shown, never acted on, and they're not the place for questions to the human: use `orange` for those.
 
 ## When to stop and ask
 

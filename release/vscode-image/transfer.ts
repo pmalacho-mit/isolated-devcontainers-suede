@@ -415,3 +415,109 @@ export async function pull(project: string, options: Options = {}): Promise<stri
     cache.release();
   }
 }
+
+/**
+ * Suede dependencies (docs/suede-factory.md): what `cli.sh deps` does in the
+ * editor, where the keys and caches are. Both are the Mac's to ask for -- the
+ * editor's `desolate` and its panel do not offer them -- and both are narrow:
+ * the CALLER names the dependency, never project content, and nothing moves
+ * but a `release` branch in, or one new `downstream/*` branch out.
+ */
+const DEPENDENCY = /^([A-Za-z0-9][A-Za-z0-9._-]*)\/([A-Za-z0-9][A-Za-z0-9._-]*)$/;
+const dependencyTag = (ownerRepo: string) => {
+  const parts = DEPENDENCY.exec(ownerRepo);
+  return parts ? `${parts[1]}__${parts[2]}` : fail(`'${ownerRepo}' is not owner/repo`);
+};
+/** Where a delivered dependency's history waits for the sandbox: depsScript reads it. */
+export const deliveredBundle = (ownerRepo: string) => join(".git", `desolate-dep-${dependencyTag(ownerRepo)}.bundle`);
+
+export interface DependencyOptions {
+  /** For tests: registrations, and how git reaches them. */
+  registrations?: Record<string, Registration>;
+  ssh?: string;
+}
+
+const registrationFor = (ownerRepo: string, options: DependencyOptions) =>
+  options.registrations?.[ownerRepo] ?? registrationOf(ownerRepo, globalUrlConfig())
+    ?? fail(`${ownerRepo} is not in the stack: on the Mac, ./cli.sh repo add ${ownerRepo}`);
+
+/** A dependency's `release` branch, from its cache, into `project`'s git dir. */
+export function deliver(project: string, ownerRepo: string, options: DependencyOptions = {}): string {
+  const projectDir = projectDirOf(project);
+  try {
+    if (!lstatSync(join(projectDir, ".git")).isDirectory()) throw new Error();
+  } catch {
+    return fail(`${project}/.git is not a directory of its own`);
+  }
+  const registration = registrationFor(ownerRepo, options);
+  const cache = openCache(registration);
+  const scratch = mkdtempSync(join(tmpdir(), "desolate-deliver-"));
+  try {
+    refresh(cache, registration, options.ssh);
+    const release = branchesOf(cache).find(([, name]) => name === "release")?.[0];
+    if (!release) fail(`${ownerRepo} has no release branch: is it a suede dependency?`);
+    const bundle = join(scratch, "release.bundle");
+    if (!cleanGit(["-C", cache.dir, "bundle", "create", "--quiet", bundle, "refs/heads/release"]).ok)
+      fail(`could not bundle ${ownerRepo}'s release branch`);
+    const inside = deliveredBundle(ownerRepo);
+    removeInside(projectDir, inside);
+    writeInside(projectDir, inside, readFileSync(bundle));
+    return `delivered ${ownerRepo}'s release (${release!.slice(0, 12)}) to ${project}`;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+    cache.release();
+  }
+}
+
+/** suede's own spelling of a branch segment (scripts/upstream.sh sanitize_seg). */
+const segment = (raw: string) =>
+  raw.replace(/[^A-Za-z0-9_.-]/g, "-").replace(/-+/g, "-").replace(/^[-.]+/, "").replace(/[-.]+$/, "");
+
+/** The branch a consumer's proposal goes to: suede's, so its workflow opens the PR. */
+export const downstreamBranch = (consumer: string, consumerCommit: string) => {
+  const [owner, repo] = consumer.includes("/") ? consumer.split("/") : ["", consumer];
+  return `downstream/${owner ? `${segment(owner)}/` : ""}${segment(repo) || "repo"}-${consumerCommit}`;
+};
+
+export interface Built { commit: string; pin: string; consumerCommit: string; name: string }
+
+/**
+ * The proposal `deps-build` bundled in `project`'s git dir, pushed to the
+ * dependency as a NEW `downstream/<consumer>-<commit>` branch -- never one
+ * that is there, never main or release -- with the dependency's own key.
+ */
+export function pushUpstream(project: string, ownerRepo: string, built: Built, options: DependencyOptions = {}): string {
+  const projectDir = projectDirOf(project);
+  const registration = registrationFor(ownerRepo, options);
+  const consumer = options.registrations?.[project]?.ownerRepo ?? registrationOf(project, globalUrlConfig())?.ownerRepo ?? project;
+  const branch = downstreamBranch(consumer, built.consumerCommit);
+  if (!COMMIT.test(built.commit) || !COMMIT.test(built.pin) || !COMMIT.test(built.consumerCommit))
+    fail("a proposal names commits, in full");
+  const cache = openCache(registration);
+  const scratch = mkdtempSync(join(tmpdir(), "desolate-upstream-"));
+  const inside = join(".git", built.name);
+  try {
+    refresh(cache, registration, options.ssh);
+    if (!hasCommit(cache, built.pin)) fail(`${ownerRepo} has no ${built.pin}: the pin is not on its history`);
+    const there = cleanGit(["-C", cache.dir, "ls-remote", "--heads", registration.url, `refs/heads/${branch}`], { capture: true, ssh: options.ssh });
+    if (!there.ok) fail(`could not reach ${ownerRepo}: ${there.stderr.trim()}`);
+    if (there.stdout.trim()) fail(`${branch} is already on ${ownerRepo}: this exact proposal was made`);
+    const bundle = join(scratch, "proposal.bundle");
+    writeFileSync(bundle, readInside(projectDir, inside));
+    const outgoing = "refs/desolate/upstream/outgoing";
+    if (!cleanGit(["-C", cache.dir, "fetch", "--quiet", bundle, `+refs/desolate/upstream/outgoing:${outgoing}`]).ok)
+      fail("the proposal did not fetch into the cache");
+    const fetched = cleanGit(["-C", cache.dir, "rev-parse", outgoing], { capture: true }).stdout.trim();
+    const parent = cleanGit(["-C", cache.dir, "rev-parse", `${outgoing}^`], { capture: true }).stdout.trim();
+    if (fetched !== built.commit || parent !== built.pin)
+      fail(`the proposal is ${fetched || "nothing"} on ${parent || "nothing"}, not the ${built.commit} on ${built.pin} its sandbox said`);
+    if (!cleanGit(["-C", cache.dir, "push", "--quiet", registration.url, `${built.commit}:refs/heads/${branch}`], { ssh: options.ssh }).ok)
+      fail(`${ownerRepo} refused ${branch}`);
+    cleanGit(["-C", cache.dir, "update-ref", "-d", outgoing]);
+    return branch;
+  } finally {
+    removeInside(projectDir, inside);
+    rmSync(scratch, { recursive: true, force: true });
+    cache.release();
+  }
+}

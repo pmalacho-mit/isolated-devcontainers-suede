@@ -118,3 +118,39 @@ describe("the reader holds what a project wrote to its shape", () => {
     assert.equal(readStatus(target(box.workspaces, "acme/widgets")), undefined, "cut short, it is not JSON");
   });
 });
+
+describe("notes, and the board every agent in a project reads", () => {
+  const notes = (cwd: string, text: string) =>
+    execFileSync("sh", [HELPER, "note"], { cwd, input: text, encoding: "utf8" });
+
+  test("each target's note beside its status; the board shows them all, and which is yours", () => {
+    const box = repository();
+    const wip = path.join(box.dir, ".worktrees", "wip");
+    helper(box.dir, "set", "blue", "integrating the widget PRs");
+    notes(box.dir, "I am carrying issue-12's change to lib.ts.\nissue-14: yours conflicts with it -- see my branch.\n");
+    helper(wip, "set", "gray", "withdrawn: carried by main");
+    helper(wip, "note", "Agreed; my change is in main's branch now.");
+    const board = helper(wip, "board");
+    assert.match(board, /^== main \[blue\] integrating the widget PRs  \(.+Z\)$/m);
+    assert.match(board, /I am carrying issue-12's change to lib.ts\.\nissue-14: yours conflicts/);
+    assert.match(board, /^== wip \[gray\] withdrawn: carried by main  \(.+\)  \(you\)$/m);
+    assert.match(board, /Agreed; my change is in main's branch now\./);
+    assert.ok(!/\(you\)/.test(board.split("== wip")[0]), "main is not marked as the reader's");
+  });
+
+  test("a note is in the git dir, not the repository, and is capped", () => {
+    const box = repository();
+    const before = box.git("status", "--porcelain");
+    notes(box.dir, "x".repeat(20000));
+    assert.equal(box.git("status", "--porcelain"), before);
+    assert.equal(fs.statSync(path.join(box.dir, ".git", "desolate-note.md")).size, 16384);
+    helper(box.dir, "note", "--clear");
+    assert.ok(!fs.existsSync(path.join(box.dir, ".git", "desolate-note.md")));
+  });
+
+  test("a target with nothing said is on the board too", () => {
+    const box = repository();
+    assert.match(helper(box.dir, "board"), /^== main \(no status\)  \(you\)$/m);
+    assert.match(helper(box.dir, "board"), /^== wip \(no status\)$/m);
+  });
+});

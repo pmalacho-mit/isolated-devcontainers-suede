@@ -1593,6 +1593,28 @@ async function pullTarget(target: Target, name: string): Promise<void> {
 }
 
 /**
+ * `cli.sh deps report` and `deps upstream`'s project half (docs/suede-factory.md):
+ * the project's own git, in its sandbox, which sees that project alone and has
+ * no network -- a dependency's history arrives as a bundle desolate delivered.
+ * Always the PROJECT's sandbox and root: a suede dependency is the project's.
+ */
+async function depsReport(target: Target, ref: string): Promise<void> {
+  await onItsDaemon(target);
+  const report = docker.depsReport(projectSandbox(target), ref);
+  if (!report) return die(`could not read ${target.project}'s suede dependencies at ${ref} in its sandbox`);
+  console.log(`DEPS ${JSON.stringify(report)}`);
+}
+
+async function depsBuild(target: Target, ref: string, dir: string, name: string): Promise<void> {
+  await onItsDaemon(target);
+  const out = path.join(target.projectDir, ".git", name);
+  const built = docker.depsBuild(projectSandbox(target), ref, dir, out, target.project);
+  if (!built) return die(`could not build ${target.project}'s proposal for ${dir} in its sandbox (see above)`);
+  if (built === "none") return console.log("BUILT none");
+  console.log(`BUILT ${built.commit} ${built.pin} ${built.tag} ${built.consumerCommit} ${built.patch} ${out}`);
+}
+
+/**
  * Run a command inside a running target's devcontainer -- how a harness starts
  * an agent in it (`cli.sh exec`, docs/agents.md). As the container's remote
  * user (its metadata label), in its workspace folder, through a login shell so
@@ -1936,6 +1958,8 @@ async function main(): Promise<void> {
   else if (args.command === "exec") execTarget(target, args.execArgv!);
   else if (args.command === "bundle") await bundleTarget(target, args.transfer!);
   else if (args.command === "pull") await pullTarget(target, args.transfer!);
+  else if (args.command === "deps-report") await depsReport(target, args.ref ?? "HEAD");
+  else if (args.command === "deps-build") await depsBuild(target, args.ref ?? "HEAD", args.subrepo!, args.transfer!);
   else if (args.command === "populate") populateWorktree(target);
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }

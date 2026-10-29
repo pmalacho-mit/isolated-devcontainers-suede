@@ -15,6 +15,7 @@
 #   ./isolated-devcontainers-suede/cli.sh reclaim owner/repo [path] # give root-owned files back to the editor
 #   ./isolated-devcontainers-suede/cli.sh exec owner/repo [--worktree wip] -- cmd...   # run it in the devcontainer
 #   ./isolated-devcontainers-suede/cli.sh push|pull owner/repo [--worktree wip]       # its branch, to and from GitHub
+#   ./isolated-devcontainers-suede/cli.sh deps deliver|report|upstream ...            # suede dependencies (docs/suede-factory.md)
 #   ./isolated-devcontainers-suede/cli.sh desolate --status [--json] [owner/repo]       # what each agent last said
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
@@ -1391,6 +1392,38 @@ case "$CMD" in
              # project's own git, which would run its hooks and config there
              # (transfer.ts). The same as `desolate --push` in its terminal.
              exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" desolate "--$CMD" "$@" ;;
+
+  deps)      ensure_running
+             # A project's suede dependencies (docs/suede-factory.md). The
+             # Mac's: the editor's desolate and its panel do not offer these,
+             # and the dependency is always named here, never read from the
+             # project. The project's git runs in its sandbox (orchestrator);
+             # keys and caches are the editor's.
+             SUB="${1:-}"; shift || true
+             DEPS_USAGE="usage: cli.sh deps {deliver <project> <owner/repo> | report <project> [--ref <ref>] | upstream <project> <dir> [--ref <ref>]}"
+             case "$SUB" in
+               deliver)
+                 [ $# -eq 2 ] || { echo "$DEPS_USAGE" >&2; exit 1; }
+                 exec docker exec -e DESOLATE_PLANE=mac "$CONTAINER" with-ca tsx /usr/local/lib/desolate/deps.ts deliver "$1" "$2" ;;
+               report)
+                 PROJ="${1:?$DEPS_USAGE}"; shift
+                 exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --deps-report "$@" "$PROJ" ;;
+               upstream)
+                 PROJ="${1:?$DEPS_USAGE}"; DIR="${2:?$DEPS_USAGE}"; shift 2
+                 NAME="desolate-transfer-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n').bundle"
+                 OUT=$(docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --deps-build "$DIR" --transfer "$NAME" "$@" "$PROJ") \
+                   || { printf '%s\n' "$OUT" >&2; exit 1; }
+                 LINE=$(printf '%s\n' "$OUT" | grep '^BUILT ' | tail -n 1)
+                 [ -n "$LINE" ] || { printf '%s\n' "$OUT" >&2; echo "cli.sh: the sandbox said nothing of a proposal" >&2; exit 1; }
+                 if [ "$LINE" = "BUILT none" ]; then echo "UPSTREAMED none"; exit 0; fi
+                 read -r _ COMMIT PIN TAG CONSUMER PATCH _ <<< "$LINE"
+                 case "$TAG" in *__*) DEP="${TAG%%__*}/${TAG#*__}" ;; *) echo "cli.sh: $DIR's remote names no owner/repo" >&2; exit 1 ;; esac
+                 SAID=$(docker exec -e DESOLATE_PLANE=mac "$CONTAINER" with-ca tsx /usr/local/lib/desolate/deps.ts upstream \
+                          "$PROJ" "$DEP" "$NAME" "$COMMIT" "$PIN" "$CONSUMER") || { printf '%s\n' "$SAID" >&2; exit 1; }
+                 BRANCH=$(printf '%s\n' "$SAID" | sed -n 's/^UPSTREAMED //p')
+                 echo "UPSTREAMED $DEP $BRANCH $COMMIT $PATCH" ;;
+               *) echo "$DEPS_USAGE" >&2; exit 1 ;;
+             esac ;;
 
   exec)      ensure_running
              # A command in a running target's devcontainer, as its user -- how

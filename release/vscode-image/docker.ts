@@ -354,6 +354,186 @@ export const pullScript = [
   'say blocked "$branch"',
 ].join("; ");
 
+/**
+ * A project's suede dependencies, as git sees them at one commit (`deps
+ * report`), and the commit that proposes one of them upstream (`deps build`)
+ * -- run in the project's sandbox, which sees that project alone, with no
+ * network: the dependency's history comes from a bundle desolate delivered
+ * into the project's git dir (`.git/desolate-dep-<owner>__<repo>.bundle`).
+ *
+ * A suede dependency is a subrepo tracking `release`, other than the
+ * project's own `release/` (docs/suede-factory.md). Its proposal is its
+ * folder at that commit, less what is not the consumer's to propose: its
+ * `.gitrepo`, and every subrepo nested inside it -- a nested one is proposed
+ * to its own repository, and the outer one keeps its pinned copy. One commit,
+ * parented on the pin: what suede's suede-downstream-to-main rebuilds from
+ * (merge-base with release), as it would from `git subrepo push`.
+ *
+ *   sh -c depsScript deps report <ref>
+ *   sh -c depsScript deps build  <ref> <dir> <out-bundle> <who>
+ *
+ * Every line it prints is a record: DEPS_* below, tab-separated.
+ */
+export const depsScript = String.raw`set -u
+g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+export GIT_LITERAL_PATHSPECS=1
+mode=$1 ref=$2
+shift 2
+commit=$(g rev-parse --verify -q "$ref^{commit}") || { echo "no commit at $ref" >&2; exit 3; }
+work=$(mktemp -d) || exit 4
+trap 'rm -rf "$work"' EXIT
+gitdir=$(cd "$(g rev-parse --git-common-dir)" && pwd -P) || exit 4
+TAB=$(printf '\t')
+
+# A remote URL -> owner__repo, or nothing.
+tag_of() {
+  printf '%s\n' "$1" | sed -E 's#/+$##; s#\.git$##; s#^[A-Za-z][A-Za-z0-9+.-]*://[^/]*/##; s#^[^@/]+@[^:/]+:##' \
+    | awk -F/ 'NF >= 2 && $(NF-1) ~ /^[A-Za-z0-9._-]+$/ && $NF ~ /^[A-Za-z0-9._-]+$/ { print $(NF-1) "__" $NF }'
+}
+
+# The pinned commit, from the delivered bundle if it is not here yet.
+have_pin() {
+  g cat-file -e "$1^{commit}" 2>/dev/null && return 0
+  bundle="$gitdir/desolate-dep-$2.bundle"
+  [ -n "$2" ] && [ -f "$bundle" ] && [ ! -L "$bundle" ] || return 1
+  g fetch --quiet --no-tags "$bundle" "+refs/heads/*:refs/desolate/deps/$2/*" >/dev/null 2>&1
+  g cat-file -e "$1^{commit}" 2>/dev/null
+}
+
+# Its folder at the commit, with .gitrepo and every nested subrepo as the pin has them.
+proposal_tree() {
+  index="$work/index"
+  rm -f "$index"
+  GIT_INDEX_FILE=$index g read-tree "$commit:$1" || return 1
+  { echo .gitrepo; cat "$work/nested"; } | while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    GIT_INDEX_FILE=$index g ls-files -z -- "$path" | GIT_INDEX_FILE=$index g update-index -z --force-remove --stdin
+    g ls-tree -r -z "$2" -- "$path" | GIT_INDEX_FILE=$index g update-index -z --index-info
+  done
+  GIT_INDEX_FILE=$index g write-tree
+}
+
+g ls-tree -r --name-only "$commit" | grep -E '(^|/)\.gitrepo$' | sed -E 's#/?\.gitrepo$##' | grep -v '^$' > "$work/subrepos"
+
+# One dependency: its .gitrepo, its pin, its proposal tree. Returns 1 when it is no suede dependency.
+load() {
+  dir=$1
+  [ "$dir" != release ] || return 1
+  [ "$(g config --blob "$commit:$dir/.gitrepo" subrepo.branch 2>/dev/null)" = release ] || return 1
+  remote=$(g config --blob "$commit:$dir/.gitrepo" subrepo.remote 2>/dev/null)
+  pin=$(g config --blob "$commit:$dir/.gitrepo" subrepo.commit 2>/dev/null)
+  tag=$(tag_of "$remote")
+  awk -v d="$dir" 'index($0, d "/") == 1 { print substr($0, length(d) + 2) }' "$work/subrepos" > "$work/nested"
+}
+
+case "$mode" in
+  report)
+    printf 'REF\t%s\n' "$commit"
+    [ "$(g config --blob "$commit:release/.gitrepo" subrepo.branch 2>/dev/null)" = release ] && printf 'SUEDE\n'
+    g ls-tree "$commit" | awk -F'\t' '$1 ~ /^120000 blob / { split($1, a, " "); print a[3] "\t" $2 }' \
+      | while IFS="$TAB" read -r blob name; do printf 'LINK\t%s\t%s\n' "$name" "$(g cat-file blob "$blob")"; done
+    while IFS= read -r d; do
+      load "$d" || continue
+      printf 'DEP\t%s\t%s\t%s\t%s\n' "$d" "$tag" "$pin" "$remote"
+      have_pin "$pin" "$tag" || { printf 'NOPIN\t%s\n' "$d"; continue; }
+      tree=$(proposal_tree "$d" "$pin") || { printf 'FAILED\t%s\n' "$d"; continue; }
+      if [ "$tree" = "$(g rev-parse "$pin^{tree}")" ]; then printf 'SAME\t%s\n' "$d"; continue; fi
+      printf 'DIFF\t%s\t%s\n' "$d" "$(g diff-tree -r -p "$pin" "$tree" | g patch-id --stable | cut -d' ' -f1)"
+      g diff-tree -r --name-status "$pin" "$tree" | while IFS= read -r line; do printf 'FILE\t%s\t%s\n' "$d" "$line"; done
+    done < "$work/subrepos"
+    ;;
+  build)
+    d=$1 out=$2 who=$3
+    load "$d" || { echo "$d is not a suede dependency at $commit" >&2; exit 5; }
+    have_pin "$pin" "$tag" || { echo "$d's pinned commit $pin is not here: deliver its repository first" >&2; exit 6; }
+    tree=$(proposal_tree "$d" "$pin") || exit 7
+    if [ "$tree" = "$(g rev-parse "$pin^{tree}")" ]; then printf 'BUILT\tnone\n'; exit 0; fi
+    patch=$(g diff-tree -r -p "$pin" "$tree" | g patch-id --stable | cut -d' ' -f1)
+    parent=$(g config --blob "$commit:$d/.gitrepo" subrepo.parent 2>/dev/null)
+    {
+      printf 'Changes to %s proposed by %s\n\nFrom %s at %s. Its commits that touched %s:\n\n' "$d" "$who" "$who" "$commit" "$d"
+      if [ -n "$parent" ] && g merge-base --is-ancestor "$parent" "$commit" 2>/dev/null; then
+        g log --format='- %h %s' "$parent..$commit" -- "$d"
+      else
+        g log --format='- %h %s' -20 "$commit" -- "$d"
+      fi
+    } > "$work/message"
+    new=$(GIT_AUTHOR_NAME="$who" GIT_AUTHOR_EMAIL=desolate@localhost GIT_COMMITTER_NAME=desolate GIT_COMMITTER_EMAIL=desolate@localhost \
+      g commit-tree "$tree" -p "$pin" -F "$work/message") || exit 8
+    g update-ref refs/desolate/upstream/outgoing "$new" || exit 8
+    g bundle create --quiet "$out" refs/desolate/upstream/outgoing "^$pin" || { g update-ref -d refs/desolate/upstream/outgoing; exit 9; }
+    g update-ref -d refs/desolate/upstream/outgoing
+    printf 'BUILT\t%s\t%s\t%s\t%s\t%s\n' "$new" "$pin" "$tag" "$commit" "$patch"
+    ;;
+  *) echo "deps: report or build" >&2; exit 2 ;;
+esac
+`;
+
+/** A suede dependency, as `deps report` found it. */
+export interface DependencyReport {
+  /** Its folder, relative to the project root. */
+  dir: string;
+  /** Its repository, `owner/repo`, when its remote names one. */
+  repo?: string;
+  remote: string;
+  pin: string;
+  /** How the project consumes it -- what is at stake if it diverges:
+   *  `release`: declared by a root symlink: the project, itself a suede
+   *    dependency, ships a pointer to it, and its publish is refused while
+   *    the copy diverges;
+   *  `vendored`: inside `release/`: shipped as source;
+   *  `development`: anything else, in a project that is a suede dependency;
+   *  `app`: in a project that is not one. */
+  kind: "release" | "vendored" | "development" | "app";
+  /** `same` as its pin, `diff`ers, its pin is not here (`nopin`: deliver
+   *  its repository), or the comparison `failed`. */
+  state: "same" | "diff" | "nopin" | "failed";
+  /** `git patch-id --stable` of the difference: equal for the same change. */
+  patch?: string;
+  files: { status: string; path: string }[];
+}
+
+export interface DepsReport {
+  commit: string;
+  /** The project is itself a suede dependency (its `release/.gitrepo` tracks release). */
+  suede: boolean;
+  dependencies: DependencyReport[];
+}
+
+/** `deps report`'s records, as one document. */
+export const parseDepsReport = (text: string): DepsReport | null => {
+  const rows = text.split("\n").filter(Boolean).map((line) => line.split("\t"));
+  const commit = rows.find(([kind]) => kind === "REF")?.[1];
+  if (!commit || !/^[0-9a-f]{40,64}$/.test(commit)) return null;
+  const suede = rows.some(([kind]) => kind === "SUEDE");
+  const links = new Map(rows.filter(([kind]) => kind === "LINK")
+    .map(([, name, target]) => [name, (target ?? "").replace(/^\.\//, "").replace(/\/+$/, "")]));
+  const declared = new Set(links.values());
+  const dependencies: DependencyReport[] = [];
+  for (const [kind, dir, ...rest] of rows) {
+    if (kind === "DEP") {
+      const [tag, pin, remote] = rest;
+      dependencies.push({
+        dir, remote: remote ?? "", pin: pin ?? "",
+        ...(tag && /^[A-Za-z0-9._-]+__[A-Za-z0-9._-]+$/.test(tag) ? { repo: tag.replace("__", "/") } : {}),
+        kind: !suede ? "app" : dir.startsWith("release/") ? "vendored" : declared.has(dir) ? "release" : "development",
+        state: "failed", files: [],
+      });
+      continue;
+    }
+    const dependency = dependencies.find((d) => d.dir === dir);
+    if (!dependency) continue;
+    if (kind === "SAME") dependency.state = "same";
+    else if (kind === "NOPIN") dependency.state = "nopin";
+    else if (kind === "DIFF") { dependency.state = "diff"; dependency.patch = rest[0]; }
+    else if (kind === "FILE") {
+      const [status, ...path] = rest;
+      dependency.files.push({ status: status ?? "", path: path.join("\t") });
+    }
+  }
+  return { commit, suede, dependencies };
+};
+
 /** What `reclaim` reports once it has run: the count of entries it changed.
  *  Absent, the reclaim did not finish -- which every caller must say. */
 export const RECLAIMED = "desolate-reclaimed";
@@ -619,6 +799,17 @@ export const createDocker = (run: Runner) => {
       const said = query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", pullScript, "pull", targetDir, bundle, refs, spec.caFile);
       const match = new RegExp(`^${PULLED} (fetched|current|diverged|fast-forwarded|blocked|needs-full) (\\S+)$`, "m").exec(said);
       return match ? { outcome: match[1], branch: match[2] } : null;
+    },
+    /** `depsScript report` in a project's sandbox, parsed; null when it did not finish. */
+    depsReport: (spec: WorktreeSandbox, ref: string) =>
+      parseDepsReport(query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", depsScript, "deps", "report", ref)),
+    /** `depsScript build`: the proposal commit, bundled at `out` (a path in the
+     *  project's git dir); `none` when the folder is its pin; null on failure. */
+    depsBuild: (spec: WorktreeSandbox, ref: string, dir: string, out: string, who: string) => {
+      const said = query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", depsScript, "deps", "build", ref, dir, out, who);
+      if (/^BUILT	none$/m.test(said)) return "none" as const;
+      const built = /^BUILT	([0-9a-f]{40,64})	([0-9a-f]{40,64})	(\S*)	([0-9a-f]{40,64})	([0-9a-f]*)$/m.exec(said);
+      return built ? { commit: built[1], pin: built[2], tag: built[3], consumerCommit: built[4], patch: built[5] } : null;
     },
     /** `reclaimArgv`, run: the number of entries it changed, or null when
      *  it did not finish. */
