@@ -1185,6 +1185,30 @@ describe("bundle and pull: a push's and a pull's project halves (transfer.ts)", 
     });
 });
 
+describe("review: what a push would send (review.ts)", () => {
+  // ===========================================================================
+  test("reaches the runner as --review, for a project or a worktree", async () => {
+    project("reviews", JSON.stringify({ image: "alpine:3" }));
+    fs.mkdirSync(path.join(workspaces, "reviews", ".worktrees", "issue-1"), { recursive: true });
+    resetRunner();
+    assert.equal(result(await ask({ op: "review", project: "reviews" })).ok, true);
+    assert.equal(result(await ask({ op: "review", project: "reviews", worktree: "issue-1" })).ok, true);
+    assert.deepEqual(runnerInvocations(), [["--review", "reviews"], ["--review", "--worktree", "issue-1", "reviews"]]);
+  });
+
+  for (const [why, query] of [
+    ["a bundle name", { op: "review", project: "reviews", transfer: "desolate-transfer-0123456789abcdef.bundle" }],
+    ["fetch-only", { op: "review", project: "reviews", fetch: true }],
+    ["a branch", { op: "review", project: "reviews", branch: "main" }],
+    ["a worktree that is a path", { op: "review", project: "reviews", worktree: "../other" }],
+  ] as const)
+    test(`refuses ${why}, before the runner`, async () => {
+      resetRunner();
+      assert.equal(result(await ask(query)).ok, false);
+      assert.deepEqual(runnerInvocations(), []);
+    });
+});
+
 describe("--json, for programs (F2)", () => {
   // ===========================================================================
   test("list and ports pass it to the runner", async () => {

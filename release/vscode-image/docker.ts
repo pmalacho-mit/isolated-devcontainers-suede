@@ -6,6 +6,7 @@
  * readability and testability.
  */
 import type { RunOptions } from "./utils.ts";
+import { REVIEWED, REVIEW_LIMITS } from "./review.ts";
 
 /** How a command reaches the world. The two shapes differ in what they return,
  *  not in what they run: `output` is for queries, `status` for effects. */
@@ -354,6 +355,96 @@ export const pullScript = [
   'git -C "$dir" -c "http.sslCAInfo=$ca" merge --ff-only --quiet "refs/remotes/origin/$branch" && say fast-forwarded "$branch"',
   'say blocked "$branch"',
 ].join("; ");
+
+/**
+ * What `desolate --push` would send, for a person to read first (`desolate
+ * --review`): the branch checked out in $1, what it is compared with, the
+ * commits and files that differ, and each file's two sides -- read-only, in
+ * the target's sandbox like the push's own half. Nothing is written.
+ *
+ * Compared with GitHub's copy of the branch as the last pull or fetch left it
+ * (origin/<branch>); for a branch GitHub does not have, with the origin branch
+ * it has the fewest commits beyond -- where it started. The diff is from where
+ * the two meet, so it is what the branch adds. Lines, tab-separated:
+ *
+ *   BRANCH <name or -> <head>        BASE <ref or -> <its commit or -> <merge-base or ->
+ *   COUNTS <ahead> <behind> <uncommitted entries>
+ *   COMMIT <sha> <author time> <author> <subject>     (newest first, at most $5)
+ *   FILE <n> <status> <mode a> <mode b> <blob a> <blob b> <size a> <size b> <kind> <path>[ <path>]
+ *   BLOB <n> <a|b> <a line of base64>                  (a `text` file's sides)
+ *   MORE (past $4 files)   END
+ *
+ * Paths are git's, quoted when they hold a tab, a newline, a quote or a
+ * backslash. Content is read by blob id (`cat-file blob`), so no filter or
+ * textconv of the project's runs; `kind` is text, binary, large or module.
+ */
+export const reviewScript = String.raw`set -u
+g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.quotePath=false "$@"; }
+dir=$1 blobmax=$2 totalmax=$3 filesmax=$4 commitsmax=$5
+T=$(printf '\t')
+say() { line=${REVIEWED}; for field in "$@"; do line="$line$T$field"; done; printf '%s\n' "$line"; }
+cd "$dir" || exit 2
+head=$(g rev-parse -q --verify 'HEAD^{commit}') || { echo "nothing is committed in $dir" >&2; exit 3; }
+branch=$(g symbolic-ref -q --short HEAD) || branch=
+say BRANCH "${'$'}{branch:--}" "$head"
+base=
+if [ -n "$branch" ] && g rev-parse -q --verify "refs/remotes/origin/$branch^{commit}" >/dev/null; then
+  base=origin/$branch
+else
+  best=
+  for ref in $(g for-each-ref --sort=-committerdate --count=100 --format='%(refname:short)' refs/remotes/origin/); do
+    case "$ref" in origin|origin/HEAD) continue ;; esac
+    n=$(g rev-list --count "$ref..HEAD" 2>/dev/null) || continue
+    if [ -z "$best" ] || [ "$n" -lt "$best" ]; then best=$n base=$ref; fi
+  done
+fi
+from=
+if [ -n "$base" ]; then
+  basecommit=$(g rev-parse -q --verify "$base^{commit}")
+  from=$(g merge-base "$basecommit" HEAD) || from=
+  ahead=$(g rev-list --count "$basecommit..HEAD") behind=$(g rev-list --count "HEAD..$basecommit")
+  range=$basecommit..HEAD
+else
+  basecommit= ahead=$(g rev-list --count HEAD) behind=0 range=HEAD
+fi
+say BASE "${'$'}{base:--}" "${'$'}{basecommit:--}" "${'$'}{from:--}"
+say COUNTS "$ahead" "$behind" "$(g status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+g log --max-count="$commitsmax" --format="%H%x09%at%x09%aN%x09%s" "$range" | sed "s/^/${REVIEWED}${'$'}{T}COMMIT${'$'}{T}/"
+left=${'$'}{from:-$(g hash-object -t tree /dev/null)}
+zero=0000000000000000000000000000000000000000
+g -c diff.renameLimit=1000 diff --raw --no-abbrev -M "$left" HEAD | {
+  i=0 total=0
+  while IFS= read -r line; do
+    i=$((i + 1))
+    if [ "$i" -gt "$filesmax" ]; then say MORE; break; fi
+    meta=${'$'}{line%%"$T"*} paths=${'$'}{line#*"$T"}
+    set -- $meta
+    ma=${'$'}{1#:} mb=$2 a=$3 b=$4 st=$5
+    sa=0 sb=0 kind=text
+    case "$ma$mb" in 160000*|*160000) kind=module ;; esac
+    if [ "$kind" = text ]; then
+      [ "$a" = "$zero" ] || sa=$(g cat-file -s "$a")
+      [ "$b" = "$zero" ] || sb=$(g cat-file -s "$b")
+      if [ "$sa" -gt "$blobmax" ] || [ "$sb" -gt "$blobmax" ] || [ $((total + sa + sb)) -gt "$totalmax" ]; then
+        kind=large
+      else
+        for blob in "$a" "$b"; do
+          [ "$blob" = "$zero" ] && continue
+          head8k=$(g cat-file blob "$blob" | head -c 8000 | wc -c)
+          kept=$(g cat-file blob "$blob" | head -c 8000 | tr -d '\000' | wc -c)
+          [ "$head8k" -eq "$kept" ] || kind=binary
+        done
+      fi
+    fi
+    say FILE "$i" "$st" "$ma" "$mb" "$a" "$b" "$sa" "$sb" "$kind" "$paths"
+    [ "$kind" = text ] || continue
+    total=$((total + sa + sb))
+    [ "$a" = "$zero" ] || g cat-file blob "$a" | base64 | sed "s/^/${REVIEWED}${'$'}{T}BLOB${'$'}{T}$i${'$'}{T}a${'$'}{T}/"
+    [ "$b" = "$zero" ] || g cat-file blob "$b" | base64 | sed "s/^/${REVIEWED}${'$'}{T}BLOB${'$'}{T}$i${'$'}{T}b${'$'}{T}/"
+  done
+}
+say END
+`;
 
 /**
  * A project's suede dependencies, as git sees them at one commit (`deps
@@ -801,6 +892,23 @@ export const createDocker = (run: Runner) => {
       const match = new RegExp(`^${PULLED} (fetched|current|diverged|fast-forwarded|blocked|needs-full) (\\S+)$`, "m").exec(said);
       return match ? { outcome: match[1], branch: match[2] } : null;
     },
+    /** `reviewScript` in a target's sandbox, its lines straight to this
+     *  process's stdout -- a review can be megabytes, and the broker relays
+     *  them to the editor as they come (review.ts reads them there). */
+    reviewBranch: (spec: WorktreeSandbox, targetDir: string) =>
+      run.status([
+        ...worktreeSandbox(spec, "timeout"),
+        String(spec.seconds),
+        "sh",
+        "-c",
+        reviewScript,
+        "review",
+        targetDir,
+        String(REVIEW_LIMITS.blobBytes),
+        String(REVIEW_LIMITS.totalBytes),
+        String(REVIEW_LIMITS.files),
+        String(REVIEW_LIMITS.commits),
+      ]),
     /** `depsScript report` in a project's sandbox, parsed; null when it did not finish. */
     depsReport: (spec: WorktreeSandbox, ref: string) =>
       parseDepsReport(query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", depsScript, "deps", "report", ref)),

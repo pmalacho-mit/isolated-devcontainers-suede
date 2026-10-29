@@ -254,6 +254,17 @@ describe("--bundle and --pull: the project's halves of a push and a pull (transf
   });
 });
 
+describe("--review: what a push would send (review.ts)", () => {
+  test("names a target, and takes nothing else", () => {
+    const review = parse("--review", "--worktree", "issue-42", "acme/widgets");
+    assert.equal(review.command, "review");
+    assert.equal(review.worktree, "issue-42");
+    assert.equal(review.project, "acme/widgets");
+    refuses(["--review", "--fetch-only", "acme/widgets"], /only means something with --pull/);
+    refuses(["--review", "--transfer", "desolate-transfer-0123456789abcdef.bundle", "acme/widgets"], /--transfer only means something/);
+  });
+});
+
 describe("--exec (docs/agents.md)", () => {
   test("everything after `--` is the command, never desolate's flags", () => {
     const parsed = parse("--exec", "--worktree", "issue-42", "acme/widgets", "--", "claude", "-p", "--stop", "fix it");

@@ -1,7 +1,7 @@
 {
   "name": "desolate",
   "displayName": "desolate",
-  "description": "Projects, their worktrees and dinds, and each one's status, in the outer editor. Built in; talks only to the commands this editor already has.",
+  "description": "Projects, their worktrees and dinds, each one's status, what needs you, and what a push would send -- in the outer editor. Built in; talks only to the commands this editor already has.",
   "version": "0.1.0",
   "publisher": "desolate",
   "license": "MIT",
@@ -31,12 +31,26 @@
     "views": {
       "desolate": [
         {
+          "id": "desolate.needsYou",
+          "name": "Needs you",
+          "initialSize": 1
+        },
+        {
           "id": "desolate.projects",
-          "name": "Projects"
+          "name": "Projects",
+          "initialSize": 4
+        },
+        {
+          "id": "desolate.review",
+          "name": "Review",
+          "when": "desolate.reviewing",
+          "initialSize": 3
         },
         {
           "id": "desolate.dinds",
-          "name": "Dinds"
+          "name": "Dinds",
+          "visibility": "collapsed",
+          "initialSize": 1
         }
       ]
     },
@@ -44,155 +58,433 @@
       {
         "command": "desolate.refresh",
         "title": "Refresh",
+        "category": "desolate",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "desolate.quickOpen",
+        "title": "Go to a target…",
+        "category": "desolate",
+        "icon": "$(search)"
+      },
+      {
+        "command": "desolate.showLog",
+        "title": "Show log",
+        "category": "desolate",
+        "icon": "$(output)"
       },
       {
         "command": "desolate.start",
         "title": "Start",
+        "category": "desolate",
         "icon": "$(play)"
       },
       {
         "command": "desolate.stop",
         "title": "Stop",
+        "category": "desolate",
         "icon": "$(debug-stop)"
       },
       {
-        "command": "desolate.openPort",
-        "title": "Open",
-        "icon": "$(link-external)"
-      },
-      {
         "command": "desolate.rebuild",
-        "title": "Rebuild\u2026",
+        "title": "Rebuild…",
+        "category": "desolate",
         "icon": "$(debug-restart)"
-      },
-      {
-        "command": "desolate.pull",
-        "title": "Pull",
-        "icon": "$(repo-pull)"
-      },
-      {
-        "command": "desolate.push",
-        "title": "Push\u2026",
-        "icon": "$(repo-push)"
       },
       {
         "command": "desolate.openEditor",
         "title": "Open editor",
+        "category": "desolate",
         "icon": "$(link-external)"
       },
       {
         "command": "desolate.copyUrl",
-        "title": "Copy editor URL"
+        "title": "Copy editor URL",
+        "category": "desolate",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "desolate.openPort",
+        "title": "Open",
+        "category": "desolate",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "desolate.review",
+        "title": "Review & Push…",
+        "category": "desolate",
+        "icon": "$(repo-push)"
+      },
+      {
+        "command": "desolate.push",
+        "title": "Push without review…",
+        "category": "desolate",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "desolate.pull",
+        "title": "Pull",
+        "category": "desolate",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "desolate.reviewPush",
+        "title": "Push…",
+        "category": "desolate",
+        "icon": "$(repo-push)"
+      },
+      {
+        "command": "desolate.reviewRefresh",
+        "title": "Review again",
+        "category": "desolate",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "desolate.reviewClose",
+        "title": "Close the review",
+        "category": "desolate",
+        "icon": "$(close)"
+      },
+      {
+        "command": "desolate.openReviewFile",
+        "title": "Open its two sides",
+        "category": "desolate",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "desolate.openIssue",
+        "title": "Open its issue",
+        "category": "desolate",
+        "icon": "$(issues)"
+      },
+      {
+        "command": "desolate.openPullRequests",
+        "title": "Open its pull requests",
+        "category": "desolate",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "desolate.openBranch",
+        "title": "Open its branch on GitHub",
+        "category": "desolate",
+        "icon": "$(github)"
+      },
+      {
+        "command": "desolate.openRepository",
+        "title": "Open its repository on GitHub",
+        "category": "desolate",
+        "icon": "$(repo)"
+      },
+      {
+        "command": "desolate.openNote",
+        "title": "Open the note",
+        "category": "desolate",
+        "icon": "$(note)"
       },
       {
         "command": "desolate.worktreeAdd",
-        "title": "Add worktree\u2026"
+        "title": "Add worktree…",
+        "category": "desolate",
+        "icon": "$(add)"
       },
       {
         "command": "desolate.worktreeRemove",
-        "title": "Remove worktree\u2026"
+        "title": "Remove worktree…",
+        "category": "desolate",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "desolate.dismiss",
+        "title": "Mark as seen",
+        "category": "desolate",
+        "icon": "$(check)"
+      },
+      {
+        "command": "desolate.undismiss",
+        "title": "Show what was marked as seen",
+        "category": "desolate",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "desolate.reveal",
+        "title": "Show in Projects",
+        "category": "desolate",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "desolate.filterRunning",
+        "title": "Show only what is running",
+        "category": "desolate",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "desolate.showAll",
+        "title": "Show stopped ones too",
+        "category": "desolate",
+        "icon": "$(filter-filled)"
+      },
+      {
+        "command": "desolate.clone",
+        "title": "Clone a repository…",
+        "category": "desolate",
+        "icon": "$(repo-clone)"
       }
     ],
     "menus": {
       "view/title": [
         {
+          "command": "desolate.quickOpen",
+          "when": "view == desolate.projects",
+          "group": "navigation@1"
+        },
+        {
+          "command": "desolate.filterRunning",
+          "when": "view == desolate.projects && !desolate.runningOnly",
+          "group": "navigation@2"
+        },
+        {
+          "command": "desolate.showAll",
+          "when": "view == desolate.projects && desolate.runningOnly",
+          "group": "navigation@2"
+        },
+        {
           "command": "desolate.refresh",
-          "when": "view =~ /^desolate\\./",
-          "group": "navigation"
+          "when": "view == desolate.projects || view == desolate.dinds",
+          "group": "navigation@9"
+        },
+        {
+          "command": "desolate.showLog",
+          "when": "view == desolate.projects",
+          "group": "1_more"
+        },
+        {
+          "command": "desolate.clone",
+          "when": "view == desolate.projects",
+          "group": "1_more"
+        },
+        {
+          "command": "desolate.undismiss",
+          "when": "view == desolate.needsYou",
+          "group": "1_more"
+        },
+        {
+          "command": "desolate.reviewPush",
+          "when": "view == desolate.review",
+          "group": "navigation@1"
+        },
+        {
+          "command": "desolate.reviewRefresh",
+          "when": "view == desolate.review",
+          "group": "navigation@2"
+        },
+        {
+          "command": "desolate.reviewClose",
+          "when": "view == desolate.review",
+          "group": "navigation@3"
         }
       ],
       "view/item/context": [
+        {
+          "command": "desolate.review",
+          "when": "viewItem =~ /^(project|worktree)\\.(?!.*\\.busy).*\\.unpushed/",
+          "group": "inline@1"
+        },
+        {
+          "command": "desolate.openEditor",
+          "when": "viewItem =~ /^(project|worktree)\\.running(?!.*\\.busy)/",
+          "group": "inline@2"
+        },
+        {
+          "command": "desolate.stop",
+          "when": "viewItem =~ /^(project|worktree)\\.running(?!.*\\.busy)/",
+          "group": "inline@3"
+        },
+        {
+          "command": "desolate.start",
+          "when": "viewItem =~ /^(project|worktree)\\.stopped(?!.*\\.busy)/",
+          "group": "inline@3"
+        },
         {
           "command": "desolate.openPort",
           "when": "viewItem == port",
           "group": "inline"
         },
         {
-          "command": "desolate.start",
-          "when": "viewItem =~ /^(project|worktree)\\.stopped$/",
+          "command": "desolate.openNote",
+          "when": "viewItem == note",
           "group": "inline"
         },
         {
           "command": "desolate.openEditor",
-          "when": "viewItem =~ /^(project|worktree)\\.running$/",
-          "group": "inline"
-        },
-        {
-          "command": "desolate.stop",
-          "when": "viewItem =~ /^(project|worktree)\\.running$/",
-          "group": "inline"
+          "when": "viewItem =~ /^(project|worktree)\\.running(?!.*\\.busy)/",
+          "group": "1_open@1"
         },
         {
           "command": "desolate.copyUrl",
-          "when": "viewItem =~ /^(project|worktree)\\.running$/"
+          "when": "viewItem =~ /^(project|worktree)\\.running(?!.*\\.busy)/",
+          "group": "1_open@2"
         },
         {
-          "command": "desolate.pull",
-          "when": "viewItem =~ /^(project|worktree)\\./",
-          "group": "inline"
+          "command": "desolate.openIssue",
+          "when": "viewItem =~ /^(project|worktree|needs)\\..*\\.issue/",
+          "group": "2_github@1"
+        },
+        {
+          "command": "desolate.openPullRequests",
+          "when": "viewItem =~ /^(project|worktree|needs)\\..*\\.branch/",
+          "group": "2_github@2"
+        },
+        {
+          "command": "desolate.openBranch",
+          "when": "viewItem =~ /^(project|worktree)\\..*\\.branch/",
+          "group": "2_github@3"
+        },
+        {
+          "command": "desolate.openRepository",
+          "when": "viewItem =~ /^(project|worktree)\\..*\\.github/",
+          "group": "2_github@4"
+        },
+        {
+          "command": "desolate.review",
+          "when": "viewItem =~ /^(project|worktree)\\.(?!.*\\.busy)/",
+          "group": "3_git@1"
         },
         {
           "command": "desolate.push",
-          "when": "viewItem =~ /^(project|worktree)\\./",
-          "group": "inline"
+          "when": "viewItem =~ /^(project|worktree)\\.(?!.*\\.busy)/",
+          "group": "3_git@2"
         },
         {
-          "command": "desolate.rebuild",
-          "when": "viewItem =~ /^(project|worktree)\\./",
-          "group": "inline"
+          "command": "desolate.pull",
+          "when": "viewItem =~ /^(project|worktree)\\.(?!.*\\.busy)/",
+          "group": "3_git@3"
         },
-        {
-          "command": "desolate.worktreeAdd",
-          "when": "viewItem =~ /^project\\./"
-        },
-        {
-          "command": "desolate.worktreeRemove",
-          "when": "viewItem == worktree.stopped"
-        }
-      ],
-      "commandPalette": [
         {
           "command": "desolate.start",
-          "when": "false"
+          "when": "viewItem =~ /^(project|worktree)\\.stopped(?!.*\\.busy)/",
+          "group": "4_run@1"
         },
         {
           "command": "desolate.stop",
-          "when": "false"
+          "when": "viewItem =~ /^(project|worktree)\\.running(?!.*\\.busy)/",
+          "group": "4_run@1"
         },
         {
           "command": "desolate.rebuild",
-          "when": "false"
-        },
-        {
-          "command": "desolate.openEditor",
-          "when": "false"
-        },
-        {
-          "command": "desolate.copyUrl",
-          "when": "false"
+          "when": "viewItem =~ /^(project|worktree)\\.(?!.*\\.busy)/",
+          "group": "4_run@2"
         },
         {
           "command": "desolate.worktreeAdd",
-          "when": "false"
+          "when": "viewItem =~ /^project\\.(?!.*\\.busy)/",
+          "group": "5_worktree@1"
         },
         {
           "command": "desolate.worktreeRemove",
-          "when": "false"
+          "when": "viewItem =~ /^worktree\\.stopped(?!.*\\.busy)/",
+          "group": "5_worktree@2"
         },
+        {
+          "command": "desolate.review",
+          "when": "viewItem =~ /^needs\\.green/",
+          "group": "inline@1"
+        },
+        {
+          "command": "desolate.openEditor",
+          "when": "viewItem =~ /^needs\\.[a-z]+\\.running/",
+          "group": "inline@2"
+        },
+        {
+          "command": "desolate.dismiss",
+          "when": "viewItem =~ /^needs\\./",
+          "group": "inline@3"
+        },
+        {
+          "command": "desolate.reveal",
+          "when": "viewItem =~ /^needs\\./",
+          "group": "1_open@1"
+        },
+        {
+          "command": "desolate.openEditor",
+          "when": "viewItem =~ /^needs\\.[a-z]+\\.running/",
+          "group": "1_open@2"
+        },
+        {
+          "command": "desolate.review",
+          "when": "viewItem =~ /^needs\\./",
+          "group": "3_git@1"
+        },
+        {
+          "command": "desolate.dismiss",
+          "when": "viewItem =~ /^needs\\./",
+          "group": "9_seen@1"
+        },
+        {
+          "command": "desolate.openReviewFile",
+          "when": "viewItem == reviewfile.text",
+          "group": "inline"
+        }
+      ],
+      "commandPalette": [
         {
           "command": "desolate.openPort",
           "when": "false"
         },
         {
-          "command": "desolate.pull",
+          "command": "desolate.openReviewFile",
           "when": "false"
         },
         {
-          "command": "desolate.push",
+          "command": "desolate.openNote",
           "when": "false"
+        },
+        {
+          "command": "desolate.reveal",
+          "when": "false"
+        },
+        {
+          "command": "desolate.dismiss",
+          "when": "false"
+        },
+        {
+          "command": "desolate.reviewPush",
+          "when": "desolate.reviewing"
+        },
+        {
+          "command": "desolate.reviewRefresh",
+          "when": "desolate.reviewing"
+        },
+        {
+          "command": "desolate.reviewClose",
+          "when": "desolate.reviewing"
         }
       ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "desolate.needsYou",
+        "contents": "Nothing needs you. An agent that asks a question, gets stuck, finishes or withdraws shows up here."
+      },
+      {
+        "view": "desolate.projects",
+        "contents": "No projects in /workspaces yet.\n[Clone a repository…](command:desolate.clone)\nOr from your Mac: ./cli.sh repo add owner/repo"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "desolate.quickOpen",
+        "key": "ctrl+alt+d"
+      }
+    ],
+    "configuration": {
+      "title": "desolate",
+      "properties": {
+        "desolate.notifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Say so, in a notification, when an agent asks a question, gets stuck, finishes or withdraws."
+        }
+      }
     }
   }
 }

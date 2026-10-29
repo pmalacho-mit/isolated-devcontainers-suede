@@ -82,7 +82,7 @@ Each tick of `suede-factory.sh`:
    The consumer keeps one open proposal per dependency folder. A newer change replaces the older one: the older PR and issue are closed, their branches kept, and the commits that had been added there are listed in the new issue for the agent to carry over.
 
 4. **The agent works.** It runs in a worktree of the dependency, on the PR's branch. Other agents working on proposals into the same dependency are in the same repository, and coordinate through `/desolate/status board` and `note`. One can carry another's change; the one that hands its change over finishes `gray "withdrawn: …"`. When an agent finishes:
-   - **green:** you're asked to review it and push it to the PR (the panel's Push, or `desolate --push --worktree <name> <project>`), then merge it;
+   - **green:** you're asked to review it and push it to the PR (the panel's Review & Push, or `desolate --push --worktree <name> <project>`), then merge it;
    - **gray:** withdrawn; it's said on the issue and the PR.
 5. **The dependency released**, i.e. its `release` branch moved, which happens after a merge publishes. Two kinds of consumer get a sync issue, `suede:sync`, release dependencies first:
    - **proposers:** consumers whose proposal was merged into this release. Their issue was closed as completed, and its PR is merged.

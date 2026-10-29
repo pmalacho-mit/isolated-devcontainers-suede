@@ -57,7 +57,7 @@ Colours: `gray`, `blue`, `green`, `yellow`, `orange`, `red`. What they mean is t
 - `green`: done.
 
 It's read in three places:
-- **the editor's desolate panel**, as each project's and worktree's icon colour and message;
+- **the editor's desolate panel** (`docs/panel.md`), as each project's and worktree's icon colour and message, and, for `orange`, `red`, `green` and `gray`, in its **Needs you** list, with a notification;
 - **`desolate --status`** in the editor's terminal (`--json` for a program);
 - **`./cli.sh desolate --status --json`** from the Mac, which is how a harness polls it. One row per target, `status` null where none is set:
 
@@ -88,13 +88,21 @@ The reader is strict about the file. It:
 
 ### Getting a branch out, and the remote's back in
 
-You push it, with desolate's push, from the outer editor's terminal, the desolate panel's **Push** on the project or worktree, or the Mac:
+You push it, with desolate's push, from the outer editor's terminal, the desolate panel's **Review & Push** on the project or worktree, or the Mac:
 
 ```bash
-desolate --push --worktree issue-42 acme/widgets         # in the outer editor
+desolate --review --worktree issue-42 acme/widgets       # in the outer editor: what a push would send
+desolate --push --worktree issue-42 acme/widgets         # then send it
 ./cli.sh push acme/widgets --worktree issue-42           # or from the Mac
 desolate --pull --worktree issue-42 acme/widgets         # the remote's branches as origin/*, fast-forwarded
 ```
+
+**Review first.** `desolate --review` says what a push would send, and sends nothing. It runs in the target's sandbox, like the push's own half, and reads only. It shows:
+- the commits to push, and the files they change;
+- what the branch is compared with: GitHub's copy of it as the last pull or fetch left it, or, for a branch GitHub doesn't have yet, the `origin/*` branch it started from;
+- whether GitHub has commits the branch lacks (the push would be refused), and how many uncommitted changes the push would leave behind.
+
+Each changed file's two sides are kept in the editor's own cache (`~/.cache/desolate/reviews/`), never in the project, where the panel opens them side by side. File contents are read by blob id, so none of the project's filters run. Past 512 KiB a file, 8 MiB in all, or 300 files, a file is listed without its content. `--json` is for programs.
 
 Not `git push` or `git pull` in the project. In the editor that is the project's own git: it runs its hooks, obeys its config (`core.sshCommand`, `url.*.insteadOf`), and follows its refs, all in the one container that can write every project and use every deploy key. The editor's shell refuses typed git in `/workspaces/*` for that reason (`command git` gets past it).
 
@@ -117,7 +125,7 @@ desolate's push and pull keep the two sides apart (`release/vscode-image/transfe
 
 Measured on `git/git`, a pull went from about 35 s to about 2 s, and a push from about 21 s to under a second, after the first. A project added with `./cli.sh repo add` is cloned through its cache: the clone's one download fills it, and the project's objects are copied from it, never hardlinked, so the project can't write into the cache. Its first push and pull are as small as any later one. For a project cloned before this, the first push or pull fills the cache instead, which costs one full fetch. If a pull's guess at what the project has is wrong, the sandbox says so and is sent everything, once.
 
-Review an agent's branch, and commit, in the project's own devcontainer, before you push. No forge token enters the stack, and no clone is needed on the Mac.
+Review an agent's branch before you push: the panel's **Review & Push**, or `desolate --review`. Commit in the project's own devcontainer. No forge token enters the stack, and no clone is needed on the Mac.
 
 ### What desolate deliberately does not do
 
@@ -147,7 +155,7 @@ Per issue labelled `desolate:run`, each tick:
 3. Read `./cli.sh desolate --status --json`:
    - **the agent's own access broken** (for Claude, `red` "claude: authentication failed"): you are told, in the terminal, with a bell, and by a macOS notification. In a terminal you are asked for a new token, and then each agent that stopped on it carries on its conversation. No new agent starts while this waits.
    - **`orange` or `red`:** a comment on the issue, once per status.
-   - **`green`:** you are told, once, to review the branch and push it (the panel's **Push**, or `desolate --push`). As soon as GitHub has `issue/<n>`, the dispatcher opens a draft PR for it (`gh pr create --draft`).
+   - **`green`:** you are told, once, to review the branch and push it (the panel's **Review & Push**, or `desolate --push`). As soon as GitHub has `issue/<n>`, the dispatcher opens a draft PR for it (`gh pr create --draft`).
 4. When the issue is closed: stop and `worktree remove` (refused while it holds uncommitted work).
 
 Another agent is five shell functions: `agent_ready`, `agent_start`, `agent_blocked`, `agent_renew` and `agent_resume`. See the top of `lib/gh-dispatch.sh`.

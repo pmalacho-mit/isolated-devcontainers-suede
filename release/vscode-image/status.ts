@@ -101,14 +101,19 @@ export const openContained = (projectDir: string, inside: string, flags: number)
   return undefined;
 };
 
-/** At most STATUS_MAX_BYTES of a contained file, and its mtime; undefined
- *  when it is not one. */
-const readContainedWithTime = (projectDir: string, inside: string) => {
+/** At most `max` bytes of a contained file, and its mtime; undefined when it
+ *  is not one. */
+export const readContainedWithTime = (projectDir: string, inside: string, max = STATUS_MAX_BYTES) => {
   const fd = openContained(projectDir, inside, constants.O_RDONLY);
   if (fd === undefined) return undefined;
   try {
-    const buffer = Buffer.alloc(STATUS_MAX_BYTES);
-    const length = readSync(fd, buffer, 0, STATUS_MAX_BYTES, 0);
+    const buffer = Buffer.alloc(Math.min(max, Math.max(1, fstatSync(fd).size)));
+    let length = 0;
+    while (length < buffer.length) {
+      const got = readSync(fd, buffer, length, buffer.length - length, length);
+      if (got === 0) break;
+      length += got;
+    }
     return { text: buffer.subarray(0, length).toString("utf8"), mtime: fstatSync(fd).mtime };
   } catch {
     return undefined;
@@ -116,7 +121,8 @@ const readContainedWithTime = (projectDir: string, inside: string) => {
     closeSync(fd);
   }
 };
-const readContained = (projectDir: string, inside: string) => readContainedWithTime(projectDir, inside)?.text;
+export const readContained = (projectDir: string, inside: string, max = STATUS_MAX_BYTES) =>
+  readContainedWithTime(projectDir, inside, max)?.text;
 
 /** This target's status, or undefined when it has none worth showing. */
 export const readStatus = (target: Target): Status | undefined => {
@@ -124,6 +130,19 @@ export const readStatus = (target: Target): Status | undefined => {
   if (gitDir === undefined) return undefined;
   const read = readContainedWithTime(target.projectDir, join(gitDir, STATUS_FILE));
   return read && parseStatus(read.text, read.mtime);
+};
+
+/** The note beside a status (`/desolate/status note`): prose for the other
+ *  agents in this repository, shown to the person too. At most NOTE_MAX_BYTES,
+ *  its lines kept and anything else unprintable a space. */
+export const NOTE_FILE = "desolate-note.md";
+export const NOTE_MAX_BYTES = 16384;
+export const readNote = (target: Target): string | undefined => {
+  const gitDir = gitDirectoryOf(target);
+  if (gitDir === undefined) return undefined;
+  const text = readContained(target.projectDir, join(gitDir, NOTE_FILE), NOTE_MAX_BYTES)
+    ?.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/g, " ").trim();
+  return text || undefined;
 };
 
 /** Every target worth showing: each project that can be started -- not an

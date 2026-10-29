@@ -4,6 +4,7 @@ import {
 } from "node:child_process";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { StringDecoder } from "node:string_decoder";
 
 /** A short, stable digest for naming things after their content.
  *
@@ -133,3 +134,24 @@ export const run = Object.assign(
     ),
   },
 );
+
+/**
+ * A stream's output, relayed a whole line at a time. A chunk ends wherever the
+ * pipe did: its last line can be half of one, and a character can be split
+ * between two chunks -- harmless for a log line, not for a review, whose lines
+ * are read as records (review.ts). The decoder keeps the half character, the
+ * buffer the half line; a final line without a newline is relayed on close.
+ */
+export const relayLines = (send: (payload: string) => void) => {
+  const decoder = new StringDecoder("utf8");
+  let partial = "";
+  const emit = (line: string) => {
+    if (line.trim()) send(JSON.stringify({ log: line }));
+  };
+  const relay = (buf: Buffer) => {
+    const lines = (partial + decoder.write(buf)).split("\n");
+    partial = lines.pop() ?? "";
+    for (const line of lines) emit(line);
+  };
+  return Object.assign(relay, { flush: () => { emit(partial + decoder.end()); partial = ""; } });
+};

@@ -11,7 +11,7 @@ desolate itself only provides isolated development environments, plus a few prim
 | **`claude/claude-helper.sh`** (the agent driver) | Claude Code in a tmux session in a worktree, on your subscription token; installs tmux, claude and git-subrepo when missing; turns Claude's own events into statuses | choose what to work on |
 | **the Claude agent** (inside the devcontainer) | reads the issue, works, commits, sets its status, coordinates through `board` and `note` | push, merge, or reach GitHub: it has no credentials |
 | **`suede/suede-factory.sh`** (the suede connector) | watches the stack's projects for changes to suede dependencies, proposes them upstream, files the review and sync issues, links and replaces PRs | start agents (it files issues, the dispatcher starts the agents), push agent work, or merge |
-| **you** | review, push (the panel's Push), merge; approve a new dependency joining the stack | |
+| **you** | review and push (the panel's Review & Push), merge; approve a new dependency joining the stack | |
 
 The two scripts you run, `claude/claude-dispatcher.sh --all` and `suede/suede-factory.sh run`, never call each other. **GitHub issues are the contract between them**: the factory files an issue, and the dispatcher picks it up.
 

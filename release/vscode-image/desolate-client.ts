@@ -13,6 +13,7 @@
 //   desolate --status [--json] [project]     each target's status (status.ts)
 //   desolate --push [--worktree w] [--allow-default] project   its branch to GitHub (transfer.ts)
 //   desolate --pull [--worktree w] project   GitHub's branches in, fast-forwarded
+//   desolate --review [--worktree w] [--json] project   what a push would send (review.ts)
 //   desolate --list --json | desolate --ports myproject --json   for programs
 //
 // The broker validates both the project name and the project's
@@ -27,6 +28,7 @@ import { ensure as ensureWorktree } from "./worktrees.ts";
 import { EVERY_TARGET, meansEveryTarget } from "./projects.ts";
 import { statusRows } from "./status.ts";
 import { pull, push, TransferError } from "./transfer.ts";
+import { describeReview, keepReview, parseReview, REVIEWED, reviewDirectory } from "./review.ts";
 
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
@@ -49,6 +51,8 @@ function usage(code = 0): never {
   out("                                          push its checked-out branch to its GitHub repository");
   out("       desolate --pull [--worktree <name>] [--fetch-only] <project>");
   out("                                          fetch that repository into origin/*, and fast-forward");
+  out("       desolate --review [--worktree <name>] [--json] <project>");
+  out("                                          what a push would send: its commits and files");
   out("");
   out("  --rebuild  recreate the container from the current devcontainer.json.");
   out("             Plain start REUSES an existing container and does not");
@@ -125,6 +129,34 @@ if (argv[0] === "--push" || argv[0] === "--pull") {
       if (!(err instanceof TransferError)) throw err;
       refuse(err.message);
     });
+} else if (argv[0] === "--review") {
+  // What a push would send, said by the target's sandbox (docker.ts
+  // reviewScript) and read here: its records are kept from the terminal, and
+  // each changed file's two sides are kept in this editor's cache for the
+  // extension's diff view -- never written into the project.
+  const words = argv.slice(1);
+  let worktree: string | undefined, json = false;
+  const projects: string[] = [];
+  while (words.length) {
+    const word = words.shift()!;
+    if (word === "--worktree") worktree = words.shift() || refuse("--worktree expects a name");
+    else if (word === "--json") json = true;
+    else if (word.startsWith("-")) refuse(`unknown option '${word}' for --review`);
+    else projects.push(word.replace(/\/+$/, "").replace(new RegExp(`^${WORKSPACES}/`), ""));
+  }
+  if (projects.length !== 1) refuse("usage: desolate --review [--worktree <name>] [--json] <project>");
+  const said: string[] = [];
+  ask({ op: "review", project: projects[0], ...(worktree ? { worktree } : {}) }, (line) => {
+    if (line.startsWith(`${REVIEWED}\t`)) { said.push(line); return false; }
+    if (json) console.error(line);
+    return !json;
+  }).then((code) => {
+    const { review, blobs, ended } = parseReview(said);
+    if (code !== 0 || !ended) refuse(`the review of ${projects[0]}${worktree ? `@${worktree}` : ""} did not finish (exit ${code})`);
+    const kept = keepReview(review, blobs, reviewDirectory(projects[0], worktree));
+    console.log(json ? JSON.stringify(kept) : describeReview(kept));
+    process.exit(0);
+  });
 } else {
 
 // Order-independent, and an unrecognised --flag is REFUSED rather than dropped.

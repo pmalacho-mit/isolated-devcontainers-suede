@@ -113,8 +113,8 @@ _desolate_line_op() {
 }
 
 # --- desolate (editor container: the broker client, desolate-client.ts) ------
-# What it accepts where, as desolate-client.ts reads it: --status, --push and
-# --pull only as the first word, each with its own flags; otherwise one of OPS
+# What it accepts where, as desolate-client.ts reads it: --status, --push,
+# --pull and --review only as the first word, each with its own flags; otherwise one of OPS
 # with the MODIFIERS and VALUES that mean something beside it.
 # tests/static/17-completion.sh checks every flag the client knows is offered.
 _desolate_complete_desolate() {
@@ -141,6 +141,7 @@ _desolate_complete_desolate() {
         --status) flags="--json" ;;
         --push)   flags="--worktree --allow-default" ;;
         --pull)   flags="--worktree --fetch-only" ;;
+        --review) flags="--worktree --json" ;;
         *)
             op=$(_desolate_line_op --list --dinds --stop --ports --rebuild)
             case "$op" in
@@ -150,7 +151,7 @@ _desolate_complete_desolate() {
                 --ports)   flags="--json --move --worktree" ;;
                 --rebuild) flags="--worktree --branch" ;;
                 *)         flags="--list --dinds --stop --ports --rebuild --all --json --worktree --branch"
-                           [ "$COMP_CWORD" -eq 1 ] && flags="--status --push --pull $flags" ;;
+                           [ "$COMP_CWORD" -eq 1 ] && flags="--status --push --pull --review $flags" ;;
             esac ;;
     esac
 
@@ -159,7 +160,7 @@ _desolate_complete_desolate() {
     elif [ -z "$(_desolate_line_project)" ]; then
         # One project at most, and none for what acts on every target.
         case "$first $op" in
-            "--status "*|"--push "*|"--pull "*) COMPREPLY=( $(compgen -W "$(_desolate_projects)" -- "$cur") ) ;;
+            "--status "*|"--push "*|"--pull "*|"--review "*) COMPREPLY=( $(compgen -W "$(_desolate_projects)" -- "$cur") ) ;;
             *" --list"|*" --dinds") ;;
             *) COMPREPLY=( $(compgen -W "$(_desolate_projects) $(_desolate_all_word)" -- "$cur") ) ;;
         esac

@@ -15,8 +15,9 @@
 #      that is dangerous.
 #
 # And the one thing ADDED to that tree, the desolate extension (T4.7, F6): built
-# into the shell root alone, it may run the editor's own two commands and
-# nothing else -- no network, no shell, no git or docker of its own.
+# into the shell root alone, it may run the editor's own commands -- desolate,
+# worktree, and newrepo for a first clone -- and nothing else: no network, no
+# shell, no git or docker of its own.
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=../lib/harness.sh
@@ -102,8 +103,8 @@ assert_not_contains "it never spawns through a shell" "$SRC" "shell:"
 for api in 'node:http' 'node:https' 'node:net' 'node:dgram' 'fetch(' 'WebSocket' 'exec(' 'spawn('; do
   assert_not_contains "it uses no $api" "$SRC" "$api"
 done
-assert_eq "it runs exactly the editor's two commands" \
-  "$(grep -oE 'command: "[a-z]+"( \| "[a-z]+")*' "$EXT/extension.mts" | sort -u | tr '\n' ' ')" 'command: "desolate" | "worktree" '
+assert_eq "it runs exactly the editor's three commands" \
+  "$(grep -oE 'command: "[a-z]+"( \| "[a-z]+")*' "$EXT/extension.mts" | sort -u | tr '\n' ' ')" 'command: "desolate" | "worktree" | "newrepo" '
 assert_contains "what it logs goes through redactTokens" "$SRC" "log.append(redactTokens("
 MANIFEST=$(cat "$EXT/package.json")
 assert_contains "its manifest's main is the bundle" "$MANIFEST" '"main": "./extension.js"'

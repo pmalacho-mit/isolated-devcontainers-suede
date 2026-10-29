@@ -30,7 +30,7 @@
 #                       fix it when this runs in a terminal; then agent_resume;
 #        orange, red -- a comment on the issue, once per status;
 #        green       -- you are told to review and push it (`desolate --push`,
-#                       or the panel's Push); once GitHub has issue/<n>, a
+#                       or the panel's Review & Push); once GitHub has issue/<n>, a
 #                       draft PR is opened for it -- or the one already open
 #                       for that branch is taken, and made to close the issue;
 #        gray        -- withdrawn: the agent recommends this not be merged;
@@ -133,7 +133,7 @@ dispatch_pull_request() { # <n> <name> <title> <message> <updated> <branch> <bas
   local n=$1 name=$2 title=$3 message=$4 updated=$5 branch=$6 base=$7
   if ! gh api "repos/$REPO/git/ref/heads/$branch" --silent 2>/dev/null; then
     [ "$(cat "$STATE/$name.push" 2>/dev/null)" = "$updated" ] && return
-    notify "#$n is ready ($message) -- review it, then push: the panel's Push on $name, or desolate --push --worktree $name $PROJECT"
+    notify "#$n is ready ($message) -- review it, then push: the panel's Review & Push on $name, or desolate --push --worktree $name $PROJECT"
     echo "$updated" > "$STATE/$name.push"
     return
   fi
@@ -256,7 +256,7 @@ dispatch_tick() {
       green)
         if [ -n "$pr" ]; then
           [ "$(cat "$STATE/$name.push" 2>/dev/null)" = "$updated" ] && continue
-          notify "#$n is ready ($message) -- review it, then push to PR #$pr: the panel's Push on $name, or desolate --push --worktree $name $PROJECT"
+          notify "#$n is ready ($message) -- review it, then push to PR #$pr: the panel's Review & Push on $name, or desolate --push --worktree $name $PROJECT"
           echo "$updated" > "$STATE/$name.push"
         else
           [ -e "$STATE/$name.pr" ] || dispatch_pull_request "$n" "$name" "$title" "$message" "$updated" "$branch" "$base"

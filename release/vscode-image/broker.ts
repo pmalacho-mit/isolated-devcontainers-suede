@@ -34,7 +34,7 @@ import {
 } from "./projects.ts";
 import { daemonOf, enforcePolicy, PolicyError } from "./policy.ts";
 import { TRANSFER_NAME, type Flags } from "./args.ts";
-import { identity, noop } from "./utils.ts";
+import { identity, noop, relayLines } from "./utils.ts";
 
 type Config = {
   workspaces: string;
@@ -94,6 +94,8 @@ const operations = [
   "rebuild",
   "stop",
   "ports",
+  /** What a push would send, read in the target's sandbox: `desolate --review`. */
+  "review",
   ...worktreeOperations,
   ...transferOperations,
   ...globalOperations,
@@ -250,14 +252,14 @@ const spawnDesolate = (argv: string[], send: Send) =>
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const relay = (buf: Buffer) => {
-      for (const line of buf.toString().split("\n")) {
-        if (line.trim()) send(JSON.stringify({ log: line }));
-      }
-    };
-    child.stdout.on("data", relay);
-    child.stderr.on("data", relay);
-    child.on("close", (code) => resolve(code ?? 1));
+    const out = relayLines(send), err = relayLines(send);
+    child.stdout.on("data", out);
+    child.stderr.on("data", err);
+    child.on("close", (code) => {
+      out.flush();
+      err.flush();
+      resolve(code ?? 1);
+    });
   });
 
 /** One target's argv: the flags built for it, then the names that select it. */
@@ -335,6 +337,9 @@ async function handle(req: unknown, send: Send) {
         break;
       case "pull":
         flags = [["--pull", req.transfer], ...(req.fetch ? (["--fetch-only"] as const) : [])];
+        break;
+      case "review":
+        flags = ["--review"];
         break;
       case "ports":
         flags = ["--ports"];

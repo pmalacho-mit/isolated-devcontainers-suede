@@ -192,6 +192,13 @@ export const memoryUsed = (usage: string) => {
   return Math.round(Number(match[1]) * UNITS[match[2]]);
 };
 
+/** ... and its right side: the container's memory ceiling, or undefined. */
+export const memoryLimitOf = (usage: string) => {
+  const match = /\/\s*([\d.]+)\s*([A-Za-z]+)\s*$/.exec(usage);
+  if (!match || !(match[2] in UNITS)) return undefined;
+  return Math.round(Number(match[1]) * UNITS[match[2]]);
+};
+
 // -------------------------------------------------------------- the daemon --
 
 /** The docker CLI against the VM daemon, keeping what a failure SAID so a
@@ -236,9 +243,11 @@ const daemons = {
     const names = docker.dind.all(dind.LABEL_KEY);
     const running = names.filter((name) => docker.dind.state(name) === "running");
     const memory = new Map<string, number | undefined>();
+    const limits = new Map<string, number | undefined>();
     for (const line of docker.dind.memoryUsage(running)) {
       const [name, usage = ""] = line.split("\t");
       memory.set(name, memoryUsed(usage));
+      limits.set(name, memoryLimitOf(usage));
     }
     const now = Date.now();
     return names.map((name) => {
@@ -251,6 +260,7 @@ const daemons = {
         inUse,
         idleSince: inUse ? undefined : lastBusy.get(name),
         memory: memory.get(name),
+        memoryLimit: limits.get(name),
       };
     });
   },

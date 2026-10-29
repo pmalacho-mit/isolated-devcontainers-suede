@@ -57,6 +57,8 @@ export interface ProjectDaemon {
   /** What it holds now, in bytes, if measured -- what stopping it frees.
    *  Absent is read as the newcomer estimate. */
   memory?: number;
+  /** Its ceiling, in bytes, as `docker stats` reports it: what it may grow to. */
+  memoryLimit?: number;
 }
 
 /** Stopping a daemon keeps its image store, so the cost of being wrong about

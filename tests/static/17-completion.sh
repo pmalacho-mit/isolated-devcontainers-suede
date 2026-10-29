@@ -37,6 +37,7 @@ mac() { offers _desolate_cli cli.sh "$@"; }
 
 group "the editor's desolate: what the client accepts, where"
 assert_eq "--p: --ports, --push and --pull" "$(editor --p)" "--ports --pull --push"
+assert_eq "--review's own flags" "$(editor --review --)" "--json --worktree"
 assert_eq "--push --al: --allow-default, not --all" "$(editor --push --al)" "--allow-default"
 assert_eq "--pull's own flags" "$(editor --pull --)" "--fetch-only --worktree"
 assert_eq "--status takes --json alone" "$(editor --status --)" "--json"
@@ -69,7 +70,7 @@ assert_eq "cli.sh worktree remove: --force" "$(mac worktree remove acme/app wip 
 
 group "every flag a person types is offered somewhere"
 # The client's: every quoted --flag in desolate-client.ts.
-offered=" $(editor --) $(editor --push --) $(editor --pull --) $(editor --status --) $(editor acme/app --) \
+offered=" $(editor --) $(editor --push --) $(editor --pull --) $(editor --status --) $(editor --review --) $(editor acme/app --) \
 $(editor --stop --) $(editor --ports --) $(editor --list --) $(editor --rebuild --) "
 missing=""
 for flag in $(grep -o '"--[a-z-]*"' "$ROOT/release/vscode-image/desolate-client.ts" | tr -d '"' | sort -u); do
@@ -80,7 +81,7 @@ assert_eq "desolate-client.ts's flags, by the editor's completion" "${missing# }
 # The runner's: every `case "--flag":` in args.ts, offered by `cli.sh desolate`
 # -- or the broker's and cli.sh's own wire form, typed by no one.
 WIRE="--populate --uncommitted --create-worktree --remove-worktree --branch --from --force --reclaim --path
-      --exec --bundle --pull --fetch-only --suede-report --suede-build --transfer --ref"
+      --exec --bundle --pull --fetch-only --suede-report --suede-build --transfer --ref --review"
 offered=" $(mac desolate --) $(mac desolate acme/app --) $(mac desolate --stop --) $(mac desolate --ports --) $(mac desolate --list --) "
 missing=""
 for flag in $(sed -n 's/^ *case "\(--[a-z-]*\)":.*/\1/p' "$ROOT/release/vscode-image/args.ts" | sort -u); do

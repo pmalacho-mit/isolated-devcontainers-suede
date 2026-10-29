@@ -66,6 +66,9 @@ export type Command =
   /** The project's half of `desolate --pull`: take the bundle the editor
    *  fetched into origin/*, in the target's sandbox, and fast-forward. */
   | "pull"
+  /** What a push would send, read in the target's sandbox and changing
+   *  nothing: `desolate --review` (review.ts), the editor's Review & Push. */
+  | "review"
   /** The project's suede dependencies, and how each differs from its pin,
    *  at a commit (`cli.sh suede report`; docs/suede-factory.md). The Mac's:
    *  the broker does not speak it. */
@@ -148,6 +151,7 @@ export type Flags =
   | ["--move", string, string]
   | ["--bundle", string]
   | ["--pull", string]
+  | "--review"
   | "--fetch-only"
   | "--rebuild"
   | [
@@ -287,6 +291,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--fetch-only":
         fetchOnly = true;
+        break;
+      case "--review":
+        command = "review";
         break;
       case "--suede-report":
         command = "suede-report";

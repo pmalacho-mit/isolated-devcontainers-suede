@@ -1593,6 +1593,14 @@ async function pullTarget(target: Target, name: string, fetchOnly = false): Prom
   console.log(`PULLED ${pulled.outcome} ${pulled.branch}`);
 }
 
+/** `desolate --review`'s project half (review.ts): what a push of the branch
+ *  checked out would send, said line by line from its sandbox. Read-only. */
+async function reviewTarget(target: Target): Promise<void> {
+  await onItsDaemon(target);
+  const code = docker.reviewBranch(worktreeSandbox(target, worktrees.sandboxMounts(target)), target.dir);
+  if (code !== 0) die(`could not review ${target.name}'s branch in its sandbox (exit ${code}; nothing committed?)`);
+}
+
 /**
  * `cli.sh suede report` and `suede upstream`'s project half (docs/suede-factory.md):
  * the project's own git, in its sandbox, which sees that project alone and has
@@ -1959,6 +1967,7 @@ async function main(): Promise<void> {
   else if (args.command === "exec") execTarget(target, args.execArgv!);
   else if (args.command === "bundle") await bundleTarget(target, args.transfer!);
   else if (args.command === "pull") await pullTarget(target, args.transfer!, args.fetchOnly);
+  else if (args.command === "review") await reviewTarget(target);
   else if (args.command === "suede-report") await depsReport(target, args.ref ?? "HEAD");
   else if (args.command === "suede-build") await depsBuild(target, args.ref ?? "HEAD", args.subrepo!, args.transfer!);
   else if (args.command === "populate") populateWorktree(target);

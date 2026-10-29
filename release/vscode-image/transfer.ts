@@ -43,13 +43,14 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ask } from "./broker-client.ts";
 import { openContained } from "./status.ts";
+import { remoteCacheRoot } from "./caches.ts";
 
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 /** newrepo.ts's: the per-repository host aliases live there. */
 const SSH_CONFIG = `${homedir()}/.ssh/config`;
 const KEYRING_RUN = process.env.DESOLATE_KEYRING_RUN ?? "/run/keyring";
 /** The editor's own: a project never mounts it. */
-const CACHE_ROOT = process.env.DESOLATE_REMOTE_CACHE ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "desolate", "remotes");
+const CACHE_ROOT = remoteCacheRoot();
 
 export class TransferError extends Error {}
 const fail = (message: string): never => { throw new TransferError(message); };

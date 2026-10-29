@@ -14,6 +14,7 @@ import {
   formatStatus,
   isRequest,
   memoryUsed,
+  memoryLimitOf,
   settingsFrom,
   specFor,
   targetOf,
@@ -121,6 +122,9 @@ describe("what the supervisor builds", () => {
   test("docker stats memory parses in both unit systems", () => {
     assert.equal(memoryUsed("490.2MiB / 15.6GiB"), Math.round(490.2 * 1024 ** 2));
     assert.equal(memoryUsed("1.5GiB / 16GiB"), 1.5 * 1024 ** 3);
+    assert.equal(memoryLimitOf("490.2MiB / 15.6GiB"), Math.round(15.6 * 1024 ** 3));
+    assert.equal(memoryLimitOf("1.5GiB / 12GiB"), 12 * 1024 ** 3);
+    assert.equal(memoryLimitOf("--"), undefined);
     assert.equal(memoryUsed("12kB / 1GB"), 12_000);
     assert.equal(memoryUsed("-- / --"), undefined);
     assert.equal(memoryUsed(""), undefined);
