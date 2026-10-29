@@ -4,11 +4,11 @@ When a project in the stack changes one of its [suede](https://github.com/pmalac
 
 It is three parts, each doing one job:
 
-| Part | Its job |
-| --- | --- |
-| **desolate** | isolated environments, plus three narrow primitives for suede dependencies (below) |
-| **`examples/factory/claude/claude-dispatcher.sh --all`** | starts a Claude agent, in a desolate worktree, for each issue labelled `desolate:run` in any project in the stack |
-| **`examples/factory/suede/suede-factory.sh run`** | connects them: proposes changes upstream, files the issues the agents work on, links and replaces PRs. It never starts an agent itself. |
+| Part                                                     | Its job                                                                                                                                 |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| **desolate**                                             | isolated environments, plus three narrow primitives for suede dependencies (below)                                                      |
+| **`examples/factory/claude/claude-dispatcher.sh --all`** | starts a Claude agent, in a desolate worktree, for each issue labelled `desolate:run` in any project in the stack                       |
+| **`examples/factory/suede/suede-factory.sh run`**        | connects them: proposes changes upstream, files the issues the agents work on, links and replaces PRs. It never starts an agent itself. |
 
 Run the last two on your Mac. They talk only through GitHub issues: a label, plus a hidden marker in the body.
 
@@ -46,6 +46,7 @@ sequenceDiagram
 ## What counts as a suede dependency
 
 A subrepo whose `.gitrepo` tracks `branch = release`. Two kinds of subrepo are excluded:
+
 - the project's own `release/`;
 - suede's tooling subrepos (`.suede/core`, the workflows), which track `dependency/...` branches.
 
@@ -53,12 +54,12 @@ A subrepo whose `.gitrepo` tracks `branch = release`. Two kinds of subrepo are e
 
 **How a consumer uses a dependency** sets how pressing the work is:
 
-| Kind | When | What the agent is told |
-| --- | --- | --- |
-| `release` | the consumer is itself a suede dependency, and a root symlink `<name><sep><repo>` declares it | **Blocking:** the consumer cannot publish until this lands and it syncs. Integrate it, adapting where needed. |
-| `vendored` | it lives inside the consumer's `release/` | the consumer ships a fork as source; integrating it lets it drop the fork |
-| `development` | anything else, in a consumer that is a suede dependency | useful to the consumer, and maybe to others; the agent decides, and "don't merge" is a fine answer |
-| `app` | the consumer is not a suede dependency | the same as `development` |
+| Kind          | When                                                                                          | What the agent is told                                                                                        |
+| ------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `release`     | the consumer is itself a suede dependency, and a root symlink `<name><sep><repo>` declares it | **Blocking:** the consumer cannot publish until this lands and it syncs. Integrate it, adapting where needed. |
+| `vendored`    | it lives inside the consumer's `release/`                                                     | the consumer ships a fork as source; integrating it lets it drop the fork                                     |
+| `development` | anything else, in a consumer that is a suede dependency                                       | useful to the consumer, and maybe to others; the agent decides, and "don't merge" is a fine answer            |
+| `app`         | the consumer is not a suede dependency                                                        | the same as `development`                                                                                     |
 
 ## The flow
 
@@ -76,6 +77,7 @@ Each tick of `suede-factory.sh`:
    - a marker telling the dispatcher to start the worktree on the PR's branch.
 
    The consumer keeps one open proposal per dependency folder. A newer change replaces the older one: the older PR and issue are closed, their branches kept, and the commits that had been added there are listed in the new issue for the agent to carry over.
+
 4. **The agent works.** It runs in a worktree of the dependency, on the PR's branch. Other agents working on proposals into the same dependency are in the same repository, and coordinate through `/desolate/status board` and `note`. One can carry another's change; the one that hands its change over finishes `gray "withdrawn: …"`. When an agent finishes:
    - **green:** you're asked to review it and push it to the PR (the panel's Push, or `desolate --push --worktree <name> <project>`), then merge it;
    - **gray:** withdrawn; it's said on the issue and the PR.
@@ -94,6 +96,7 @@ Each tick of `suede-factory.sh`:
 **What stays yours:** every push of an agent's work, every merge, and adding a dependency to the stack.
 
 **What it does by itself:**
+
 - it pushes `downstream/*` branches, whose content is already on a consumer's `main`, which you merged;
 - it files and closes issues;
 - it adds labels;
@@ -105,6 +108,7 @@ Each tick of `suede-factory.sh`:
 ## Who syncs, and when
 
 **On a release** (`run --sync <mode>`):
+
 - **`proposers`, the default:** the consumers whose proposal was merged into it, plus those blocked on it, as in step 5. The work in flight stays easy to follow: only consumers already involved in this change get an agent.
 - **`all`:** every consumer in the stack whose pin is behind.
 - **`none`:** nothing on a release; only `sync` by hand.
@@ -132,11 +136,11 @@ A dependency's first release seen is recorded, not acted on. Syncs follow the re
 
 The factory asks desolate three things. You can ask them too: they're how you see what the factory sees.
 
-| Command | In one line |
-| --- | --- |
-| `./cli.sh suede report <project>` | **Look:** which suede dependencies does this project have, and has it changed any? Changes nothing. |
-| `./cli.sh suede deliver <project> <owner/repo>` | **Bring in:** put a dependency's `release` history inside the project, so the look and the sync work with no network. |
-| `./cli.sh suede upstream <project> <folder>` | **Propose:** turn the project's changes to that folder into a branch on the dependency's GitHub repository, where suede opens a PR. |
+| Command                                         | In one line                                                                                                                         |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `./cli.sh suede report <project>`               | **Look:** which suede dependencies does this project have, and has it changed any? Changes nothing.                                 |
+| `./cli.sh suede deliver <project> <owner/repo>` | **Bring in:** put a dependency's `release` history inside the project, so the look and the sync work with no network.               |
+| `./cli.sh suede upstream <project> <folder>`    | **Propose:** turn the project's changes to that folder into a branch on the dependency's GitHub repository, where suede opens a PR. |
 
 All three are on the Mac's `cli.sh` only. The editor's `desolate` and its panel don't offer them, and no devcontainer can reach them.
 
@@ -164,7 +168,8 @@ flowchart LR
     subgraph editor["outer editor (deploy keys)"]
       cache["cache of acme/widget<br/>~/.cache/desolate/remotes"]
     end
-    subgraph sandbox["acme/app's sandbox<br/>(acme/app only, no network, no keys)"]
+    subgraph sandbox["acme/app's sandbox"]
+      _["<i>(acme/app only, no network, no keys)</i>"]
       git["git, on acme/app's .git"]
     end
     app_git[("/workspaces/acme/app/.git")]
@@ -184,6 +189,7 @@ The project's own git only ever runs in its sandbox, which sees that project alo
 ```
 
 In acme/app's sandbox, at `origin/main`:
+
 1. find every subrepo tracking `release` (here `widget/`), skipping the project's own `release/` and suede's tooling;
 2. classify how acme/app uses it (`app`, since acme/app isn't itself a suede dependency);
 3. compare `widget/` with its pinned commit `a1b2c3`, leaving out `widget/.gitrepo` and any dependency nested inside.
@@ -194,11 +200,17 @@ It prints one line, `DEPS {…}`. Here it is, pretty-printed:
 {
   "commit": "5e0c…",
   "suede": false,
-  "dependencies": [{
-    "dir": "widget", "repo": "acme/widget", "pin": "a1b2c3…",
-    "kind": "app", "state": "diff", "patch": "9f3c…",
-    "files": [{ "status": "M", "path": "lib.ts" }]
-  }]
+  "dependencies": [
+    {
+      "dir": "widget",
+      "repo": "acme/widget",
+      "pin": "a1b2c3…",
+      "kind": "app",
+      "state": "diff",
+      "patch": "9f3c…",
+      "files": [{ "status": "M", "path": "lib.ts" }]
+    }
+  ]
 }
 ```
 
@@ -218,6 +230,7 @@ It prints one line, `DEPS {…}`. Here it is, pretty-printed:
 The editor refreshes its cache of acme/widget, using widget's own deploy key, so this works for private repositories too. It writes widget's `release` branch as one file, `/workspaces/acme/app/.git/desolate-dep-acme__widget.bundle`.
 
 It's read by:
+
 - **`report` and `upstream`,** for the pinned commit;
 - **a sync agent in acme/app's devcontainer,** which pulls from it instead of the network:
 
@@ -275,11 +288,13 @@ The branch name is exactly the one suede's own `upstream` script would push, so 
 ## Not yet run for real
 
 Everything above is tested with real git and git-subrepo, but against local remotes and stand-in `gh`/`cli.sh` (`tests/unit/desolate/deps.test.ts`, `tests/static/15-dispatcher.sh`, `tests/static/16-suede-factory.sh`). Not yet seen:
+
 - suede's workflow opening the PR on GitHub, from a branch desolate pushed;
 - an agent's sync in a real devcontainer;
 - the whole loop on real repositories.
 
 **To try it:**
+
 1. Make two throwaway suede dependencies with suede's `scripts/create/dependency.sh`, e.g. `widget`, plus a consumer that installs `widget`.
 2. `./cli.sh repo add` all three.
 3. Change `widget`'s folder in the consumer, and merge to its `main`.
