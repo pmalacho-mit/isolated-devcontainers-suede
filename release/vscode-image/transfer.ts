@@ -279,6 +279,8 @@ export interface Options {
   worktree?: string;
   /** Push to the remote's default branch, which is refused otherwise. */
   allowDefault?: boolean;
+  /** Pull: set origin/* only; nothing checked out moves. */
+  fetchOnly?: boolean;
   /** For tests: the registration, and how git reaches it. */
   registration?: Registration;
   ssh?: string;
@@ -393,7 +395,7 @@ export async function pull(project: string, options: Options = {}): Promise<stri
       writeInside(projectDir, files.refs, refs);
       let pulled: { outcome: string; branch: string } | undefined;
       const code = await (options.ask ?? ask)(
-        { op: "pull", project, ...(options.worktree ? { worktree: options.worktree } : {}), transfer: name },
+        { op: "pull", project, ...(options.worktree ? { worktree: options.worktree } : {}), transfer: name, ...(options.fetchOnly ? { fetch: true } : {}) },
         (line) => {
           const said = /^PULLED (\S+) (\S+)$/.exec(line);
           if (said) pulled = { outcome: said[1], branch: said[2] };
@@ -408,7 +410,9 @@ export async function pull(project: string, options: Options = {}): Promise<stri
     if (pulled.outcome === "needs-full") pulled = await handOver(true);
     if (pulled.outcome === "needs-full") fail("its sandbox still lacks what the whole of the remote holds");
     cache.remember(branches.map(([commit]) => commit));
-    return pulledMessage(pulled.outcome, pulled.branch, registration.ownerRepo);
+    return options.fetchOnly
+      ? `fetched ${registration.ownerRepo}'s branches as origin/*`
+      : pulledMessage(pulled.outcome, pulled.branch, registration.ownerRepo);
   } finally {
     removeInside(projectDir, ...created);
     rmSync(scratch, { recursive: true, force: true });

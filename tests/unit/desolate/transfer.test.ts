@@ -50,7 +50,7 @@ const sandbox = (op: string) => async (request: Record<string, unknown>, onLog: 
   const stem = join(project, ".git", String(request.transfer).replace(/\.bundle$/, ""));
   const args = op === "bundle"
     ? [bundleScript, [project, `${stem}.bundle`, `${stem}.haves`]] as const
-    : [pullScript, [project, `${stem}.bundle`, `${stem}.refs`, "/dev/null"]] as const;
+    : [pullScript, [project, `${stem}.bundle`, `${stem}.refs`, "/dev/null", request.fetch ? "fetch" : "merge"]] as const;
   if (op === "pull") seen.push({ op, bundle: describeBundle(`${stem}.bundle`) });
   const result = spawnSync("sh", ["-c", args[0], op, ...args[1]], { encoding: "utf8" });
   if (op === "bundle") seen.push({ op, bundle: describeBundle(`${stem}.bundle`) });
@@ -195,6 +195,15 @@ describe("pull", () => {
     assert.match(await pull("acme/widgets", { registration, ask: puller }), /fast-forwarded/);
     assert.deepEqual(seen.slice(before).map((s) => s.bundle), ["only what is new", "whole"]);
     assert.equal(git(project, "rev-parse", "HEAD"), git(upstream, "rev-parse", "HEAD"));
+  });
+
+  test("fetch-only sets origin/* and moves nothing checked out", async () => {
+    commitIn(upstream, "a.txt", "fetched, not merged\n");
+    git(upstream, "push", "--quiet", "origin", "feature");
+    const head = git(project, "rev-parse", "HEAD");
+    assert.match(await pull("acme/widgets", { registration, ask: puller, fetchOnly: true }), /^fetched acme\/widgets's branches/);
+    assert.equal(git(project, "rev-parse", "HEAD"), head, "the checked-out branch moved");
+    assert.equal(git(project, "rev-parse", "refs/remotes/origin/feature"), git(upstream, "rev-parse", "HEAD"));
   });
 
   test("a branch that has moved on from origin is said to have diverged, and left alone", async () => {

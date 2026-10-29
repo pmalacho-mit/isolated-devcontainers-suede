@@ -2,6 +2,7 @@
 # examples/factory/gh-dispatcher.sh -- GitHub issues in, any agent command, draft PRs out.
 #
 #   FACTORY_AGENT="claude -p" examples/factory/gh-dispatcher.sh <project> [<owner/repo>] [--base B] [--label L] [--interval S] [--once]
+#   (or --all: every project in the stack; see lib/gh-dispatch.sh)
 #
 # The loop is lib/gh-dispatch.sh. The agent here is FACTORY_AGENT, a command
 # `cli.sh exec` runs in the worktree in the background, words split on

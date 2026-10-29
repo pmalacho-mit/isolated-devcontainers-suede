@@ -332,7 +332,7 @@ export const bundleScript = [
  *  and changes nothing. The branch checked out is fast-forwarded to its own
  *  when it can be, and otherwise left as it is. The merge is the project's own
  *  git, hooks and filters and all -- in here, where they reach nothing but this
- *  project. */
+ *  project. $5 `fetch` stops once origin/* is set: nothing checked out moves. */
 export const pullScript = [
   TRANSFER_GIT,
   'dir=$1 bundle=$2 refs=$3 ca=$4',
@@ -346,6 +346,7 @@ export const pullScript = [
   'g -C "$dir" for-each-ref --format="%(refname)" refs/remotes/origin/ refs/desolate/incoming/ | while read -r old; do ' +
     'case "$old" in refs/remotes/origin/HEAD) continue ;; refs/remotes/origin/*) cut -d" " -f2- "$refs" | grep -qxF "${old#refs/remotes/origin/}" && continue ;; esac; ' +
     'g -C "$dir" update-ref -d "$old"; done',
+  '[ "${5:-}" != fetch ] || say fetched -',
   'branch=$(g -C "$dir" symbolic-ref -q --short HEAD) || say fetched -',
   'g -C "$dir" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null || say fetched "$branch"',
   'g -C "$dir" merge-base --is-ancestor "refs/remotes/origin/$branch" HEAD && say current "$branch"',
@@ -795,8 +796,8 @@ export const createDocker = (run: Runner) => {
     },
     /** `pullScript` in a target's sandbox: what became of its branch, or null
      *  when it did not finish. */
-    pullBranch: (spec: WorktreeSandbox & { caFile: string }, targetDir: string, bundle: string, refs: string) => {
-      const said = query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", pullScript, "pull", targetDir, bundle, refs, spec.caFile);
+    pullBranch: (spec: WorktreeSandbox & { caFile: string }, targetDir: string, bundle: string, refs: string, fetchOnly = false) => {
+      const said = query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", pullScript, "pull", targetDir, bundle, refs, spec.caFile, fetchOnly ? "fetch" : "merge");
       const match = new RegExp(`^${PULLED} (fetched|current|diverged|fast-forwarded|blocked|needs-full) (\\S+)$`, "m").exec(said);
       return match ? { outcome: match[1], branch: match[2] } : null;
     },

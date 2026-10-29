@@ -1575,7 +1575,7 @@ async function bundleTarget(target: Target, name: string): Promise<void> {
   console.log(`BUNDLED ${bundled.branch} ${bundled.commit} ${bundled.bundled ? "bundled" : "none"}`);
 }
 
-async function pullTarget(target: Target, name: string): Promise<void> {
+async function pullTarget(target: Target, name: string, fetchOnly = false): Promise<void> {
   await onItsDaemon(target);
   const view = SHARED_DIRECTORIES.find((mount) => mount.target === DESOLATE_DIR)!;
   const files = transferFiles(target, name);
@@ -1587,6 +1587,7 @@ async function pullTarget(target: Target, name: string): Promise<void> {
     target.dir,
     files.bundle,
     files.refs,
+    fetchOnly,
   );
   if (!pulled) return die(`could not take the fetched branches into ${target.name} in its sandbox`);
   console.log(`PULLED ${pulled.outcome} ${pulled.branch}`);
@@ -1957,7 +1958,7 @@ async function main(): Promise<void> {
   else if (args.command === "reclaim") await reclaimTarget(target, args.path);
   else if (args.command === "exec") execTarget(target, args.execArgv!);
   else if (args.command === "bundle") await bundleTarget(target, args.transfer!);
-  else if (args.command === "pull") await pullTarget(target, args.transfer!);
+  else if (args.command === "pull") await pullTarget(target, args.transfer!, args.fetchOnly);
   else if (args.command === "deps-report") await depsReport(target, args.ref ?? "HEAD");
   else if (args.command === "deps-build") await depsBuild(target, args.ref ?? "HEAD", args.subrepo!, args.transfer!);
   else if (args.command === "populate") populateWorktree(target);

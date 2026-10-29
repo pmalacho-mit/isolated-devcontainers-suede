@@ -124,6 +124,8 @@ export type Args = {
   execArgv?: string[];
   /** `bundle`, `pull` and `deps-build`: the bundle's file name in the project's git dir. */
   transfer?: string;
+  /** `pull`: set origin/* and move nothing checked out. */
+  fetchOnly?: boolean;
   /** `deps-report` and `deps-build`: the commit to look at. */
   ref?: string;
   /** `deps-build`: the dependency's folder, relative to the project. */
@@ -146,6 +148,7 @@ export type Flags =
   | ["--move", string, string]
   | ["--bundle", string]
   | ["--pull", string]
+  | "--fetch-only"
   | "--rebuild"
   | [
       "--rebuild",
@@ -223,6 +226,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let transfer: string | undefined;
   let ref: string | undefined;
   let subrepo: string | undefined;
+  let fetchOnly = false;
 
   while (queue.length) {
     const arg = queue.shift()!;
@@ -280,6 +284,9 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         transfer = queue.shift() ?? "";
         if (!TRANSFER_NAME.test(transfer))
           throw new UsageError(`${arg} takes a bundle name (desolate-transfer-<16 hex>.bundle), got '${transfer}'`);
+        break;
+      case "--fetch-only":
+        fetchOnly = true;
         break;
       case "--deps-report":
         command = "deps-report";
@@ -354,6 +361,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     throw new UsageError("'--' only means something with --exec");
   if (command === "exec" && !execArgv?.length)
     throw new UsageError("--exec takes a command after '--'");
+  if (fetchOnly && command !== "pull") throw new UsageError("--fetch-only only means something with --pull");
   if (ref !== undefined && command !== "deps-report" && command !== "deps-build")
     throw new UsageError("--ref only means something with --deps-report or --deps-build");
   if (command === "deps-build" && transfer === undefined)
@@ -391,6 +399,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     ...(execArgv !== undefined ? { execArgv } : {}),
     ...(transfer !== undefined ? { transfer } : {}),
     ...(ref !== undefined ? { ref } : {}),
+    ...(fetchOnly ? { fetchOnly } : {}),
     ...(subrepo !== undefined ? { subrepo } : {}),
   };
 };

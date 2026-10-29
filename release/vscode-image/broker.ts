@@ -120,7 +120,7 @@ type Request = {
         : op extends "ports"
           ? { op: op; project: string; worktree?: string; move?: { label: string; port: number }; json?: boolean }
           : op extends "bundle" | "pull"
-            ? { op: op; project: string; worktree?: string; transfer: string }
+            ? { op: op; project: string; worktree?: string; transfer: string; fetch?: boolean }
             : { op: op; project: string; worktree?: string };
 }[Operation];
 
@@ -188,7 +188,8 @@ const request = {
         (!("move" in query) || (query.op === "ports" && isMove(query.move))) &&
         ((transferOperations as readonly string[]).includes(query.op)
           ? "transfer" in query && typeof query.transfer === "string" && TRANSFER_NAME.test(query.transfer)
-          : !("transfer" in query)))),
+          : !("transfer" in query)) &&
+        (query.op === "pull" ? optional(query, "fetch", "boolean") : !("fetch" in query)))),
 };
 
 /**
@@ -333,7 +334,7 @@ async function handle(req: unknown, send: Send) {
         flags = [["--bundle", req.transfer]];
         break;
       case "pull":
-        flags = [["--pull", req.transfer]];
+        flags = [["--pull", req.transfer], ...(req.fetch ? (["--fetch-only"] as const) : [])];
         break;
       case "ports":
         flags = ["--ports"];

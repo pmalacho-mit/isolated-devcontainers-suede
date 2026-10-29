@@ -185,7 +185,7 @@ read -r -d '' REMOTE <<'REMOTE' || true
 set -euo pipefail
 session=$1 placeholder=$2 status=$3 has_task=$4 resume=$5 version=$6; shift 6
 say() { echo "claude-helper: $*" >&2; }
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.local/share/git-subrepo/lib:$PATH"
 dir=${XDG_STATE_HOME:-$HOME/.local/state}/desolate-claude/$session
 mkdir -p "$dir"
 log=$dir/install.log
@@ -220,6 +220,18 @@ if ! command -v claude >/dev/null; then
     || failed claude "Add the feature ghcr.io/anthropics/devcontainer-features/claude-code:1 to devcontainer.json, then rebuild."
   installed="$installed claude"
 fi
+# git-subrepo, for a suede dependency's sync (docs/suede-factory.md): where a
+# devcontainer feature put it, or installed for this session, pinned as suede's
+# own workflows pin it. Not fatal: most tasks never need it.
+if ! git subrepo --version >/dev/null 2>&1 && ! { [ -f "${GIT_SUBREPO_ROOT:-/nonexistent}/.rc" ] && . "$GIT_SUBREPO_ROOT/.rc" >/dev/null 2>&1 && git subrepo --version >/dev/null 2>&1; }; then
+  say "no git-subrepo in this devcontainer; installing it (0.4.9)"
+  if git clone --quiet --depth 1 --branch 0.4.9 https://github.com/ingydotnet/git-subrepo "$HOME/.local/share/git-subrepo" >>"$log" 2>&1 \
+     && git subrepo --version >/dev/null 2>&1; then
+    installed="$installed git-subrepo"
+  else
+    say "could not install git-subrepo (see $log); a task that syncs a suede dependency will fail"
+  fi
+fi
 
 if tmux has-session -t "=$session" 2>/dev/null; then
   [ "$resume" = 1 ] || { say "session '$session' is already running here; attach to it, or stop it first"; exit 4; }
@@ -230,7 +242,7 @@ if [ "$has_task" = 1 ]; then cat > "$dir/task"; else : > "$dir/task"; fi
 if [ -n "$installed" ] && [ -s "$dir/task" ]; then
   cat >> "$dir/task" <<NOTE
 
-A note from the harness that started you: this devcontainer did not have$installed, so it installed them for this session; a rebuild loses them. Consider updating the devcontainer config so they are there from the start -- the feature "ghcr.io/anthropics/devcontainer-features/claude-code:1" for claude, tmux in the image -- or, if that change is not yours to make, say so in your status or your PR.
+A note from the harness that started you: this devcontainer did not have$installed, so it installed them for this session; a rebuild loses them. Consider updating the devcontainer config so they are there from the start -- the feature "ghcr.io/anthropics/devcontainer-features/claude-code:1" for claude, "ghcr.io/pmalacho-mit/devcontainer-features/git-subrepo:latest" for git-subrepo, tmux in the image -- or, if that change is not yours to make, say so in your status or your PR.
 NOTE
 fi
 [ -z "$installed" ] || say "installed$installed for this session (a rebuild loses them; the agent was told)"
@@ -295,6 +307,7 @@ fi
 {
   echo '#!/usr/bin/env bash'
   echo '# Claude, on the subscription token and nothing that outranks it (claude-helper.sh).'
+  echo 'export PATH="$HOME/.local/bin:$HOME/.local/share/git-subrepo/lib:$PATH"'
   echo 'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_PROFILE ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_IDENTITY_TOKEN_FILE'
   echo 'unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY'
   printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\n' "$placeholder"

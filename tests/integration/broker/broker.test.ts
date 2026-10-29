@@ -1165,6 +1165,9 @@ describe("bundle and pull: a push's and a pull's project halves (transfer.ts)", 
       ["--bundle", name, "pushes"],
       ["--pull", name, "--worktree", "issue-1", "pushes"],
     ]);
+    resetRunner();
+    assert.equal(result(await ask({ op: "pull", project: "pushes", transfer: name, fetch: true })).ok, true);
+    assert.deepEqual(runnerInvocations(), [["--pull", name, "--fetch-only", "pushes"]]);
   });
 
   for (const [why, query] of [
@@ -1172,6 +1175,8 @@ describe("bundle and pull: a push's and a pull's project halves (transfer.ts)", 
     ["a name that is a path", { op: "bundle", project: "pushes", transfer: "../../other/.git/x.bundle" }],
     ["a name that is a flag", { op: "pull", project: "pushes", transfer: "--rebuild" }],
     ["a bundle name on another op", { op: "start", project: "pushes", transfer: name }],
+    ["fetch-only on another op", { op: "bundle", project: "pushes", transfer: name, fetch: true }],
+    ["fetch-only that is not a boolean", { op: "pull", project: "pushes", transfer: name, fetch: "yes" }],
   ] as const)
     test(`refuses ${why}, before the runner`, async () => {
       resetRunner();

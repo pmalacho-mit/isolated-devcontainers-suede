@@ -4,11 +4,13 @@
 # `dispatch_main "$@"` (see ../gh-dispatcher.sh, ../claude/claude-dispatcher.sh).
 #
 #   <dispatcher> <project> [<owner/repo>] [--base B] [--label L] [--interval S] [--once]
+#   <dispatcher> --all [--label L] [--interval S] [--once]
 #
 # <project> is desolate's name for it -- its path under /workspaces, what
 # `./cli.sh desolate <project>` takes. <owner/repo> is its GitHub repository,
 # for gh; it defaults to <project>, which is what `./cli.sh repo add owner/repo`
-# clones it as.
+# clones it as. With --all, every project in the stack whose name is an
+# owner/repo, each with its repository named after it.
 #
 # Runs on your Mac, with YOUR gh login; desolate holds no forge credential.
 # There is no clone here: the repository lives in desolate, and its branches
@@ -29,12 +31,24 @@
 #        green       -- you are told to review and push it (`desolate --push`,
 #                       or the panel's Push); once GitHub has issue/<n>, a
 #                       draft PR is opened for it;
+#        gray        -- withdrawn: the agent recommends this not be merged;
+#                       said on the issue (and its PR), once per status;
 #
 # and for every worktree it started whose issue is no longer open: stop it and
 # `cli.sh worktree remove` it, which refuses one holding uncommitted work.
 #
 # A status is the agent's claim (docs/agents.md): you look before you push,
 # and review the draft after.
+#
+# An issue may carry a marker, written by another tool (the suede factory,
+# docs/suede-factory.md), saying more than the issue's number can:
+#   <!-- desolate-dispatch: {"branch": B, "start": S, "fetch": true, "pr": N, "base": P} -->
+#   branch  the worktree's branch, instead of issue/<n>
+#   start   where it starts, when the branch is new here (an origin/... ref)
+#   fetch   refresh the project's origin/* first (`cli.sh pull --fetch-only`)
+#   pr      the branch already has PR #N: on green you are asked to push to it,
+#           and no PR is opened
+#   base    the new PR's base, instead of --base or the default branch
 #
 # The agent, as functions the dispatcher defines (each has a default here):
 #   agent_ready   <project>                    credentials in place; may ask -- once, at start
@@ -73,10 +87,21 @@ notify() {
   fi
 }
 
+# The marker's field, or the default. An issue body is anyone's text: only a
+# well-formed marker counts, and every value is checked where it is used.
+marker_field() { # <body> <field> <default>
+  local marker value
+  marker=$(printf '%s\n' "$1" | sed -n 's/^<!-- desolate-dispatch: \({.*}\) -->$/\1/p' | head -n 1)
+  value=$( [ -n "$marker" ] && jq -r --arg f "$2" '.[$f] // empty | tostring' <<< "$marker" 2>/dev/null )
+  printf '%s' "${value:-$3}"
+}
+
 # The task an agent starts with.
-dispatch_task() { # <n> <title> <body>
+dispatch_task() { # <n> <title> <body> <branch> <pr>
+  local after="A human pushes it, and a draft PR follows."
+  [ -z "$5" ] || after="A human pushes it to PR #$5."
   cat <<EOF
-You are working on GitHub issue #$1 of $REPO, in a desolate worktree on branch issue/$1.
+You are working on GitHub issue #$1 of $REPO, in a desolate worktree on branch $4.
 
 Title: $2
 
@@ -86,8 +111,11 @@ Say how it is going with $STATUS_HELPER; a human sees it beside this worktree:
   set blue "<what you are doing>" while working;
   set orange "<your question>" when you need a human, then stop;
   set red "<what failed>" when you cannot go on;
-  set green "<one line for the PR>" when the work is committed on issue/$1.
-Commit your work on issue/$1; do not push. A human pushes it, and a draft PR follows.
+  set green "<one line for the PR>" when the work is committed on $4;
+  set gray "withdrawn: <why>" if you conclude this should not be merged.
+Other agents may be working in this repository too: read \`$STATUS_HELPER board\` when you start and before you finish,
+and leave a \`$STATUS_HELPER note\` when they should know something.
+Commit your work on $4; do not push. $after
 How this environment works -- the proxy, secrets, what you cannot reach: /desolate/AGENTS.md.
 EOF
 }
@@ -96,15 +124,15 @@ EOF
 # through desolate's push, which never runs the project's git in the editor
 # (transfer.ts). Asked for once per status; the PR follows as soon as GitHub
 # has the branch.
-dispatch_pull_request() { # <n> <name> <title> <message> <updated>
-  local n=$1 name=$2 title=$3 message=$4 updated=$5 branch=issue/$1
+dispatch_pull_request() { # <n> <name> <title> <message> <updated> <branch> <base>
+  local n=$1 name=$2 title=$3 message=$4 updated=$5 branch=$6 base=$7
   if ! gh api "repos/$REPO/git/ref/heads/$branch" --silent 2>/dev/null; then
     [ "$(cat "$STATE/$name.push" 2>/dev/null)" = "$updated" ] && return
     notify "#$n is ready ($message) -- review it, then push: the panel's Push on $name, or desolate --push --worktree $name $PROJECT"
     echo "$updated" > "$STATE/$name.push"
     return
   fi
-  gh pr create -R "$REPO" --draft --head "$branch" --base "$PR_BASE" \
+  gh pr create -R "$REPO" --draft --head "$branch" --base "$base" \
     --title "$title" --body "$message
 
 Closes #$n" > "$STATE/$name.pr"
@@ -144,23 +172,29 @@ dispatch_tick() {
   local can_start=1
   dispatch_unblock "$statuses" || can_start=""
 
-  local issue n title body name row color message updated
+  local issue n title body name row color message updated branch start fetch pr base
   while IFS= read -r issue; do
     n=$(jq -r .number <<< "$issue"); title=$(jq -r .title <<< "$issue"); body=$(jq -r '.body // ""' <<< "$issue")
     name=issue-$n
+    branch=$(marker_field "$body" branch "issue/$n"); start=$(marker_field "$body" start "$BASE")
+    fetch=$(marker_field "$body" fetch ""); pr=$(marker_field "$body" pr ""); base=$(marker_field "$body" base "$PR_BASE")
+    case "$pr" in *[!0-9]*) pr="" ;; esac
 
     if [ ! -e "$STATE/$name.agent" ]; then
       [ -n "$can_start" ] || continue
       if ! jq -e --arg w "$name" 'any(.[]; .worktree == $w)' <<< "$statuses" >/dev/null; then
-        log "#$n: a worktree"
-        "$CLI" worktree add "$PROJECT" "$name" "issue/$n" ${BASE:+"$BASE"} || { log "#$n: worktree add failed"; continue; }
+        if [ "$fetch" = true ]; then
+          "$CLI" pull "$PROJECT" --fetch-only </dev/null >/dev/null || { log "#$n: could not refresh $PROJECT's origin/*"; continue; }
+        fi
+        log "#$n: a worktree on $branch"
+        "$CLI" worktree add "$PROJECT" "$name" "$branch" ${start:+"$start"} || { log "#$n: worktree add failed"; continue; }
       fi
       if ! jq -e --arg w "$name" 'any(.[]?; .worktree == $w)' <<< "${running:-[]}" >/dev/null; then
         log "#$n: starting it"
         "$CLI" desolate "$PROJECT" --worktree "$name" </dev/null || { log "#$n: start failed"; continue; }
       fi
       log "#$n: an agent"
-      if agent_start "$PROJECT" "$name" "$(dispatch_task "$n" "$title" "$body")" </dev/null > "$STATE/$name.log" 2>&1; then
+      if agent_start "$PROJECT" "$name" "$(dispatch_task "$n" "$title" "$body" "$branch" "$pr")" </dev/null > "$STATE/$name.log" 2>&1; then
         date -u +%FT%TZ > "$STATE/$name.agent"
       else
         log "#$n: the agent did not start: $(tail -n 1 "$STATE/$name.log")"
@@ -179,7 +213,19 @@ dispatch_tick() {
         echo "$updated" > "$STATE/$name.told"
         log "#$n: $color, said on the issue" ;;
       green)
-        [ -e "$STATE/$name.pr" ] || dispatch_pull_request "$n" "$name" "$title" "$message" "$updated" ;;
+        if [ -n "$pr" ]; then
+          [ "$(cat "$STATE/$name.push" 2>/dev/null)" = "$updated" ] && continue
+          notify "#$n is ready ($message) -- review it, then push to PR #$pr: the panel's Push on $name, or desolate --push --worktree $name $PROJECT"
+          echo "$updated" > "$STATE/$name.push"
+        else
+          [ -e "$STATE/$name.pr" ] || dispatch_pull_request "$n" "$name" "$title" "$message" "$updated" "$branch" "$base"
+        fi ;;
+      gray)
+        [ "$(cat "$STATE/$name.told" 2>/dev/null)" = "$updated" ] && continue
+        gh issue comment "$n" -R "$REPO" --body "desolate: the agent **withdrew** -- $message. It recommends this not be merged." >/dev/null
+        [ -z "$pr" ] || gh pr comment "$pr" -R "$REPO" --body "desolate: the agent working on #$n **withdrew** -- $message. It recommends this not be merged." >/dev/null
+        echo "$updated" > "$STATE/$name.told"
+        notify "#$n: the agent withdrew ($message)" ;;
     esac
   done < <(jq -c '.[]' <<< "$issues")
 
@@ -199,13 +245,42 @@ dispatch_tick() {
   done
 }
 
+# One project's tick: PROJECT, REPO, STATE, PR_BASE for it, and its agent ready.
+dispatch_project() { # <project> <repo>
+  PROJECT=$1 REPO=$2
+  STATE=${FACTORY_STATE:-$HOME/.local/state/desolate-factory}/${PROJECT//\//__}
+  mkdir -p "$STATE"
+  if [ ! -s "$STATE/.default-branch" ]; then
+    gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name > "$STATE/.default-branch" 2>/dev/null \
+      || { rm -f "$STATE/.default-branch"; log "$REPO: not reachable with gh; skipped"; return 0; }
+  fi
+  DEFAULT_BRANCH=$(cat "$STATE/.default-branch")
+  PR_BASE=${BASE#origin/}; PR_BASE=${PR_BASE:-$DEFAULT_BRANCH}
+  if [ ! -e "$STATE/.ready" ]; then
+    agent_ready "$PROJECT" || { log "$PROJECT: the agent is not ready; skipped"; return 0; }
+    : > "$STATE/.ready"
+  fi
+  dispatch_tick || log "$PROJECT: tick failed; trying again next time"
+}
+
+# Every project in the stack whose name is owner/repo.
+stack_projects() {
+  "$CLI" desolate --status --json </dev/null \
+    | jq -r '[.[] | select(.worktree == null) | .project | select(test("^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"))] | unique | .[]'
+}
+
 dispatch_main() {
   set -euo pipefail
-  [ $# -ge 1 ] || { sed -n '6p' "$FACTORY_LIB/gh-dispatch.sh" | sed "s/^# \{0,1\}//; s/<dispatcher>/$DISPATCHER.sh/" >&2; exit 2; }
-  PROJECT=$1; shift
-  REPO=$PROJECT
-  case "${1:-}" in ""|-*) ;; *) REPO=$1; shift ;; esac
-  case "$REPO" in */*) ;; *) echo "$DISPATCHER: $PROJECT is no owner/repo; name its GitHub repository after it" >&2; exit 2 ;; esac
+  [ $# -ge 1 ] || { sed -n '6,7p' "$FACTORY_LIB/gh-dispatch.sh" | sed "s/^# \{0,1\}//; s/<dispatcher>/$DISPATCHER.sh/" >&2; exit 2; }
+  local ALL=""
+  if [ "$1" = --all ]; then
+    ALL=1; shift
+  else
+    PROJECT=$1; shift
+    REPO=$PROJECT
+    case "${1:-}" in ""|-*) ;; *) REPO=$1; shift ;; esac
+    case "$REPO" in */*) ;; *) echo "$DISPATCHER: $PROJECT is no owner/repo; name its GitHub repository after it" >&2; exit 2 ;; esac
+  fi
   LABEL=desolate:run INTERVAL=60 ONCE= BASE=
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -216,17 +291,22 @@ dispatch_main() {
       *) echo "$DISPATCHER: unknown option '$1'" >&2; exit 2 ;;
     esac
   done
-  STATE=${FACTORY_STATE:-$HOME/.local/state/desolate-factory}/${PROJECT//\//__}
-  mkdir -p "$STATE"
-  local tool
+  [ -z "$ALL" ] || [ -z "$BASE" ] || { echo "$DISPATCHER: --base is one project's; with --all, an issue's marker says it" >&2; exit 2; }
+  local tool project
   for tool in gh jq; do
     command -v "$tool" >/dev/null || { echo "$DISPATCHER: needs $tool" >&2; exit 1; }
   done
-  agent_ready "$PROJECT" || { echo "$DISPATCHER: the agent is not ready" >&2; exit 1; }
-  DEFAULT_BRANCH=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
-  PR_BASE=${BASE#origin/}; PR_BASE=${PR_BASE:-$DEFAULT_BRANCH}
+  if [ -z "$ALL" ]; then
+    agent_ready "$PROJECT" || { echo "$DISPATCHER: the agent is not ready" >&2; exit 1; }
+    mkdir -p "${FACTORY_STATE:-$HOME/.local/state/desolate-factory}/${PROJECT//\//__}"
+    : > "${FACTORY_STATE:-$HOME/.local/state/desolate-factory}/${PROJECT//\//__}/.ready"
+  fi
   while :; do
-    dispatch_tick || log "tick failed; trying again next time"
+    if [ -n "$ALL" ]; then
+      for project in $(stack_projects); do dispatch_project "$project" "$project"; done
+    else
+      dispatch_project "$PROJECT" "$REPO"
+    fi
     [ -z "$ONCE" ] || exit 0
     sleep "$INTERVAL"
   done

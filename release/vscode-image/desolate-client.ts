@@ -47,7 +47,7 @@ function usage(code = 0): never {
   out("       desolate --stop all|--stop --all   stop every running target");
   out("       desolate --push [--worktree <name>] [--allow-default] <project>");
   out("                                          push its checked-out branch to its GitHub repository");
-  out("       desolate --pull [--worktree <name>] <project>");
+  out("       desolate --pull [--worktree <name>] [--fetch-only] <project>");
   out("                                          fetch that repository into origin/*, and fast-forward");
   out("");
   out("  --rebuild  recreate the container from the current devcontainer.json.");
@@ -108,17 +108,18 @@ if (argv[0] === "--status") {
 if (argv[0] === "--push" || argv[0] === "--pull") {
   const which = argv[0];
   const words = argv.slice(1);
-  let worktree: string | undefined, allowDefault = false;
+  let worktree: string | undefined, allowDefault = false, fetchOnly = false;
   const projects: string[] = [];
   while (words.length) {
     const word = words.shift()!;
     if (word === "--worktree") worktree = words.shift() || refuse("--worktree expects a name");
     else if (word === "--allow-default" && which === "--push") allowDefault = true;
+    else if (word === "--fetch-only" && which === "--pull") fetchOnly = true;
     else if (word.startsWith("-")) refuse(`unknown option '${word}' for ${which}`);
     else projects.push(word.replace(/\/+$/, "").replace(new RegExp(`^${WORKSPACES}/`), ""));
   }
   if (projects.length !== 1) refuse(`usage: desolate ${which} [--worktree <name>]${which === "--push" ? " [--allow-default]" : ""} <project>`);
-  (which === "--push" ? push(projects[0], { worktree, allowDefault }) : pull(projects[0], { worktree }))
+  (which === "--push" ? push(projects[0], { worktree, allowDefault }) : pull(projects[0], { worktree, fetchOnly }))
     .then((said) => { console.log(`desolate: ${said}`); process.exit(0); })
     .catch((err) => {
       if (!(err instanceof TransferError)) throw err;

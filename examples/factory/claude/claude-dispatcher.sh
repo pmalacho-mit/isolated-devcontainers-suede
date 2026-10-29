@@ -2,6 +2,7 @@
 # examples/factory/claude/claude-dispatcher.sh -- GitHub issues in, Claude Code on them, draft PRs out.
 #
 #   examples/factory/claude/claude-dispatcher.sh <project> [<owner/repo>] [--base B] [--label L] [--interval S] [--once]
+#   (or --all: every project in the stack; see ../lib/gh-dispatch.sh)
 #
 # The loop is ../lib/gh-dispatch.sh; the agent is claude-helper.sh: Claude
 # Code in a tmux session in each issue's worktree, on your subscription.
