@@ -89,9 +89,11 @@ pr_appears() { # <head> <number> [<created, default now> [<state>]]
     '[{number: $n, state: $s, url: "u", title: "t", body: "suede rebuilt it.\nFrom acme/app.", createdAt: $at}]' \
     > "$STUB/pr-for-downstream_acme_app-$1"
 }
+# Closed now: after the tick that saw the release before, so it counts as
+# closed since then -- a fixed time would stop counting once the clock passed it.
 closed_issue() { # <issue file> <number> <reason>: as gh lists it, closed
   jq -cn --arg m "$(sed -n 's/.*\(<!-- suede-factory: {.*} -->\).*/\1/p' "$1")" --argjson n "$2" --arg r "$3" \
-    '{number: $n, closedAt: "2026-10-29T10:00:01Z", stateReason: $r, body: ("x\n" + $m)}'
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{number: $n, closedAt: $at, stateReason: $r, body: ("x\n" + $m)}'
 }
 
 group "a consumer's main moved: its changes are proposed, once"
@@ -156,7 +158,7 @@ assert_contains "the new consumers are looked at" "$(calls)" "suede report acme/
 # #32 (PR #15, acme/app's) was merged, and closed its issue; #31 was replaced.
 echo '[]' > "$STUB/widget-open-issues"
 jq -s . <(closed_issue "$STUB/issue-32" 32 COMPLETED) \
-  <(jq -cn '{number: 31, closedAt: "2026-10-29T10:00:01Z", stateReason: "NOT_PLANNED", body: "replaced"}') > "$STUB/widget-closed-issues"
+  <(jq -cn --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{number: 31, closedAt: $at, stateReason: "NOT_PLANNED", body: "replaced"}') > "$STUB/widget-closed-issues"
 echo "$REL2" > "$STUB/widget-release"
 tick
 ISSUE=$(cat "$STUB/issue-33" 2>/dev/null)
