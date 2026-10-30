@@ -202,6 +202,24 @@ describe("deliver and push upstream: the editor's half", { skip: !subrepoAvailab
       /not the c{40}/);
   });
 
+  test("a proposal that touches the dependency's .github/ is refused: its workflows would run there, with its secrets (audit H1)", () => {
+    const project = "acme/fresh";
+    const fresh = join(root, "workspaces", "acme", "fresh");
+    const name = "desolate-transfer-0000000000000002.bundle";
+    mkdirSync(join(fresh, "widget", ".github", "workflows"), { recursive: true });
+    writeFileSync(join(fresh, "widget", ".github", "workflows", "ci.yml"), "on: push\njobs: {}\n");
+    git(fresh, "add", "widget");
+    git(fresh, "commit", "--quiet", "-m", "a workflow for the dependency");
+    const built = run(fresh, "build", "HEAD", "widget", join(fresh, ".git", name), project);
+    assert.equal(built.status, 0, built.stderr);
+    const [, commit, pin, , consumerCommit] = built.stdout.trim().split("\t");
+    assert.throws(() => pushUpstream(project, "acme/widget", { name, commit, pin, consumerCommit }, { registrations }),
+      (err: Error) => err instanceof TransferError && /\.github\/workflows\/ci\.yml/.test(err.message) && /secrets/.test(err.message));
+    assert.equal(git(root, "--git-dir", remote("widget"), "for-each-ref", "--format=%(refname)", `refs/heads/downstream/acme/fresh-${consumerCommit}`), "",
+      "nothing reached the dependency");
+    git(fresh, "reset", "--quiet", "--hard", "HEAD~1");
+  });
+
   test("a dependency that is not in the stack is named, not guessed at", () => {
     assert.throws(() => deliver("acme/fresh", "acme/nowhere", { registrations }), /acme\/nowhere is not in the stack/);
   });

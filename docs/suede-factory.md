@@ -68,8 +68,8 @@ Each tick of `suede-factory.sh`:
 1. **A consumer's `main` moved.** The factory:
    - refreshes `origin/*` (`cli.sh pull --fetch-only`);
    - reports its suede dependencies at `origin/<main>` (`cli.sh suede report`);
-   - delivers the history of any it lacks (`cli.sh suede deliver`). A dependency that isn't in the stack is asked about once, by notification: `suede-factory.sh approve <owner/repo>` adds it, with `cli.sh repo add`, which clones it and creates a write deploy key on it. Until you approve, the consumer isn't looked at again; approving has every consumer of that dependency looked at on the next tick.
-2. **A dependency differs from its pin.** `cli.sh suede upstream` pushes the change to the dependency as `downstream/<consumer>-<commit>`. That is suede's own branch, so suede's own workflow there opens the PR into `main`. The change is compared by `git patch-id`, and it isn't pushed when that exact change, from that consumer and folder:
+   - delivers the history of any it lacks (`cli.sh suede deliver`). A dependency is the project's own claim (its `.gitrepo` names the repository), so each consumer-and-dependency **pair** is yours to approve, once, asked by notification: `suede-factory.sh approve <consumer> <owner/repo>`. Approved, the dependency's releases go into that consumer and that consumer's proposals go to the dependency, and nowhere else; a project cannot route its branches to another repository in the stack by naming it. If the dependency isn't in the stack, approving adds it with `cli.sh repo add`, which clones it and creates a write deploy key on it. Until you approve, the consumer isn't looked at again; approving has it looked at on the next tick.
+2. **A dependency differs from its pin.** `cli.sh suede upstream` pushes the change to the dependency as `downstream/<consumer>-<commit>`. That is suede's own branch, so suede's own workflow there opens the PR into `main`. A proposal that changes the dependency's `.github/` is refused: GitHub runs a pushed branch's own workflows on the push, with that repository's secrets, and the tree is the consumer's to write. Make such a change in the dependency itself. The change is compared by `git patch-id`, and it isn't pushed when that exact change, from that consumer and folder:
    - **is already proposed:** its issue is open, or it was pushed and is waiting for its PR;
    - **was merged:** its issue closed as completed and its PR merged. The consumer's copy keeps differing until the release and the sync bring the change back, and that is not a new change;
    - **was closed without merging:** that was your answer. It is proposed again only once the change itself changes.
@@ -143,7 +143,7 @@ The factory asks desolate three things. You can ask them too: they're how you se
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `./cli.sh suede report <project>`               | **Look:** which suede dependencies does this project have, and has it changed any? Changes nothing.                                 |
 | `./cli.sh suede deliver <project> <owner/repo>` | **Bring in:** put a dependency's `release` history inside the project, so the look and the sync work with no network.               |
-| `./cli.sh suede upstream <project> <folder>`    | **Propose:** turn the project's changes to that folder into a branch on the dependency's GitHub repository, where suede opens a PR. |
+| `./cli.sh suede upstream <project> <folder> <owner/repo>` | **Propose:** turn the project's changes to that folder into a branch on that dependency's GitHub repository, where suede opens a PR. The repository is named by you, and the folder's `.gitrepo` must agree. |
 
 All three are on the Mac's `cli.sh` only. The editor's `desolate` and its panel don't offer them, and no devcontainer can reach them.
 
@@ -249,7 +249,7 @@ The rewrite redirects the recorded remote to the bundle for that one command, an
 ### `upstream`: propose
 
 ```bash
-./cli.sh suede upstream acme/app widget --ref origin/main
+./cli.sh suede upstream acme/app widget acme/widget --ref origin/main
 # UPSTREAMED acme/widget downstream/acme/app-5e0c… 7d8e… 9f3c…
 #            dependency  the branch it pushed     commit fingerprint
 ```

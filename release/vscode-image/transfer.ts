@@ -535,6 +535,14 @@ export function pushUpstream(project: string, ownerRepo: string, built: Built, o
     const parent = cleanGit(["-C", cache.dir, "rev-parse", `${outgoing}^`], { capture: true }).stdout.trim();
     if (fetched !== built.commit || parent !== built.pin)
       fail(`the proposal is ${fetched || "nothing"} on ${parent || "nothing"}, not the ${built.commit} on ${built.pin} its sandbox said`);
+    // Never the dependency's .github/: GitHub runs a pushed branch's OWN
+    // workflow files on the push, with that repository's secrets, and the
+    // tree is the consumer's to write. A proposal is a change to what the
+    // consumer vendors, which its CI is not.
+    const changed = cleanGit(["-C", cache.dir, "diff", "--name-only", "-z", built.pin, outgoing], { capture: true }).stdout.split("\0").filter(Boolean);
+    const ci = changed.filter((file) => file === ".github" || file.startsWith(".github/"));
+    if (ci.length)
+      fail(`the proposal changes ${ownerRepo}'s ${ci.slice(0, 3).join(", ")}${ci.length > 3 ? ` and ${ci.length - 3} more` : ""}: a pushed branch's own .github/ runs there, with ${ownerRepo}'s secrets, on the push itself. Proposals leave .github/ alone; make that change in ${ownerRepo} yourself`);
     if (!cleanGit(["-C", cache.dir, "push", "--quiet", registration.url, `${built.commit}:refs/heads/${branch}`], { ssh: options.ssh }).ok)
       fail(`${ownerRepo} refused ${branch}`);
     cleanGit(["-C", cache.dir, "update-ref", "-d", outgoing]);

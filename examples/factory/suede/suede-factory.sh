@@ -3,7 +3,7 @@
 #
 #   suede-factory.sh run [--interval S] [--once] [--dry-run] [--sync proposers|all|none]
 #   suede-factory.sh sync [--dry-run] (<consumer>... | --all) [--dep <owner/repo>]...
-#   suede-factory.sh approve <owner/repo>
+#   suede-factory.sh approve <consumer> <owner/repo>
 #   suede-factory.sh status
 #
 # Runs on your Mac, with your gh, polling (docs/suede-factory.md). It never
@@ -12,8 +12,12 @@
 #
 #   1. Its main moved: refresh origin/*, report its suede dependencies at
 #      origin/<main> (`cli.sh suede report`), delivering any whose history the
-#      project lacks. A dependency not in the stack is asked about once
-#      (`approve` adds it with `cli.sh repo add`).
+#      project lacks. A dependency is the project's own claim (its .gitrepo),
+#      so each consumer-and-dependency PAIR is yours to approve, once, asked by
+#      notification: approved, the dependency's releases go into the consumer
+#      and the consumer's proposals go to the dependency -- and nowhere else.
+#      `approve` adds the dependency to the stack if it is not there (`cli.sh
+#      repo add`: a clone, and a write deploy key).
 #   2. A dependency whose folder differs from its pin, unless that exact change
 #      (its patch-id) is already proposed, or was -- merged, and waiting for a
 #      release and the sync that brings it back, or closed unmerged, which is
@@ -86,21 +90,28 @@ stack_projects() {
 }
 in_stack() { printf '%s\n' "$PROJECTS" | grep -qxF "$1"; }
 
-# 0 when <dependency> is in the stack -- added now, if you approved it before;
-# 1 while it waits on your approval (`approve` has its consumers looked at
-# again); 2 when it could not be added now.
+# Have you approved <consumer> and <dependency> as a pair? A line "consumer
+# dependency" in approved. A bare dependency (how approval was recorded once)
+# approves nothing: that let any project in the stack name any other as its
+# dependency, and have its branches pushed there with that repository's key.
+approved_pair() { grep -qxF "$1 $2" "$STATE/approved" 2>/dev/null; }
+
+# 0 when <dependency> is approved for <consumer> and in the stack -- added now,
+# if it was not; 1 while the pair waits on your approval (`approve` has the
+# consumer looked at again); 2 when it could not be added now.
 ensure_dependency() { # <dependency> <consumer>
-  in_stack "$1" && return 0
-  if grep -qxF "$1" "$STATE/approved" 2>/dev/null; then
-    [ -z "$DRY" ] || { log "would: add $1 to the stack (approved)"; return 2; }
-    log "$1: approved; adding it to the stack"
+  if approved_pair "$2" "$1"; then
+    in_stack "$1" && return 0
+    [ -z "$DRY" ] || { log "would: add $1 to the stack (approved for $2)"; return 2; }
+    log "$1: approved for $2; adding it to the stack"
     "$CLI" repo add "$1" </dev/null || { log "$1: repo add failed; trying again next tick"; return 2; }
     PROJECTS=$(stack_projects)
     return 0
   fi
-  if ! grep -qxF "$1" "$STATE/asked" 2>/dev/null; then
-    notify "$1, a suede dependency of $2, is not in the stack. To include it (it is cloned, and given a write deploy key): $0 approve $1"
-    mkdir -p "$STATE"; echo "$1" >> "$STATE/asked"
+  if ! grep -qxF "$2 $1" "$STATE/asked" 2>/dev/null; then
+    local adds=""; in_stack "$1" || adds=", and $1 cloned into the stack with a write deploy key"
+    notify "$2 names $1 as a suede dependency. Approving the pair means $1's releases into $2, $2's proposals pushed to $1$adds: $0 approve $2 $1"
+    mkdir -p "$STATE"; echo "$2 $1" >> "$STATE/asked"
   fi
   return 1
 }
@@ -211,7 +222,9 @@ propose() { # <consumer> <main> <dependency report>
     return 0
   fi
   at=$(date -u +%s)
-  out=$("$CLI" suede upstream "$consumer" "$dir" --ref "origin/$main" </dev/null 2>&1) || { log "$consumer: proposing $dir failed: $(printf '%s' "$out" | tail -n 1)"; return 1; }
+  # The dependency is named here, from the approved pair -- never left to the
+  # project's .gitrepo, which cli.sh only checks against it.
+  out=$("$CLI" suede upstream "$consumer" "$dir" "$dep" --ref "origin/$main" </dev/null 2>&1) || { log "$consumer: proposing $dir failed: $(printf '%s' "$out" | tail -n 1)"; return 1; }
   branch=$(printf '%s\n' "$out" | sed -n 's/^UPSTREAMED [^ ]* \([^ ]*\) .*/\1/p')
   [ -n "$branch" ] || { log "$consumer: $dir has nothing to propose"; return 0; }
   log "$consumer: proposed $dir to $dep as $branch"
@@ -387,6 +400,7 @@ file_syncs() { # <dependency> <release> <rows>
   while IFS=$'\t' read -r consumer d; do
     [ -n "$consumer" ] || continue
     in_stack "$consumer" || continue
+    approved_pair "$consumer" "$dep" || { log "$consumer: $dep is not approved for it; no sync is filed"; continue; }
     dir=$(jq -r .dir <<< "$d"); pin=$(jq -r .pin <<< "$d"); kind=$(jq -r .kind <<< "$d")
     open=$(marked_issues "$consumer" "$SYNC_LABEL" open | jq -r --arg r "$dep" --arg d "$dir" '[.[] | select(.marker.dependency == $r and .marker.dir == $d)][0].url // empty')
     if [ -n "$open" ]; then
@@ -480,6 +494,7 @@ EOF
 file_sync_issue() { # <consumer> <dependency> <dir> <pin> <release> <kind> <main>
   local consumer=$1 dep=$2 dir=$3 pin=$4 release=$5 kind=$6 main=$7 body tag issue
   tag=$(tag_of "$dep")
+  approved_pair "$consumer" "$dep" || { log "$consumer: $dep is not approved for it; no sync is filed"; return 1; }
   if [ -n "$DRY" ]; then log "would: file an issue in $consumer to sync $dir to $dep's ${release:0:12}"; return 0; fi
   "$CLI" suede deliver "$consumer" "$dep" </dev/null >/dev/null || { log "$consumer: could not deliver $dep"; return 1; }
   local blocking="" deps_check="" dispatch factory
@@ -515,18 +530,16 @@ tick() {
 COMMAND=$1; shift
 case "$COMMAND" in
   approve)
-    [ $# -eq 1 ] && [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || usage
+    [ $# -eq 2 ] && [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+                 && [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || usage
     mkdir -p "$STATE"
-    grep -qxF "$1" "$STATE/approved" 2>/dev/null || echo "$1" >> "$STATE/approved"
-    # The consumers that were waiting on it are looked at again.
-    for f in "$STATE"/deps/*.json; do
-      [ -e "$f" ] || continue
-      jq -e --arg r "$1" 'any(.dependencies[]; .repo == $r)' "$f" >/dev/null && rm -f "$STATE/heads/$(basename "$f" .json).main"
-    done
-    echo "$ME: $1 approved; it is added to the stack on the next tick" ;;
+    grep -qxF "$1 $2" "$STATE/approved" 2>/dev/null || echo "$1 $2" >> "$STATE/approved"
+    # The consumer that was waiting on it is looked at again.
+    rm -f "$STATE/heads/$(tag_of "$1").main"
+    echo "$ME: $2 approved as a suede dependency of $1; it is looked at on the next tick" ;;
   status)
-    echo "approved: $(cat "$STATE/approved" 2>/dev/null | tr '\n' ' ')"
-    echo "asked:    $(cat "$STATE/asked" 2>/dev/null | tr '\n' ' ')"
+    echo "approved (consumer -> dependency):"; sed -n 's/^\([^ ]*\) \([^ ]*\)$/  \1 -> \2/p' "$STATE/approved" 2>/dev/null
+    echo "asked:"; sed -n 's/^\([^ ]*\) \([^ ]*\)$/  \1 -> \2/p' "$STATE/asked" 2>/dev/null
     echo "waiting for suede to open a PR:"
     for f in "$STATE"/pending/*/*.json; do [ -e "$f" ] && jq -r '"  \(.dep): \(.branch) (\(.consumer)/\(.dir))"' "$f"; done
     echo "consumers' dependencies:"

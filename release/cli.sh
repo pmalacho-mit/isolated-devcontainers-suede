@@ -1396,11 +1396,14 @@ case "$CMD" in
   suede)     ensure_running
              # A project's suede dependencies (docs/suede-factory.md). The
              # Mac's: the editor's desolate and its panel do not offer these,
-             # and the dependency is always named here, never read from the
-             # project. The project's git runs in its sandbox (orchestrator);
-             # keys and caches are the editor's.
+             # and the dependency is always named HERE, never read from the
+             # project: its .gitrepo says which repository a folder is a copy
+             # of, and that is the project's own word -- a push with that
+             # repository's key on the project's say-so would let any project
+             # push to any repository in the stack. The project's git runs in
+             # its sandbox (orchestrator); keys and caches are the editor's.
              SUB="${1:-}"; shift || true
-             SUEDE_USAGE="usage: cli.sh suede {deliver <project> <owner/repo> | report <project> [--ref <ref>] | upstream <project> <dir> [--ref <ref>]}"
+             SUEDE_USAGE="usage: cli.sh suede {deliver <project> <owner/repo> | report <project> [--ref <ref>] | upstream <project> <dir> <owner/repo> [--ref <ref>]}"
              case "$SUB" in
                deliver)
                  [ $# -eq 2 ] || { echo "$SUEDE_USAGE" >&2; exit 1; }
@@ -1409,7 +1412,8 @@ case "$CMD" in
                  PROJ="${1:?$SUEDE_USAGE}"; shift
                  exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --suede-report "$@" "$PROJ" ;;
                upstream)
-                 PROJ="${1:?$SUEDE_USAGE}"; DIR="${2:?$SUEDE_USAGE}"; shift 2
+                 PROJ="${1:?$SUEDE_USAGE}"; DIR="${2:?$SUEDE_USAGE}"; DEP="${3:?$SUEDE_USAGE}"; shift 3
+                 [[ "$DEP" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "cli.sh: '$DEP' is not an owner/repo" >&2; exit 1; }
                  NAME="desolate-transfer-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n').bundle"
                  OUT=$(docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --suede-build "$DIR" --transfer "$NAME" "$@" "$PROJ") \
                    || { printf '%s\n' "$OUT" >&2; exit 1; }
@@ -1417,7 +1421,10 @@ case "$CMD" in
                  [ -n "$LINE" ] || { printf '%s\n' "$OUT" >&2; echo "cli.sh: the sandbox said nothing of a proposal" >&2; exit 1; }
                  if [ "$LINE" = "BUILT none" ]; then echo "UPSTREAMED none"; exit 0; fi
                  read -r _ COMMIT PIN TAG CONSUMER PATCH _ <<< "$LINE"
-                 case "$TAG" in *__*) DEP="${TAG%%__*}/${TAG#*__}" ;; *) echo "cli.sh: $DIR's remote names no owner/repo" >&2; exit 1 ;; esac
+                 # The sandbox says what the folder's .gitrepo names; it must be
+                 # the repository named here, or the proposal goes nowhere.
+                 case "$TAG" in *__*) SAID="${TAG%%__*}/${TAG#*__}" ;; *) SAID="" ;; esac
+                 [ "$SAID" = "$DEP" ] || { echo "cli.sh: $DIR in $PROJ is a copy of ${SAID:-no owner/repo}, not of $DEP; nothing is pushed" >&2; exit 1; }
                  SAID=$(docker exec -e DESOLATE_PLANE=mac "$CONTAINER" with-ca tsx /usr/local/lib/desolate/suede.ts upstream \
                           "$PROJ" "$DEP" "$NAME" "$COMMIT" "$PIN" "$CONSUMER") || { printf '%s\n' "$SAID" >&2; exit 1; }
                  BRANCH=$(printf '%s\n' "$SAID" | sed -n 's/^UPSTREAMED //p')
