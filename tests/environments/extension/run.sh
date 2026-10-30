@@ -82,6 +82,10 @@ case "\$*" in
     printf 'fresh\n' > "\$dir/2.b"
     echo "desolate: reviewing in its sandbox" >&2
     echo '{"branch":"issue/42","head":"$ISSUE","base":{"ref":"origin/main","commit":"$MAIN","from":"$MAIN"},"ahead":2,"behind":0,"uncommitted":1,"commits":[{"commit":"$(printf 'c%.0s' $(seq 40))","time":1793290000,"author":"Ada","subject":"the answer is 42"},{"commit":"$(printf 'd%.0s' $(seq 40))","time":1793280000,"author":"Ada","subject":"add a fresh file"}],"files":[{"index":1,"status":"M","path":"src/answer.ts","kind":"text","sizes":[52,52],"sides":{"a":true,"b":true}},{"index":2,"status":"A","path":"fresh.txt","kind":"text","sizes":[0,6],"sides":{"a":false,"b":true}},{"index":3,"status":"A","path":"logo.png","kind":"binary","sizes":[0,900],"sides":{"a":false,"b":true}}],"more":false,"dir":"'"\$dir"'"}' ;;
+  "--push acme/widgets")
+    echo "desolate: main is acme/widgets's default branch; push a branch of its own, or pass --allow-default" >&2
+    exit 77 ;;
+  "--push --allow-default acme/widgets") echo "desolate: pushed main (aaaaaaaaaaaa) to acme/widgets" ;;
   *) echo "ready: http://127.0.0.1:8094/?tkn=another-secret-token" ;;
 esac
 EOF
@@ -187,6 +191,15 @@ const { chromium } = require("playwright");
   await page.locator(".monaco-dialog-box a.monaco-button, .monaco-dialog-box button", { hasText: /^Push$/ }).first().click();
   await wait(5000);
 
+  // The default branch: refused, so asked about, then pushed with --allow-default.
+  await menu(widgets, /^Push without review…$/);
+  await page.locator(".monaco-dialog-box a.monaco-button, .monaco-dialog-box button", { hasText: /^Push$/ }).first().click();
+  await wait(3000);
+  report.defaultAsked = await page.locator(".monaco-dialog-box").innerText().catch(() => "");
+  await shot("default-branch");
+  await page.locator(".monaco-dialog-box a.monaco-button, .monaco-dialog-box button", { hasText: /^Push to main$/ }).first().click();
+  await wait(3000);
+
   // Pull, from the worktree's menu; each port's Open.
   await menu(issue, /^Pull$/);
   report.portOpens = await projects.locator('.monaco-list-row:has-text(":809") [aria-label="Open"]').count();
@@ -240,7 +253,7 @@ EOF
 docker cp "$SCRIPT/test.js" "$BROWSER:/test.js" >/dev/null
 docker start -a "$BROWSER" >/dev/null 2>&1
 OUTPUT=$(docker logs "$BROWSER" 2>&1)
-for png in views review-diff needs-you running-only quick-open log; do
+for png in views review-diff default-branch needs-you running-only quick-open log; do
   docker cp "$BROWSER:/run/test/$png.png" "$OUT/" >/dev/null 2>&1
 done
 REPORT=$(printf '%s\n' "$OUTPUT" | sed -n 's/^REPORT //p' | tail -1)
@@ -286,6 +299,12 @@ assert_contains "  and what it leaves" "$(field pushAsked)" "1 uncommitted chang
 assert_contains "confirmed, it ran desolate --push for the worktree" "$CALLS" "desolate --push --worktree issue-42 acme/widgets"
 assert_contains "Pull on a worktree ran desolate --pull for it" "$CALLS" "desolate --pull --worktree issue-42 acme/widgets"
 
+group "the default branch: refused, asked about, then pushed"
+assert_contains "pushing main asks once more, saying why" "$(field defaultAsked)" "main is acme/widgets's default branch. Push to it anyway?"
+assert_contains "  and what it means" "$(field defaultAsked)" "with no pull request to review it in"
+assert_contains "the first try was plain" "$CALLS" "desolate --push acme/widgets"
+assert_contains "confirmed, it pushed with --allow-default" "$CALLS" "desolate --push --allow-default acme/widgets"
+
 group "Needs you, the filter, the palette"
 assert_not_contains "marked as seen, it is gone" "$(field needsAfterSeen)" "which API version"
 assert_contains "  and the rest stay" "$(field needsAfterSeen)" "ready for a PR"
@@ -302,5 +321,5 @@ assert_not_contains "with the token redacted, all of it" "$PANEL" "secret-token"
 assert_contains "the views read through the commands" "$CALLS" "desolate --list --json"
 assert_not_contains "and statuses, notes and branches through none" "$CALLS" "--status"
 note() { printf '       %s\n' "$1"; }
-note "screenshots: $OUT/{views,review-diff,needs-you,running-only,quick-open,log}.png"
+note "screenshots: $OUT/{views,review-diff,default-branch,needs-you,running-only,quick-open,log}.png"
 summary

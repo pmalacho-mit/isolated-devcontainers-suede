@@ -74,6 +74,8 @@ What a push of a target's branch would send, before it does (`desolate --review`
 
 The view's title has **Push**, which asks once more, with the counts. It also has review again, and close.
 
+A push to the repository's **default branch** (`main`, say) is refused the first time, as `desolate --push` refuses it without `--allow-default`. The panel then asks whether you mean it, and if you do, pushes with `--allow-default`. That goes for Push without review as well. It is never a force-push: GitHub refuses it if the branch moved there since your last pull.
+
 The diff is read-only. Its two sides are what the target's sandbox read out of git, kept in the editor's cache. A binary file, a submodule, or one past the size limits is listed, and says so, without its content.
 
 ### Dinds

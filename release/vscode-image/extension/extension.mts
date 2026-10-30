@@ -162,6 +162,9 @@ const readWorkspaces = () => {
 };
 
 const targetArgs = (target: TargetRef) => [...(target.worktree ? ["--worktree", target.worktree] : []), target.project];
+/** `desolate --push`'s status for the repository's default branch, refused
+ *  without --allow-default (transfer.ts DEFAULT_BRANCH_EXIT). */
+const DEFAULT_BRANCH_EXIT = 77;
 const nameOf = (target: TargetRef) => `${target.project}${target.worktree ? ` · ${target.worktree}` : ""}`;
 
 /** A review, and the target it is of. */
@@ -314,8 +317,10 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   /** A command for a target: its row spins and says what is happening, the
-   *  status bar shows progress, and a failure says what it said last. */
-  const act = async (target: TargetRef | undefined, doing: string, command: "desolate" | "worktree" | "newrepo", args: string[]) => {
+   *  status bar shows progress, and a failure says what it said last -- but
+   *  for the exit statuses the caller says it handles itself (`handled`). */
+  const act = async (target: TargetRef | undefined, doing: string, command: "desolate" | "worktree" | "newrepo", args: string[],
+                     handled: number[] = []) => {
     const key = target ? targetKey(target) : undefined;
     if (key) {
       busy.set(key, doing);
@@ -326,7 +331,9 @@ export function activate(context: vscode.ExtensionContext) {
       return await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: `desolate: ${what}` }, async () => {
         const result = await run(command, args);
         const last = result.output.trim().split("\n").filter(Boolean).pop() ?? "";
-        if (result.code === 75) {
+        if (handled.includes(result.code)) {
+          // The caller's to say.
+        } else if (result.code === 75) {
           // Busy, not broken (locks.ts): something else is doing this target now.
           const why = result.output.split("\n").find((line) => line.includes(" is in use: ")) ?? last;
           void vscode.window.showWarningMessage(`desolate: not now -- ${plain(why).replace(/^desolate: /, "").slice(0, 300)}`);
@@ -379,7 +386,18 @@ export function activate(context: vscode.ExtensionContext) {
       ...(review?.uncommitted ? { detail: `${review.uncommitted} uncommitted change${review.uncommitted === 1 ? " is" : "s are"} not sent.` } : {}),
     }, "Push");
     if (sure !== "Push") return;
-    const { code } = await act(target, "pushing…", "desolate", ["--push", ...targetArgs(target)]);
+    let { code } = await act(target, "pushing…", "desolate", ["--push", ...targetArgs(target)], [DEFAULT_BRANCH_EXIT]);
+    if (code === DEFAULT_BRANCH_EXIT) {
+      // Refused for being the repository's default branch (transfer.ts): the
+      // person may mean it, so they are asked -- once more, and plainly.
+      const branch = review?.branch ?? target.branch ?? "this branch";
+      const anyway = await vscode.window.showWarningMessage(
+        `${branch} is ${target.repo ?? "its repository"}'s default branch. Push to it anyway?`,
+        { modal: true, detail: `This updates ${branch} on GitHub directly, with no pull request to review it in. It is never a force-push: GitHub refuses it if ${branch} moved there since your last pull.` },
+        `Push to ${branch}`);
+      if (anyway !== `Push to ${branch}`) return;
+      ({ code } = await act(target, "pushing…", "desolate", ["--push", "--allow-default", ...targetArgs(target)]));
+    }
     if (code === 0 && reviewing && targetKey(reviewing.target) === targetKey(target)) await startReview(target);
   };
   register("push", async (node) => {

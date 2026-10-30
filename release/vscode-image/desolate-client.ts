@@ -27,7 +27,7 @@ import { ask } from "./broker-client.ts";
 import { ensure as ensureWorktree } from "./worktrees.ts";
 import { EVERY_TARGET, meansEveryTarget } from "./projects.ts";
 import { statusRows } from "./status.ts";
-import { pull, push, TransferError } from "./transfer.ts";
+import { DEFAULT_BRANCH_EXIT, pull, push, TransferError } from "./transfer.ts";
 import { describeReview, keepReview, parseReview, REVIEWED, reviewDirectory } from "./review.ts";
 import { BUSY_EXIT } from "./locks.ts";
 
@@ -128,9 +128,9 @@ if (argv[0] === "--push" || argv[0] === "--pull") {
     .then((said) => { console.log(`desolate: ${said}`); process.exit(0); })
     .catch((err) => {
       if (!(err instanceof TransferError)) throw err;
-      if (err.busy) {
+      if (err.busy || err.defaultBranch !== undefined) {
         console.error(`desolate: ${err.message}`);
-        process.exit(BUSY_EXIT);
+        process.exit(err.busy ? BUSY_EXIT : DEFAULT_BRANCH_EXIT);
       }
       refuse(err.message);
     });

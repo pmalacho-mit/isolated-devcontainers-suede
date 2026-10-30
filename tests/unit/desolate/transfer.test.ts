@@ -121,7 +121,8 @@ describe("push", () => {
     git(project, "checkout", "--quiet", "main");
     try {
       await assert.rejects(push("acme/widgets", { registration, ask: bundler }), (err: Error) =>
-        err instanceof TransferError && /default branch/.test(err.message));
+        err instanceof TransferError && /default branch/.test(err.message) &&
+        err.defaultBranch === "main" && !err.busy, "refused as the default branch, which a caller can ask about");
       commitIn(project, "a.txt", "main moves\n");
       assert.match(await push("acme/widgets", { registration, ask: bundler, allowDefault: true }), /^pushed main/);
     } finally {

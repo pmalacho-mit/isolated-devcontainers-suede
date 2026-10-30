@@ -53,12 +53,20 @@ const KEYRING_RUN = process.env.DESOLATE_KEYRING_RUN ?? "/run/keyring";
 /** The editor's own: a project never mounts it. */
 const CACHE_ROOT = remoteCacheRoot();
 
+/** `desolate --push`'s exit status when the branch is the repository's
+ *  default and --allow-default was not given (EX_NOPERM): a caller can ask the
+ *  person, then push again with it -- the editor's panel does. */
+export const DEFAULT_BRANCH_EXIT = 77;
+
 export class TransferError extends Error {
   /** The target was busy with something else (locks.ts): try again, not fix. */
   readonly busy: boolean;
-  constructor(message: string, busy = false) {
+  /** The branch is the repository's default, which wants --allow-default. */
+  readonly defaultBranch?: string;
+  constructor(message: string, options: { busy?: boolean; defaultBranch?: string } = {}) {
     super(message);
-    this.busy = busy;
+    this.busy = options.busy ?? false;
+    if (options.defaultBranch !== undefined) this.defaultBranch = options.defaultBranch;
   }
 }
 const fail = (message: string): never => { throw new TransferError(message); };
@@ -325,7 +333,7 @@ export async function push(project: string, options: Options = {}): Promise<stri
         return !said;
       },
     );
-    if (code === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); push again once that is done", true);
+    if (code === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); push again once that is done", { busy: true });
     if (code !== 0 || !bundled) return fail(`its sandbox did not bundle the branch (exit ${code})`);
     const { branch, commit } = bundled;
 
@@ -344,7 +352,8 @@ export async function push(project: string, options: Options = {}): Promise<stri
     const head = cleanGit(["-C", cache.dir, "ls-remote", "--symref", registration.url, "HEAD"], { capture: true, ssh: options.ssh });
     if (!head.ok) fail(`could not reach ${registration.ownerRepo}: ${head.stderr.trim()}`);
     if (defaultBranchOf(head.stdout) === branch && !options.allowDefault)
-      fail(`${branch} is ${registration.ownerRepo}'s default branch; push a branch of its own, or pass --allow-default`);
+      throw new TransferError(`${branch} is ${registration.ownerRepo}'s default branch; push a branch of its own, or pass --allow-default`,
+        { defaultBranch: branch });
 
     if (!cleanGit(["-C", cache.dir, "push", "--quiet", registration.url, `${commit}:refs/heads/${branch}`], { ssh: options.ssh }).ok)
       fail(`${registration.ownerRepo} refused ${branch} (not a fast-forward? pull first)`);
@@ -412,7 +421,7 @@ export async function pull(project: string, options: Options = {}): Promise<stri
           return !said;
         },
       );
-      if (code === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); pull again once that is done", true);
+      if (code === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); pull again once that is done", { busy: true });
       if (code !== 0 || !pulled) return fail(`its sandbox did not take the fetched branches (exit ${code})`);
       return pulled;
     };

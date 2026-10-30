@@ -117,7 +117,7 @@ desolate's push and pull keep the two sides apart (`release/vscode-image/transfe
 **Push:**
 1. The target's sandbox, which sees only that project, bundles the branch checked out there, less what the editor's cache of the remote already has.
 2. The cache takes the bundle.
-3. It pushes the bundled commit to the repository `repo add` registered for the project, with that repository's key. It never force-pushes, and never pushes to the default branch unless you pass `--allow-default`.
+3. It pushes the bundled commit to the repository `repo add` registered for the project, with that repository's key. It never force-pushes, and never pushes to the default branch unless you pass `--allow-default`. Refused for that, it exits **77**, so a caller can ask you and push again with the flag; the panel does.
 
 **Pull** runs the other way:
 1. The editor's cache fetches what is new in that registered repository, and bundles what the project lacks.
