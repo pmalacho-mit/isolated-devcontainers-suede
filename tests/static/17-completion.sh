@@ -34,6 +34,7 @@ offers_at() {
 offers() { local fn=$1; shift; offers_at "$fn" $(( $# - 1 )) "$@"; }
 editor() { offers _desolate_complete_desolate desolate "$@"; }
 mac() { offers _desolate_cli cli.sh "$@"; }
+wt() { offers _desolate_complete_worktree worktree "$@"; }
 
 group "the editor's desolate: what the client accepts, where"
 assert_eq "--p: --ports, --push and --pull" "$(editor --p)" "--ports --pull --push"
@@ -90,5 +91,28 @@ for flag in $(sed -n 's/^ *case "\(--[a-z-]*\)":.*/\1/p' "$ROOT/release/vscode-i
 done
 assert_eq "args.ts's flags, by cli.sh desolate's completion" "${missing# }" ""
 assert_contains "  (and the extraction found them)" "$offered" "--no-cache"
+
+group "names a project chose are offered only as names, and run nothing (audit C1)"
+# What a hostile devcontainer can make: a directory under its .worktrees, a
+# branch, a spec in a subdirectory of a one-segment project. `compgen -W`
+# would have expanded each -- `$(...)` runs -- on TAB.
+rm -f "$WS/pwned"
+mkdir -p "$WS/acme/app/.worktrees/\$(touch $WS/pwned)" "$WS/acme/app/.worktrees/bad__name" \
+         "$WS/acme/app/.git/refs/heads/feature" "$WS/solo/evil"
+: > "$WS/acme/app/.git/refs/heads/feature/one"
+: > "$WS/acme/app/.git/refs/heads/\$(touch\${IFS}$WS/pwned)"
+: > "$WS/acme/app/.git/refs/heads/-option"
+printf '%s refs/heads/main\n%s refs/heads/release\n^%s\n' "$(printf 'a%.0s' $(seq 40))" "$(printf 'b%.0s' $(seq 40))" "$(printf 'c%.0s' $(seq 40))" > "$WS/acme/app/.git/packed-refs"
+echo '{}' > "$WS/solo/evil/.devcontainer.json"
+assert_eq "the editor offers the worktree that is a name, and not the one that is a command" "$(editor acme/app --worktree "")" "wip"
+assert_eq "  nor one no volume namespace could hold" "$(editor --stop acme/app --worktree b)" ""
+assert_eq "branches, from the ref files -- loose and packed, never git: the spelled ones" "$(wt add acme/app wt "")" "feature/one main release"
+assert_eq "a spec inside a project does not make a project" "$(editor --push "")" "acme/app solo"
+assert_eq "the Mac's cli.sh: the same worktrees" "$(mac desolate acme/app --worktree "")" "wip"
+assert_eq "  the same projects" "$(mac desolate "")" "acme/app solo"
+_desolate_cli_secrets() { printf '%s\n' 'GH_TOKEN' '$(touch '"$WS"'/pwned)' 'has space'; }
+assert_eq "  secret names, filtered too" "$(mac secret rm "")" "GH_TOKEN"
+assert_eq "nothing ran" "$([ -e "$WS/pwned" ] && echo ran || echo clean)" "clean"
+assert_eq "what is offered matches the typed prefix, as before" "$(wt add acme/app wt fe)" "feature/one"
 
 summary
