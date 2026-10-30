@@ -7,7 +7,7 @@ desolate itself only provides isolated development environments, plus a few prim
 | Layer | What it does | What it never does |
 | --- | --- | --- |
 | **desolate** (the stack) | isolated devcontainers and worktrees; pushes and pulls with your deploy keys (`desolate --push/--pull`); the status each agent sets (`/desolate/status`); the three suede primitives (`./cli.sh suede`) | decide anything about issues, PRs or agents |
-| **`lib/gh-dispatch.sh`** (the dispatch loop) | turns GitHub issues labelled `desolate:run` into worktrees with an agent in each; relays the agent's status (comments on orange/red, asks you to push on green, opens the draft PR or takes the one you opened); removes the worktree when the issue closes, or leaves it to you, said once, when it holds work | write code, push, or merge |
+| **`lib/gh-dispatch.sh`** (the dispatch loop) | turns GitHub issues labelled `desolate:run` into worktrees with an agent in each; relays the agent's status to you (a notification on orange, red and gray; asks you to push on green; opens the draft PR, or takes the one you opened), and never posts the agent's words to GitHub; removes the worktree when the issue closes, or leaves it to you, said once, when it holds work | write code, push, or merge |
 | **`claude/claude-helper.sh`** (the agent driver) | Claude Code in a tmux session in a worktree, on your subscription token; installs tmux, claude and git-subrepo when missing; turns Claude's own events into statuses | choose what to work on |
 | **the Claude agent** (inside the devcontainer) | reads the issue, works, commits, sets its status, coordinates through `board` and `note` | push, merge, or reach GitHub: it has no credentials |
 | **`suede/suede-factory.sh`** (the suede connector) | watches the stack's projects for changes to suede dependencies, proposes them upstream, files the review and sync issues, links and replaces PRs | start agents (it files issues, the dispatcher starts the agents), push agent work, or merge |
@@ -69,7 +69,7 @@ sequenceDiagram
   H->>A: claude in tmux, in the worktree
   A->>A: work, commit, /desolate/status set blue
   A-->>L: status orange (a question)
-  L->>I: comment the question
+  L->>You: notify the question (never on GitHub)
   You->>A: answer it (claude-helper attach)
   A-->>L: status green
   L->>You: review it, then push
@@ -101,10 +101,12 @@ The suede factory keeps its own state in a second marker, `<!-- suede-factory: {
 
 **Statuses** an agent sets with `/desolate/status`, as the dispatcher reads them:
 - **blue:** working;
-- **orange:** a question for you, commented on the issue;
-- **red:** stuck;
+- **orange:** a question for you, by a notification;
+- **red:** stuck, by a notification;
 - **green:** ready, so you're asked to push;
-- **gray:** withdrawn: it recommends not merging, which is said on the issue and its PR.
+- **gray:** withdrawn: it recommends not merging, by a notification.
+
+**None of it reaches GitHub.** `gh` is your login, so anything the dispatcher posted would be posted as you, and an agent's words are unvetted. They come to you instead: in the dispatcher's terminal, as a macOS notification, and in the panel's **Needs you**. The draft PR it opens says only which issue it closes.
 
 ## What's here
 

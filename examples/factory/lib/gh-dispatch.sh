@@ -34,13 +34,19 @@
 #        the agent's own access broken (agent_blocked: a failed login, say) --
 #                       you are told, here and by a notification, and asked to
 #                       fix it when this runs in a terminal; then agent_resume;
-#        orange, red -- a comment on the issue, once per status;
+#        orange, red -- told here and by a notification, once per status;
 #        green       -- you are told to review and push it (`desolate --push`,
 #                       or the panel's Review & Push); once GitHub has issue/<n>, a
-#                       draft PR is opened for it -- or the one already open
-#                       for that branch is taken, and made to close the issue;
+#                       draft PR is opened for it, saying only which issue it
+#                       closes -- or the one already open for that branch is
+#                       taken, and made to close the issue;
 #        gray        -- withdrawn: the agent recommends this not be merged;
-#                       said on the issue (and its PR), once per status;
+#                       told here and by a notification, once per status.
+#
+# Nothing an agent writes reaches GitHub through this: not its question, not
+# its reason for withdrawing, not its line on being done. gh is YOUR login,
+# so anything this posted would be posted as you; an agent's words are for you
+# to read here, or in the panel's Needs you, and to pass on if you choose.
 #
 # and for every worktree it started whose issue is no longer open: stop it and
 # `cli.sh worktree remove` it, which refuses one holding uncommitted work. One
@@ -122,7 +128,7 @@ Say how it is going with $STATUS_HELPER; a human sees it beside this worktree:
   set blue "<what you are doing>" while working;
   set orange "<your question>" when you need a human, then stop;
   set red "<what failed>" when you cannot go on;
-  set green "<one line for the PR>" when the work is committed on $4;
+  set green "<one line on what is ready, for the human>" when the work is committed on $4;
   set gray "withdrawn: <why>" if you conclude this should not be merged.
 Other agents may be working in this repository too: read \`$STATUS_HELPER board\` when you start and before you finish,
 and leave a \`$STATUS_HELPER note\` when they should know something.
@@ -157,10 +163,10 @@ Closes #$n" >/dev/null 2>&1 && log "#$n: that PR now closes it" || log "#$n: cou
     fi
     return
   fi
+  # The issue's title, and the issue it closes: never the agent's own words,
+  # which this would post as you (gh is your login).
   if gh pr create -R "$REPO" --draft --head "$branch" --base "$base" \
-    --title "$title" --body "$message
-
-Closes #$n" > "$STATE/$name.pr" 2> "$STATE/$name.pr-error"; then
+    --title "$title" --body "Closes #$n" > "$STATE/$name.pr" 2> "$STATE/$name.pr-error"; then
     log "#$n: draft PR $(cat "$STATE/$name.pr")"
   else
     rm -f "$STATE/$name.pr"
@@ -205,12 +211,14 @@ dispatch_tick() {
       : > "$STATE/.issues-off"
       return 0
     fi
-    log "$REPO: issues not read: $(tail -n 1 "$STATE/.issues-error")"
-    return 1
+    # A GitHub that did not answer (a 504, a sleeping Mac): this tick ends,
+    # and nothing it did not read is taken for closed.
+    log "$REPO: issues not read ($(tail -n 1 "$STATE/.issues-error")); trying again next tick"
+    return 0
   fi
   rm -f "$STATE/.issues-off"
   statuses=$("$CLI" desolate --status --json "$PROJECT" </dev/null) && jq -e 'type == "array"' <<< "$statuses" >/dev/null 2>&1 \
-    || { log "$PROJECT: its worktrees not read"; return 1; }
+    || { log "$PROJECT: its worktrees not read; trying again next tick"; return 0; }
   running=$("$CLI" desolate --list --json | sed -n '/^\[/p' | tail -n 1)
   local can_start=1
   dispatch_unblock "$statuses" || can_start=""
@@ -265,10 +273,11 @@ dispatch_tick() {
     agent_blocked "$color" "$message" && continue    # the agent's own access: ours to fix, not the issue's
     case "$color" in
       orange|red)
+        # Here and by a notification -- never on the issue, as you.
         [ "$(cat "$STATE/$name.told" 2>/dev/null)" = "$updated" ] && continue
-        gh issue comment "$n" -R "$REPO" --body "desolate: **$color** -- $message" >/dev/null
-        echo "$updated" > "$STATE/$name.told"
-        log "#$n: $color, said on the issue" ;;
+        if [ "$color" = orange ]; then notify "#$n asks ($PROJECT@$name): $message"
+        else notify "#$n is stuck ($PROJECT@$name): $message"; fi
+        echo "$updated" > "$STATE/$name.told" ;;
       green)
         if [ -n "$pr" ]; then
           [ "$(cat "$STATE/$name.push" 2>/dev/null)" = "$updated" ] && continue
@@ -279,10 +288,8 @@ dispatch_tick() {
         fi ;;
       gray)
         [ "$(cat "$STATE/$name.told" 2>/dev/null)" = "$updated" ] && continue
-        gh issue comment "$n" -R "$REPO" --body "desolate: the agent **withdrew** -- $message. It recommends this not be merged." >/dev/null
-        [ -z "$pr" ] || gh pr comment "$pr" -R "$REPO" --body "desolate: the agent working on #$n **withdrew** -- $message. It recommends this not be merged." >/dev/null
-        echo "$updated" > "$STATE/$name.told"
-        notify "#$n: the agent withdrew ($message)" ;;
+        notify "#$n: the agent withdrew ($message) -- it recommends this not be merged"
+        echo "$updated" > "$STATE/$name.told" ;;
     esac
   done < <(jq -c '.[]' <<< "$issues")
 
@@ -299,11 +306,18 @@ dispatch_tick() {
       continue
     fi
     log "#$n: no longer open; stopping and removing $name"
-    "$CLI" desolate "$PROJECT" --worktree "$name" --stop </dev/null || true
+    "$CLI" desolate "$PROJECT" --worktree "$name" --stop </dev/null >/dev/null || true
     if out=$("$CLI" worktree remove "$PROJECT" "$name" </dev/null 2>&1); then
       mv "$started" "$started.done"
     else
-      log "#$n: $name was not removed ($(printf '%s\n' "$out" | tail -n 1)) -- it is yours now: ./cli.sh worktree remove $PROJECT $name [--force]"
+      # Why, as desolate said it -- its first line of reason, not the hint it
+      # ends with -- and the first files, when it is work it would lose.
+      local why files
+      why=$(printf '%s\n' "$out" | grep -m 1 -E 'has uncommitted|^desolate: ' | sed 's/^desolate: //; s/:$//')
+      [ -n "$why" ] || why=$(printf '%s\n' "$out" | grep -v '^ *$' | tail -n 1)
+      files=$(printf '%s\n' "$out" | sed -n '/has uncommitted or untracked files:/,/^commit or stash/p' | sed '1d;$d' \
+        | sed 's/^ *//' | head -n 3 | paste -sd, - | sed 's/,/, /g')
+      log "#$n: $name was not removed: $why${files:+ ($files)} -- it is yours now: ./cli.sh worktree remove $PROJECT $name [--force]"
       mv "$started" "$started.kept"
     fi
   done

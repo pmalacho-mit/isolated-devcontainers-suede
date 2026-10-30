@@ -83,7 +83,7 @@ Each tick of `suede-factory.sh`:
 
 4. **The agent works.** It runs in a worktree of the dependency, on the PR's branch. Other agents working on proposals into the same dependency are in the same repository, and coordinate through `/desolate/status board` and `note`. One can carry another's change; the one that hands its change over finishes `gray "withdrawn: …"`. When an agent finishes:
    - **green:** you're asked to review it and push it to the PR (the panel's Review & Push, or `desolate --push --worktree <name> <project>`), then merge it;
-   - **gray:** withdrawn; it's said on the issue and the PR.
+   - **gray:** withdrawn; you're told by a notification. The dispatcher posts none of an agent's words to GitHub, since they'd go out as you.
 5. **The dependency released**, i.e. its `release` branch moved, which happens after a merge publishes. Two kinds of consumer get a sync issue, `suede:sync`, release dependencies first:
    - **proposers:** consumers whose proposal was merged into this release. Their issue was closed as completed, and its PR is merged.
    - **blocked consumers:** those that ship the dependency as a release dependency while their copy still differs from its pin. They can't publish until they sync, even when their change was carried into someone else's PR.

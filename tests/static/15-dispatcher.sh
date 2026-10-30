@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # examples/factory's dispatcher (lib/gh-dispatch.sh), executed against stand-in
 # `gh` and `cli.sh`: --all over the stack's projects, an issue whose marker
-# names an existing PR's branch, and what green and gray do with it; a PR you
+# names an existing PR's branch, and what green, gray, orange and red do with
+# it -- none of the agent's words reaching GitHub, which would be as you; a PR you
 # opened yourself, issues that cannot be read, and worktrees of closed issues;
 # a target busy or not answering yet, and a ^C mid-start; what counts toward
 # --max-agents -- an agent whose worktree runs.
@@ -43,7 +44,14 @@ case "$1 $2" in
   "desolate --list")
     [ ! -e "$STUB_DIR/list-fails" ] || { echo "desolate: cannot reach the daemon" >&2; exit 1; }
     jq -cRn '[inputs | select(length > 0) | split(" ") | {project: .[0], worktree: .[1]}]' < "$STUB_DIR/running" ;;
-  "worktree remove") [ ! -e "$STUB_DIR/remove-fails" ] || { echo "desolate: issue-3 has uncommitted changes" >&2; exit 1; } ;;
+  "worktree remove")
+    if [ -e "$STUB_DIR/remove-fails" ]; then
+      # As desolate says it: the reason, the files, and a hint last.
+      printf '%s\n' "acme/app@issue-3 has uncommitted or untracked files:" "  ?? repro.html" "  M src/editor.ts" \
+        "  ?? notes.md" "  ?? more.txt" "commit or stash them, or discard them with:" \
+        "  ./cli.sh worktree remove acme/app issue-3 --force   (on your Mac)" >&2
+      exit 3
+    fi ;;
   "desolate acme/app")
     [ ! -e "$STUB_DIR/start-busy" ] || exit 75
     [ ! -e "$STUB_DIR/start-slow" ] || sleep 30 ;;
@@ -53,7 +61,8 @@ esac
 if [ "$1" = desolate ] && [ "${3:-}" = --worktree ]; then
   case "${5:-}" in
     "") echo "$2 $4" >> "$STUB_DIR/running" ;;
-    --stop) grep -vxF "$2 $4" "$STUB_DIR/running" > "$STUB_DIR/running.new"; mv "$STUB_DIR/running.new" "$STUB_DIR/running" ;;
+    --stop) grep -vxF "$2 $4" "$STUB_DIR/running" > "$STUB_DIR/running.new"; mv "$STUB_DIR/running.new" "$STUB_DIR/running"
+            echo "stopped $2@$4 (container kept, so restarting is fast;" ;;
   esac
 fi
 exit 0
@@ -103,7 +112,8 @@ assert_not_contains "and no PR is created for the widget" "$(cat "$STUB/calls")"
 touch "$STUB/app-pushed"
 tick
 assert_contains "the plain issue's PR is opened once its branch is there" "$(cat "$STUB/calls")" \
-  "gh pr create -R acme/app --draft --head issue/3 --base main"
+  "gh pr create -R acme/app --draft --head issue/3 --base main --title Plain work --body Closes #3"
+assert_not_contains "  its description is not the agent's words" "$(grep 'pr create' "$STUB/calls")" "app says"
 
 group "green, with a PR you opened yourself: that one is taken, and made to close the issue"
 rm -f "$STUB/state/acme__app/issue-3.pr"
@@ -118,20 +128,26 @@ tick
 assert_not_contains "one that closes it already is left as it is" "$(cat "$STUB/calls")" "gh pr edit"
 rm -f "$STUB/open-pr"
 
-group "gray: withdrawn, said on the issue and its PR, once"
+group "gray, orange, red: told to you, once -- never on GitHub, as you"
 statuses gray ""
 tick
-CALLS=$(cat "$STUB/calls")
-assert_contains "on the issue" "$CALLS" "gh issue comment 7 -R acme/widget --body desolate: the agent **withdrew** -- widget says."
-assert_contains "on its PR" "$CALLS" "gh pr comment 12 -R acme/widget"
+assert_contains "gray: you are told it withdrew, and why" "$(cat "$STUB/out")" "#7: the agent withdrew (widget says) -- it recommends this not be merged"
+assert_not_contains "  nothing on the issue" "$(cat "$STUB/calls")" "gh issue comment"
+assert_not_contains "  nothing on its PR" "$(cat "$STUB/calls")" "gh pr comment"
 tick
-assert_not_contains "and not again for the same status" "$(cat "$STUB/calls")" "gh issue comment 7"
+assert_not_contains "  and not again for the same status" "$(cat "$STUB/out")" "withdrew"
+statuses orange red
+tick
+assert_contains "orange: its question, to you" "$(cat "$STUB/out")" "#7 asks (acme/widget@issue-7): widget says"
+assert_contains "red: what failed, to you" "$(cat "$STUB/out")" "#3 is stuck (acme/app@issue-3): app says"
+assert_not_contains "  nothing on GitHub" "$(cat "$STUB/calls")" "comment"
 
 group "issues that cannot be read: the tick ends, and nothing is removed"
 statuses green green
 echo "HTTP 502: Bad Gateway" > "$STUB/app-issues-fail"
 tick
-assert_contains "it says why" "$(cat "$STUB/out")" "acme/app: issues not read: HTTP 502: Bad Gateway"
+assert_contains "it says why, once" "$(cat "$STUB/out")" "acme/app: issues not read (HTTP 502: Bad Gateway); trying again next tick"
+assert_not_contains "  and not a second time as a failed tick" "$(cat "$STUB/out")" "tick failed"
 assert_not_contains "and does not take the issue for closed" "$(cat "$STUB/calls")" "worktree remove acme/app"
 echo "the 'acme/app' repository has disabled issues" > "$STUB/app-issues-fail"
 tick
@@ -145,7 +161,9 @@ echo '[]' > "$STUB/app-issues"
 touch "$STUB/remove-fails"
 tick
 assert_contains "it is stopped and removed" "$(cat "$STUB/calls")" "cli worktree remove acme/app issue-3"
-assert_contains "  the refusal is said, as it was given" "$(cat "$STUB/out")" "issue-3 was not removed (desolate: issue-3 has uncommitted changes) -- it is yours now"
+assert_contains "  the refusal says why, with the first files -- not the hint it ends with" "$(cat "$STUB/out")" \
+  "issue-3 was not removed: acme/app@issue-3 has uncommitted or untracked files (?? repro.html, M src/editor.ts, ?? notes.md) -- it is yours now"
+assert_not_contains "  and its own stop's chatter is not in the log" "$(cat "$STUB/out")" "container kept"
 assert_contains "  and its agent no longer counts as working" "$(ls "$STUB/state/acme__app")" "issue-3.agent.kept"
 tick
 assert_not_contains "  not tried again" "$(cat "$STUB/calls")" "worktree remove"

@@ -272,7 +272,7 @@ $carry_section$others_section
 ### What to do
 - You are on \`$branch\`, the branch of #$number. Commit there; do not push -- a human pushes it to the PR, and merges.
 - Run $dep's tests.
-- Finish with \`green "<one line for the PR>"\` when it is ready to merge, or \`gray "withdrawn: <why>"\` if it should not be.
+- Finish with \`green "<one line on what is ready, for the human>"\` when it is ready to merge, or \`gray "withdrawn: <why>"\` if it should not be.
 
 <!-- desolate-dispatch: $dispatch -->
 <!-- suede-factory: $factory -->
@@ -470,7 +470,7 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.\$bundle.insteadOf" GIT_CONFIG_VALUE_0=
 Then:
 - Resolve any conflicts with $consumer's own changes to \`$dir\`: keep what $consumer still needs that the release does not have.
 - Run $consumer's tests.$deps_check
-- Finish with \`green "<one line for the PR>"\`; a human pushes it, and a draft PR follows.
+- Finish with \`green "<one line on what is ready, for the human>"\`; a human pushes it, and a draft PR follows.
 
 <!-- desolate-dispatch: $dispatch -->
 <!-- suede-factory: $factory -->

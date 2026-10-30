@@ -160,8 +160,8 @@ Per issue labelled `desolate:run`, each tick:
 2. If no agent was started there: start one, with the issue as its task and a pointer to `desolate-status`.
 3. Read `./cli.sh desolate --status --json`:
    - **the agent's own access broken** (for Claude, `red` "claude: authentication failed"): you are told, in the terminal, with a bell, and by a macOS notification. In a terminal you are asked for a new token, and then each agent that stopped on it carries on its conversation. No new agent starts while this waits.
-   - **`orange` or `red`:** a comment on the issue, once per status.
-   - **`green`:** you are told, once, to review the branch and push it (the panel's **Review & Push**, or `desolate --push`). As soon as GitHub has `issue/<n>`, the dispatcher opens a draft PR for it (`gh pr create --draft`).
+   - **`orange`, `red` or `gray`:** you are told, once per status, in the terminal and by a macOS notification. Never on GitHub: `gh` is your login, and an agent's words would go out as yours.
+   - **`green`:** you are told, once, to review the branch and push it (the panel's **Review & Push**, or `desolate --push`). As soon as GitHub has `issue/<n>`, the dispatcher opens a draft PR for it (`gh pr create --draft`), whose description says only which issue it closes.
 4. When the issue is closed: stop and `worktree remove` (refused while it holds uncommitted work).
 
 Another agent is five shell functions: `agent_ready`, `agent_start`, `agent_blocked`, `agent_renew` and `agent_resume`. See the top of `lib/gh-dispatch.sh`.
