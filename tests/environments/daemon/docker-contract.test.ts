@@ -16,6 +16,11 @@ import { randomBytes } from "node:crypto";
 
 import { createDocker, type Runner } from "../../../release/vscode-image/docker.ts";
 import { overlayOptions } from "../../../release/vscode-image/overlay.ts";
+import { parseWorktreeChanges } from "../../../release/vscode-image/docker.ts";
+import {
+  CHECKOUT_IMAGE,
+  SANDBOX_LABEL,
+} from "../../../release/vscode-image/worktrees.ts";
 
 /** The real thing, for the shapes this suite exercises. `build` throws rather
  *  than being stubbed silently: nothing here derives an image, and a test that
@@ -262,5 +267,82 @@ describe("container queries against a real container", () => {
     // recreateRelays polls this in a loop; a throw there would abort the start
     // instead of retrying.
     assert.equal(docker.container.state(`${tag}-absent`), "");
+  });
+});
+
+describe("a worktree checked out in its sandbox", () => {
+  // The editor creates worktrees with --no-checkout; this is the step that
+  // fills one in. Run for real, because the claim is about WHERE the
+  // repository's own code executes, and only a real container can say.
+  test("lands the files, and the repository's hook runs inside the sandbox", () => {
+    const store = volume("checkout");
+    docker.volume.create(store);
+    const project = "/w/acme/widgets";
+    const dir = `${project}/.worktrees/alpha`;
+    const seed = [
+      "set -e",
+      `git init -q -b main ${project}`,
+      `cd ${project}`,
+      "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m root",
+      "echo hello > greeting.txt && git add greeting.txt",
+      "git -c user.email=t@t -c user.name=t commit -q -m greeting",
+      `git worktree add -q --no-checkout -b alpha ${dir}`,
+      // Records which system it ran on: alpine's release file exists only in
+      // the sandbox image, never in the editor's.
+      `printf '#!/bin/sh\\ncat /etc/alpine-release > ${dir}/.hook-ran-on\\n' > .git/hooks/post-checkout`,
+      "chmod +x .git/hooks/post-checkout",
+      "chown -R 1000:1000 /w",
+    ].join("\n");
+    assert.equal(
+      realRunner.status([
+        "run", "--rm", "-v", `${store}:/w`, "--entrypoint", "sh",
+        CHECKOUT_IMAGE, "-c", seed,
+      ]),
+      0,
+      "could not seed the repository",
+    );
+
+    const sandbox = {
+      image: CHECKOUT_IMAGE,
+      label: `${SANDBOX_LABEL}=test`,
+      dir,
+      mounts: [`type=volume,source=${store},target=/w`],
+      seconds: 120,
+    };
+    const code = docker.checkoutWorktree({ ...sandbox, caFile: "/nonexistent/ca.pem" });
+    assert.equal(code, 0, "the sandboxed checkout failed");
+
+    const read = (path: string) =>
+      realRunner.output(["run", "--rm", "-v", `${store}:/w`, HELPER, "cat", path]);
+    assert.equal(read(`${dir}/greeting.txt`), "hello");
+    assert.match(read(`${dir}/.hook-ran-on`), /^\d+\.\d+/);
+    assert.equal(
+      realRunner.status(["run", "--rm", "-v", `${store}:/w`, HELPER, "test", "-f",
+        `${project}/.git/worktrees/alpha/index`]),
+      0,
+      "no index: isPopulated would call this worktree empty and check it out again",
+    );
+
+    // The removal check, in the same sandbox: the hook's own marker file is
+    // untracked, so even a fresh checkout is not clean -- which is right.
+    assert.deepEqual(parseWorktreeChanges(docker.worktreeChanges(sandbox)), ["?? .hook-ran-on"]);
+    realRunner.status(["run", "--rm", "-v", `${store}:/w`, HELPER, "sh", "-c",
+      `rm ${dir}/.hook-ran-on && echo changed > ${dir}/greeting.txt`]);
+    assert.deepEqual(parseWorktreeChanges(docker.worktreeChanges(sandbox)), [" M greeting.txt"]);
+    assert.equal(
+      parseWorktreeChanges(docker.worktreeChanges({ ...sandbox, dir: "/w/not-a-worktree" })),
+      null,
+      "a check that could not run must not read as clean",
+    );
+
+    // Measured: git exits 0 with only a WARNING for a directory it cannot
+    // read, so root-owned output would have been reported as nothing at all.
+    realRunner.status(["run", "--rm", "-v", `${store}:/w`, HELPER, "sh", "-c",
+      `mkdir ${dir}/root-owned && echo precious > ${dir}/root-owned/db && chmod 700 ${dir}/root-owned`]);
+    assert.equal(
+      parseWorktreeChanges(docker.worktreeChanges(sandbox)),
+      null,
+      "a directory the sandbox could not read was reported as clean",
+    );
   });
 });

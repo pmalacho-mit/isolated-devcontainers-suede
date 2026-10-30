@@ -11,9 +11,11 @@ import assert from "node:assert/strict";
 
 import {
   allocatePorts,
+  ingressPorts,
+  movePort,
   ownRelayPorts,
+  portBase,
   portMapFile,
-  portRange,
   publishedPorts,
   PortRangeError,
   PortsExhaustedError,
@@ -36,54 +38,52 @@ const thrown = (fn: () => unknown): Error => {
 };
 
 const world = (over: Partial<PortWorld> = {}): PortWorld => ({
-  range: { min: 8080, max: 8090 },
+  base: 8080,
   published: new Map(),
   ownRelayPorts: new Set(),
+  ownForwards: new Set(),
   previous: new Map(),
   ...over,
 });
 
-describe("portRange", () => {
-  test("defaults match the range dind publishes", () => {
-    assert.deepEqual(portRange({}), { min: 8080, max: 8119 });
+describe("portBase", () => {
+  test("defaults to 8080, where the range used to start", () => {
+    assert.equal(portBase({}), 8080);
   });
 
   test("an empty string is absent, not zero", () => {
-    // `DESOLATE_PORT_MIN=` in a .env is how a variable gets unset by accident.
-    assert.deepEqual(portRange({ DESOLATE_PORT_MIN: "" }), {
-      min: 8080,
-      max: 8119,
-    });
+    // `DESOLATE_PORT_BASE=` in a .env is how a variable gets unset by accident.
+    assert.equal(portBase({ DESOLATE_PORT_BASE: "" }), 8080);
   });
 
-  test("both bounds are read", () => {
-    assert.deepEqual(
-      portRange({ DESOLATE_PORT_MIN: "9000", DESOLATE_PORT_MAX: "9002" }),
-      { min: 9000, max: 9002 },
-    );
+  test("it is read", () => {
+    assert.equal(portBase({ DESOLATE_PORT_BASE: "9000" }), 9000);
   });
 
-  test("a bound that is not a port is refused", () => {
+  test("below 1024 is refused: Lima forwards those onto the Mac's LAN", () => {
+    for (const bad of ["80", "443", "1023"])
+      assert.throws(() => portBase({ DESOLATE_PORT_BASE: bad }), /onto the Mac's LAN/, bad);
+  });
+
+  test("a base that is not a port is refused", () => {
     for (const bad of ["0", "65536", "-1", "80.5", "eighty", "8080abc"])
-      assert.throws(
-        () => portRange({ DESOLATE_PORT_MIN: bad }),
-        PortRangeError,
-        `DESOLATE_PORT_MIN='${bad}' was accepted`,
-      );
+      assert.throws(() => portBase({ DESOLATE_PORT_BASE: bad }), PortRangeError, bad);
+  });
+});
+
+describe("what the ingress is already serving", () => {
+  test("each ports/ file is a held port, holding what it forwards to", () => {
+    const held = ingressPorts(new Map([
+      ["8080", "desolate-dind:8080\n"],
+      ["8081", "desolate-dind-acme__widgets:5173\n"],
+    ]));
+    assert.deepEqual([...held], [[8080, "desolate-dind:8080"], [8081, "desolate-dind-acme__widgets:5173"]]);
   });
 
-  test("an inverted range is refused rather than yielding no ports", () => {
-    assert.throws(
-      () => portRange({ DESOLATE_PORT_MIN: "9000", DESOLATE_PORT_MAX: "8000" }),
-      PortRangeError,
-    );
-  });
-
-  test("a single-port range is legal", () => {
-    assert.deepEqual(
-      portRange({ DESOLATE_PORT_MIN: "8080", DESOLATE_PORT_MAX: "8080" }),
-      { min: 8080, max: 8080 },
-    );
+  test("files the ingress would ignore hold nothing", () => {
+    // The writers' temporary files, and anything not named as a port.
+    const held = ingressPorts(new Map([[".8080", "x"], ["8080.tmp", "x"], ["08080", "x"], ["README", "x"]]));
+    assert.equal(held.size, 0);
   });
 });
 
@@ -204,42 +204,81 @@ describe("allocatePorts", () => {
     );
   });
 
-  test("exhaustion names who holds every port in the range", () => {
-    const range = { min: 8080, max: 8082 };
-    const published = new Map([
-      [8080, "relay-for-alpha"],
-      [8081, "relay-for-beta"],
-    ]);
+  test("there is no ceiling short of 65535: past a held block, the next one", () => {
+    const published = new Map(Array.from({ length: 200 }, (_, i) => [8080 + i, `relay-${i}`] as [number, string]));
+    assert.equal(allocatePorts(world({ published }), []).get("editor"), 8280);
+  });
+
+  test("exhaustion names who holds the ports, lowest first", () => {
+    const published = new Map(
+      Array.from({ length: 65535 - 65530 + 1 }, (_, i) => [65530 + i, `relay-${i}`] as [number, string]),
+    );
     const error = thrown(() =>
-      allocatePorts(
-        world({ range, published, ownRelayPorts: new Set([8082]) }),
-        [1, 2],
-      ),
+      allocatePorts(world({ base: 65530, published, ownRelayPorts: new Set([65535]) }), [1, 2]),
     );
     assert.ok(error instanceof PortsExhaustedError);
+    assert.match(error.message, /65530\s+relay-0/);
+    assert.match(error.message, /65535\s+this project/);
+    assert.doesNotMatch(error.message, /65530\s+this project/, "a port held by another was reported as ours");
+  });
+});
 
-    // The whole point of the message: which project to stop.
-    assert.match(error.message, /8080\s+relay-for-alpha/);
-    assert.match(error.message, /8081\s+relay-for-beta/);
-    assert.match(error.message, /8082\s+this project/);
-    assert.match(error.message, /range 8080-8082 is full/);
-    // and it must not claim every port belongs to this project
-    assert.doesNotMatch(
-      error.message,
-      /8080\s+this project/,
-      "a port held by another container was reported as ours",
+describe("a target's own forwards are not a clash", () => {
+  test("a port whose ports/ file this target claimed is its to take back", () => {
+    // A start that died after claiming, or a restart: the file is still there.
+    const map = allocatePorts(world({
+      published: new Map([[8080, "desolate-dind:8080"]]),
+      ownForwards: new Set([8080]),
+      previous: new Map([["editor", 8080]]),
+    }), []);
+    assert.equal(map.get("editor"), 8080);
+  });
+
+  test("another target's is not, saved or not", () => {
+    const map = allocatePorts(world({
+      published: new Map([[8080, "desolate-dind:8080"]]),
+      previous: new Map([["editor", 8080]]),
+    }), []);
+    assert.equal(map.get("editor"), 8081);
+  });
+
+  test("and a move onto a forward of its own is allowed", () => {
+    const moved = movePort(world({
+      published: new Map([[8090, "desolate-dind:8090"]]),
+      ownForwards: new Set([8090]),
+      previous: new Map([["editor", 8080]]),
+    }), "editor", 8090);
+    assert.equal(moved.get("editor"), 8090);
+  });
+});
+
+describe("moving one label (desolate --ports --move)", () => {
+  // For when the Mac already holds a port: Lima never forwards it, and never
+  // retries (vm-loopback-forward.sh L6), so the only fix is a different port.
+  const previous = new Map([["editor", 8080], ["5173", 8081]]);
+
+  test("moves exactly the one label", () => {
+    assert.deepEqual([...movePort(world({ previous }), "5173", 9000)], [["editor", 8080], ["5173", 9000]]);
+  });
+
+  test("refuses an unknown label, saying what there is", () => {
+    assert.throws(() => movePort(world({ previous }), "3000", 9000), /no port is allocated to '3000' \(have: editor, 5173\)/);
+  });
+
+  test("refuses a port somebody else holds, naming them", () => {
+    assert.throws(
+      () => movePort(world({ previous, published: new Map([[9000, "desolate-dind:9000"]]) }), "5173", 9000),
+      /9000 is held by desolate-dind:9000/,
     );
   });
 
-  test("a port nobody publishes is reported as unknown, not as free", () => {
-    // Reaching exhaustion with an unaccounted port means the range disagrees
-    // with what dind publishes -- worth saying so rather than showing a blank.
-    const range = { min: 8080, max: 8080 };
-    const error = thrown(() =>
-      allocatePorts(world({ range, published: new Map([[8080, "x"]]) }), [1]),
-    );
-    assert.ok(error instanceof PortsExhaustedError);
-    assert.match(error.message, /8080\s+x/);
+  test("refuses one of this target's own other labels", () => {
+    assert.throws(() => movePort(world({ previous }), "5173", 8080), /already this target's 'editor'/);
+  });
+
+  test("refuses a port the ingress would not forward", () => {
+    for (const port of [80, 1023, 65536, 8080.5])
+      assert.throws(() => movePort(world({ previous }), "5173", port), PortRangeError, String(port));
   });
 });
 

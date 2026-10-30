@@ -29,6 +29,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
+  describeResolveFailure,
   labelledConfig,
   tryLocateConfig,
 } from "../../../release/vscode-image/devcontainer.ts";
@@ -92,5 +93,19 @@ describe("the config path a container is LABELLED with", () => {
       labelledConfig(dir).startsWith(dir),
       "the labelled config must live inside the workspace folder",
     );
+  });
+});
+
+describe("why a spec could not be resolved", () => {
+  test("a timeout is named as one, not quoted as the banner the CLI printed first", () => {
+    // The shape execFileSync throws when its timeout kills the child (measured).
+    const message = describeResolveFailure({ code: "ETIMEDOUT", signal: "SIGTERM", stderr: "[t] @devcontainers/cli 0.88.0.\n" }, 120000);
+    assert.match(message, /did not finish in 120s/);
+  });
+
+  test("an ordinary failure quotes the end of what the CLI said", () => {
+    const message = describeResolveFailure({ status: 1, stderr: `${"x".repeat(1000)}\nError: Feature not found` }, 120000);
+    assert.doesNotMatch(message, /did not finish/);
+    assert.match(message, /Error: Feature not found$/);
   });
 });

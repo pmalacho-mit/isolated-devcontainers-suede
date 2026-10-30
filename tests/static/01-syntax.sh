@@ -147,9 +147,9 @@ while IFS= read -r line; do
   [ -n "$line" ] || continue
   case "$line" in
     *with-ca*)     pass "cli.sh exec into the editor uses with-ca" ;;
-    # These three are the /usr/local/bin wrappers checked immediately above --
-    # each one already exec's with-ca itself, so naming it here is not a bypass.
-    *newrepo*|*desolate-run*|*worktree*) pass "cli.sh exec runs a self-wrapping command" ;;
+    # These are the /usr/local/bin wrappers checked immediately above -- each
+    # one already exec's with-ca itself, so naming it here is not a bypass.
+    *newrepo*|*desolate-run*|*worktree*|*'"$CONTAINER" desolate "$@"'*|*'"$CONTAINER" desolate "--$CMD" "$@"'*) pass "cli.sh exec runs a self-wrapping command" ;;
     *)             fail "cli.sh exec into the editor uses with-ca" \
                         "bare exec: ${line#*exec }" ;;
   esac

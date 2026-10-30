@@ -40,6 +40,17 @@ assert_contains "it lists a secret with its allowlist" "$OUT" "MYAPP-OPENAI-KEY"
 assert_contains "it includes every host, not just the first" "$OUT" "*.example.com"
 assert_contains "it lists every secret" "$OUT" "OTHER-KEY"
 
+# A scope and a header confinement travel as counts, then the projects, the
+# headers, the hosts -- so each is told apart, and nothing reads as a host.
+SCOPED_FIXTURE='{"secrets":{"DEPLOY-KEY":{"value":"x","hosts":["api.github.com"],"projects":["acme/widgets","solo"]},"OPEN-KEY":{"value":"y","hosts":["b.com"]},"OAUTH":{"value":"z","hosts":["api.anthropic.com"],"headers":["authorization"]}}}'
+SCOPED_OUT=$(printf '%s' "$SCOPED_FIXTURE" | jq -r "$PROG" 2>&1)
+assert_eq "a scoped secret's row: name, counts, projects, hosts" \
+  "$(printf '%s\n' "$SCOPED_OUT" | grep '^DEPLOY-KEY')" "$(printf 'DEPLOY-KEY\t2\t0\tacme/widgets\tsolo\tapi.github.com')"
+assert_eq "an unscoped one's: two zeros, then its hosts" \
+  "$(printf '%s\n' "$SCOPED_OUT" | grep '^OPEN-KEY')" "$(printf 'OPEN-KEY\t0\t0\tb.com')"
+assert_eq "a confined one's: its headers before its hosts" \
+  "$(printf '%s\n' "$SCOPED_OUT" | grep '^OAUTH')" "$(printf 'OAUTH\t0\t1\tauthorization\tapi.anthropic.com')"
+
 # The whole point of the TSV shape: nothing for a remote shell to re-parse.
 case "$PROG" in
   *'"'*) fail "the program survives 'colima ssh' re-parsing" \
@@ -150,5 +161,216 @@ V4=$(printf '%s' "$GH_FIXTURE" | jq -r '.git[] | select(contains(":") | not)' | 
 V6=$(printf '%s' "$GH_FIXTURE" | jq -r '.git[] | select(contains(":"))' | tr '\n' ' ')
 assert_not_contains "the v4 filter excludes IPv6 ranges" "$V4" ":"
 assert_contains "the v6 filter keeps IPv6 ranges" "$V6" "2a0a"
+
+group "the 'export' archive"
+
+# Extracted, not retyped, and run against a real directory tree: the claim is
+# about what realpath and tar do with planted symlinks, which only running it
+# shows. Judged on the archive's own listing, not on a printed path.
+EXPORT=$(awk "/^EXPORT_TAR_SH='/{p=1; sub(/^EXPORT_TAR_SH='/, \"\")} p{ if (sub(/'\$/, \"\")) { print; exit } print }" "$RELEASE/cli.sh")
+if [ -z "$EXPORT" ]; then
+  fail "found EXPORT_TAR_SH in cli.sh" "awk matched nothing -- was it renamed or reformatted?"
+else
+  pass "found EXPORT_TAR_SH in cli.sh"
+  WS=$(mktemp -d)
+  mkdir -p "$WS/acme/widgets/dist" "$WS/acme/gadgets" "$WS/solo"
+  echo built > "$WS/acme/widgets/dist/app.js"
+  echo private > "$WS/acme/gadgets/secret.txt"
+  ln -s ../gadgets "$WS/acme/widgets/escape"
+  ln -s dist "$WS/acme/widgets/inside"
+  ln -s /etc "$WS/acme/widgets/dist/etc-link"
+  # The case the first version missed: a single-segment project whose child
+  # links to ANOTHER project, named as if it were an owner/repo.
+  ln -s ../acme/gadgets "$WS/solo/b"
+  archive() { sh -c "$EXPORT" sh "$WS" "$@"; }
+  listing() { archive "$@" 2>/dev/null | tar -tf - 2>/dev/null | sort | tr '\n' ' '; }
+
+  OUT=$(listing acme/widgets dist)
+  if [ "$OUT" = "dist/ dist/app.js dist/etc-link " ]; then pass "a directory in the project is archived under its own name"
+  else fail "a directory in the project is archived under its own name" "got: $OUT"; fi
+  case "$(listing acme/widgets)" in
+    "widgets/ "*) pass "no path means the whole project" ;;
+    *) fail "no path means the whole project" "got: $(listing acme/widgets)" ;;
+  esac
+  if archive acme/widgets dist | tar -tvf - 2>/dev/null | grep -q 'etc-link -> /etc'; then
+    pass "a link inside is archived AS a link, never followed"
+  else fail "a link inside is archived AS a link, never followed" "tar followed it or dropped it"; fi
+  OUT=$(listing acme/widgets inside)
+  if [ "$OUT" = "dist/ dist/app.js dist/etc-link " ]; then pass "a symlink that stays inside is followed to its target"
+  else fail "a symlink that stays inside is followed to its target" "got: $OUT"; fi
+  for case in "escape:4" "../gadgets/secret.txt:4" "nope:3"; do
+    rel=${case%:*} want=${case#*:}
+    archive acme/widgets "$rel" >/dev/null 2>&1; RC=$?
+    if [ "$RC" = "$want" ]; then pass "acme/widgets '$rel' exits $want"
+    else fail "acme/widgets '$rel' exits $want" "rc=$RC"; fi
+  done
+  for project in solo/b .. . "" /etc acme/widgets/../gadgets/.. acme/ acme/widgets/dist .hidden nosuch; do
+    archive "$project" . >/dev/null 2>&1; RC=$?
+    if [ "$RC" = 2 ]; then pass "'$project' is not a project"
+    else fail "'$project' is not a project" "rc=$RC"; fi
+  done
+  rm -rf "$WS"
+fi
+
+group "the proxy's AUDIT lines are read as journald holds them"
+# Measured on the VM, 2026-10-26: mitmdump under systemd prefixes every line
+# with its time, and every reader here anchored on `^AUDIT` -- so `proxy audit`
+# printed nothing and preflight's leak oracle failed against a working addon.
+# These are that VM's lines, verbatim, and the same lines unprefixed.
+VM_LEAK='[12:05:13.007] AUDIT verdict=LEAK-SUSPECT method=GET host=example.com path=/desolate-manual-probe secrets=- suspect=DESOLATE-SELFTEST-PLACEHOLDER project=-'
+VM_ALLOW='[12:04:04.855] AUDIT verdict=ALLOW method=GET host=raw.githubusercontent.com path=/x secrets=- suspect=- project=pmalacho-mit/isolated-devcontainers-suede'
+VM_PROSE="[12:05:13.007] LEAK-SUSPECT placeholder 'DESOLATE-SELFTEST-PLACEHOLDER' sent toward 'example.com' -- passed UNSUBSTITUTED"
+JOURNAL=$(printf '%s\n' "$VM_PROSE" "$VM_LEAK" "$VM_ALLOW" "${VM_ALLOW#\[*\] }")
+FIELDS_SED=$(sed -n "s/^AUDIT_FIELDS_SED='\(.*\)'$/\1/p" "$RELEASE/cli.sh")
+assert_eq "proxy audit reads every AUDIT line, prefixed or not, and no prose" \
+  "$(printf '%s\n' "$JOURNAL" | sed -nE "$FIELDS_SED" | cut -d' ' -f1 | tr '\n' ' ')" \
+  "verdict=LEAK-SUSPECT verdict=ALLOW verdict=ALLOW "
+eval "$(sed -n '/^leak_suspect_line()/p' "$RELEASE/cli.sh")"
+assert_eq "proxy test finds its probe's line by path" \
+  "$(printf '%s\n' "$JOURNAL" | leak_suspect_line desolate-manual-probe)" "$VM_LEAK"
+# The oracle's own pattern, as preflight.sh writes it; anchored, or it proves
+# nothing -- a bare path would match on its own.
+PREFLIGHT_RE=$(sed -nE 's/.*grep -aE? "(\^.*AUDIT verdict=LEAK-SUSPECT \.\* path=\/)\$marker ".*/\1/p' "$RELEASE/preflight.sh")
+case "$PREFLIGHT_RE" in
+  "^"*) assert_eq "preflight's leak oracle matches it too" \
+          "$(printf '%s\n' "$JOURNAL" | grep -aE "${PREFLIGHT_RE}desolate-manual-probe " | tail -n 1)" "$VM_LEAK" ;;
+  *) fail "found preflight's leak oracle pattern" "sed matched nothing anchored -- was it reformatted?" ;;
+esac
+
+group "proxy audit <n> shows n requests, not n journal lines"
+# A request writes about eight journal lines and one AUDIT line, so reading
+# `journalctl -n <n>` showed fewer than n requests -- with n=5, usually none
+# (measured on the VM, 2026-10-26). A stand-in colima serves the VM's own lines
+# and honours -n the way journalctl does.
+STUB=$(mktemp -d)
+{ for i in 1 2 3; do
+    printf '%s\n' "[12:0$i:00.000][172.19.0.2:3448$i] client connect" \
+      "[12:0$i:00.100] AUDIT verdict=ALLOW method=GET host=h$i.example path=/ secrets=- suspect=- project=acme/widgets" \
+      "      << HTTP/2.0 200 OK 1b" "[12:0$i:00.200][172.19.0.2:3448$i] client disconnect" \
+      "[12:0$i:00.200][172.19.0.2:3448$i] server disconnect 1.2.3.4:443"
+  done; } > "$STUB/journal"
+cat > "$STUB/colima" <<EOF
+#!/bin/sh
+n=10; while [ \$# -gt 0 ]; do [ "\$1" = -n ] && n=\$2; shift; done
+tail -n "\$n" "$STUB/journal"
+EOF
+chmod +x "$STUB/colima"
+assert_eq "proxy audit 2: the last two requests" \
+  "$(PATH="$STUB:$PATH" "$RELEASE/cli.sh" proxy audit 2 2>&1 | awk '{print $4}' | tr '\n' ' ')" "h2.example/ h3.example/ "
+assert_eq "proxy logs --project acme/widgets 1: its last request" \
+  "$(PATH="$STUB:$PATH" "$RELEASE/cli.sh" proxy logs --project acme/widgets 1 2>&1 | grep -o 'host=[^ ]*')" "host=h3.example"
+rm -rf "$STUB"
+
+group "proxy logs --project matches its project exactly"
+AWK=$(sed -n "s/^PROJECT_AUDIT_AWK='\(.*\)'$/\1/p" "$RELEASE/cli.sh")
+if [ -z "$AWK" ]; then
+  fail "found PROJECT_AUDIT_AWK in cli.sh" "sed matched nothing -- was it renamed or reformatted?"
+else
+  LINES='AUDIT verdict=ALLOW host=a.com project=a.b
+[12:04:04.855] AUDIT verdict=ALLOW host=d.com project=a.b
+AUDIT verdict=ALLOW host=b.com project=aXb
+AUDIT verdict=ALLOW host=c.com project=a.b/c
+[12:04:04.855] NOTE project=a.b'
+  assert_eq "only the AUDIT lines naming exactly that project, as journald holds them" \
+    "$(printf '%s\n' "$LINES" | awk -v want=" project=a.b" "$AWK" | tr '\n' '|')" \
+    "AUDIT verdict=ALLOW host=a.com project=a.b|[12:04:04.855] AUDIT verdict=ALLOW host=d.com project=a.b|"
+fi
+
+group "exec and --status: what reaches docker (docs/agents.md)"
+# A stand-in docker that logs each call's argv, one word per field, and answers
+# as the stack would: the editor running.
+STUB=$(mktemp -d)
+cat > "$STUB/docker" <<EOF
+#!/bin/sh
+printf '%s|' "\$@" >> "$STUB/calls"; echo >> "$STUB/calls"
+case "\$1" in
+  inspect) echo running ;;
+  cp) : > "\$3" ;;
+esac
+EOF
+chmod +x "$STUB/docker"
+cli() { : > "$STUB/calls"; PATH="$STUB:$PATH" DESOLATE_NO_COMPLETION_INSTALL=1 "$RELEASE/cli.sh" "$@" </dev/null 2>&1; }
+execs() { grep '^exec|' "$STUB/calls" | tr '\n' ' '; }
+
+cli exec acme/widgets --worktree issue-42 -- claude -p 'fix it, --stop' >/dev/null
+assert_eq "exec: the command after --, word for word, to the orchestrator's runner" "$(execs)" \
+  "exec|-i|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--exec|--worktree|issue-42|acme/widgets|--|claude|-p|fix it, --stop| "
+cli exec solo ls >/dev/null
+assert_eq "exec: no worktree, and no -- needed" "$(execs)" \
+  "exec|-i|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--exec|solo|--|ls| "
+OUT=$(cli exec solo --)
+assert_eq "exec with no command is refused, before docker" "$(execs)" ""
+assert_contains "and says how" "$OUT" "usage: cli.sh exec"
+
+cli push acme/widgets --worktree issue-42 >/dev/null
+assert_eq "push is the editor's desolate --push, where the keys are" "$(execs)" \
+  "exec|-i|-e|DESOLATE_PLANE=mac|desolate-vscode|desolate|--push|acme/widgets|--worktree|issue-42| "
+cli pull acme/widgets >/dev/null
+assert_eq "and pull its --pull" "$(execs)" "exec|-i|-e|DESOLATE_PLANE=mac|desolate-vscode|desolate|--pull|acme/widgets| "
+
+cli desolate --status --json acme/widgets >/dev/null
+assert_eq "desolate --status is the editor's to read, not the orchestrator's" "$(execs)" \
+  "exec|-e|DESOLATE_PLANE=mac|desolate-vscode|desolate|--status|--json|acme/widgets| "
+rm -rf "$STUB"
+
+group "secret add --headers, through a stand-in VM"
+# `secret add` runs its store in the VM over `colima ssh`. A stand-in colima
+# runs that same script here, against a scratch store: the one change it makes
+# is where the store lives (and who owns it).
+VMSTUB=$(mktemp -d)
+cat > "$VMSTUB/colima" <<EOF
+#!/usr/bin/env bash
+while [ "\$1" != -- ]; do shift; done; shift
+[ "\$1" = sudo ] && shift
+args=("\$@")
+for i in "\${!args[@]}"; do
+  a=\${args[\$i]}; a=\${a//\/etc\/desolate-proxy\/settings.json/$VMSTUB/settings.json}; a=\${a//-o desolate-proxy -g desolate-proxy/}
+  args[\$i]=\$a
+done
+exec "\${args[@]}"
+EOF
+chmod +x "$VMSTUB/colima"
+vmcli() { PATH="$VMSTUB:$PATH" DESOLATE_NO_COMPLETION_INSTALL=1 "$RELEASE/cli.sh" secret "$@" 2>&1; }
+OUT=$(printf 'sk-ant-oat01-x\n' | vmcli add DESOLATE-CLAUDE-OAUTH --hosts api.anthropic.com --headers Authorization)
+assert_contains "it is stored" "$OUT" "stored"
+assert_eq "confined to the header it names, lower-cased" \
+  "$(jq -c '.secrets["DESOLATE-CLAUDE-OAUTH"].headers' "$VMSTUB/settings.json")" '["authorization"]'
+printf 'v\n' | vmcli add OPEN-KEY --hosts b.com >/dev/null
+assert_eq "without --headers, no confinement is written" "$(jq -c '.secrets["OPEN-KEY"] | has("headers")' "$VMSTUB/settings.json")" "false"
+LIST=$(vmcli list)
+assert_contains "list shows the confinement" "$LIST" "DESOLATE-CLAUDE-OAUTH  ->  api.anthropic.com   [headers: authorization]"
+assert_contains "and nothing for one without" "$LIST" "OPEN-KEY  ->  b.com"
+OUT=$(printf 'v\n' | vmcli add BAD-KEY --hosts b.com --headers 'x y')
+assert_contains "a header that is no header name is refused" "$OUT" "is not a header name"
+assert_eq "  and nothing is stored" "$(jq -c '.secrets | has("BAD-KEY")' "$VMSTUB/settings.json")" "false"
+rm -rf "$VMSTUB"
+
+group "cli.sh suede: which half runs where (docs/suede-factory.md)"
+DSTUB=$(mktemp -d)
+cat > "$DSTUB/docker" <<EOF
+#!/bin/sh
+printf '%s|' "\$@" >> "$DSTUB/calls"; echo >> "$DSTUB/calls"
+case "\$*" in
+  inspect*) echo running ;;
+  *--suede-build*) echo "desolate: driving its daemon"; echo "BUILT $(printf 'c%.0s' $(seq 40)) $(printf 'p%.0s' $(seq 40)) acme__widget $(printf 'a%.0s' $(seq 40)) patchid /w/.git/x.bundle" ;;
+  *suede.ts\ upstream*) echo "UPSTREAMED downstream/acme/consumer-aaaa" ;;
+esac
+EOF
+chmod +x "$DSTUB/docker"
+dcli() { : > "$DSTUB/calls"; PATH="$DSTUB:$PATH" DESOLATE_NO_COMPLETION_INSTALL=1 "$RELEASE/cli.sh" suede "$@" </dev/null 2>&1; }
+dexecs() { grep '^exec|' "$DSTUB/calls" | sed -E 's/desolate-transfer-[0-9a-f]{16}\.bundle/NAME/g' | tr '\n' ' '; }
+dcli deliver acme/consumer acme/widget >/dev/null
+assert_eq "deliver: in the editor, where the keys are, by path" "$(dexecs)" \
+  "exec|-e|DESOLATE_PLANE=mac|desolate-vscode|with-ca|tsx|/usr/local/lib/desolate/suede.ts|deliver|acme/consumer|acme/widget| "
+dcli report acme/consumer --ref origin/main >/dev/null
+assert_eq "report: the orchestrator's runner, in the project's sandbox" "$(dexecs)" \
+  "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--suede-report|--ref|origin/main|acme/consumer| "
+OUT=$(dcli upstream acme/consumer widget --ref origin/main)
+C40=$(printf 'c%.0s' $(seq 40)); P40=$(printf 'p%.0s' $(seq 40)); A40=$(printf 'a%.0s' $(seq 40))
+assert_eq "upstream: built in the sandbox, pushed from the editor, one bundle name for both" "$(dexecs)" \
+  "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--suede-build|widget|--transfer|NAME|--ref|origin/main|acme/consumer| exec|-e|DESOLATE_PLANE=mac|desolate-vscode|with-ca|tsx|/usr/local/lib/desolate/suede.ts|upstream|acme/consumer|acme/widget|NAME|$C40|$P40|$A40| "
+assert_eq "  and says what it proposed, where" "$OUT" "UPSTREAMED acme/widget downstream/acme/consumer-aaaa $C40 patchid"
+assert_contains "anything else is refused, with the usage" "$(dcli frobnicate)" "usage: cli.sh suede"
+rm -rf "$DSTUB"
 
 summary

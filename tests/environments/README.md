@@ -26,6 +26,7 @@ slow one be skipped when its prerequisites are missing.
 |------------|------------------------------------|-----------------|
 | `runtime`  | the vscode-image node/tsx toolchain | nothing         |
 | `daemon`   | the orchestrator's docker CLI       | a docker socket |
+| `nested`   | the whole stack, one level down     | sudo, nft, docker, mitmproxy -- not part of `run.sh`; see below |
 
 ### `runtime`
 
@@ -56,3 +57,21 @@ Dockerfile must end with a `CMD` that runs them and exits non-zero on failure.
 automatically. Declare a socket requirement by creating a `needs-docker` file
 next to the Dockerfile, so the environment skips cleanly rather than failing
 where no daemon exists.
+
+### `nested`
+
+Not an environment `run.sh` builds: the **whole stack**, brought up inside this
+repo's own devcontainer, with the VM-side services (proxy, CA publisher,
+resolver, nftables ruleset) as processes beside it.
+
+```bash
+./tests/environments/nested/run.sh up        # build + start + verify
+./tests/environments/nested/run.sh status    # re-verify, including a request through addon.py
+./tests/environments/nested/run.sh down [-v]
+```
+
+It exists so the stack's own components can be exercised from the editor
+without restarting the real stack. Every line it prints is stamped
+`APPROXIMATION (runc, no Lima)`: the shared dind runs `--privileged` under runc
+(`compose.nested.yml`, the one change to the stack itself), and nothing here says
+what reaches the Mac. It refuses a daemon that has sysbox-runc.

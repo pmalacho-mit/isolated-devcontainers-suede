@@ -55,4 +55,34 @@ else
   fi
 fi
 
+group "every shipped .ts file runs under the image's tsx"
+# The image runs these with tsx, which compiles a .ts file with no package.json
+# "type" around it to CommonJS -- and CommonJS has no top-level await. The unit
+# tests run them under node's own type stripping, as ESM, where it works; so a
+# top-level await passes every test here and crash-loops a container (the
+# supervisor did, once). Asked of the parser rather than grepped.
+if [ ! -d "$ROOT/node_modules/typescript" ]; then
+  skip "no top-level await in release/vscode-image" "typescript not installed -- run: npm install"
+else
+  FOUND=$(node -e '
+    const ts = require(process.argv[1] + "/node_modules/typescript");
+    const fs = require("fs"), path = require("path");
+    const dir = process.argv[1] + "/release/vscode-image";
+    const found = [];
+    for (const name of fs.readdirSync(dir).filter((n) => n.endsWith(".ts"))) {
+      const file = path.join(dir, name);
+      const source = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
+      const visit = (node) => {
+        if (ts.isFunctionLike(node)) return;
+        if (ts.isAwaitExpression(node) || (ts.isForOfStatement(node) && node.awaitModifier))
+          found.push(`${name}:${source.getLineAndCharacterOfPosition(node.getStart()).line + 1}`);
+        ts.forEachChild(node, visit);
+      };
+      visit(source);
+    }
+    console.log(found.join(" "));
+  ' "$ROOT" 2>&1)
+  assert_eq "no top-level await in release/vscode-image" "${FOUND:-none}" "none"
+fi
+
 summary

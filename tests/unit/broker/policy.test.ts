@@ -12,9 +12,12 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  builtBeyondDeclared,
+  daemonOf,
   enforcePolicy,
   feature,
   mount,
+  type Daemon,
 } from "../../../release/vscode-image/policy.ts";
 import type { ResolvedSpec } from "../../../release/vscode-image/devcontainer.ts";
 import {
@@ -34,7 +37,7 @@ const named = (project: string, worktree?: string) =>
   target(WORKSPACES, project, worktree);
 
 /** The trailing (targets) argument of enforcePolicy. */
-type EnforceArgs = [targets: Target[]];
+type EnforceArgs = [targets: Target[], daemon: Daemon];
 
 /** enforcePolicy options for a workspace holding exactly one project.
  *
@@ -43,7 +46,9 @@ type EnforceArgs = [targets: Target[]];
  *  and a test that let it would depend on whatever directories the machine
  *  running it happens to have. Cases that ARE about the rule name their own
  *  siblings instead. */
-const alone = (project: string): EnforceArgs => [[named(project)]];
+const alone = (project: string): EnforceArgs => [[named(project)], "shared"];
+/** The same, on a daemon of the project's own (supervisor.ts). */
+const onItsOwnDaemon = (project: string): EnforceArgs => [[named(project)], "project"];
 
 /** Build a ResolvedSpec the way `devcontainer read-configuration
  *  --include-merged-configuration` reports one.
@@ -378,30 +383,19 @@ describe("demonstrated escapes (regression)", () => {
     allows(spec({ image: "x" }, {}));
   });
 
-  test("E8: a feature cannot grant itself the privilege opt-in", () => {
-    // The policy enforces on mergedConfiguration, but reads the allowPrivileged
-    // opt-in from the RAW config, and this is why. Merged reshapes
-    // customizations into one array of contributions per namespace, so a feature
-    // that ships "customizations": {"desolate": {"allowPrivileged": true}} in its
-    // own metadata lands in the very same place the project's opt-in would. Read
-    // there, the feature demanding the privilege would also be authorising it.
-    refuses(
-      spec(
-        { image: "x" },
-        {
-          privileged: true,
-          customizations: { desolate: { allowPrivileged: true } },
-        },
-      ),
-      /PRIVILEGED/,
-    );
-    // ... while the project's own opt-in still works, same feature present.
-    allows(
-      spec(
-        { image: "x", customizations: { desolate: { allowPrivileged: true } } },
-        { privileged: true },
-      ),
-    );
+  test("E8: privilege cannot be opted into at all any more -- not by a feature, not by the project", () => {
+    // The old shape of E8 was a feature granting itself the allowPrivileged
+    // opt-in through its own customizations. The opt-in is gone, so there is
+    // nothing to grant: privileged is refused from either source, on either
+    // daemon, whatever the customizations say.
+    for (const args of [alone(PROJECT), onItsOwnDaemon(PROJECT)]) {
+      for (const cfg of [
+        spec({ image: "x" }, { privileged: true, customizations: { desolate: { allowPrivileged: true } } }),
+        spec({ image: "x", customizations: { desolate: { allowPrivileged: true } } }, { privileged: true }),
+        spec({ image: "x", privileged: true, customizations: { desolate: { allowPrivileged: true } } }),
+      ])
+        assert.throws(() => enforcePolicy(named(PROJECT), cfg, ...args), /PRIVILEGED/, args[1]);
+    }
   });
 
   test("E9: a merged config that LOST a key the project declared is refused", () => {
@@ -574,12 +568,12 @@ describe("mounts", () => {
       }),
       /bind/,
     );
-    allows(
-      spec({
-        image: "x",
-        mounts: ["source=/desolate-ca,target=/desolate-ca,type=bind"],
-      }),
-    );
+    // desolate's directory at its own path, and only that exact path -- the
+    // old /desolate-ca is no longer it.
+    allows(spec({ image: "x", mounts: ["source=/desolate,target=/desolate,type=bind"] }));
+    refuses(spec({ image: "x", mounts: ["source=/desolate-ca,target=/desolate-ca,type=bind"] }), /bind/);
+    refuses(spec({ image: "x", mounts: ["source=/desolate/../workspaces,target=/w,type=bind"] }), /bind/);
+    refuses(spec({ image: "x", mounts: ["source=/desolate-cache,target=/w,type=bind"] }), /bind/);
   });
 
   test("object-form mounts are normalised the same way as string-form", () => {
@@ -601,49 +595,20 @@ describe("mounts", () => {
     assert.equal(m.type, "bind");
   });
 
-  test("the docker-in-docker volumes are allowed only for an opted-in project", () => {
-    // BOTH of them. The feature mounts /var/lib/docker AND /var/lib/containerd;
-    // allowing only the first refused every real docker-in-docker project with a
-    // namespace error naming a volume the project never asked for.
-    const dind = {
+  test("the docker-in-docker volumes are refused now that nothing runs a nested daemon", () => {
+    // They were allowed for an allowPrivileged project. With the opt-in gone
+    // they are what they look like: volumes outside the project's namespace.
+    const nested = {
       mounts: [
-        {
-          source: "dind-var-lib-docker-abc123",
-          target: "/var/lib/docker",
-          type: "volume",
-        },
-        {
-          source: "dind-var-lib-containerd-abc123",
-          target: "/var/lib/containerd",
-          type: "volume",
-        },
+        { source: "dind-var-lib-docker-abc123", target: "/var/lib/docker", type: "volume" },
+        { source: "dind-var-lib-containerd-abc123", target: "/var/lib/containerd", type: "volume" },
       ],
-      privileged: true,
     };
-    refuses(spec({ image: "x" }, dind), /PRIVILEGED/);
-    allows(
-      spec(
-        { image: "x", customizations: { desolate: { allowPrivileged: true } } },
-        dind,
-      ),
-    );
-    // and it must still be a volume, not a bind
-    refuses(
-      spec(
-        { image: "x", customizations: { desolate: { allowPrivileged: true } } },
-        {
-          privileged: true,
-          mounts: [
-            {
-              source: "/var/lib/docker",
-              target: "/var/lib/docker",
-              type: "bind",
-            },
-          ],
-        },
-      ),
-      /bind/,
-    );
+    for (const args of [alone(PROJECT), onItsOwnDaemon(PROJECT)])
+      assert.throws(
+        () => enforcePolicy(named(PROJECT), spec({ image: "x" }, nested), ...args),
+        /outside this project's namespace/,
+      );
   });
 });
 
@@ -731,7 +696,7 @@ describe("a worktree target", () => {
   const project = named("acme/widgets");
   const feature = named("acme/widgets", "feature123");
   const sibling = named("acme/widgets", "other");
-  const family: EnforceArgs = [[project, feature, sibling]];
+  const family: EnforceArgs = [[project, feature, sibling], "shared"];
 
   const bind = (source: string, target = source) =>
     spec({
@@ -750,11 +715,18 @@ describe("a worktree target", () => {
     enforcePolicy(feature, bind(dir), ...family);
   });
 
-  test("may not bind its own PROJECT's folder", () => {
-    // The project root is the root target's mount, and mounting it here would
-    // put a second copy of every filename in this container -- which is the
-    // ergonomic problem worktrees exist to solve.
-    refusedFor(feature, bind("/workspaces/acme/widgets"), /exactly/);
+  test("is mounted as its PROJECT's root, at that root's own path", () => {
+    // What desolate derives for every worktree (worktrees.ts projectRoot): a
+    // bind of anything below the root follows whatever link its project put
+    // there, which on the shared daemon is any other project's directory.
+    enforcePolicy(feature, bind("/workspaces/acme/widgets"), ...family);
+  });
+
+  test("but the root nowhere else, and never for a project that is not a worktree", () => {
+    refusedFor(feature, bind("/workspaces/acme/widgets", "/workspaces/widgets"), /target must be/);
+    refusedFor(feature, bind("/workspaces/acme/widgets", "/workspaces"), /target must be/);
+    refusedFor(feature, bind("/workspaces/acme", "/workspaces/acme"), /exactly/);
+    refusedFor(sibling, bind("/workspaces/acme/widgets/.worktrees", "/workspaces/acme/widgets/.worktrees"), /exactly/);
   });
 
   test("may not bind a SIBLING worktree", () => {
@@ -926,6 +898,24 @@ describe("other refused keys", () => {
 });
 
 // ===========================================================================
+describe("customizations.desolate.memory", () => {
+  // ===========================================================================
+  // The project's own daemon's ceiling. Its shape is held here, where the
+  // message can quote the key; the VM's size, by the supervisor.
+  const asking = (memory: any) => spec({ image: "x", customizations: { desolate: { memory } } });
+
+  test("whole megabytes or gigabytes are accepted, and absent is the normal case", () => {
+    allows(asking("12g"));
+    allows(asking("8192m"));
+    allows(spec({ image: "x" }));
+  });
+
+  test("anything else is refused, naming the key", () => {
+    for (const bad of [12, "12", "12GB", "1.5g", "", ["12g"], { g: 12 }])
+      refuses(asking(bad), /customizations\.desolate\.memory/);
+  });
+});
+
 describe("shadowImages", () => {
   // ===========================================================================
   // Base images whose tag desolate points at a CA-trusting derivative, inside
@@ -1029,7 +1019,7 @@ describe("features must be fetched, not read from the project", () => {
     allows(
       spec({
         image: "x",
-        features: { "ghcr.io/devcontainers/features/docker-in-docker:2": {} },
+        features: { "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {} },
       }),
     );
     allows(
@@ -1047,6 +1037,20 @@ describe("features must be fetched, not read from the project", () => {
         features: { "https://example.com/feature.tgz": {} },
       }),
     );
+  });
+
+  test("docker-in-docker is refused by id, with the way out in the message", () => {
+    for (const id of [
+      "ghcr.io/devcontainers/features/docker-in-docker:2",
+      "ghcr.io/devcontainers/features/docker-in-docker",
+      "GHCR.IO/devcontainers/features/docker-in-docker@sha256:" + "0".repeat(64),
+    ])
+      for (const args of [alone(PROJECT), onItsOwnDaemon(PROJECT)])
+        assert.throws(
+          () => enforcePolicy(named(PROJECT), spec({ image: "x", features: { [id]: {} } }), ...args),
+          /switch to "ghcr\.io\/devcontainers\/features\/docker-outside-of-docker:1"|Switch to "ghcr\.io\/devcontainers\/features\/docker-outside-of-docker:1"/,
+          id,
+        );
   });
 
   test("an id that is neither is refused rather than guessed at", () => {
@@ -1274,27 +1278,57 @@ describe("the repo's own example projects satisfy the policy", () => {
     enforcePolicy(named("example-project"), spec(cfg), ...alone("example-project"));
   });
 
-  test("sample-fastapi (docker-in-docker, privilege opted in)", async (t) => {
+  test("sample-fastapi (docker-outside-of-docker, on its own daemon)", async (t) => {
     const cfg = await readExample(t, "sample-fastapi");
     if (!cfg) return;
-    // What the docker-in-docker feature contributes, per its published metadata.
+    // What docker-outside-of-docker contributes, measured from the built image's
+    // devcontainer.metadata (tests/probes/sibling-feature.sh F1).
     const merged = {
-      privileged: true,
-      init: true,
-      mounts: [
-        {
-          source: "dind-var-lib-docker-0123456789",
-          target: "/var/lib/docker",
-          type: "volume",
-        },
-        {
-          source: "dind-var-lib-containerd-0123456789",
-          target: "/var/lib/containerd",
-          type: "volume",
-        },
-      ],
+      mounts: [{ source: "/var/run/docker.sock", target: "/var/run/docker-host.sock", type: "bind" }],
+      securityOpt: ["label=disable"],
     };
-    enforcePolicy(named("sample-fastapi"), spec(cfg, merged), ...alone("sample-fastapi"));
+    const resolved = spec(cfg, merged);
+    assert.equal(daemonOf(resolved), "project");
+    enforcePolicy(named("sample-fastapi"), resolved, ...onItsOwnDaemon("sample-fastapi"));
+  });
+
+  // The v2 fixture, and it is REFUSED today on purpose -- this is the marker
+  // for the change, not a bug in the sample.
+  //
+  // docker-outside-of-docker declares a bind of the docker socket, and the
+  // policy refuses binds categorically because a bind reaches the daemon's own
+  // filesystem, where every other project lives. Under one shared dind that
+  // refusal is exactly right: the socket it names is the daemon running every
+  // project. It stops being right only once the project has a daemon of its
+  // OWN, so the exception cannot land before provisioning does -- until then,
+  // granting it would hand this project every other one.
+  //
+  // When the supervisor exists, this test inverts: same fixture, same feature
+  // metadata, and the enforcement passes because the target's daemon is its own.
+  // The marker PR #10 left: "when that test inverts, step 4 is done"
+  // (docs/dind/HANDOFF.md section 8). It has: refused on the shared daemon,
+  // accepted on the daemon of its own that daemonOf says it gets.
+  test("sample-siblings runs on its own daemon, and would still be refused on the shared one", async (t) => {
+    const cfg = await readExample(t, "sample-siblings");
+    if (!cfg) return;
+    // What docker-outside-of-docker contributes, measured (sibling-feature.sh F1).
+    const merged = {
+      mounts: [{ source: "/var/run/docker.sock", target: "/var/run/docker-host.sock", type: "bind" }],
+      securityOpt: ["label=disable"],
+    };
+    const resolved = spec(cfg, merged, "sample-siblings");
+    assert.equal(daemonOf(resolved), "project");
+    enforcePolicy(named("sample-siblings"), resolved, ...onItsOwnDaemon("sample-siblings"));
+    assert.throws(() => enforcePolicy(named("sample-siblings"), resolved, ...alone("sample-siblings")));
+  });
+
+  test("sample-siblings asks for no privilege of any kind", async (t) => {
+    const cfg = await readExample(t, "sample-siblings");
+    if (!cfg) return;
+    assert.equal(cfg.customizations?.desolate?.allowPrivileged, undefined);
+    assert.equal(cfg.privileged, undefined);
+    assert.equal(cfg.capAdd, undefined);
+    assert.equal(cfg.runArgs, undefined);
   });
 
   test("sample-fastapi WITHOUT the opt-in is refused", async (t) => {
@@ -1317,7 +1351,7 @@ test("a project cannot reach a sibling whose name it prefixes", () => {
   // rule let `web` mount it -- and that is exactly where the README tells you
   // to keep a local-only database password. `web`/`web-api` is an ordinary way
   // to name two services, not a contrived collision.
-  const siblings: EnforceArgs = [[named("web"), named("web-api")]];
+  const siblings: EnforceArgs = [[named("web"), named("web-api")], "shared"];
   const vol = (source: string) => ({
     mounts: [{ source, target: "/x", type: "volume" }],
   });
@@ -1342,10 +1376,10 @@ test("a project cannot reach a sibling whose name it prefixes", () => {
 });
 
 test("volumes desolate injects for a project are still its own", () => {
-  // The overlay views are named <project>-vscode-server / -desolate-ca, and
+  // The overlay views are named <project>-vscode-server / -desolate, and
   // must not be mistaken for a sibling's just because siblings exist.
-  const siblings: EnforceArgs = [[named("web"), named("web-api")]];
-  for (const v of ["web-vscode-server", "web-vscode-server-data", "web-desolate-ca"]) {
+  const siblings: EnforceArgs = [[named("web"), named("web-api")], "shared"];
+  for (const v of ["web-vscode-server", "web-vscode-server-data", "web-desolate"]) {
     enforcePolicy(named("web"), spec({ image: "x" }, { mounts: [{ source: v, target: "/x", type: "volume" }] }), ...siblings);
   }
 });
@@ -1354,7 +1388,7 @@ test("nested projects own a volume namespace with '/' encoded", () => {
   // Docker volume names cannot contain '/', so `acme/widgets` owns the
   // `acme__widgets` namespace. policy.ts and desolate.ts must agree on that
   // encoding or a project could not mount its own volumes.
-  const siblings: EnforceArgs = [[named("acme/widgets"), named("other/widgets")]];
+  const siblings: EnforceArgs = [[named("acme/widgets"), named("other/widgets")], "shared"];
   const vol = (source: string) => ({ mounts: [{ source, target: "/x", type: "volume" }] });
 
   enforcePolicy(named("acme/widgets"), spec({ image: "x" }, vol("acme__widgets")), ...siblings);
@@ -1412,34 +1446,162 @@ test("a name volumeNamespace cannot encode is excluded from the project list", a
     target(ws, "myapp"),
     spec({ image: "x", mounts: ["source=myapp-data,target=/d,type=volume"] }),
     targets,
+    "shared",
   );
 });
 
-test("the privilege opt-in must be exactly true, not merely truthy", () => {
-  // Boolean("false") is true. The opt-in is not a boundary against a hostile
-  // editor (it can write `true` itself) -- it exists so privilege is never
-  // inherited by accident, and a typo silently granting it defeats that.
-  for (const value of ["false", "0", "no", 0, 1, [], {}, null]) {
-    const cfg = spec({
-      image: "x",
-      privileged: true,
-      customizations: { desolate: { allowPrivileged: value } },
-    });
+test("allowPrivileged is gone: no value of it grants privilege, true included", () => {
+  for (const value of [true, "true", 1, "false", 0, [], {}, null])
     assert.throws(
-      () => enforcePolicy(named(PROJECT), cfg, ...alone(PROJECT)),
+      () =>
+        enforcePolicy(
+          named(PROJECT),
+          spec({ image: "x", privileged: true, customizations: { desolate: { allowPrivileged: value } } }),
+          ...alone(PROJECT),
+        ),
       /PRIVILEGED/,
-      `allowPrivileged: ${JSON.stringify(value)} was accepted as an opt-in`,
+      `allowPrivileged: ${JSON.stringify(value)} granted privilege`,
     );
-  }
-  enforcePolicy(
-    named(PROJECT),
-    spec({
-      image: "x",
-      privileged: true,
-      customizations: { desolate: { allowPrivileged: true } },
-    }),
-    ...alone(PROJECT),
-  );
+});
+
+// ===========================================================================
+// T3.3: the one exception, and the privilege checks that branch on the daemon
+// ===========================================================================
+
+/** docker-outside-of-docker, as the CLI reports it merged (sibling-feature.sh F1). */
+const OUTSIDE = { "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {} };
+const OUTSIDE_MERGED = {
+  mounts: [{ source: "/var/run/docker.sock", target: "/var/run/docker-host.sock", type: "bind" }],
+  securityOpt: ["label=disable"],
+};
+
+describe("E18: the socket bind is granted to the feature, on a project daemon, and nowhere else", () => {
+  test("the feature's own bind passes on the project's daemon", () => {
+    enforcePolicy(named(PROJECT), spec({ image: "x", features: OUTSIDE }, OUTSIDE_MERGED), ...onItsOwnDaemon(PROJECT));
+  });
+
+  test("the same bind toward the SHARED daemon is refused -- it would be root over every project", () => {
+    assert.throws(
+      // The mount alone, so it is the BIND that is refused, not label=disable.
+      () => enforcePolicy(named(PROJECT), spec({ image: "x", features: OUTSIDE }, { mounts: OUTSIDE_MERGED.mounts }), ...alone(PROJECT)),
+      /bind/,
+    );
+  });
+
+  test("a project writing the bind itself is refused, even on its own daemon", () => {
+    const written = { image: "x", mounts: ["type=bind,source=/var/run/docker.sock,target=/var/run/docker-host.sock"] };
+    assert.throws(() => enforcePolicy(named(PROJECT), spec(written), ...onItsOwnDaemon(PROJECT)), /bind/);
+  });
+
+  for (const [why, bind] of [
+    ["a suffixed source", { source: "/var/run/docker.sock.evil", target: "/var/run/docker-host.sock" }],
+    ["a source through ..", { source: "/var/run/docker.sock/..", target: "/var/run/docker-host.sock" }],
+    ["the host's root", { source: "/", target: "/var/run/docker-host.sock" }],
+    ["another target", { source: "/var/run/docker.sock", target: "/host-socket" }],
+    ["a target that only starts the same", { source: "/var/run/docker.sock", target: "/var/run/docker-host.sock.d" }],
+  ] as const)
+    test(`a feature asking for ${why} is refused`, () => {
+      assert.throws(
+        () =>
+          enforcePolicy(
+            named(PROJECT),
+            spec({ image: "x", features: OUTSIDE }, { mounts: [{ ...bind, type: "bind" }] }),
+            ...onItsOwnDaemon(PROJECT),
+          ),
+        /bind/,
+      );
+    });
+});
+
+describe("E19: capabilities and securityOpt branch on the daemon", () => {
+  // The rust feature declares both, for lldb. On a project daemon refusing
+  // them protects nothing -- the socket can start a --privileged sibling --
+  // and blocks a real feature; on the shared daemon they stay refused.
+  const RUST = { capAdd: ["SYS_PTRACE"], securityOpt: ["seccomp=unconfined"] };
+  const rust = () => spec({ image: "x", features: { ...OUTSIDE, "ghcr.io/devcontainers/features/rust:1": {} } }, {
+    ...RUST,
+    mounts: OUTSIDE_MERGED.mounts,
+  });
+
+  test("the rust feature passes on a project daemon", () => {
+    enforcePolicy(named(PROJECT), rust(), ...onItsOwnDaemon(PROJECT));
+  });
+
+  test("and is refused on the shared one", () => {
+    assert.throws(
+      () => enforcePolicy(named(PROJECT), spec({ image: "x" }, RUST), ...alone(PROJECT)),
+      /capability additions are not allowed on the shared daemon/,
+    );
+  });
+
+  test("a seccomp profile from a project-writable path stays refused on either daemon", () => {
+    for (const args of [alone(PROJECT), onItsOwnDaemon(PROJECT)])
+      for (const option of ["seccomp=./profile.json", "seccomp=/workspaces/x/p.json"])
+        assert.throws(
+          () => enforcePolicy(named(PROJECT), spec({ image: "x" }, { securityOpt: [option] }), ...args),
+          /weakens the sandbox/,
+          `${option} on ${args[1]}`,
+        );
+  });
+
+  test("switching off no-new-privileges stays refused on either daemon", () => {
+    for (const args of [alone(PROJECT), onItsOwnDaemon(PROJECT)])
+      for (const option of ["no-new-privileges=false", "no-new-privileges:false"])
+        assert.throws(
+          () => enforcePolicy(named(PROJECT), spec({ image: "x", runArgs: ["--security-opt", option] }), ...args),
+          /weakens the sandbox/,
+        );
+  });
+});
+
+describe("E21: a security option is judged as docker reads it, not as it is spelled", () => {
+  // From an independent review: the CLI also accepts `key:value`, the daemon
+  // reads a bare `disable` as label=disable, and no-new-privileges is a Go
+  // ParseBool. Each line below passed the old pattern deny list.
+  const both = (option: string) => [
+    spec({ image: "x" }, { securityOpt: [option] }),
+    spec({ image: "x", runArgs: ["--security-opt", option] }),
+    spec({ image: "x", runArgs: [`--security-opt=${option}`] }),
+  ];
+  const refusedOn = (args: EnforceArgs, option: string) => {
+    for (const candidate of both(option))
+      assert.throws(() => enforcePolicy(named(PROJECT), candidate, ...args), /weakens the sandbox/, `${option} on ${args[1]}`);
+  };
+  const allowedOn = (args: EnforceArgs, option: string) => {
+    for (const candidate of both(option)) enforcePolicy(named(PROJECT), candidate, ...args);
+  };
+
+  for (const option of [
+    "seccomp:/workspaces/x/allow.json", "seccomp:./allow.json", "seccomp:unconfined",
+    "label:disable", "disable", "apparmor:unconfined", "apparmor=some-looser-profile",
+    "systempaths=unconfined", "writable-cgroups=true", "label=type:spc_t",
+    "no-new-privileges=0", "no-new-privileges=f", "no-new-privileges:False", "no-new-privileges=",
+    "unknown-key=1", "seccomp", " seccomp=unconfined",
+  ])
+    test(`'${option}' is refused on the shared daemon`, () => refusedOn(alone(PROJECT), option));
+
+  for (const option of ["seccomp:/workspaces/x/allow.json", "seccomp=/tmp/p.json", "no-new-privileges=0", "no-new-privileges:f", "bogus:1"])
+    test(`'${option}' is refused on a project daemon too`, () => refusedOn(onItsOwnDaemon(PROJECT), option));
+
+  for (const option of ["no-new-privileges", "no-new-privileges:true", "no-new-privileges=1", "seccomp=builtin", "apparmor=docker-default"])
+    test(`'${option}' restates or tightens the default, and passes on the shared daemon`, () =>
+      allowedOn(alone(PROJECT), option));
+
+  for (const option of ["label=disable", "seccomp=unconfined", "seccomp:unconfined", "systempaths=unconfined", "apparmor=unconfined"])
+    test(`'${option}' passes on a project daemon, whose socket is root over it anyway`, () =>
+      allowedOn(onItsOwnDaemon(PROJECT), option));
+});
+
+describe("E20: the daemon is decided by the one provisioning rule", () => {
+  test("docker-outside-of-docker means a project daemon; anything else the shared one", () => {
+    assert.equal(daemonOf(spec({ image: "x", features: OUTSIDE })), "project");
+    assert.equal(daemonOf(spec({ image: "x", features: { "ghcr.io/devcontainers/features/node:1": {} } })), "shared");
+    assert.equal(daemonOf(spec({ image: "x" })), "shared");
+  });
+
+  test("a policy asked without a daemon refuses rather than guessing", () => {
+    assert.throws(() => (enforcePolicy as any)(named(PROJECT), spec({ image: "x" }), [named(PROJECT)]), /no daemon given/);
+  });
 });
 
 test("keys that are refused outright are refused by PRESENCE, not truthiness", () => {
@@ -1454,4 +1616,41 @@ test("keys that are refused outright are refused by PRESENCE, not truthiness", (
         new RegExp(key),
         `${key}: ${JSON.stringify(value)} was accepted`,
       );
+});
+
+describe("an existing container built from more than its spec now asks for (#26)", () => {
+  // `devcontainer up` starts an existing container as it was BUILT, so one
+  // built privileged under docker-in-docker must not start behind a clean spec.
+  const legacy = JSON.stringify([
+    { id: "ghcr.io/devcontainers/features/docker-in-docker:2", privileged: true,
+      mounts: [{ source: "dind-var-lib-docker-abc", target: "/var/lib/docker", type: "volume" }] },
+    { remoteUser: "vscode" },
+  ]);
+  const dood = {
+    securityOpt: ["label=disable"],
+    mounts: [{ source: "/var/run/docker.sock", target: "/var/run/docker-host.sock", type: "bind" }],
+  };
+
+  test("a docker-in-docker container behind a docker-outside-of-docker spec is named", () => {
+    assert.deepEqual(builtBeyondDeclared(legacy, dood), [
+      "privileged: true", "mount volume|dind-var-lib-docker-abc|/var/lib/docker",
+    ]);
+  });
+
+  test("a container built from the spec it declares holds nothing more", () => {
+    const same = JSON.stringify([{ securityOpt: ["label=disable"],
+      mounts: ["source=/var/run/docker.sock,target=/var/run/docker-host.sock,type=bind"] }]);
+    assert.deepEqual(builtBeyondDeclared(same, dood), [], "a mount as a string is the same mount as an object");
+    assert.deepEqual(builtBeyondDeclared("", dood), [], "no label: nothing it was built with");
+  });
+
+  test("a capability or a security option it no longer asks for is named, however spelled", () => {
+    assert.deepEqual(builtBeyondDeclared(JSON.stringify([{ capAdd: ["cap_sys_admin"], securityOpt: ["seccomp=unconfined"] }]),
+      { capAdd: ["NET_ADMIN"] }), ["capAdd SYS_ADMIN", "securityOpt seccomp=unconfined"]);
+    assert.deepEqual(builtBeyondDeclared(JSON.stringify([{ capAdd: ["SYS_PTRACE"] }]), { capAdd: ["CAP_SYS_PTRACE"] }), []);
+  });
+
+  test("a label that cannot be read is a difference, not a pass", () => {
+    assert.deepEqual(builtBeyondDeclared("{not json", dood), ["a metadata label that cannot be read"]);
+  });
 });

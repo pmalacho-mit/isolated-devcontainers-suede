@@ -27,7 +27,7 @@
     // is not a break in this stack.
     "skipLibCheck": true
   },
-  "include": ["release/**/*.ts", "tests/**/*.ts"],
+  "include": ["release/**/*.ts", "release/**/*.mts", "tests/**/*.ts"],
   // docs/typescript2mermaid-suede is a vendored tool with its own dependency
   // (ts-morph, uninstalled here), and .worktrees holds whole other checkouts of
   // this same repo -- type-checking either would report failures that say

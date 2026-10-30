@@ -45,4 +45,4 @@ todo.txt
 # Deliberately NOT ignored:
 #   samples/     -- fixtures the test suite asserts against
 #   release/     -- the shipped tree; all of it is meant to be committed
-#   HANDOFF.md   -- working notes for whoever picks this up next
+#   docs/dind/HANDOFF.md -- working notes for whoever picks this up next

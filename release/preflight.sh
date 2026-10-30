@@ -16,7 +16,7 @@ vm_ssh() { colima ssh -p "${COLIMA_PROFILE:-desolate}" -- "$@"; }
 
 echo
 echo "== 1. containers =="
-for c in desolate-dind desolate-orchestrator desolate-vscode; do
+for c in desolate-dind desolate-orchestrator desolate-vscode desolate-supervisor; do
   st=$(docker inspect -f '{{.State.Status}}' "$c" 2>/dev/null) || { bad "$c not found"; continue; }
   rc=$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null)
   if [ "$st" = running ] && [ "${rc:-0}" -lt 3 ]; then ok "$c running (restarts: $rc)"
@@ -153,11 +153,24 @@ fi
 
 echo
 echo "== 5. security invariants =="
-if docker inspect desolate-vscode desolate-orchestrator 2>/dev/null \
-     | grep -q '"Source": "/var/run/docker.sock"'; then
-  bad "HOST docker socket is mounted somewhere -- this breaks the design"
+# The VM's docker socket is held by the supervisor and NOTHING else -- asked of
+# every running desolate-* container, not of a list someone has to remember to
+# extend (the compose file says the same in tests/static/02-compose-invariants.sh;
+# this is the running stack, which an old container can contradict).
+holders=""
+for c in $(docker ps --format '{{.Names}}' | grep '^desolate-'); do
+  docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$c" 2>/dev/null \
+    | grep -qw /var/run/docker.sock && holders="$holders $c"
+done
+case "$holders" in
+  " desolate-supervisor") ok "the VM docker socket is held by the supervisor alone" ;;
+  "") bad "nothing holds the VM docker socket -- the supervisor is not up, so no project dind can start" ;;
+  *)  bad "the VM docker socket is mounted by:$holders -- only desolate-supervisor may hold it" ;;
+esac
+if [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' desolate-supervisor 2>/dev/null)" = none ]; then
+  ok "the supervisor has no network"
 else
-  ok "host docker socket not mounted into the stack"
+  bad "the supervisor is on a network -- it holds the VM socket and needs none"
 fi
 # Ask the RUNNING container where the editor is published, rather than assuming
 # 3000: VSCODE_PORT moves it, and a container that predates an .env edit is still
@@ -181,24 +194,16 @@ else
     ok "editor (port $VSPORT) not exposed beyond loopback"
   fi
 fi
-# The dind publish is what makes a relay reachable from the Mac; DESOLATE_PORT_*
-# is what desolate.ts allocates relays from. compose feeds both from the same
-# variables, so these agree unless a running container predates an .env edit --
-# and the failure mode is silent: the relay starts, the URL just never answers.
-PMIN=$(docker exec desolate-orchestrator printenv DESOLATE_PORT_MIN 2>/dev/null || echo 8080)
-PMAX=$(docker exec desolate-orchestrator printenv DESOLATE_PORT_MAX 2>/dev/null || echo 8119)
-PUB=" $(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}' \
-        desolate-dind 2>/dev/null) "
-missing=""
-for p in $(seq "${PMIN:-8080}" "${PMAX:-8119}"); do
-  case "$PUB" in *" $p "*) ;; *) missing="$missing $p" ;; esac
-done
-if [ -z "$missing" ]; then
-  ok "dind publishes every port desolate allocates from ($PMIN-$PMAX)"
+# Nothing in the container world publishes a port to the VM any more: every
+# dev-server port is a listener desolate-ingress opens on demand (section 8).
+# A publish that reappears is a range someone re-added, and it would sit beside
+# the ingress's forwards on the same loopback.
+PUB=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{$p}} {{end}}' desolate-dind 2>/dev/null)
+if [ -z "$PUB" ]; then
+  ok "dind publishes nothing (dev-server ports go through the ingress)"
 else
-  bad "desolate allocates from $PMIN-$PMAX but dind does not publish:$missing"
-  note "relays on those ports bind inside dind and are unreachable from the Mac"
-  note "recreate dind so it picks up the range: ./cli.sh up"
+  bad "dind publishes ports again: $PUB"
+  note "the range was replaced by desolate-ingress; remove 'ports:' from the dind service"
 fi
 if [ -z "$VSPORT" ]; then
   note "editor container not running -- skipping the token-gate check"
@@ -269,7 +274,7 @@ if docker exec desolate-dind test -f /usr/local/share/ca-certificates/desolate-p
   ok "dind has the proxy CA in its trust store"
 else
   bad "dind has NOT installed the proxy CA -- every image pull will fail with x509"
-  note "docker exec -u 0 desolate-dind /desolate-ca/install-ca.sh   # now reports the real reason"
+  note "docker exec -u 0 desolate-dind /desolate/ca/install-ca.sh   # now reports the real reason"
   note "then: docker restart desolate-dind"
 fi
 
@@ -280,7 +285,7 @@ else
   case "$RUNOUT" in
     *x509*|*"unknown authority"*|*"certificate is not trusted"*)
       bad "inner run failed: dind does not trust the proxy CA (x509)"
-      note "docker exec -u 0 desolate-dind /desolate-ca/install-ca.sh; docker restart desolate-dind" ;;
+      note "docker exec -u 0 desolate-dind /desolate/ca/install-ca.sh; docker restart desolate-dind" ;;
     *"no such host"*|*"server misbehaving"*|*"Temporary failure in name resolution"*)
       bad "inner run failed: name resolution inside dind"
       note "desolate-dnsmasq on :5353 and the nftables dport-53 redirect are the path" ;;
@@ -341,16 +346,38 @@ have_selftest_fixture() {
 # fails to load leaves a working transparent proxy that substitutes nothing.
 # with-ca is required -- `docker exec` inherits none of the entrypoint's exports,
 # so a bare curl fails cert verification, returns 000, and reads as a dead addon.
+#
+# Since #12 a placeholder toward a host it is not allowlisted for passes through
+# UNSUBSTITUTED instead of being refused, so the oracle is no longer the status
+# but the audit line the addon writes for exactly this request. The path is
+# unique to this run, so a line from any other request cannot satisfy it.
 probe_leak_detection() {
-  local code
+  local code marker line attempt
+  marker="desolate-preflight-$(date +%s)-$$"
   code=$(docker exec desolate-orchestrator with-ca sh -c \
-         'curl -s -o /dev/null -w "%{http_code}" --max-time 8 https://example.com \
-            -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' 2>/dev/null || true)
+         "curl -s -o /dev/null -w '%{http_code}' --max-time 8 https://example.com/$marker \
+            -H 'X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER'" 2>/dev/null || true)
   case "$code" in
-    403) ok "leak detection is live (placeholder toward a non-allowlisted host -> 403)" ;;
     000) bad "leak detection got no response at all (000) -- TLS to the proxy failed"
-         note "not necessarily the addon: check the interception line above first" ;;
-    *)   bad "leak detection returned '$code', expected 403 -- the addon may have failed to load" ;;
+         note "not necessarily the addon: check the interception line above first"
+         return ;;
+    403) bad "leak detection REFUSED the probe (403): the VM runs an addon from before #12"
+         note "re-install it:  ./cli.sh vm install --proxy-only"
+         return ;;
+  esac
+  # journald can trail the request by a moment.
+  for attempt in 1 2 3 4 5; do
+    line=$(vm_ssh sudo journalctl -u desolate-proxy --since -5min --no-pager -o cat 2>/dev/null \
+             | grep -aE "^(\[[0-9:.]*\] )?AUDIT verdict=LEAK-SUSPECT .* path=/$marker " | tail -n 1)
+    [ -n "$line" ] && break
+    sleep 1
+  done
+  case "$line" in
+    *" suspect=DESOLATE-SELFTEST-PLACEHOLDER"*)
+      ok "leak detection is live (placeholder toward a non-allowlisted host -> LEAK-SUSPECT, unsubstituted)" ;;
+    "") bad "no LEAK-SUSPECT audit line for the probe (got HTTP $code) -- the addon may have failed to load"
+        note "./cli.sh proxy logs | grep -E 'failed to load|AUDIT'" ;;
+    *)  bad "the probe's audit line does not name the fixture as suspect: $line" ;;
   esac
 }
 
@@ -401,10 +428,10 @@ if vm_ssh systemctl is-active --quiet desolate-proxy 2>/dev/null; then
   PERM=$(vm_ssh sudo stat -c '%a' /etc/desolate-proxy/settings.json 2>/dev/null)
   [ "$PERM" = "600" ] && ok "settings.json is 0600" \
     || bad "settings.json mode is '$PERM' (want 600) -- secret values may be readable"
-  if docker exec desolate-orchestrator test -f /desolate-ca/ca.pem 2>/dev/null; then
+  if docker exec desolate-orchestrator test -f /desolate/ca/ca.pem 2>/dev/null; then
     ok "proxy CA is mounted into the stack"
   else
-    bad "CA missing at /desolate-ca/ca.pem -- TLS through the proxy will fail"
+    bad "CA missing at /desolate/ca/ca.pem -- TLS through the proxy will fail"
     note "did install.sh run? it creates /var/lib/desolate-proxy/public in the VM"
   fi
   # Interception check: a request from inside the stack should be MITM'd.
@@ -515,6 +542,171 @@ if vm_ssh systemctl is-active --quiet desolate-proxy 2>/dev/null; then
 else
   note "desolate-proxy not installed -- secrets substitution and egress control are OFF"
   note "install it: ./cli.sh vm install"
+fi
+
+echo
+echo "== 8. ingress (dev-server ports reach the Mac with no published range) =="
+# desolate-ingress (release/proxy/vm/ingress.py) opens 127.0.0.1:<port> in the
+# VM when a ports/ file appears, and Lima carries that to this Mac. Proved the
+# way a dev server will use it: a listener on the shared dind's INNER daemon,
+# published there and nowhere else, fetched from THIS machine's 127.0.0.1.
+INGRESS_ROOT=/run/desolate-ingress
+INGRESS_PROBE=desolate-preflight-ingress
+if ! vm_ssh systemctl is-active --quiet desolate-ingress 2>/dev/null; then
+  bad "desolate-ingress is not running in the VM"
+  note "install it: ./cli.sh vm install --proxy-only"
+else
+  ok "desolate-ingress is running in the VM"
+  owners=$(vm_ssh stat -c '%n=%u' "$INGRESS_ROOT/dinds" "$INGRESS_ROOT/ports" 2>/dev/null | tr '\n' ' ')
+  case "$owners" in
+    *"/dinds=0 "*"/ports=1000 "*) ok "its directories exist, owned by their writers ($owners)" ;;
+    *) bad "its directories are missing or owned wrongly: ${owners:-none}"
+       note "expected dinds/ owned by root (the supervisor) and ports/ by 1000 (the orchestrator)" ;;
+  esac
+  # Its listeners, by the unit's own pid -- `ss` names the process python3.
+  ingress_listeners() {
+    local pid
+    pid=$(vm_ssh systemctl show -p MainPID --value desolate-ingress 2>/dev/null)
+    [ -n "$pid" ] && [ "$pid" != 0 ] || return
+    vm_ssh sudo ss -Hltnp 2>/dev/null | awk -v p="pid=$pid," 'index($0, p) {print $4}' | sort -u | tr '\n' ' '
+  }
+
+  # The self-test forward. A free port on THIS Mac, since a port the Mac holds
+  # is one Lima never forwards (L6) -- that would fail the probe, not the stack.
+  probe_port=""
+  # ...nor one a target's forward holds: its ports/ file is created only if
+  # absent (a link, which fails rather than replaces), and removed only if it
+  # still names this probe as its owner.
+  for candidate in 18996 18986 18976 18966; do
+    lsof -nP -iTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1 && continue
+    vm_ssh sudo sh -c "printf 'desolate-dind:18997 desolate-preflight\n' > $INGRESS_ROOT/ports/.preflight \
+      && ln $INGRESS_ROOT/ports/.preflight $INGRESS_ROOT/ports/$candidate; held=\$?; rm -f $INGRESS_ROOT/ports/.preflight; exit \$held" \
+      2>/dev/null && { probe_port=$candidate; break; }
+  done
+  release_probe_port() {
+    [ -n "$probe_port" ] || return 0
+    vm_ssh sudo sh -c "grep -qx 'desolate-dind:18997 desolate-preflight' $INGRESS_ROOT/ports/$probe_port && rm -f $INGRESS_ROOT/ports/$probe_port"
+  }
+  dind_ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "desolate_dindnet").IPAddress}}' desolate-dind 2>/dev/null)
+  if [ -z "$probe_port" ] || [ -z "$dind_ip" ]; then
+    release_probe_port
+    skipped "ingress self-test: no free probe port on this Mac, or the dind has no address"
+  else
+    inner() { docker exec -e DOCKER_HOST=unix:///run/inner/docker.sock desolate-dind docker "$@"; }
+    inner rm -f "$INGRESS_PROBE" >/dev/null 2>&1
+    if ! inner run -d --rm --name "$INGRESS_PROBE" -p 18997:18997 alpine/socat \
+           "TCP-LISTEN:18997,fork,reuseaddr" "SYSTEM:echo desolate-ingress-selftest" >/dev/null 2>&1; then
+      release_probe_port
+      bad "could not start the ingress self-test listener on the inner daemon"
+    else
+      # Only write the shared dind's entry if nothing owns it yet, and only
+      # remove what this wrote: the supervisor will publish it for real.
+      wrote_dind=""
+      if ! vm_ssh test -e "$INGRESS_ROOT/dinds/desolate-dind"; then
+        vm_ssh sudo sh -c "printf '%s\n' '$dind_ip' > $INGRESS_ROOT/dinds/.desolate-dind && mv $INGRESS_ROOT/dinds/.desolate-dind $INGRESS_ROOT/dinds/desolate-dind" \
+          && wrote_dind=1
+      fi
+      # About 15 s at most: Lima forwarded a new VM listener in 20-215 ms when
+      # measured (T1.2), and waiting longer only made a failure slower.
+      body=""
+      for _ in $(seq 1 20); do
+        body=$(curl -s --http0.9 -m 0.5 "http://127.0.0.1:$probe_port/" 2>/dev/null) && [ -n "$body" ] && break
+        sleep 0.25
+      done
+      # Nothing on the Mac: ask the VM the same question while the forward is
+      # still open, so the failure can say which half of the path it is.
+      vm_body=""
+      [ -z "$body" ] && vm_body=$(vm_ssh curl -s --http0.9 -m 2 "http://127.0.0.1:$probe_port/" 2>/dev/null)
+      mac_holder=""
+      [ -z "$body" ] && mac_holder=$(lsof -nP -iTCP:"$probe_port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 {print $1 "(" $2 ")"}' | sort -u | tr '\n' ' ')
+      # Checked while the probe's own listener is open, so there is at least
+      # one to see: an empty answer here is a check that measured nothing.
+      bound=$(ingress_listeners)
+      case "$bound" in
+        "") bad "could not see the ingress's listeners (ss, or the unit's pid)" ;;
+        *0.0.0.0:*|*"[::]:"*|*"*:"*) bad "the ingress listens beyond loopback: $bound"
+                                     note "Lima forwards a VM 0.0.0.0 listener onto the Mac's LAN (vm-loopback-forward.sh L2)" ;;
+        *) ok "every ingress listener is loopback-only ($bound)" ;;
+      esac
+      release_probe_port
+      [ -n "$wrote_dind" ] && vm_ssh sudo rm -f "$INGRESS_ROOT/dinds/desolate-dind"
+      inner rm -f "$INGRESS_PROBE" >/dev/null 2>&1
+      case "$body" in
+        *desolate-ingress-selftest*) ok "a port opened on demand reached this Mac: 127.0.0.1:$probe_port -> dind $dind_ip:18997" ;;
+        *) case "$vm_body" in
+             *desolate-ingress-selftest*)
+               bad "nothing came back through 127.0.0.1:$probe_port on this Mac -- but the VM's own 127.0.0.1:$probe_port answered, so the ingress works and Lima did not forward it"
+               note "on this Mac, 127.0.0.1:$probe_port is held by: ${mac_holder:-nothing} (a port the Mac holds is one Lima never forwards)" ;;
+             *)
+               bad "nothing came back through 127.0.0.1:$probe_port, on this Mac or inside the VM -- the ingress did not forward it"
+               note "colima ssh -p ${COLIMA_PROFILE:-desolate} -- sudo journalctl -u desolate-ingress -n 20" ;;
+           esac ;;
+      esac
+    fi
+  fi
+fi
+
+echo
+echo "== 9. every bridge is covered, every forward is bounded =="
+# The nftables rules match bridges by NAME: the two the stack pins and, by
+# shape, every project dind's br-d-<hash>. A bridge that matches none of them is
+# outside interception, the lateral drops and the default-deny -- silently --
+# so every br-* interface on the VM is asked about, not a list of the expected.
+IFS_LINE=$(vm_ssh sudo nft list table inet desolate 2>/dev/null | sed -n 's/.*iifname { \(.*\) } .*/\1/p' | head -1)
+bridges=$(vm_ssh ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | sed 's/@.*//' | grep '^br-' | sort -u)
+uncovered=""
+for bridge in $bridges; do
+  covered=""
+  case "$bridge" in br-desolate|br-desolate-in) case "$IFS_LINE" in *"\"$bridge\""*) covered=1 ;; esac ;; esac
+  case "$bridge" in br-d-*) case "$IFS_LINE" in *'"br-d-*"'*) covered=1 ;; esac ;; esac
+  [ -n "$covered" ] || uncovered="$uncovered $bridge"
+done
+if [ -z "$IFS_LINE" ]; then
+  bad "could not read the interface set the desolate ruleset matches"
+elif [ -n "$uncovered" ]; then
+  # A br-<hash> that is not ours (docker's default networks on the VM, say) is
+  # reported, not failed: it carries no desolate traffic. Ours must all match.
+  ours=$(printf '%s\n' $uncovered | grep -E '^br-(desolate|d-)' || true)
+  if [ -n "$ours" ]; then
+    bad "desolate bridges outside the ruleset: $(echo $ours)"
+    note "re-arm it: ./cli.sh vm install --proxy-only"
+  else
+    ok "every desolate bridge is matched by the ruleset (not desolate's, so not covered:$uncovered)"
+  fi
+else
+  ok "every br-* interface on the VM is matched by the desolate ruleset"
+fi
+# A dind's own daemon must not hold the subnet its link to the VM is on: then
+# two routes claim it, the dind answers the VM on the wrong interface, and
+# every forward into it is dead (measured, 2026-10-26: docker0 had kept
+# 172.18.0.0/16 from its first start, and a later `up` gave dindnet the same).
+# dind.ts pins inner daemons to 10.234.0.0/16; a dind made before that, or an
+# inner network made before it, can still hold an old subnet.
+shadowed=""
+for dind in desolate-dind $(docker ps --filter label=desolate.dind --format '{{.Names}}'); do
+  dup=$(docker exec "$dind" ip route 2>/dev/null | awk '{print $1}' | grep -v '^default$' | sort | uniq -d | tr '\n' ' ')
+  [ -n "$dup" ] && shadowed="$shadowed $dind($dup)"
+done
+[ -z "$shadowed" ] && ok "no dind's own networks shadow its link to the VM" \
+  || { bad "a dind's own network holds the subnet of its link to the VM:$shadowed -- the ingress cannot reach it"
+       note "recreate it so its daemon takes the pinned range: ./cli.sh down && ./cli.sh up (project dinds are recreated from their spec, their images kept)"; }
+published=""
+for dind in $(docker ps --filter label=desolate.dind --format '{{.Names}}'); do
+  [ -n "$(docker port "$dind" 2>/dev/null)" ] && published="$published $dind"
+done
+[ -z "$published" ] && ok "no project dind publishes a port" \
+  || bad "project dinds publish ports:$published -- every port goes through the ingress"
+# One after the other, stdin closed: a second `colima ssh` expanded inside the
+# first's pipeline ran beside it on the same terminal and could come back
+# empty -- and an empty uid matches no rule, failing a ruleset that was fine.
+INGRESS_UID=$(vm_ssh id -u desolate-ingress </dev/null 2>/dev/null | tr -dc '0-9')
+INGRESS_RULES=$(vm_ssh sudo nft list chain inet desolate output </dev/null 2>/dev/null)
+if [ -n "$INGRESS_UID" ] && printf '%s\n' "$INGRESS_RULES" | grep -Eq "meta skuid $INGRESS_UID counter packets [0-9]+ bytes [0-9]+ drop"; then
+  ok "the ingress uid's output rule is loaded, with its counter"
+else
+  bad "no nftables output rule bounds the ingress uid (uid '${INGRESS_UID:-unknown}')"
+  printf '%s\n' "$INGRESS_RULES" | grep 'skuid' | sed 's/^[[:space:]]*/        saw: /'
+  note "re-arm it: ./cli.sh vm install --proxy-only"
 fi
 
 echo

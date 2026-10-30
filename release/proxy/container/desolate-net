@@ -1,0 +1,52 @@
+#!/bin/sh
+# desolate-net -- join THIS devcontainer to a network on its project's daemon.
+#
+#   /desolate/net join <network>...   join these
+#   /desolate/net join --all          every network on the daemon
+#   /desolate/net list                what there is, and what you are on
+#
+# Why it exists. With docker-outside-of-docker, the containers you start are
+# SIBLINGS of this one on your project's own daemon, not children of it, and
+# docker isolates bridges from each other: after `docker compose up`, the
+# services sit on `<project>_default` and `wget http://web:8000` from here does
+# not resolve until this container joins that network too. desolate joins every
+# network that exists when the project starts; this is for the ones a later
+# `compose up` creates. Every network on that daemon is your project's -- it is
+# a daemon of the project's own -- so `--all` reaches nothing else.
+set -eu
+
+die() { echo "desolate-net: $*" >&2; exit 1; }
+command -v docker >/dev/null 2>&1 || die "no docker CLI here (the docker-outside-of-docker feature provides it)"
+docker info >/dev/null 2>&1 || die "no daemon answers -- is this project using docker-outside-of-docker?"
+
+# This container, found by its hostname, which docker sets to the container's
+# id unless the spec overrode it -- so it is matched against every container's
+# configured hostname rather than assumed to be an id.
+self() {
+  me=$(hostname)
+  for id in $(docker ps -q); do
+    [ "$(docker inspect -f '{{.Config.Hostname}}' "$id" 2>/dev/null)" = "$me" ] && { echo "$id"; return; }
+  done
+  die "could not find this container on the daemon (hostname '$me')"
+}
+
+on() { docker inspect -f '{{range $n, $_ := .NetworkSettings.Networks}}{{$n}} {{end}}' "$1"; }
+
+case "${1:-}" in
+  list)
+    id=$(self); joined=" $(on "$id")"
+    docker network ls --filter type=custom --format '{{.Name}}' | while read -r net; do
+      case "$joined" in *" $net "*) echo "  * $net (joined)" ;; *) echo "    $net" ;; esac
+    done ;;
+  join)
+    shift
+    [ $# -gt 0 ] || die "usage: desolate-net join <network>... | --all"
+    id=$(self)
+    if [ "$1" = --all ]; then set -- $(docker network ls --filter type=custom --format '{{.Name}}'); fi
+    joined=" $(on "$id")"
+    for net in "$@"; do
+      case "$joined" in *" $net "*) echo "desolate-net: already on $net"; continue ;; esac
+      docker network connect "$net" "$id" && echo "desolate-net: joined $net"
+    done ;;
+  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

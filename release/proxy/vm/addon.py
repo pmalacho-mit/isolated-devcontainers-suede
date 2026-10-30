@@ -9,6 +9,9 @@ devcontainers put in .env files:
     settings.json in the VM:    "MY-AWESOME-PROJECT-OPENAI-KEY":
                                     {"value": "sk-...", "hosts": ["api.openai.com"]}
 
+and, optionally, `"headers": ["authorization"]`: substituted in those request
+headers ONLY -- see "A SECRET CONFINED TO HEADERS" below.
+
 Behavior per request:
   0. Refuse any request whose destination ADDRESS is internal (see below).
   1. Establish the PROVEN destination (see below).
@@ -16,12 +19,18 @@ Behavior per request:
      name WHERE THERE IS ONE. Plaintext has none, so that path falls back to
      the Host header and the policy is only as good as a name the client chose
      -- see "WHAT THE NETWORK POLICY DOES NOT DECIDE" below.
-  3. Scan URL + headers + body for any configured placeholder. One kind of
-     entry is scanned for more narrowly -- see "THE SELF-TEST FIXTURE" below.
-  4. If a placeholder is found but the proven destination is NOT in that
-     secret's allowlist -> block 403 (leak detection / honeypot defense).
-     Unlike step 2 this NEVER falls back: no SNI means no substitution.
-  5. Otherwise substitute every occurrence with the real value.
+  3. Scan URL + headers + body for any configured placeholder. Two kinds of
+     entry are scanned for more narrowly -- a secret confined to headers, in
+     those headers alone, and see "THE SELF-TEST FIXTURE" below.
+  4. A placeholder whose allowlist does NOT cover the proven destination is
+     left exactly as written and the request passes, with an AUDIT line
+     `verdict=LEAK-SUSPECT` naming it (leak detection / honeypot defense). A
+     placeholder is not a secret: `git push` of code that mentions one, or an
+     issue quoting it, used to be a 403 with nothing secret in flight (#12).
+     Unlike step 2 this NEVER falls back: no SNI means no substitution, and a
+     placeholder over plaintext is still refused outright.
+  5. Substitute every placeholder whose allowlist DOES cover it, and only
+     those -- the bound that matters, a real value reaches only its hosts.
   6. On responses, scrub real values back to placeholders, so an endpoint that
      echoes a secret VERBATIM does not hand it to the container -- see "WHAT
      SCRUBBING IS, AND WHAT IT IS NOT" below for how far that goes.
@@ -32,7 +41,8 @@ a gzipped message, which is most of them, and a size cap turned the largest
 responses into the ones that went unscrubbed.
 
 Redirect safety falls out of the model: substitution is decided per-request,
-so a redirect to an unlisted host receives the placeholder, which trips rule 4.
+so a redirect to an unlisted host receives the placeholder, unsubstituted, and
+rule 4 records it.
 
 ---------------------------------------------------------------------------
 WHY "PROVEN DESTINATION" AND NOT THE HOST HEADER
@@ -106,6 +116,38 @@ sent to that secret's allowlisted hosts. Bounding where a secret goes is the
 guarantee; keeping it unknown to a compromised container is not.
 
 ---------------------------------------------------------------------------
+A SECRET CONFINED TO HEADERS
+---------------------------------------------------------------------------
+The recovery above needs the real value somewhere the host computes on: a
+body, or a URL. A credential only ever needs to travel where the host reads
+credentials -- for Claude Code's subscription token, measured, that is the
+`Authorization` header and nowhere else -- so a secret may name the request
+headers it belongs in:
+
+    "DESOLATE-CLAUDE-OAUTH": {"value": "sk-ant-oat01-...",
+                              "hosts": ["api.anthropic.com"],
+                              "headers": ["authorization"]}
+
+Then it is substituted in those headers (matched by name, case-insensitively)
+and in nothing else. The same placeholder in a body, a URL or another header
+is not this secret at all: it goes out as written, the name the model sees,
+and nothing about the request is decided by it -- not leak detection, not the
+plaintext refusal, not the project scope. So `{"prompt": "reverse this:
+DESOLATE-CLAUDE-OAUTH"}` hands the model a name, and the name is all a
+container can get back.
+
+What stays open is only what an allowlisted host does with a header it is
+sent: an endpoint that answered with the request's own Authorization header,
+transformed, would undo this the way a model undoes a body. The exact echo is
+still scrubbed. So confine a secret to a header its host reads and does not
+repeat -- Authorization, an API-key header -- not, say, a cookie a service
+reflects into a page.
+
+A `headers` value that is not a non-empty list of header names drops the
+secret, loudly: a confinement that cannot be read is not widened to
+everywhere.
+
+---------------------------------------------------------------------------
 WHY INTERNAL DESTINATIONS ARE REFUSED BEFORE ANYTHING ELSE
 ---------------------------------------------------------------------------
 nftables REDIRECTs every :80 and :443 from the container bridges here,
@@ -170,11 +212,41 @@ nowhere, so it travels as itself and no value can leave.
     never prevented the thing it was named for.
 
 ---------------------------------------------------------------------------
+WHICH PROJECT A REQUEST CAME FROM (T4.6)
+---------------------------------------------------------------------------
+Every project dind sits on a bridge of its own (br-d-*), so the connection's
+SOURCE address names the dind, and the supervisor publishes each dind's
+address in desolate-ingress's dinds/ directory, the file named for it. That
+is the map: `desolate-dind-acme__widgets` holding 172.30.0.2 means a request
+from 172.30.0.2 is acme/widgets'. The shared dind and the editor's bridge
+are no project's (`project=-`).
+
+A source address is only worth this because it cannot be borrowed. A dind may
+set its own interface to another dind's address, and its packets would arrive
+with that source -- but this proxy's replies route by destination, to the
+OTHER dind's bridge, so the forged connection never completes a handshake and
+never carries a request. An address that maps to nothing is no project's, and
+earns nothing a project scope grants: fail closed.
+
+What the map is used for:
+
+  * every AUDIT line ends `project=<name>` (or `-`);
+  * a `network` rule with `"projects": [...]` applies only to those projects,
+    and one without applies to all, as before;
+  * a secret with `"projects": [...]` is substituted only for requests from
+    those projects. From anywhere else -- another project, the shared daemon,
+    an unmapped address -- the request is refused (403, `verdict=DENY-SCOPE`)
+    rather than passed unsubstituted: unlike a placeholder sent to the wrong
+    HOST, this one is headed to a host that would accept the real value, and
+    the caller is not someone it was meant for. A secret with no `projects`
+    key behaves as it always has.
+
+---------------------------------------------------------------------------
 THE SELF-TEST FIXTURE, AND WHY IT IS MATCHED DIFFERENTLY
 ---------------------------------------------------------------------------
 `preflight.sh` proves leak detection is running by tripping it: it sends a
-placeholder toward a host that placeholder is not allowlisted for and demands a
-403. That needs a placeholder to exist, so one ships in settings.example.json
+placeholder toward a host that placeholder is not allowlisted for and demands
+the `LEAK-SUSPECT` audit line for that exact request (it was a 403 before #12). That needs a placeholder to exist, so one ships in settings.example.json
 -- DESOLATE-SELFTEST-PLACEHOLDER, fake value, pinned to httpbin.org.
 
 Its NAME is a published string: it appears in this file, in install.sh, in
@@ -203,10 +275,19 @@ import json
 import logging
 import os
 import re
+import stat
 
 from mitmproxy import http
 
 SETTINGS_PATH = os.environ.get("DESOLATE_SETTINGS", "/etc/desolate-proxy/settings.json")
+# The supervisor's published dind addresses (desolate-ingress.tmpfiles): what a
+# request's source address is attributed by. See "WHICH PROJECT".
+DINDS_DIR = os.environ.get("DESOLATE_DINDS_DIR", "/run/desolate-ingress/dinds")
+PROJECT_DIND = re.compile(r"desolate-dind-([A-Za-z0-9][A-Za-z0-9._-]*)")
+# projects.ts's validName: `name` or `owner/name`.
+PROJECT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?")
+# A header a secret may be confined to ("A SECRET CONFINED TO HEADERS").
+HEADER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
 
 # There is deliberately NO size cap on body inspection.
 #
@@ -246,6 +327,72 @@ def host_pattern_problem(pattern):
             "('*foo.com' also matches 'evilfoo.com', and '*.com' is a whole TLD)")
 
 
+def project_of_dind(name):
+    """The project a dind's file name stands for (dind.ts names them for the
+    project's namespace, `/` spelled `__`), or None for anything else -- the
+    shared `desolate-dind`, a writer's temporary file, a stray name."""
+    match = PROJECT_DIND.fullmatch(name)
+    if not match or name.endswith(".tmp"):
+        return None
+    # At most one `/`, and a name's second segment starts alphanumeric, so the
+    # `/` is the LAST `__`: owner `a_` with repo `b` is `a___b`, which a
+    # left-to-right replace read as `a/_b`.
+    owner, slash, repo = match.group(1).rpartition("__")
+    project = f"{owner}/{repo}" if slash else repo
+    if "__" in project:
+        return None
+    return project if PROJECT_NAME.fullmatch(project) else None
+
+
+def dinds_fingerprint(directory):
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return None
+    stamp = []
+    for name in names:
+        try:
+            st = os.lstat(os.path.join(directory, name))
+        except OSError:
+            continue
+        # The content too, not only the inode and times: a dind removed and
+        # made again can get its file's freed inode back, at an address of the
+        # same length, within one mtime tick -- and its old address would go
+        # on naming the project. The files are one address each.
+        content = b""
+        if not stat.S_ISLNK(st.st_mode):
+            try:
+                with open(os.path.join(directory, name), "rb") as handle:
+                    content = handle.read(64)
+            except OSError:
+                pass
+        stamp.append((name, st.st_ino, st.st_mtime_ns, st.st_size, content))
+    return tuple(stamp)
+
+
+def read_dind_addresses(directory):
+    """address -> project, from the supervisor's dinds/ files. Symlinks are not
+    read (the ingress does not read them either), and a file that is not one
+    address is skipped: it attributes nothing."""
+    addresses = {}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return addresses
+    for name in names:
+        project = project_of_dind(name)
+        path = os.path.join(directory, name)
+        if project is None or os.path.islink(path):
+            continue
+        try:
+            with open(path) as handle:
+                address = ipaddress.ip_address(handle.read().strip())
+        except (OSError, ValueError):
+            continue
+        addresses[str(address)] = project
+    return addresses
+
+
 def is_selftest_fixture(entry):
     """Whether this entry exists to be TRIPPED rather than to guard a value.
 
@@ -264,12 +411,37 @@ log = logging.getLogger("desolate-proxy")
 class DesolateProxy:
     def __init__(self):
         self._mtime = None
-        self.secrets = {}          # placeholder -> {"value": str, "hosts": [glob...]}
+        self.secrets = {}          # placeholder -> {"value", "hosts": [glob...], "projects", "headers"}
         self.network = []          # [{"action","host","method"?}, ...]
         self.default_action = "allow"
         self.scrub_responses = True
         self.tls_passthrough = []  # SNI globs to tunnel without interception
         self.allow_private_destinations = False
+        self._dinds_stamp = None
+        self._projects_by_address = {}
+
+    # ---------- attribution ----------
+
+    def project_of(self, flow):
+        """The project this request came from, or None. See "WHICH PROJECT"."""
+        # Each file's inode and mtime, not the directory's: a directory's mtime
+        # is too coarse to see two changes in one tick, and an address docker
+        # hands a new dind after an old one's purge must never be attributed to
+        # the old one's project. Compared by content as well as inode
+        # (dinds_fingerprint): an unlinked file's inode can come straight back.
+        stamp = dinds_fingerprint(DINDS_DIR)
+        if stamp != self._dinds_stamp:
+            self._projects_by_address = read_dind_addresses(DINDS_DIR)
+            self._dinds_stamp = stamp
+        peer = getattr(flow.client_conn, "peername", None)
+        if not isinstance(peer, (tuple, list)) or not peer:
+            return None
+        try:
+            address = ipaddress.ip_address(str(peer[0]).strip("[]"))
+        except ValueError:
+            return None
+        address = getattr(address, "ipv4_mapped", None) or address
+        return self._projects_by_address.get(str(address))
 
     # ---------- config ----------
 
@@ -305,8 +477,24 @@ class DesolateProxy:
                     log.error(f"secret {name!r}: host {host!r} {problem}")
                 log.warning(f"secret {name!r} skipping (its allowlist does not pin a destination)")
                 continue
+            projects = entry.get("projects")
+            if projects is not None and (
+                    not isinstance(projects, list) or not projects
+                    or not all(isinstance(p, str) and PROJECT_NAME.fullmatch(p) for p in projects)):
+                log.error(f"secret {name!r}: projects {projects!r} is not a list of project names; "
+                          f"skipping (a scope that cannot be read is not widened to everyone)")
+                continue
+            headers = entry.get("headers")
+            if headers is not None and (
+                    not isinstance(headers, list) or not headers
+                    or not all(isinstance(h, str) and HEADER_NAME.fullmatch(h) for h in headers)):
+                log.error(f"secret {name!r}: headers {headers!r} is not a list of header names; "
+                          f"skipping (a confinement that cannot be read is not widened to everywhere)")
+                continue
             secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts],
-                             "selftest": is_selftest_fixture(entry)}
+                             "selftest": is_selftest_fixture(entry),
+                             "projects": None if projects is None else frozenset(projects),
+                             "headers": None if headers is None else frozenset(h.lower() for h in headers)}
 
         for name in self._overlapping(secrets):
             del secrets[name]
@@ -392,7 +580,7 @@ class DesolateProxy:
                 continue
         return None
 
-    def audit(self, flow, verdict, host, route, method, secrets):
+    def audit(self, flow, verdict, host, route, method, secrets, suspect=(), project=None):
         """One machine-readable line per request, for `cli.sh proxy audit`.
 
         Separate from the human log lines above on purpose. Those are prose and
@@ -404,6 +592,11 @@ class DesolateProxy:
         token would sit, so `route` arrives already stripped by the caller. The
         whole point of substitution is that a real value exists in one 0600 file
         on this VM; writing one into journald would quietly make that false.
+
+        `suspect` is the placeholders that passed UNSUBSTITUTED toward a host
+        their allowlist does not cover, and `project` the project the request
+        came from ("-" for none). Each was appended last, so every older field
+        keeps its position for parsers that predate it.
         """
         try:
             log.info(
@@ -412,7 +605,9 @@ class DesolateProxy:
                 f"method={method} "
                 f"host={host or '?'} "
                 f"path={route or '/'} "
-                f"secrets={','.join(secrets) if secrets else '-'}"
+                f"secrets={','.join(secrets) if secrets else '-'} "
+                f"suspect={','.join(suspect) if suspect else '-'} "
+                f"project={project or '-'}"
             )
         except Exception:
             # An audit line must never be the reason a request fails.
@@ -461,10 +656,26 @@ class DesolateProxy:
             raw = raw.rsplit(":", 1)[0]
         return raw.lower()
 
-    def _network_allowed(self, host, method):
+    def _network_allowed(self, host, method, project=None):
         for rule in self.network:
             if not self._host_matches(host, [str(rule.get("host", "*")).lower()]):
                 continue
+            # A rule naming projects is theirs -- read so that it fails closed.
+            # An ALLOW is theirs alone, and one whose scope cannot be read
+            # applies to no one. A DENY also applies to traffic no project can
+            # be named for: a project chooses its daemon in its own spec, and
+            # on the shared one it is unattributed, so a deny that skipped
+            # unattributed traffic would be one it could step around. A deny
+            # whose scope cannot be read applies to everyone.
+            scope = rule.get("projects")
+            if scope is not None:
+                deny = rule.get("action", "deny") != "allow"
+                readable = isinstance(scope, list)
+                if deny:
+                    if readable and project is not None and project not in scope:
+                        continue
+                elif not readable or project not in scope:
+                    continue
             m = rule.get("method")
             if m and m.upper() != method.upper():
                 continue
@@ -512,8 +723,19 @@ class DesolateProxy:
             return set()
         url = flow.request.url
         headers = "\n".join(f"{k}: {v}" for k, v in flow.request.headers.items(multi=True))
-        body = self.decoded_body(flow.request)
-        return {n for n in names if n in url or n in headers or n.encode() in body}
+        # A secret confined to headers is in a request only where it may be
+        # substituted. Never decoded for: a body cannot carry one.
+        confined = {n for n, e in names.items() if e.get("headers") is not None}
+        found = {n for n in confined if self._in_its_headers(flow, n)}
+        rest = [n for n in names if n not in confined]
+        if rest:
+            body = self.decoded_body(flow.request)
+            found |= {n for n in rest if n in url or n in headers or n.encode() in body}
+        return found
+
+    def _in_its_headers(self, flow, name):
+        allowed = self.secrets[name].get("headers")
+        return any(name in v for k, v in flow.request.headers.items(multi=True) if k.lower() in allowed)
 
     # ---------- mitmproxy hooks ----------
 
@@ -541,6 +763,7 @@ class DesolateProxy:
         method = flow.request.method
         proven = self.proven_host(flow)
         claimed = self.host_header(flow)
+        project = self.project_of(flow)
 
         # 0) destination address -- BEFORE the name is consulted, because the
         # name is the part an attacker chooses. See the module header.
@@ -550,7 +773,7 @@ class DesolateProxy:
                 log.warning(f"DENY  {method} -> {destination} (internal destination; "
                             f"claimed {claimed!r}, sni {proven!r})")
                 self.audit(flow, "DENY-INTERNAL", str(destination),
-                           flow.request.path.split("?", 1)[0], method, [])
+                           flow.request.path.split("?", 1)[0], method, [], project=project)
                 self._block(flow, 403,
                             f"destination {destination} is internal to the host; "
                             f"containers may not reach it through this proxy")
@@ -558,10 +781,10 @@ class DesolateProxy:
 
         # 1) network policy -- on the proven name where we have one.
         policy_host = proven or claimed or flow.request.host
-        if not self._network_allowed(policy_host, method):
+        if not self._network_allowed(policy_host, method, project):
             log.warning(f"DENY  {method} {policy_host}{flow.request.path} (network policy)")
             self.audit(flow, "DENY-POLICY", policy_host,
-                       flow.request.path.split("?", 1)[0], method, [])
+                       flow.request.path.split("?", 1)[0], method, [], project=project)
             self._block(flow, 403, f"network policy denied {method} {policy_host}")
             return
 
@@ -582,16 +805,33 @@ class DesolateProxy:
                             f"Host header '{claimed}' does not match the TLS destination "
                             f"'{proven}'; refusing to substitute a secret")
                 return
-            for name in sorted(found):
-                if not self._host_matches(proven, self.secrets[name]["hosts"]):
-                    log.warning(f"LEAK  placeholder {name!r} sent toward {proven!r} "
-                                f"(allowed: {self.secrets[name]['hosts']}) -- blocked")
-                    self._block(flow, 403, f"secret {name} is not permitted for host {proven}")
-                    return
+        # A placeholder toward a host its allowlist does not cover is not
+        # refused: nothing secret is in flight, only a name. It goes out as
+        # written -- never substituted, which is the bound -- and is recorded.
+        suspect = sorted(name for name in found
+                         if not self._host_matches(proven, self.secrets[name]["hosts"]))
+        for name in suspect:
+            log.warning(f"LEAK-SUSPECT placeholder {name!r} sent toward {proven!r} "
+                        f"(allowed: {self.secrets[name]['hosts']}) -- passed UNSUBSTITUTED")
+        found = found - set(suspect)
 
         # Captured BEFORE substitution and stripped of its query string, for the
         # audit line and the SUBST log below. See the comment at the log call.
         route = flow.request.path.split("?", 1)[0]
+
+        # A secret scoped to projects is refused to anyone else -- including a
+        # source that maps to no project at all. See "WHICH PROJECT".
+        out_of_scope = sorted(name for name in found
+                              if self.secrets[name]["projects"] is not None
+                              and project not in self.secrets[name]["projects"])
+        if out_of_scope:
+            log.warning(f"DENY  {method} {proven}{route}: {out_of_scope} scoped to other projects "
+                        f"(request from {project or 'no project'}) -- blocked")
+            self.audit(flow, "DENY-SCOPE", proven, route, method, [], out_of_scope, project=project)
+            self._block(flow, 403,
+                        f"secret {out_of_scope} is not available to "
+                        f"{project or 'this source, which is no project'}")
+            return
 
         # 3) substitution. Order does not matter here, and that is a property
         # the config check buys: no loaded placeholder contains another (see
@@ -600,10 +840,19 @@ class DesolateProxy:
         # The body is decoded once, substituted into for every secret, and
         # written back once. Assigning `.content` per secret would re-encode
         # the whole body and rewrite Content-Length once per name.
-        body = self.decoded_body(flow.request) if found else b""
+        unconfined = [n for n in found if self.secrets[n].get("headers") is None]
+        body = self.decoded_body(flow.request) if unconfined else b""
         substituted = body
         for name in found:
             value = self.secrets[name]["value"]
+            allowed = self.secrets[name].get("headers")
+            if allowed is not None:
+                # In its own headers and NOWHERE else: not the path, not the
+                # body, not another header. "A SECRET CONFINED TO HEADERS".
+                for k, v in list(flow.request.headers.items(multi=True)):
+                    if k.lower() in allowed and name in v:
+                        flow.request.headers[k] = v.replace(name, value)
+                continue
             # .path, NOT .url -- and this is load-bearing, not style.
             #
             # Assigning flow.request.url re-parses it into scheme/host/port/path
@@ -634,7 +883,11 @@ class DesolateProxy:
         if substituted is not body:
             flow.request.content = substituted
 
-        if found:
+        if suspect:
+            if found:
+                log.info(f"SUBST {method} {proven}{route} <- {sorted(found)}")
+            self.audit(flow, "LEAK-SUSPECT", proven, route, method, sorted(found), suspect, project=project)
+        elif found:
             # `route` was captured BEFORE the loop above and has its query string
             # stripped. Both halves matter: `flow.request.path` covers path AND
             # query, and the substitution has already run by the time we get
@@ -643,9 +896,9 @@ class DesolateProxy:
             # Secrets are supposed to exist in exactly one place on this VM,
             # 0600 in /etc/desolate-proxy/settings.json, and journald is not it.
             log.info(f"SUBST {method} {proven}{route} <- {sorted(found)}")
-            self.audit(flow, "SUBST", proven, route, method, sorted(found))
+            self.audit(flow, "SUBST", proven, route, method, sorted(found), project=project)
         else:
-            self.audit(flow, "ALLOW", proven or claimed, route, method, [])
+            self.audit(flow, "ALLOW", proven or claimed, route, method, [], project=project)
 
     def response(self, flow: http.HTTPFlow):
         try:

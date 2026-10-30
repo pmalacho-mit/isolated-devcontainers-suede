@@ -8,10 +8,10 @@
 #
 # Usage, from your own terminal inside the devcontainer:
 #
-#   /desolate-ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim
-#   /desolate-ca/trust-proxy-in-builds.sh --image node:22-slim --shadow
-#   /desolate-ca/trust-proxy-in-builds.sh --image node:22-slim   # derive only
-#   /desolate-ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim \
+#   /desolate/ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim
+#   /desolate/ca/trust-proxy-in-builds.sh --image node:22-slim --shadow
+#   /desolate/ca/trust-proxy-in-builds.sh --image node:22-slim   # derive only
+#   /desolate/ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim \
 #       --compose ./deploy/compose.yml
 #
 #   --shadow        also point the base image's OWN tag at the derivative, so
@@ -57,12 +57,11 @@
 #                                           to prefer a local image.
 #   POST /build?version=1 (classic)      -- shadow wins. The classic builder
 #                                           only ever reads the local store.
-#   POST /build?version=2 (BuildKit)     -- shadow LOSES. This path does not
-#                                           ask for local-first, so BuildKit
-#                                           resolves the tag at the registry
-#                                           and pins `FROM ...@sha256:<their
-#                                           digest>`. Retagging here changes
-#                                           nothing it looks at.
+#   POST /build?version=2 (BuildKit)     -- the local tag LOSES. This path
+#                                           does not ask for local-first, so
+#                                           BuildKit resolves the tag at the
+#                                           registry. On a project's own daemon
+#                                           the shadow wins anyway: see below.
 #
 # The last one is an SDK's default in some clients (dockerode with
 # version: "2", and anything wrapping it). Nothing in the build output says the
@@ -75,20 +74,32 @@
 # registry, so BuildKit falls back to this store), or ask that build for the
 # classic builder instead.
 #
+# On a PROJECT'S OWN daemon (docker-outside-of-docker), --shadow also pushes
+# the derivative to that dind's mirror -- a registry it starts there on first
+# use, at 127.0.0.1:5995 in the dind -- under the base's own name, and the dind
+# lists that mirror in its daemon.json. Its daemon uses the containerd image
+# store, where BuildKit DOES honour registry-mirrors (measured: T5.3's probe,
+# S7), so the Engine-API build gets the derivative too, and so does a `docker
+# pull`. Docker Hub images only -- registry-mirrors covers no other registry --
+# and not the shared daemon, which has no mirror. --unshadow takes it out of
+# the mirror again.
+#
 # What does NOT fix this, and is the obvious thing to reach for: a CA in the
 # daemon's buildkitd.toml. That configures BuildKit's own REGISTRY client -- how
 # it pulls images -- and has no effect on the HTTPS traffic your RUN steps make.
-# Nor do the daemon's registry-mirrors: `docker pull` honours them, and the
-# BuildKit inside the same daemon ignores them, so a mirror serving derivatives
-# cannot stand in for the shadow either.
 set -eu
 
-CA_DIR=/desolate-ca
+CA_DIR=/desolate/ca
 CA_PEM="$CA_DIR/ca.pem"
 TAG_PREFIX=desolate-ca
-MARKER='# managed by /desolate-ca/trust-proxy-in-builds.sh'
+MARKER='# managed by /desolate/ca/trust-proxy-in-builds.sh'
 FINGERPRINT_LABEL=desolate.ca.fingerprint
 BASE_LABEL=desolate.ca.shadowed-from
+# A project dind's mirror (release/vscode-image/dind.ts MIRROR; tests/static
+# holds the two equal). Loopback inside the dind: no other project reaches it.
+MIRROR_ADDRESS=127.0.0.1:5995
+MIRROR_IMAGE=registry:2.8.3@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+MIRROR_CONTAINER=desolate-mirror
 
 IMAGE=""
 SERVICE=""
@@ -100,6 +111,66 @@ SHADOW=0
 UNSHADOW=0
 
 die() { echo "trust-proxy: $*" >&2; exit 1; }
+
+# The repository a Docker Hub image has in a registry, with its tag:
+# node:22 -> library/node:22, owner/x -> owner/x:latest. Nothing for an image
+# of another registry, or one named by digest: registry-mirrors covers Docker
+# Hub alone, and a digest names one image, which no mirror may stand in for.
+mirror_path() {
+    ref=$1
+    case "$ref" in *@*) return 1 ;; esac
+    ref=${ref#docker.io/}; ref=${ref#index.docker.io/}
+    case "$ref" in
+        */*) case "${ref%%/*}" in *.*|*:*|localhost) return 1 ;; esac ;;
+        *)   ref="library/$ref" ;;
+    esac
+    case "${ref##*/}" in *:*) ;; *) ref="$ref:latest" ;; esac
+    case "$ref" in *[!a-z0-9._/:-]*) return 1 ;; esac
+    printf '%s\n' "$ref"
+}
+
+# Whether this daemon lists the mirror -- a project dind does; the shared one
+# does not.
+has_mirror() { docker info --format '{{json .RegistryConfig.Mirrors}}' 2>/dev/null | grep -q "$MIRROR_ADDRESS"; }
+
+ensure_mirror() {
+    [ "$(docker inspect -f '{{.State.Running}}' "$MIRROR_CONTAINER" 2>/dev/null)" = true ] && return 0
+    docker rm -f "$MIRROR_CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --name "$MIRROR_CONTAINER" --restart unless-stopped --label desolate.mirror=1 \
+        -p "$MIRROR_ADDRESS:5000" -v desolate-mirror:/var/lib/registry "$MIRROR_IMAGE" >/dev/null || return 1
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        docker exec "$MIRROR_CONTAINER" wget -q -O /dev/null http://127.0.0.1:5000/v2/ 2>/dev/null && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Serve the derivative from the mirror under the base's own name.
+mirror_shadow() {
+    if ! has_mirror; then
+        echo "trust-proxy: this daemon has no mirror (it is the shared one), so a BuildKit build"
+        echo "             posted to the Engine API still gets the pristine base -- see below."
+        return 0
+    fi
+    path=$(mirror_path "$IMAGE") || { echo "trust-proxy: $IMAGE is not a Docker Hub image; the mirror cannot serve it."; return 0; }
+    ensure_mirror || { echo "trust-proxy: could not start the mirror ($MIRROR_CONTAINER); the local shadow stands alone." >&2; return 0; }
+    docker tag "$TAG" "$MIRROR_ADDRESS/$path" \
+        && docker push -q "$MIRROR_ADDRESS/$path" >/dev/null \
+        && docker rmi "$MIRROR_ADDRESS/$path" >/dev/null \
+        && echo "trust-proxy: and the mirror serves it as $path, for every builder this daemon has" \
+        || echo "trust-proxy: could not push $TAG to the mirror; the local shadow stands alone." >&2
+}
+
+# Take it out of the mirror: the tag's link goes, so the mirror answers 404
+# and the daemon falls back to Docker Hub.
+mirror_unshadow() {
+    has_mirror || return 0
+    path=$(mirror_path "$IMAGE") || return 0
+    [ "$(docker inspect -f '{{.State.Running}}' "$MIRROR_CONTAINER" 2>/dev/null)" = true ] || return 0
+    docker exec "$MIRROR_CONTAINER" rm -rf \
+        "/var/lib/registry/docker/registry/v2/repositories/${path%:*}/_manifests/tags/${path##*:}" \
+        && echo "trust-proxy: and the mirror no longer serves $path"
+}
 
 usage() {
     # Anchored on the WHY marker, not a line range. A hardcoded range silently
@@ -216,6 +287,8 @@ if [ "$UNSHADOW" = 1 ]; then
         echo "trust-proxy: $IMAGE is not shadowed (nothing to undo)."
         exit 0
     fi
+    # First, before anything below pulls: a pull goes to the mirror first.
+    mirror_unshadow
 
     if is_local "$PRISTINE_ALIAS"; then
         docker tag "$PRISTINE_ALIAS" "$IMAGE" || die "could not retag $PRISTINE_ALIAS as $IMAGE"
@@ -457,6 +530,7 @@ if [ "$SHADOW" = 1 ]; then
 
     docker tag "$TAG" "$IMAGE" || die "could not retag $TAG as $IMAGE"
     echo "trust-proxy: $IMAGE now resolves to $TAG in this daemon"
+    mirror_shadow
 
     cat <<EOF
 
@@ -465,6 +539,10 @@ Done. Builds in THIS daemon that say
 now get the CA-trusting derivative, with your Dockerfile unchanged. That covers
 \`docker build\`, \`docker compose build\`, and any build posted to the Engine
 API that does not ask for BuildKit.
+
+On a project's own daemon the mirror covers the rest -- a build posted to the
+Engine API that asks for BuildKit, and \`docker pull $IMAGE\` -- for Docker Hub
+images. Otherwise, and for any other registry:
 
 It does NOT cover a build posted to the Engine API that DOES ask for BuildKit
 (\`/build?version=2\` -- dockerode with version: "2", and tools built on it).

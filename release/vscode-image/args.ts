@@ -5,6 +5,11 @@
  * subprocess. Turning a UsageError into an exit code is the entry point's job.
  */
 
+/** A bundle handed between the editor and a target's sandbox (transfer.ts):
+ *  the editor picks the name, and everything that takes one holds it to this,
+ *  so no side can be asked for any other file. */
+export const TRANSFER_NAME = /^desolate-transfer-[0-9a-f]{16}\.bundle$/;
+
 /**
  * What the invocation asks for. Each one acts on exactly one target.
  *
@@ -26,7 +31,51 @@ export type Command =
   | "purge"
   /** What is UP right now, across every project and worktree. Names no target:
    *  the question is about all of them. Reads state; changes none. */
-  | "list";
+  | "list"
+  /** Every project dind, as the supervisor sees it -- state, health, idle
+   *  time, memory, image store -- and the VM's headroom, as JSON. Names no
+   *  target. What the editor's extension shows; `cli.sh dind list` prints it. */
+  | "dinds"
+  /** Whether a worktree holds anything a removal would lose, asked in its
+   *  sandbox. What `cli.sh worktree remove` runs before deleting one; the
+   *  editor cannot ask git that itself (worktrees.ts). */
+  | "uncommitted"
+  /** Check a never-started worktree out in its sandbox, and nothing else.
+   *  What the broker asks for BEFORE it reads the spec: a worktree the editor
+   *  created holds no `.devcontainer/` until this has run (worktrees.ts). */
+  | "populate"
+  /** Create a worktree, with nothing checked out, in its sandbox: the broker's
+   *  answer to the editor's `worktree add`, which must not run git itself
+   *  (worktrees.ts). The one command whose target must NOT exist yet. */
+  | "create-worktree"
+  /** Remove a worktree -- once nothing would be lost, or `--force` -- in its
+   *  sandbox, after purging what desolate made for it. What `worktree remove`
+   *  asks for, from the editor or the Mac. */
+  | "remove-worktree"
+  /** Give the editor's uid back everything under the target -- or under
+   *  `path` inside it -- that a container left owned by someone else (#15).
+   *  What `cli.sh reclaim` and `cli.sh worktree remove` run. */
+  | "reclaim"
+  /** Run a command inside a running target's devcontainer, as its user, in its
+   *  folder -- how a harness starts an agent (`cli.sh exec`, docs/agents.md).
+   *  The Mac's alone: the editor has no daemon, and gets no way into one. */
+  | "exec"
+  /** The project's half of `desolate --push` (transfer.ts): bundle the branch
+   *  checked out in the target, in its sandbox, into the project's git dir. */
+  | "bundle"
+  /** The project's half of `desolate --pull`: take the bundle the editor
+   *  fetched into origin/*, in the target's sandbox, and fast-forward. */
+  | "pull"
+  /** What a push would send, read in the target's sandbox and changing
+   *  nothing: `desolate --review` (review.ts), the editor's Review & Push. */
+  | "review"
+  /** The project's suede dependencies, and how each differs from its pin,
+   *  at a commit (`cli.sh suede report`; docs/suede-factory.md). The Mac's:
+   *  the broker does not speak it. */
+  | "suede-report"
+  /** The commit that proposes one suede dependency's changes upstream,
+   *  bundled in the project's git dir (`cli.sh suede upstream`). The Mac's. */
+  | "suede-build";
 
 export type Args = {
   command: Command;
@@ -57,14 +106,53 @@ export type Args = {
   /** `--all`: widen `stop` from one target to every running one. The spelling
    *  that cannot be mistaken for a project called `all`. */
   all: boolean;
+  /** The branch `create-worktree` checks out, made if it is not there. Absent
+   *  is the worktree's own name. */
+  branch?: string;
+  /** Where `create-worktree` starts a branch it makes: a commit, or a ref to
+   *  one. Absent is the project's HEAD. */
+  from?: string;
+  /** `remove-worktree` without asking whether anything would be lost. */
+  force: boolean;
+  /** `--ports <p> --move <label> <port>`: give one label a different host
+   *  port -- for when the Mac already holds it, which Lima never forwards. */
+  move?: { label: string; port: number };
+  /** `--reclaim --path <relative>`: where under the target to reclaim. Relative
+   *  to the target's directory, and refused if it leaves it. */
+  path?: string;
+  /** `--json`: `list` and `ports` print one JSON document instead of prose,
+   *  for programs -- the editor's extension, a harness. */
+  json: boolean;
+  /** `exec`'s command line: everything after `--`. */
+  execArgv?: string[];
+  /** `bundle`, `pull` and `suede-build`: the bundle's file name in the project's git dir. */
+  transfer?: string;
+  /** `pull`: set origin/* and move nothing checked out. */
+  fetchOnly?: boolean;
+  /** `suede-report` and `suede-build`: the commit to look at. */
+  ref?: string;
+  /** `suede-build`: the dependency's folder, relative to the project. */
+  subrepo?: string;
 };
 
 /** The wire form the broker spawns desolate with. */
 export type Flags =
   | "--stop"
   | "--ports"
+  | "--populate"
+  | "--create-worktree"
+  | ["--branch", string]
+  | "--remove-worktree"
+  | "--force"
+  | ["--from", string]
+  | "--json"
   | ["--config", string]
   | ["--worktree", string]
+  | ["--move", string, string]
+  | ["--bundle", string]
+  | ["--pull", string]
+  | "--review"
+  | "--fetch-only"
   | "--rebuild"
   | [
       "--rebuild",
@@ -75,7 +163,7 @@ export type Flags =
 
 export const USAGE =
   `usage: desolate [--config <path>] [--worktree <name>] [--rebuild [--no-cache]]
-                [--stop|--ports|--purge] <project>
+                [--stop|--ports [--move <label> <port>]|--purge] <project>
        desolate --list                    what is running right now
        desolate --stop all|--stop --all   stop every running target
        <project> is 'name' or 'owner/name', relative to /workspaces
@@ -87,6 +175,15 @@ export class UsageError extends Error {
   }
 }
 
+/** A path under a target, as written: relative, no `..` segment, nothing a
+ *  shell or a mount option would read twice. Checked again against the real
+ *  directory where it is used; this is the grammar's half. */
+const relativeWithin = (raw: string) =>
+  raw !== "" &&
+  !raw.startsWith("/") &&
+  !/[\0\n,]/.test(raw) &&
+  raw.split("/").every((segment) => segment !== "..");
+
 /** A project argument may be written as a bare name, an `owner/name`, or the
  *  absolute path the shell's tab-completion produces. All three denote the same
  *  project, so they are reduced to the one form the rest of the code uses. */
@@ -96,7 +193,7 @@ const projectName = (raw: string, workspaces: string) =>
 /** Commands that act on the whole stack, so a project argument has nothing to
  *  mean. `--all` puts `stop` in the same class. */
 const namesNoTarget = (command: Command, all: boolean) =>
-  command === "list" || all;
+  command === "list" || command === "dinds" || all;
 
 /** @throws UsageError unless exactly one project was given. */
 const theOneProject = (positional: string[], workspaces: string) => {
@@ -121,11 +218,27 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let rebuild = false;
   let noCache = false;
   let all = false;
+  let branch: string | undefined;
+  let from: string | undefined;
+  let force = false;
+  let move: Args["move"];
+  let reclaimPath: string | undefined;
+  let json = false;
   const positional: string[] = [];
   const queue = [...argv];
+  let execArgv: string[] | undefined;
+  let transfer: string | undefined;
+  let ref: string | undefined;
+  let subrepo: string | undefined;
+  let fetchOnly = false;
 
   while (queue.length) {
     const arg = queue.shift()!;
+    // Everything after `--` is a command line, never desolate's flags.
+    if (arg === "--") {
+      execArgv = queue.splice(0);
+      break;
+    }
     switch (arg) {
       case "--config":
         config = queue.shift() ?? "";
@@ -142,12 +255,88 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--purge":
         command = "purge";
         break;
+      case "--populate":
+        command = "populate";
+        break;
+      case "--uncommitted":
+        command = "uncommitted";
+        break;
+      case "--create-worktree":
+        command = "create-worktree";
+        break;
+      case "--remove-worktree":
+        command = "remove-worktree";
+        break;
+      case "--branch":
+        branch = queue.shift() ?? "";
+        break;
+      case "--from":
+        from = queue.shift() ?? "";
+        break;
+      case "--force":
+        force = true;
+        break;
+      case "--reclaim":
+        command = "reclaim";
+        break;
+      case "--exec":
+        command = "exec";
+        break;
+      case "--bundle":
+      case "--pull":
+        command = arg === "--bundle" ? "bundle" : "pull";
+        transfer = queue.shift() ?? "";
+        if (!TRANSFER_NAME.test(transfer))
+          throw new UsageError(`${arg} takes a bundle name (desolate-transfer-<16 hex>.bundle), got '${transfer}'`);
+        break;
+      case "--fetch-only":
+        fetchOnly = true;
+        break;
+      case "--review":
+        command = "review";
+        break;
+      case "--suede-report":
+        command = "suede-report";
+        break;
+      case "--suede-build":
+        command = "suede-build";
+        subrepo = queue.shift() ?? "";
+        if (!relativeWithin(subrepo) || subrepo.startsWith("-"))
+          throw new UsageError(`--suede-build takes a dependency folder inside the project, got '${subrepo}'`);
+        break;
+      case "--transfer":
+        transfer = queue.shift() ?? "";
+        if (!TRANSFER_NAME.test(transfer))
+          throw new UsageError(`--transfer takes a bundle name (desolate-transfer-<16 hex>.bundle), got '${transfer}'`);
+        break;
+      case "--ref":
+        ref = queue.shift() ?? "";
+        if (!/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(ref) || ref.includes(".."))
+          throw new UsageError(`--ref takes a branch, ref or commit, got '${ref}'`);
+        break;
+      case "--path":
+        reclaimPath = queue.shift() ?? "";
+        break;
       case "--list":
         command = "list";
+        break;
+      case "--dinds":
+        command = "dinds";
         break;
       case "--all":
         all = true;
         break;
+      case "--json":
+        json = true;
+        break;
+      case "--move": {
+        const label = queue.shift() ?? "";
+        const port = queue.shift() ?? "";
+        if (!/^(editor|[1-9][0-9]{0,4})$/.test(label) || !/^[1-9][0-9]{0,4}$/.test(port))
+          throw new UsageError(`--move takes a label (editor, or a container port) and a host port`);
+        move = { label, port: Number(port) };
+        break;
+      }
       case "--rebuild":
         rebuild = true;
         break;
@@ -163,14 +352,41 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
 
   if (all && command !== "stop")
     throw new UsageError("--all only means something with --stop");
+  if (branch !== undefined && command !== "create-worktree")
+    throw new UsageError("--branch only means something with --create-worktree");
+  if (from !== undefined && command !== "create-worktree")
+    throw new UsageError("--from only means something with --create-worktree");
+  if (force && command !== "remove-worktree")
+    throw new UsageError("--force only means something with --remove-worktree");
+  if ((command === "create-worktree" || command === "remove-worktree") && worktree === undefined)
+    throw new UsageError(`--${command} acts on a worktree; name it with --worktree`);
+  if (move && command !== "ports")
+    throw new UsageError("--move only means something with --ports");
+  if (json && command !== "list" && command !== "ports")
+    throw new UsageError("--json only means something with --list or --ports");
+  if (execArgv !== undefined && command !== "exec")
+    throw new UsageError("'--' only means something with --exec");
+  if (command === "exec" && !execArgv?.length)
+    throw new UsageError("--exec takes a command after '--'");
+  if (fetchOnly && command !== "pull") throw new UsageError("--fetch-only only means something with --pull");
+  if (ref !== undefined && command !== "suede-report" && command !== "suede-build")
+    throw new UsageError("--ref only means something with --suede-report or --suede-build");
+  if (command === "suede-build" && transfer === undefined)
+    throw new UsageError("--suede-build takes --transfer <bundle name>");
+  if (transfer !== undefined && !["bundle", "pull", "suede-build"].includes(command))
+    throw new UsageError("--transfer only means something with --suede-build");
+  if (reclaimPath !== undefined && command !== "reclaim")
+    throw new UsageError("--path only means something with --reclaim");
+  if (reclaimPath !== undefined && !relativeWithin(reclaimPath))
+    throw new UsageError(`--path '${reclaimPath}' must be relative, and stay inside the target`);
 
   if (namesNoTarget(command, all)) {
     if (positional.length)
       throw new UsageError(
-        `'${all ? "--all" : "--list"}' acts on every target, so it takes no ` +
+        `'${all ? "--all" : `--${command}`}' acts on every target, so it takes no ` +
           `project (got '${positional.join(" ")}')`,
       );
-    return { command, worktree, config, rebuild, noCache, all };
+    return { command, worktree, config, rebuild, noCache, all, branch, from, force, json };
   }
 
   return {
@@ -181,5 +397,16 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     rebuild,
     noCache,
     all,
+    branch,
+    from,
+    force,
+    json,
+    ...(move ? { move } : {}),
+    ...(reclaimPath !== undefined ? { path: reclaimPath } : {}),
+    ...(execArgv !== undefined ? { execArgv } : {}),
+    ...(transfer !== undefined ? { transfer } : {}),
+    ...(ref !== undefined ? { ref } : {}),
+    ...(fetchOnly ? { fetchOnly } : {}),
+    ...(subrepo !== undefined ? { subrepo } : {}),
   };
 };

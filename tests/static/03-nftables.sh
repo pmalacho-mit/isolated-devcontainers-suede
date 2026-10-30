@@ -173,11 +173,62 @@ for range in ::1/128 fc00::/7 fe80::/10; do
   assert_contains "internal v6 list covers $range" "$V6" "$range"
 done
 
+# A per-project dind's bridge is created long after install.sh runs, so it can
+# only be covered by shape. Two things have to hold, and each fails silently on
+# its own: the glob has to be in the set, and it has to keep its hyphen.
+#
+# Without it, a bridge that appears later matches nothing -- no interception, no
+# lateral drop, and outside the forward chain's default-deny.
+#
+# With `br-d*` instead, nftables merges the literals the wildcard subsumes and
+# stores the set as `{ "br-d*" }`: both named bridges swallowed, and every
+# unrelated br-d... interface on the VM dragged under desolate's default-deny.
+IFS_SET=$(sed -n 's/^define DESOLATE_IFS = //p' "$CONF")
+assert_contains "the interface set covers per-project bridges by shape" \
+  "$IFS_SET" 'br-d-*'
+assert_eq "and does so with the hyphen, so it cannot swallow br-desolate" \
+  "$(printf '%s' "$IFS_SET" | grep -c '"br-d\*"')" "0"
+for named in br-desolate br-desolate-in; do
+  assert_contains "the interface set still names $named in its own right" \
+    "$IFS_SET" "$named"
+done
+
+# install.sh REWRITES that define with the bridges it detected, so a glob
+# present only in the conf is one the installed ruleset never sees.
+assert_ok "install.sh's rewrite carries the glob too, so the two cannot drift" \
+  grep -q "PROJECT_IF_GLOB='br-d-\*'" "$RELEASE/proxy/vm/install.sh"
+assert_ok "and uses it in the DESOLATE_IFS replacement" \
+  grep -q 'define DESOLATE_IFS = .*PROJECT_IF_GLOB' "$RELEASE/proxy/vm/install.sh"
+
 # nft resolves `skuid desolate-proxy` to a uid at PARSE time, so a missing
 # account is not a rule that fails -- it is a file that does not parse, and
 # `nft -f` applies nothing at all. Interception and the forward default-deny
 # would be absent together, on a VM that looks installed.
-assert_ok "install.sh checks the account exists before loading the ruleset" \
-  grep -q 'id desolate-proxy >/dev/null 2>&1 ||' "$RELEASE/proxy/vm/install.sh"
+assert_ok "install.sh checks both accounts exist before loading the ruleset" \
+  grep -q 'for account in desolate-proxy desolate-ingress' "$RELEASE/proxy/vm/install.sh"
+assert_ok "and creates the ingress account at the top" \
+  grep -q 'id desolate-ingress >/dev/null 2>&1 || useradd' "$RELEASE/proxy/vm/install.sh"
+
+group "the ingress dials dind bridges and nothing else"
+# ingress.py refuses any address outside a dind bridge, and any gateway; this
+# is the wall that does not trust it. Its listeners' replies are established
+# traffic, so the ct-state accept that opens the chain must come first, then
+# the one allowed kind of NEW connection, then the counted drop.
+ING_ACCEPT=$(printf '%s\n' "$OUT" | grep -n 'meta skuid desolate-ingress oifname' | cut -d: -f1)
+ING_DROP=$(printf '%s\n' "$OUT" | grep -n 'meta skuid desolate-ingress counter drop' | cut -d: -f1)
+CT_FIRST=$(printf '%s\n' "$OUT" | grep -n 'ct state established,related accept' | head -1 | cut -d: -f1)
+assert_contains "it may dial the shared dind's bridge and every project bridge" "$OUT" \
+  'meta skuid desolate-ingress oifname { $DESOLATE_DIND_IF, "br-d-*" } accept'
+assert_eq "everything else from that uid is dropped, counted" \
+  "$([ -n "$ING_DROP" ] && echo yes || echo no)" "yes"
+assert_eq "the accept precedes the drop" \
+  "$([ -n "$ING_ACCEPT" ] && [ -n "$ING_DROP" ] && [ "$ING_ACCEPT" -lt "$ING_DROP" ] && echo yes || echo no)" "yes"
+assert_eq "replies are accepted before either" \
+  "$([ -n "$CT_FIRST" ] && [ -n "$ING_ACCEPT" ] && [ "$CT_FIRST" -lt "$ING_ACCEPT" ] && echo yes || echo no)" "yes"
+case "$OUT" in
+  *'desolate-ingress oifname { $DESOLATE_IFS'*|*'desolate-ingress oifname $DESOLATE_IF '*)
+    fail "the editor bridge is not an ingress destination" "the rule names it" ;;
+  *) pass "the editor bridge is not an ingress destination" ;;
+esac
 
 summary

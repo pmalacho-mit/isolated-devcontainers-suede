@@ -4,13 +4,13 @@
 # Run as ROOT: image build, dind entrypoint, or `docker exec -u 0`.
 #
 # CA source, in order of preference:
-#   1. /desolate-ca/ca.pem   -- bind-mount chain (how desolate does it)
-#   2. $DESOLATE_CA_URL      -- http://<vm-bridge-gw>:18081/ca.pem
+#   1. /desolate/ca/ca.pem   -- bind-mount chain (how desolate does it)
+#   2. $DESOLATE_CA_URL      -- http://<vm-bridge-gw>:18081/ca/ca.pem
 set -eu
 
 SRC=""
-if [ -f /desolate-ca/ca.pem ]; then
-    SRC=/desolate-ca/ca.pem
+if [ -f /desolate/ca/ca.pem ]; then
+    SRC=/desolate/ca/ca.pem
 elif [ -n "${DESOLATE_CA_URL:-}" ]; then
     command -v curl >/dev/null 2>&1 || {
         echo "desolate-ca: DESOLATE_CA_URL is set but this image has no curl" >&2
@@ -19,7 +19,7 @@ elif [ -n "${DESOLATE_CA_URL:-}" ]; then
     curl -fsS "$DESOLATE_CA_URL" -o /tmp/desolate-ca.pem
     SRC=/tmp/desolate-ca.pem
 else
-    echo "desolate-ca: no /desolate-ca/ca.pem mount and no DESOLATE_CA_URL set" >&2
+    echo "desolate-ca: no /desolate/ca/ca.pem mount and no DESOLATE_CA_URL set" >&2
     exit 1
 fi
 
@@ -78,7 +78,7 @@ else
     cat >&2 <<'EOF'
 desolate-ca: FAILED -- no system trust store was updated.
              update-ca-certificates is missing from this image. Install the
-             ca-certificates package, or trust /desolate-ca/ca.pem another way;
+             ca-certificates package, or trust /desolate/ca/ca.pem another way;
              every HTTPS request from here will fail certificate verification
              until you do.
 EOF

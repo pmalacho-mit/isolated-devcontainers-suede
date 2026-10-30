@@ -138,6 +138,9 @@ group "an attacker standing in the editor container"
 # below runs INSIDE desolate-vscode, with no docker access, exactly as it would.
 
 ed() { docker exec "$C_VSCODE" "$@"; }
+# ed, with this script's stdin passed through: without -i, `docker exec` gives
+# the command an empty one, and `... | ed sh -c 'cat > f'` writes nothing.
+ed_in() { docker exec -i "$C_VSCODE" "$@"; }
 
 write_project() { # write_project <name> <devcontainer.json>
   ed sh -c "mkdir -p /workspaces/$1/.devcontainer && cat > /workspaces/$1/.devcontainer/devcontainer.json" <<EOF
@@ -212,8 +215,9 @@ if printf '%s' "$OUT" | grep -q "is ready:"; then
   pass "desolate example-project succeeded from inside the editor"
   URL=$(printf '%s' "$OUT" | grep -oE 'http://127\.0\.0\.1:[0-9]+/\?tkn=[a-f0-9]+' | head -1)
   INNER_PORT=$(printf '%s' "$URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
-  # The Mac-side hop: the test stack maps 8180-8219 -> dind's 8080-8119.
-  MAC_PORT=$((INNER_PORT + 100))
+  # The Mac-side hop is desolate-ingress: the port desolate printed is the
+  # one Lima carries to this Mac, with nothing remapped in between.
+  MAC_PORT=$INNER_PORT
   CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1:$MAC_PORT/" || echo none)
   case "$CODE" in 200|302|401|403) pass "the project editor answers through the relay (HTTP $CODE)" ;;
     *) fail "the project editor answers through the relay" "got '$CODE' on 127.0.0.1:$MAC_PORT" ;; esac
@@ -288,7 +292,7 @@ fi
 # =========================================================================
 group "E7: a project cannot poison the shared CA scripts"
 # =========================================================================
-# /desolate-ca/install-ca.sh is executed with `docker exec -u 0` in EVERY
+# /desolate/ca/install-ca.sh is executed with `docker exec -u 0` in EVERY
 # devcontainer by installProxyCa(), and by dind's own entrypoint. Shared and
 # writable, poisoning it once buys ROOT execution in every project and in the
 # daemon holding them all -- strictly worse than the editor binary in E6. Same
@@ -296,15 +300,15 @@ group "E7: a project cannot poison the shared CA scripts"
 if [ -z "${DEVC:-}" ]; then
   skip "E7 CA poisoning" "no example-project devcontainer is running"
 else
-  CA_BEFORE=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
+  CA_BEFORE=$(docker exec "$C_DIND" sha256sum /desolate/ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
   # Keep the output. Same lesson as E6: a write that never happened leaves the
   # hash unchanged and the assertion green, having defended against nothing.
   CA_ATTACK=$(docker exec "$C_ORCH" docker exec -u 1000 "$DEVC" \
-    sh -c 'echo POISONED > /desolate-ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
+    sh -c 'echo POISONED > /desolate/ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
   # And the privileged escalation the read-only flag could not stop.
   CA_ATTACK2=$(docker exec "$C_ORCH" docker exec "$DEVC" sh -c \
-    'mount -o remount,bind,rw /desolate-ca 2>&1; echo POISONED > /desolate-ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
-  CA_AFTER=$(docker exec "$C_DIND" sha256sum /desolate-ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
+    'mount -o remount,bind,rw /desolate 2>&1; echo POISONED > /desolate/ca/install-ca.sh 2>&1; echo "exit=$?"' 2>&1)
+  CA_AFTER=$(docker exec "$C_DIND" sha256sum /desolate/ca/install-ca.sh 2>/dev/null | cut -d' ' -f1)
 
   # The positive control: the write must have been ATTEMPTED and REFUSED by the
   # filesystem, not skipped because the path was absent or the exec failed.
@@ -474,10 +478,12 @@ group "worktrees: parallel branches of one repo"
 WT=wt-demo
 WT_DIR=/workspaces/$WT
 
+# An image the editor runs in: its server is built against glibc, so on
+# alpine the container starts and the editor never answers.
 wt_devcontainer() { # wt_devcontainer <dir> <workspaceMount source>
   cat <<EOF
 {
-  "image": "alpine:3",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
   "workspaceFolder": "$1",
   "workspaceMount": "source=$2,target=$2,type=bind"
 }
@@ -495,11 +501,18 @@ in_devc() { # in_devc <cid> <sh -c script>
 
 ed sh -c "rm -rf $WT_DIR && mkdir -p $WT_DIR/.devcontainer" >/dev/null 2>&1
 wt_devcontainer "$WT_DIR" "$WT_DIR" \
-  | ed sh -c "cat > $WT_DIR/.devcontainer/devcontainer.json"
+  | ed_in sh -c "cat > $WT_DIR/.devcontainer/devcontainer.json"
 ed sh -c "cd $WT_DIR && printf 'root\n' > which-tree.txt &&
   git init -q -b main . &&
   git config user.email t@example.com && git config user.name tester &&
   git add -A && git commit -qm init" >/dev/null 2>&1
+# A worktree's files are checked out the first time it starts, from its
+# branch, so a spec written into it before then is overwritten. The hostile
+# one is committed on its branch instead, the way an agent would ship it.
+wt_devcontainer "$WT_DIR/.worktrees/evil" /workspaces \
+  | ed_in sh -c "cd $WT_DIR && git checkout -q -b evil &&
+                 cat > .devcontainer/devcontainer.json &&
+                 git commit -qam 'a wider mount' && git checkout -q main" >/dev/null 2>&1
 
 if ! ed test -d "$WT_DIR/.git"; then
   skip "worktrees" "could not make $WT_DIR a git repository inside the editor"
@@ -519,11 +532,10 @@ else
     "$(ed cat "$WT_DIR/.git/info/exclude" 2>&1)" ".worktrees/"
   assert_fails "no .gitignore was written" ed test -e "$WT_DIR/.gitignore"
 
+  # Untracked, so the first start's checkout leaves it be; their spec is the
+  # main tree's, checked out from main.
   for name in alpha beta; do
-    wt_devcontainer "$WT_DIR/.worktrees/$name" "$WT_DIR/.worktrees/$name" \
-      | ed sh -c "mkdir -p $WT_DIR/.worktrees/$name/.devcontainer &&
-                  cat > $WT_DIR/.worktrees/$name/.devcontainer/devcontainer.json"
-    ed sh -c "printf '%s\n' $name > $WT_DIR/.worktrees/$name/which-tree.txt"
+    ed sh -c "printf '%s\n' $name > $WT_DIR/.worktrees/$name/own-tree.txt"
   done
 
   # --- both run at once, with editors of their own -----------------------
@@ -553,14 +565,13 @@ else
   else
     pass "both worktree containers are running"
 
-    # --- the mount shape: its own tree, plus .git, and nothing else ------
+    # --- the mount shape: its project's root, the worktree as its folder --
+    # The root, not the worktree and `.git` as two binds: either of those is a
+    # path the project can make a link, and a bind follows it (below).
     assert_contains "a worktree sees its OWN checkout" \
-      "$(in_devc "$ALPHA" "cat $WT_DIR/.worktrees/alpha/which-tree.txt")" "alpha"
-    assert_fails "and not a sibling's files" \
-      docker exec "$C_ORCH" docker exec "$ALPHA" \
-        test -e "$WT_DIR/.worktrees/beta/which-tree.txt"
-    assert_fails "and not the main tree's files" \
-      docker exec "$C_ORCH" docker exec "$ALPHA" test -e "$WT_DIR/which-tree.txt"
+      "$(in_devc "$ALPHA" "cat $WT_DIR/.worktrees/alpha/own-tree.txt")" "alpha"
+    assert_contains "its project's root is in reach, as conceded" \
+      "$(in_devc "$ALPHA" "cat $WT_DIR/which-tree.txt")" "root"
 
     # The boundary that HOLDS: a different project is as unreachable as ever.
     assert_fails "and not another project at all" \
@@ -575,16 +586,55 @@ else
       "printf '\n[desolate]\n\tsiblingReach = yes\n' >> $WT_DIR/.git/config" >/dev/null
     assert_contains "a worktree CAN reach its siblings through the shared .git" \
       "$(in_devc "$BETA" "cat $WT_DIR/.git/config")" "siblingReach"
+
+    # --- a link its project planted is not followed out of it ------------
+    # The project's agent owns everything under its root, `.git` included.
+    # Made a link to another project's `.git`, a bind of it on the shared
+    # daemon mounted THAT project's, writable (measured in the nested stack
+    # when worktrees were given `.git` as a bind of its own). The root can't
+    # be replaced, so the link now resolves inside the container instead.
+    DECOY=/workspaces/wt-decoy
+    ed sh -c "rm -rf $DECOY && mkdir -p $DECOY && cp -a $WT_DIR/.git $DECOY/.git &&
+              touch $DECOY/.git/ANOTHER-PROJECT &&
+              mv $WT_DIR/.git $WT_DIR/.git-real && ln -s $DECOY/.git $WT_DIR/.git" >/dev/null 2>&1
+    OUT=$(ed desolate "$WT" --worktree alpha --rebuild 2>&1)
+    ALPHA=$(wt_container "$WT_DIR/.worktrees/alpha")
+    if printf '%s' "$OUT" | grep -q "is ready:" && [ -n "$ALPHA" ]; then
+      assert_fails "a .git made a link to another project's reaches nothing" \
+        docker exec "$C_ORCH" docker exec "$ALPHA" test -e "$WT_DIR/.git/ANOTHER-PROJECT"
+    else
+      fail "the worktree restarts with its .git made a link" "$(detail "$(printf '%s' "$OUT" | tail -5)")"
+    fi
+    ed sh -c "rm $WT_DIR/.git && mv $WT_DIR/.git-real $WT_DIR/.git && rm -rf $DECOY" >/dev/null 2>&1
   fi
 
   # --- a hostile worktree spec cannot widen its own mount ----------------
   ed worktree add "$WT" evil >/dev/null 2>&1
-  wt_devcontainer "$WT_DIR/.worktrees/evil" "$WT_DIR" \
-    | ed sh -c "mkdir -p $WT_DIR/.worktrees/evil/.devcontainer &&
-                cat > $WT_DIR/.worktrees/evil/.devcontainer/devcontainer.json"
   OUT=$(ed desolate "$WT" --worktree evil 2>&1)
-  assert_contains "a worktree asking for its PROJECT's folder is refused" \
+  assert_contains "a worktree asking for more than its project is refused" \
     "$OUT" "exactly"
+
+  # --- creating one follows no link its project planted -----------------
+  # git ran in the editor, which mounts every project, and followed whatever
+  # the project's agent made its `.git` or `.git/info/exclude`: measured, the
+  # editor's `add` then made a branch in ANOTHER project's repository, and
+  # appended to its config until git there refused to run. Creating one is
+  # the orchestrator's now, in a sandbox that mounts this project alone.
+  VICTIM=/workspaces/wt-victim
+  ed sh -c "rm -rf $VICTIM && mkdir -p $VICTIM && cd $VICTIM && git init -q -b main . &&
+            git -c user.email=t@example.com -c user.name=t commit -q --allow-empty -m init" >/dev/null 2>&1
+  VICTIM_CONFIG=$(ed cat "$VICTIM/.git/config")
+  ed sh -c "mv $WT_DIR/.git/info/exclude $WT_DIR/.git/info/exclude-real;
+            ln -s $VICTIM/.git/config $WT_DIR/.git/info/exclude" >/dev/null 2>&1
+  ed worktree add "$WT" gamma >/dev/null 2>&1
+  assert_eq "an exclude made a link to another project's config leaves it alone" \
+    "$(ed cat "$VICTIM/.git/config")" "$VICTIM_CONFIG"
+  ed sh -c "rm $WT_DIR/.git/info/exclude; mv $WT_DIR/.git/info/exclude-real $WT_DIR/.git/info/exclude;
+            mv $WT_DIR/.git $WT_DIR/.git-real; ln -s $VICTIM/.git $WT_DIR/.git" >/dev/null 2>&1
+  ed worktree add "$WT" delta >/dev/null 2>&1
+  assert_eq "a .git made a link to another project's gets no branch made in it" \
+    "$(ed git -C "$VICTIM" branch --format='%(refname:short)' | tr '\n' ' ')" "main "
+  ed sh -c "rm $WT_DIR/.git; mv $WT_DIR/.git-real $WT_DIR/.git; rm -rf $VICTIM $WT_DIR/.worktrees/delta" >/dev/null 2>&1
 
   # --- the main tree masks .worktrees, and the lock survives a gc --------
   OUT=$(ed desolate "$WT" 2>&1)
@@ -621,6 +671,28 @@ else
   assert_ok "and then the project itself stops" ed desolate --stop "$WT"
 fi
 
+group "a container built from an older spec (#26)"
+# `devcontainer up` starts an existing container as it was BUILT. One built
+# privileged -- docker-in-docker, before v2 -- beside a spec that no longer asks
+# for it: the editor's start is refused by name, not as a PRIVILEGED spec, and
+# --rebuild from the editor replaces it.
+STALE=/workspaces/stale-built
+ed sh -c "rm -rf $STALE && mkdir -p $STALE/.devcontainer" >/dev/null 2>&1
+printf '{ "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04" }' \
+  | ed_in sh -c "cat > $STALE/.devcontainer/devcontainer.json"
+STALE_ID=$(docker exec "$C_ORCH" docker create \
+  --label "devcontainer.local_folder=$STALE" \
+  --label "devcontainer.config_file=$STALE/.devcontainer/devcontainer.json" \
+  --label 'devcontainer.metadata=[{"privileged":true}]' alpine:3 true 2>/dev/null)
+OUT=$(ed desolate stale-built 2>&1)
+assert_contains "starting it is refused for what the container holds" "$OUT" "was built from a different spec"
+assert_not_contains "not for the spec, which asks for nothing of the kind" "$OUT" "requests a PRIVILEGED container"
+OUT=$(ed desolate --rebuild stale-built 2>&1)
+assert_contains "--rebuild from the editor starts it" "$OUT" "is ready:"
+assert_fails "and the old container is gone" docker exec "$C_ORCH" docker inspect "$STALE_ID"
+ed desolate --stop stale-built >/dev/null 2>&1
+ed sh -c "rm -rf $STALE" >/dev/null 2>&1
+
 group "the inner daemon says WHICH state it is in"
 # The healthcheck asserted at the top of this file now runs the classifier, so
 # "dind reports healthy" already covers the healthy path end to end. What is
@@ -645,8 +717,8 @@ group "reset-inner's sweep asks the daemon something it understands"
 # rather than retyped here where the two could drift apart.
 eval "$(sed -n '/^inner_docker()/,/^}/p' "$RELEASE/cli.sh")"
 eval "$(sed -n '/^inner_ids()/,/^}/p' "$RELEASE/cli.sh")"
-RELAY_STATES=$(grep -oE 'inner_ids desolate\.relay [a-z ]+' "$RELEASE/cli.sh" \
-               | sed 's/inner_ids desolate\.relay //')
+RELAY_STATES=$(grep -oE 'sweep_inner "[^"]*" desolate\.relay [a-z ]+' "$RELEASE/cli.sh" \
+               | sed -E 's/.*desolate\.relay //')
 if [ -z "$RELAY_STATES" ]; then
   fail "found the sweep's relay states in cli.sh" "grep matched nothing -- did the call change shape?"
 else

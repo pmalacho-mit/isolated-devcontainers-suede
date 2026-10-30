@@ -32,6 +32,10 @@ describe("parseArgs", () => {
       rebuild: false,
       noCache: false,
       all: false,
+      branch: undefined,
+      from: undefined,
+      force: false,
+      json: false,
     });
   });
 
@@ -134,6 +138,19 @@ describe("parseArgs", () => {
   test("--config with no value yields an empty config rather than eating the project", () => {
     refuses(["--config"], /usage:/);
   });
+
+  test("--dinds names no target", () => {
+    assert.equal(parse("--dinds").command, "dinds");
+    refuses(["--dinds", "myapp"], /acts on every target/);
+  });
+
+  test("creating or removing a worktree names one, and nothing else takes their flags", () => {
+    refuses(["--create-worktree", "myapp"], /name it with --worktree/);
+    refuses(["--remove-worktree", "myapp"], /name it with --worktree/);
+    refuses(["--branch", "x", "myapp"], /--branch only means something with --create-worktree/);
+    refuses(["--force", "--worktree", "wip", "myapp"], /--force only means something with --remove-worktree/);
+    refuses(["--create-worktree", "--force", "--worktree", "wip", "myapp"], /--force only/);
+  });
 });
 
 describe("every flag shape `Flags` declares round-trips", () => {
@@ -153,6 +170,9 @@ describe("every flag shape `Flags` declares round-trips", () => {
     { flags: [["--rebuild", "--no-cache"]], expect: { rebuild: true, noCache: true } },
     { flags: ["--stop"], expect: { command: "stop" } },
     { flags: ["--ports"], expect: { command: "ports" } },
+    { flags: ["--create-worktree", ["--branch", "feature/1"], ["--worktree", "wip"]], expect: { command: "create-worktree", branch: "feature/1", worktree: "wip" } },
+    { flags: ["--remove-worktree", ["--worktree", "wip"]], expect: { command: "remove-worktree", force: false } },
+    { flags: ["--remove-worktree", "--force", ["--worktree", "wip"]], expect: { command: "remove-worktree", force: true } },
   ];
 
   for (const { flags, expect } of shapes)
@@ -163,4 +183,124 @@ describe("every flag shape `Flags` declares round-trips", () => {
         assert.equal(parsed[key as keyof typeof parsed], value);
       assert.equal(parsed.project, "myapp");
     });
+});
+
+describe("--move", () => {
+  test("is a label and a port, with --ports", () => {
+    const args = parseArgs(["--ports", "acme/widgets", "--move", "editor", "8095"]);
+    assert.equal(args.command, "ports");
+    assert.deepEqual(args.move, { label: "editor", port: 8095 });
+    assert.deepEqual(parseArgs(["--ports", "--move", "5173", "8096", "x"]).move, { label: "5173", port: 8096 });
+  });
+
+  test("means nothing without --ports", () => {
+    assert.throws(() => parseArgs(["acme/widgets", "--move", "editor", "8095"]), /only means something with --ports/);
+    assert.throws(() => parseArgs(["--stop", "x", "--move", "editor", "8095"]), /only means something with --ports/);
+  });
+
+  for (const bad of [["editor"], ["editor", "eighty"], ["web", "8095"], ["editor", "0"], ["--all", "8095"], ["5173", "-1"]])
+    test(`refuses ${JSON.stringify(bad)}`, () => {
+      assert.throws(() => parseArgs(["--ports", "x", "--move", ...bad]));
+    });
+
+  test("is absent when not given, rather than an empty object", () => {
+    assert.equal("move" in parseArgs(["--ports", "x"]), false);
+  });
+});
+
+describe("--reclaim (#15)", () => {
+  test("reclaims a whole target, or one path inside it", () => {
+    assert.equal(parse("--reclaim", "acme/widgets").command, "reclaim");
+    assert.equal(parse("--reclaim", "acme/widgets").path, undefined);
+    assert.equal(parse("--reclaim", "--path", "build/out", "acme/widgets").path, "build/out");
+    assert.equal(parse("--reclaim", "--worktree", "wip", "acme/widgets").worktree, "wip");
+  });
+
+  for (const [why, path] of [
+    ["an absolute path", "/etc"],
+    ["a path out of the target", "../other"],
+    ["a .. anywhere in it", "a/../../b"],
+    ["nothing at all", ""],
+    ["a comma, which a mount option reads", "a,b"],
+    ["a newline", "a\nb"],
+  ] as const)
+    test(`refuses ${why}`, () => refuses(["--reclaim", "--path", path, "acme/widgets"], /--path/));
+
+  test("--path means nothing without --reclaim", () => refuses(["--path", "x", "acme/widgets"], /only means something with --reclaim/));
+});
+
+describe("--json (F2)", () => {
+  test("list and ports take it", () => {
+    assert.equal(parse("--list", "--json").json, true);
+    assert.equal(parse("--ports", "--json", "acme/widgets").json, true);
+  });
+  test("anything else refuses it", () => refuses(["--json", "acme/widgets"], /only means something with --list or --ports/));
+});
+
+describe("--bundle and --pull: the project's halves of a push and a pull (transfer.ts)", () => {
+  const name = "desolate-transfer-0123456789abcdef.bundle";
+  test("each takes the bundle's name, and names a target", () => {
+    const bundle = parse("--bundle", name, "--worktree", "issue-42", "acme/widgets");
+    assert.equal(bundle.command, "bundle");
+    assert.equal(bundle.transfer, name);
+    assert.equal(bundle.worktree, "issue-42");
+    assert.equal(parse("--pull", name, "acme/widgets").command, "pull");
+  });
+
+  test("any other name is refused: no side can be asked for another file", () => {
+    for (const bad of ["", "../x.bundle", "desolate-transfer-xyz.bundle", "a/desolate-transfer-0123456789abcdef.bundle", "--worktree"])
+      refuses(["--bundle", bad, "acme/widgets"], /takes a bundle name/);
+    refuses(["--pull"], /takes a bundle name/);
+  });
+});
+
+describe("--review: what a push would send (review.ts)", () => {
+  test("names a target, and takes nothing else", () => {
+    const review = parse("--review", "--worktree", "issue-42", "acme/widgets");
+    assert.equal(review.command, "review");
+    assert.equal(review.worktree, "issue-42");
+    assert.equal(review.project, "acme/widgets");
+    refuses(["--review", "--fetch-only", "acme/widgets"], /only means something with --pull/);
+    refuses(["--review", "--transfer", "desolate-transfer-0123456789abcdef.bundle", "acme/widgets"], /--transfer only means something/);
+  });
+});
+
+describe("--exec (docs/agents.md)", () => {
+  test("everything after `--` is the command, never desolate's flags", () => {
+    const parsed = parse("--exec", "--worktree", "issue-42", "acme/widgets", "--", "claude", "-p", "--stop", "fix it");
+    assert.equal(parsed.command, "exec");
+    assert.equal(parsed.worktree, "issue-42");
+    assert.equal(parsed.project, "acme/widgets");
+    assert.deepEqual(parsed.execArgv, ["claude", "-p", "--stop", "fix it"]);
+  });
+
+  test("it needs a command, and `--` means nothing without it", () => {
+    refuses(["--exec", "myapp"], /--exec takes a command after '--'/);
+    refuses(["--exec", "myapp", "--"], /--exec takes a command after '--'/);
+    refuses(["myapp", "--", "ls"], /'--' only means something with --exec/);
+    refuses(["--stop", "myapp", "--", "ls"], /'--' only means something with --exec/);
+  });
+});
+
+describe("--suede-report and --suede-build (docs/suede-factory.md)", () => {
+  const name = "desolate-transfer-0123456789abcdef.bundle";
+  test("a report at a ref; a build of one folder, into a named bundle", () => {
+    const report = parse("--suede-report", "--ref", "origin/main", "acme/consumer");
+    assert.equal(report.command, "suede-report");
+    assert.equal(report.ref, "origin/main");
+    const build = parse("--suede-build", "vendor/widget", "--transfer", name, "--ref", "origin/main", "acme/consumer");
+    assert.equal(build.command, "suede-build");
+    assert.equal(build.subrepo, "vendor/widget");
+    assert.equal(build.transfer, name);
+  });
+
+  test("what would reach git or a path as anything else is refused", () => {
+    refuses(["--suede-build", "../other", "--transfer", name, "x"], /a dependency folder inside the project/);
+    refuses(["--suede-build", "/abs", "--transfer", name, "x"], /a dependency folder inside the project/);
+    refuses(["--suede-build", "widget", "x"], /takes --transfer/);
+    refuses(["--suede-report", "--ref", "--upload-pack=x", "x"], /--ref takes a branch/);
+    refuses(["--suede-report", "--ref", "a..b", "x"], /--ref takes a branch/);
+    refuses(["--ref", "main", "x"], /--ref only means something/);
+    refuses(["--transfer", name, "x"], /--transfer only means something/);
+  });
 });

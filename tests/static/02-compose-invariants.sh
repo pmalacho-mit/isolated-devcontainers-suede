@@ -37,9 +37,21 @@ assert_eq "vscode reaches the broker socket" \
 assert_eq "orchestrator holds the daemon socket" \
   "$(q '[.services.orchestrator.volumes[]? | select(.source == "inner-run")] | length')" "1"
 
-group "the host docker socket is mounted nowhere"
-assert_eq "no /var/run/docker.sock bind anywhere" \
-  "$(q '[.services[].volumes[]? | select(.source == "/var/run/docker.sock")] | length')" "0"
+group "the VM's docker socket is mounted by the supervisor and nothing else"
+# It used to be mounted NOWHERE. The supervisor (supervisor.ts) is the one
+# named exception, and this is what notices a SECOND service gaining it.
+assert_eq "only the supervisor binds /var/run/docker.sock" \
+  "$(q '[.services | to_entries[] | select(.value.volumes[]?.source == "/var/run/docker.sock") | .key] | join(",")')" "supervisor"
+assert_eq "the supervisor has no network at all" \
+  "$(q '.services.supervisor.network_mode // "unset"')" "none"
+assert_eq "the supervisor drops every capability" \
+  "$(q '.services.supervisor.cap_drop | join(",")')" "ALL"
+assert_eq "only the orchestrator (and the supervisor) reach its request socket" \
+  "$(q '[.services | to_entries[] | select(.value.volumes[]?.source == "supervisor-run") | .key] | sort | join(",")')" "orchestrator,supervisor"
+assert_eq "the editor reaches no project dind's socket" \
+  "$(q '[.services.vscode.volumes[]? | select(.source == "dind-sockets")] | length')" "0"
+assert_eq "the supervisor mounts no workspace" \
+  "$(q '[.services.supervisor.volumes[]? | select(.source == "workspaces")] | length')" "0"
 
 group "published ports stay on loopback"
 for svc in dind vscode; do
@@ -59,22 +71,19 @@ assert_eq "no service mounts inner-run except the orchestrator" \
   "$(q '[.services | to_entries[] | select(.key != "orchestrator" and .key != "dind" and .key != "volume-init")
         | select(.value.volumes[]?.source == "inner-run")] | length')" "0"
 
-group "the dind port publish and the allocator's range cannot drift apart"
-# desolate.ts allocates relay ports from DESOLATE_PORT_MIN..MAX; dind publishes
-# a range to the Mac. If the allocator's range is the WIDER of the two, relays
-# bind fine inside dind's netns and are unreachable from the Mac -- a probe
-# timeout with nothing in any log. Both must come from the same two variables.
-DIND_MIN=$(q '[.services.dind.ports[]?.target] | min')
-DIND_MAX=$(q '[.services.dind.ports[]?.target] | max')
-DIND_N=$(q '[.services.dind.ports[]?.target] | length')
-assert_eq "orchestrator's PORT_MIN matches dind's lowest published port" \
-  "$(q '.services.orchestrator.environment.DESOLATE_PORT_MIN')" "$DIND_MIN"
-assert_eq "orchestrator's PORT_MAX matches dind's highest published port" \
-  "$(q '.services.orchestrator.environment.DESOLATE_PORT_MAX')" "$DIND_MAX"
-# min/max agreeing is not enough -- a gap in the middle is the same failure for
-# whichever port lands in it.
-assert_eq "dind publishes the range with no holes" \
-  "$DIND_N" "$((DIND_MAX - DIND_MIN + 1))"
+group "no range: dev-server ports go through the ingress"
+# The published range (DESOLATE_PORT_MIN..MAX on dind) was replaced by
+# desolate-ingress, which opens each host port on demand. A publish that comes
+# back is a range someone re-added, on the same loopback as the ingress.
+assert_eq "dind publishes nothing" "$(q '[.services.dind.ports[]?] | length')" "0"
+assert_eq "no service reads DESOLATE_PORT_MIN/MAX any more" \
+  "$(q '[.services[].environment // {} | keys[] | select(. == "DESOLATE_PORT_MIN" or . == "DESOLATE_PORT_MAX")] | length')" "0"
+assert_eq "the orchestrator writes the ingress's ports/ (and nothing else does)" \
+  "$(q '[.services | to_entries[] | select(.value.volumes[]?.source == "/run/desolate-ingress/ports") | .key] | join(",")')" "orchestrator"
+assert_eq "the supervisor writes the ingress's dinds/ (and nothing else does)" \
+  "$(q '[.services | to_entries[] | select(.value.volumes[]?.source == "/run/desolate-ingress/dinds") | .key] | join(",")')" "supervisor"
+assert_eq "the allocator is told the editor's own port" \
+  "$(q '.services.orchestrator.environment.VSCODE_PORT // "unset"')" "3000"
 
 group "dind runs unprivileged under sysbox"
 assert_eq "dind runtime is sysbox-runc" "$(q '.services.dind.runtime // "unset"')" "sysbox-runc"
@@ -157,5 +166,20 @@ for svc in dind orchestrator vscode; do
   assert_eq "$svc mounts the CA dir read-only" \
     "$(q "[.services.\"$svc\".volumes[]? | select(.source == \"/var/lib/desolate-proxy/public\") | .read_only] | first")" "true"
 done
+
+group "the shared dind's own daemon hands out what the project dinds' do"
+# One range for every inner daemon, outside docker's default pools (dind.ts
+# INNER_BRIDGE_IP, INNER_POOL). The shared dind gets it as flags, project dinds
+# in daemon.json; the two must not drift.
+DIND_TS="$RELEASE/vscode-image/dind.ts"
+BIP=$(sed -n 's/^export const INNER_BRIDGE_IP = "\(.*\)";$/\1/p' "$DIND_TS")
+POOL=$(sed -n 's/^export const INNER_POOL = { base: "\(.*\)", size: \([0-9]*\) } as const;$/base=\1,size=\2/p' "$DIND_TS")
+DIND_CMD=$(q '.services.dind.command | join(" ")')
+if [ -z "$BIP" ] || [ -z "$POOL" ]; then
+  fail "found INNER_BRIDGE_IP and INNER_POOL in dind.ts" "sed matched nothing -- renamed or reformatted?"
+else
+  assert_contains "the shared dind's docker0 is INNER_BRIDGE_IP" "$DIND_CMD" "--bip=$BIP"
+  assert_contains "its networks come from INNER_POOL" "$DIND_CMD" "--default-address-pool=$POOL"
+fi
 
 summary

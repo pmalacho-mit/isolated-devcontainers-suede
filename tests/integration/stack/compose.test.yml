@@ -14,18 +14,23 @@
 # so a renamed test bridge gets no interception at all and E8's proxy probes
 # would silently pass by measuring nothing. Run `./cli.sh down` first.
 #
-# The inner-side port numbers are deliberately unchanged. desolate allocates
-# relay ports from DESOLATE_PORT_MIN..MAX inside dind's namespace, so only the
-# Mac-facing half of the mapping is moved. Keep it that way: moving the
-# container side without moving the orchestrator's env is exactly the drift
-# that tests/static/02-compose-invariants.sh exists to catch.
+# Dev-server and project-editor ports are NOT remapped here: there is no
+# published range any more. Each is a listener desolate-ingress opens in the VM
+# from a ports/ file, so the port desolate prints is the port the Mac uses --
+# which is also why this stack, like the real one, needs the ingress installed
+# (./cli.sh vm install --proxy-only) and cannot share the VM with a running one.
 services:
   volume-init:
     container_name: desolate-test-volume-init
   dind:
     container_name: desolate-test-dind
-    ports: !override
-      - "127.0.0.1:8180-8219:8080-8119"
+  supervisor:
+    container_name: desolate-test-supervisor
+    environment:
+      # compose names this stack's volumes and networks desolate-test_*, and
+      # its shared dind desolate-test-dind.
+      DESOLATE_VOLUME_PREFIX: desolate-test_
+      DESOLATE_SHARED_DIND_CONTAINER: desolate-test-dind
   orchestrator:
     container_name: desolate-test-orchestrator
   vscode:

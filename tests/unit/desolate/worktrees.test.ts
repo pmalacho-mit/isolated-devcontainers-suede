@@ -16,7 +16,19 @@ import { join } from "node:path";
 
 import { target } from "../../../release/vscode-image/projects.ts";
 import {
+  CHECKOUT_IMAGE,
+  awaitsCheckout,
+  checkoutMounts,
+  createArguments,
+  createScript,
+  hardenedGit,
+  removal,
+  removeScript,
+  validBranch,
+  projectRoot,
+  sandboxMounts,
   isLocked,
+  isPopulated,
   mounts,
   runArgs,
   unlocked,
@@ -71,37 +83,43 @@ const sandbox = () => {
 };
 
 describe("a worktree's container", () => {
-  test("gets the project's .git at one absolute path, and nothing else", () => {
-    // Its own `.git` is a FILE naming a path inside this directory, and that
-    // path's `commondir` names another. Both are absolute, so the bind's source
-    // and destination have to be the same string.
+  test("is given no bind beyond its workspace mount -- never the project's .git", () => {
+    // A bind's source is resolved on the daemon, following symlinks, and the
+    // project's own agent can make its `.git` a link to another project's.
+    // The worktree's `.git` arrives inside the project root instead, which is
+    // its workspace mount (projectRoot, below).
     const box = sandbox();
     box.project("acme/widgets");
     const feature = box.worktree("acme/widgets", "feature123");
+    assert.deepEqual(mounts(feature), []);
+  });
 
-    const git = join(box.workspaces, "acme/widgets", ".git");
-    assert.deepEqual(mounts(feature), [
-      `type=bind,source=${git},target=${git}`,
-    ]);
+  test("is mounted as its project's root, at that root's own path", () => {
+    // Its own `.git` is a FILE naming an absolute path inside the project's
+    // `.git`, so the root has to sit at the same path inside and out.
+    const box = sandbox();
+    box.project("acme/widgets");
+    const feature = box.worktree("acme/widgets", "feature123");
+    const project = join(box.workspaces, "acme/widgets");
+    assert.equal(projectRoot(feature), `type=bind,source=${project},target=${project}`);
+    assert.ok(feature.dir.startsWith(`${project}/`), feature.dir);
   });
 
   test("in the only shape the devcontainer CLI will parse", () => {
     const box = sandbox();
     box.project("acme/widgets");
-    for (const mount of mounts(box.worktree("acme/widgets", "feature123")))
+    const feature = box.worktree("acme/widgets", "feature123");
+    for (const mount of [...mounts(feature), projectRoot(feature)])
       assert.match(mount, CLI_MOUNT, mount);
   });
 
-  test("does not reach a SIBLING worktree's directory", () => {
+  test("masks nothing", () => {
+    // Its siblings and main tree are in its project root, and so in reach:
+    // they share its `.git`, and so its trust, already (the header).
     const box = sandbox();
     box.project("acme/widgets");
     box.worktree("acme/widgets", "other");
-    const feature = box.worktree("acme/widgets", "feature123");
-
-    for (const mount of mounts(feature))
-      assert.ok(!mount.includes("other"), `sibling reachable via ${mount}`);
-    // and a worktree never masks anything -- there is nothing below it to hide
-    assert.deepEqual(runArgs(feature), []);
+    assert.deepEqual(runArgs(box.worktree("acme/widgets", "feature123")), []);
   });
 });
 
@@ -188,5 +206,154 @@ describe("the main tree's view of .worktrees", () => {
     assert.equal(isLocked(ours), false);
     assert.equal(isLocked(root), false);
     assert.deepEqual(runArgs(root), []);
+  });
+});
+
+describe("git in the editor executes nothing the repository configured", () => {
+  test("the hardening is a fixed command line that reads nothing first", () => {
+    // Reading the repository's config to decide what to switch off was a race
+    // a devcontainer rewriting it could win, and a lookup that could fail
+    // open. So the argv cannot depend on the repository at all: a project
+    // directory that does not exist yields the same one.
+    const box = sandbox();
+    const real = hardenedGit(box.project("acme/widgets"));
+    const absent = hardenedGit(target(box.workspaces, "acme/nowhere"));
+    assert.deepEqual(real.slice(2), absent.slice(2));
+    const settings = real.filter((_, i) => real[i - 1] === "-c");
+    assert.deepEqual(settings, [
+      "core.hooksPath=/dev/null",
+      "core.fsmonitor=false",
+      "gc.auto=0",
+      "maintenance.auto=false",
+    ]);
+    assert.ok(real.includes("--no-pager"));
+  });
+
+  test("add never checks out", () => {
+    const adds = createScript.split("\n").filter((line) => line.includes("worktree add"));
+    assert.equal(adds.length, 2, createScript);
+    for (const line of adds) assert.match(line, /--no-checkout/);
+  });
+
+  test("the sandbox image is pinned by digest", () => {
+    assert.match(CHECKOUT_IMAGE, /@sha256:[0-9a-f]{64}$/);
+  });
+});
+
+describe("whether a worktree has been checked out", () => {
+  test("not until its admin directory holds an index", () => {
+    const box = sandbox();
+    const feature = box.worktree("acme/widgets", "feature123");
+    assert.equal(isPopulated(feature), false);
+    fs.writeFileSync(join(box.workspaces, "acme/widgets/.git/worktrees/feature123/index"), "");
+    assert.equal(isPopulated(feature), true);
+  });
+
+  test("a root target always is", () => {
+    assert.equal(isPopulated(sandbox().project("acme/widgets")), true);
+  });
+});
+
+describe("the checkout sandbox's reach", () => {
+  test("is its devcontainer's: the project root, and the CA read-only", () => {
+    const box = sandbox();
+    const feature = box.worktree("acme/widgets", "feature123");
+    const project = join(box.workspaces, "acme/widgets");
+    assert.deepEqual(sandboxMounts(feature), [projectRoot(feature)]);
+    assert.deepEqual(checkoutMounts(feature, "acme__widgets--wt--feature123-desolate", "/desolate"), [
+      `type=bind,source=${project},target=${project}`,
+      "type=volume,source=acme__widgets--wt--feature123-desolate,target=/desolate,readonly",
+    ]);
+  });
+
+  test("binds no path below the project root, which its project could make a link", () => {
+    // The attack, measured on the shared daemon: `/workspaces/p/.git` made a
+    // link to `/workspaces/victim/.git`, and a bind of it mounted the
+    // victim's. Every bind source here must be the root, which the project
+    // works inside and so cannot replace.
+    const box = sandbox();
+    box.worktree("acme/widgets", "other");
+    const feature = box.worktree("acme/widgets", "feature123");
+    const project = join(box.workspaces, "acme/widgets");
+    const binds = checkoutMounts(feature, "ca", "/desolate").filter((m) => m.startsWith("type=bind,"));
+    assert.deepEqual(binds.map((mount) => /source=([^,]+)/.exec(mount)![1]), [project]);
+  });
+});
+
+describe("which worktrees a sandbox should check out", () => {
+  test("one that git registered and never checked out", () => {
+    const box = sandbox();
+    box.project("acme/widgets");
+    assert.equal(awaitsCheckout(box.worktree("acme/widgets", "fresh")), true);
+  });
+
+  test("not one already checked out", () => {
+    const box = sandbox();
+    box.project("acme/widgets");
+    const done = box.worktree("acme/widgets", "done");
+    fs.writeFileSync(join(box.workspaces, "acme/widgets/.git/worktrees/done/index"), "");
+    assert.equal(awaitsCheckout(done), false);
+  });
+
+  test("not a directory that is no worktree at all", () => {
+    // No .git file, or one naming an admin directory that is gone: checking
+    // it out would fail, so it is started -- or refused -- as it always was.
+    const box = sandbox();
+    box.project("acme/widgets");
+    fs.mkdirSync(join(box.workspaces, "acme/widgets/.worktrees/handmade"), { recursive: true });
+    assert.equal(awaitsCheckout(target(box.workspaces, "acme/widgets", "handmade")), false);
+    const orphan = box.worktree("acme/widgets", "orphan");
+    fs.rmSync(join(box.workspaces, "acme/widgets/.git/worktrees/orphan"), { recursive: true });
+    assert.equal(awaitsCheckout(orphan), false);
+  });
+
+  test("never a root target", () => {
+    assert.equal(awaitsCheckout(sandbox().project("acme/widgets")), false);
+  });
+});
+
+describe("creating and removing one, in its sandbox", () => {
+  test("the scripts take every path and name as an argument, never as text", () => {
+    // A name spliced into a script is a name that can end the quote it sits
+    // in. These are fixed strings; what varies arrives as $1, $2, ...
+    const box = sandbox();
+    const alpha = target(box.workspaces, "acme/widgets", "alpha");
+    for (const script of [createScript, removeScript])
+      for (const word of [box.workspaces, "acme", "alpha"])
+        assert.ok(!script.includes(word), `'${word}' is in the script`);
+    assert.deepEqual(createArguments(alpha, "feature/1").slice(0, 3), [
+      alpha.projectDir,
+      alpha.dir,
+      "feature/1",
+    ]);
+  });
+
+  test("a branch that git would read as something else never reaches it", () => {
+    for (const branch of ["-b", "--orphan", "a b", "a\nb", "", "x".repeat(256), 7])
+      assert.equal(validBranch(branch), false, JSON.stringify(branch));
+    for (const branch of ["main", "feature/123", "hotfix-1.2"])
+      assert.equal(validBranch(branch), true, branch);
+  });
+
+  test("removal asks git only of a worktree that was checked out", () => {
+    const box = sandbox();
+    box.project("acme/widgets");
+    const fresh = box.worktree("acme/widgets", "fresh");
+    assert.deepEqual(removal(fresh, false), { kind: "nothing" });
+    assert.deepEqual(removal(fresh, true), { kind: "force" });
+
+    const started = box.worktree("acme/widgets", "started");
+    fs.writeFileSync(join(started.projectDir, ".git", "worktrees", "started", "index"), "");
+    assert.deepEqual(removal(started, false), { kind: "check" });
+  });
+
+  test("one never checked out still keeps a file put there by hand", () => {
+    // Never checked out means no index, so git has nothing to compare -- but
+    // anything beside `.git` was put there by someone, and is theirs.
+    const box = sandbox();
+    box.project("acme/widgets");
+    const draft = box.worktree("acme/widgets", "draft");
+    fs.writeFileSync(join(draft.dir, "scratch.txt"), "keep me\n");
+    assert.deepEqual(removal(draft, false), { kind: "refuse", stray: ["scratch.txt"] });
   });
 });

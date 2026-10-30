@@ -10,9 +10,9 @@ Group=desolate-proxy
 # cert into an empty directory that the HTTP server exposes.
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do \
     [ -f /var/lib/desolate-proxy/mitmproxy-ca-cert.pem ] && break; sleep 1; done; \
-    install -d -m 0755 /var/lib/desolate-proxy/public && \
-    install -m 0644 /var/lib/desolate-proxy/mitmproxy-ca-cert.pem /var/lib/desolate-proxy/public/ca.pem && \
-    install -m 0755 /opt/desolate-proxy/install-ca.sh /var/lib/desolate-proxy/public/install-ca.sh'
+    install -d -m 0755 /var/lib/desolate-proxy/public /var/lib/desolate-proxy/public/ca && \
+    install -m 0644 /var/lib/desolate-proxy/mitmproxy-ca-cert.pem /var/lib/desolate-proxy/public/ca/ca.pem && \
+    install -m 0755 /opt/desolate-proxy/install-ca.sh /var/lib/desolate-proxy/public/ca/install-ca.sh'
 ExecStart=/usr/bin/python3 -m http.server 18081 --directory /var/lib/desolate-proxy/public
 Restart=always
 NoNewPrivileges=yes

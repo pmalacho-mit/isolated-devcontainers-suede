@@ -1,0 +1,25 @@
+[Unit]
+Description=desolate ingress (dev-server ports to the Mac, on demand; see ingress.py)
+After=network-online.target docker.service desolate-nft.service
+Wants=network-online.target
+
+[Service]
+User=desolate-ingress
+Group=desolate-ingress
+Environment=DESOLATE_INGRESS_ROOT=/run/desolate-ingress
+ExecStart=/usr/bin/python3 /opt/desolate-proxy/ingress.py
+Restart=always
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# It only READS its two directories; their writers are the supervisor and the
+# orchestrator. Nothing here may be writable to it.
+ReadOnlyPaths=/run/desolate-ingress
+# No capabilities: every port it binds is >= 1024, on purpose (ingress.py).
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

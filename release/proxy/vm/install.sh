@@ -27,6 +27,10 @@ apt-get install -y -qq python3-venv nftables dnsmasq jq
 
 echo "==> service user"
 id desolate-proxy >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin desolate-proxy
+# The ingress (ingress.py) has a uid of its own for the same reason the proxy
+# does: the nftables output chain keys on it, so it can dial dind bridges and
+# nothing else. Created here, before the ruleset that names it is loaded.
+id desolate-ingress >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin desolate-ingress
 
 echo "==> mitmproxy venv"
 # PINNED. The addon is the entire secrets boundary and mitmproxy answers an
@@ -47,6 +51,7 @@ if [ "$NEED_INSTALL" = 1 ]; then
     /opt/desolate-proxy/venv/bin/pip install --quiet "mitmproxy==${MITMPROXY_VERSION}"
 fi
 install -m 0644 addon.py /opt/desolate-proxy/addon.py
+install -m 0644 ingress.py /opt/desolate-proxy/ingress.py
 install -m 0755 ../container/install-ca.sh /opt/desolate-proxy/install-ca.sh
 
 echo "==> config (0600, proxy-owned, VM disk only -- never under a Colima mount)"
@@ -95,13 +100,29 @@ else
 fi
 install -d -m 0750 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy
 # Public dir must exist before compose starts (dind bind-mounts it read-only).
-install -d -m 0755 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy/public
-install -m 0755 ../container/install-ca.sh /var/lib/desolate-proxy/public/install-ca.sh
-# Published for DEVELOPERS to run from inside their own devcontainer terminal,
-# where there is no desolate CLI and no access to the outer daemon. The
-# /desolate-ca mount is the only channel into a devcontainer, so anything a
-# developer needs to run in there has to arrive this way.
-install -m 0755 ../container/trust-proxy-in-builds.sh /var/lib/desolate-proxy/public/trust-proxy-in-builds.sh
+# Mounted read-only at /desolate in every container -- the only channel into a
+# devcontainer, so anything a developer or an agent needs in there arrives this
+# way:
+#   ca/ca.pem, ca/install-ca.sh, ca/trust-proxy-in-builds.sh   the proxy's CA
+#   status, net                                                helpers
+#   AGENTS.md                                                  how it all works
+# ca/ca.pem itself is written by desolate-proxy-ca.service, from mitmproxy.
+PUBLIC=/var/lib/desolate-proxy/public
+install -d -m 0755 -o desolate-proxy -g desolate-proxy "$PUBLIC" "$PUBLIC/ca"
+install -m 0755 ../container/install-ca.sh "$PUBLIC/ca/install-ca.sh"
+install -m 0755 ../container/trust-proxy-in-builds.sh "$PUBLIC/ca/trust-proxy-in-builds.sh"
+install -m 0755 ../container/desolate-status "$PUBLIC/status"
+install -m 0755 ../container/desolate-net "$PUBLIC/net"
+install -m 0644 ../../AGENTS.md "$PUBLIC/AGENTS.md"
+# The cert too, when mitmproxy has minted one: the link below points at it, and
+# the unit that normally writes it there may not be restarted by this run.
+if [ -f /var/lib/desolate-proxy/mitmproxy-ca-cert.pem ]; then
+  install -m 0644 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy/mitmproxy-ca-cert.pem "$PUBLIC/ca/ca.pem"
+fi
+# The flat layout this replaced (it was mounted at /desolate-ca), and the
+# factory's retired helper: stale copies, gone.
+rm -f "$PUBLIC/ca.pem" "$PUBLIC/install-ca.sh" "$PUBLIC/trust-proxy-in-builds.sh" \
+      "$PUBLIC/desolate-status" "$PUBLIC/desolate-net" "$PUBLIC/desolate-work"
 install -m 0755 ssh-allow.sh /opt/desolate-proxy/ssh-allow.sh
 
 # Both bridges, because the stack is split across two networks and BOTH must be
@@ -151,9 +172,16 @@ if [ "$BRIDGE" = "$DIND_BRIDGE" ]; then
 EOF
     exit 1
 fi
+# Per-project dind bridges are created after this runs and cannot be detected
+# here, so they are covered by shape instead of by name. The header of
+# nftables-desolate.conf is where this is explained, including why the hyphen
+# matters; this line exists because the sed below REPLACES that file's own
+# definition, so a wildcard written only there would be silently dropped.
+PROJECT_IF_GLOB='br-d-*'
+
 sed -e "s|define DESOLATE_IF = \".*\"|define DESOLATE_IF = \"$BRIDGE\"|" \
     -e "s|define DESOLATE_DIND_IF = \".*\"|define DESOLATE_DIND_IF = \"$DIND_BRIDGE\"|" \
-    -e "s|define DESOLATE_IFS = .*|define DESOLATE_IFS = { \"$BRIDGE\", \"$DIND_BRIDGE\" }|" \
+    -e "s|define DESOLATE_IFS = .*|define DESOLATE_IFS = { \"$BRIDGE\", \"$DIND_BRIDGE\", \"$PROJECT_IF_GLOB\" }|" \
     nftables-desolate.conf > /etc/desolate-proxy/nftables-desolate.conf
 
 echo "==> container resolver (dedicated dnsmasq on :5353)"
@@ -224,12 +252,14 @@ echo "==> nftables"
 # otherwise looks installed. The account is created at the top of this script;
 # say so plainly if that has somehow not happened rather than letting nft
 # report a syntax error about a line that is not wrong.
-id desolate-proxy >/dev/null 2>&1 || {
-    echo "ERROR: the desolate-proxy account does not exist, so the nftables" >&2
-    echo "       ruleset cannot resolve 'meta skuid desolate-proxy' and NOTHING" >&2
+for account in desolate-proxy desolate-ingress; do
+  id "$account" >/dev/null 2>&1 || {
+    echo "ERROR: the $account account does not exist, so the nftables" >&2
+    echo "       ruleset cannot resolve 'meta skuid $account' and NOTHING" >&2
     echo "       would be applied. Re-run this installer from the top." >&2
     exit 1
-}
+  }
+done
 nft -f /etc/desolate-proxy/nftables-desolate.conf
 
 echo "==> git-over-ssh allowlist"
@@ -253,9 +283,24 @@ ExecStartPost=/opt/desolate-proxy/ssh-allow.sh
 WantedBy=multi-user.target
 EOF
 
+echo "==> ingress directories (/run is a tmpfs; tmpfiles.d recreates them at boot)"
+install -m 0644 desolate-ingress.tmpfiles /etc/tmpfiles.d/desolate-ingress.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/desolate-ingress.conf
+# Measured, not assumed: a directory that came out owned by the wrong uid is a
+# writer that cannot write, which looks like a forwarder that does nothing.
+for dir in dinds:root ports:1000; do
+  name=${dir%%:*} want=${dir#*:}
+  have=$(stat -c %U "/run/desolate-ingress/$name" 2>/dev/null || echo missing)
+  [ "$have" = "$want" ] || [ "$(stat -c %u "/run/desolate-ingress/$name" 2>/dev/null)" = "$want" ] || {
+    echo "ERROR: /run/desolate-ingress/$name is owned by '$have', not '$want'" >&2
+    exit 1
+  }
+done
+
 echo "==> systemd units"
 install -m 0644 desolate-proxy.service /etc/systemd/system/
 install -m 0644 desolate-proxy-ca.service /etc/systemd/system/
+install -m 0644 desolate-ingress.service /etc/systemd/system/
 systemctl daemon-reload
 # mitmproxy loads addon.py ONCE, at startup. `enable --now` starts a stopped
 # unit but does not restart a running one, so on an upgrade the new addon.py
@@ -264,12 +309,12 @@ systemctl daemon-reload
 # exactly how a fixture carrying "selftest" gets judged as a real secret and
 # 403s every request that names it. try-restart is a no-op when the unit is
 # stopped, so a fresh install still starts exactly once, below.
-systemctl try-restart desolate-proxy
-systemctl enable -q --now desolate-nft desolate-proxy desolate-proxy-ca
+systemctl try-restart desolate-proxy desolate-ingress
+systemctl enable -q --now desolate-nft desolate-proxy desolate-proxy-ca desolate-ingress
 
 echo "==> done"
 systemctl --no-pager --plain status desolate-proxy | head -5
 echo
 echo "Interfaces: $BRIDGE (editor), $DIND_BRIDGE (containers)"
-echo "Proxy: :18080   CA: :18081   DNS: :5353"
+echo "Proxy: :18080   CA: :18081   DNS: :5353   Ingress: /run/desolate-ingress"
 echo "Add secrets from your Mac:  ./cli.sh secret add NAME --hosts api.example.com"

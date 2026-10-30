@@ -143,6 +143,44 @@ if define_from_cli count_by_state; then
   assert_eq "nothing to reconcile reads as 'none'" "$(count_by_state "")" "none"
 fi
 
+group "rung 2 does not guess on a daemon that will not answer"
+# Wedged is the state rung 2 exists for, and a wedged daemon answers no `ps`:
+# "no stale relays" there would be a claim nobody measured.
+if define_from_cli sweep_inner && define_from_cli inner_ids; then
+  inner_docker() { sleep 0; return 124; }
+  assert_contains "an unanswered listing is said to be one" \
+    "$(sweep_inner "relays" desolate.relay exited)" "cannot sweep relays: the daemon did not answer"
+  inner_docker() { return 0; }
+  assert_contains "an empty answer is still 'none'" \
+    "$(sweep_inner "relays" desolate.relay exited)" "no stale relays"
+  unset -f inner_docker
+fi
+
+group "a project's daemon cannot make the sweep expand globs here"
+# On a project's dind, what `ps` prints comes from binaries the project can
+# replace. An unquoted `$ids` expanded a printed `*` against THIS machine's
+# files and handed the matches back to that daemon as argv -- the names of
+# files on the Mac, to a process the project owns (found in review, measured
+# with this stub). Only container ids reach `rm`, and the rest is said.
+if define_from_cli sweep_inner && define_from_cli inner_ids; then
+  HERE_FILES=$(mktemp -d)
+  touch "$HERE_FILES/id_ed25519" "$HERE_FILES/known_hosts"
+  REMOVED=""
+  inner_docker() {
+    case "$1" in
+      ps) printf '%s\n' "$HERE_FILES/*" '*' 0123456789ab ;;
+      *) shift 2; REMOVED="$*" ;;
+    esac
+  }
+  OUT=$(cd "$HERE_FILES" && sweep_inner "relays" desolate.relay exited; printf 'REMOVED=%s' "$REMOVED")
+  assert_contains "only the container id reaches the daemon" "$OUT" "REMOVED=0123456789ab"
+  assert_not_contains "no file name from this machine does" "$OUT" "id_ed25519"
+  assert_contains "and what was dropped is said" "$OUT" "ignored 2 entries in the listing that are not container ids"
+  unset -f inner_docker
+  rmdir_files() { find "$HERE_FILES" -type f -delete; rmdir "$HERE_FILES"; }
+  rmdir_files
+fi
+
 group "the rung that deletes every project's images needs asking for"
 # EXECUTED, not read: rung 3 is today's folklore ("delete the data root") turned
 # into a command, and the whole reason to have it as a command is that the
@@ -182,6 +220,70 @@ assert_eq "the flag reaches the confirmation, and a refusal stops there" \
   "$BREACHED" "prompted for confirmation"
 # The stubs shadow the real commands, and the next group needs the real ones.
 unset -f compose docker confirm_data_root_reset
+
+group "a project's dind climbs the same ladder"
+# `dind reset <project>` is the same functions pointed elsewhere, so what is
+# asserted here is the pointing: the names it derives are dind.ts's, a name
+# that would derive a different docker object is refused, and each rung that
+# acts goes through the supervisor rather than past it.
+for fn in valid_project select_project_dind restart_dind delete_data_root; do
+  define_from_cli "$fn"
+done
+for bad in "../etc" "a/b/c" ".hidden" "a__b" "" "a b" "a;rm" "-rf" "acme/widgets@wt" "_x" "acme/-w"; do
+  if (select_project_dind "$bad") >/dev/null 2>&1; then
+    fail "'$bad' is refused as a project" "it was accepted"
+  else
+    pass "'$bad' is refused as a project"
+  fi
+done
+# In THIS shell, not a subshell: the harness counts failures in variables, and
+# a subshell's would be lost. What it changes is put back at the end.
+select_project_dind acme/widgets
+NAMES=$(node -e '
+  const dind = await import(process.argv[1] + "/vscode-image/dind.ts");
+  const { target } = await import(process.argv[1] + "/vscode-image/projects.ts");
+  const t = target("/workspaces", "acme/widgets");
+  console.log(dind.name(t), dind.volumes(t).data);
+' "$RELEASE" 2>/dev/null || true)
+if [ -z "$NAMES" ]; then
+  skip "cli.sh derives dind.ts's names" "node could not import dind.ts"
+else
+  assert_eq "cli.sh derives dind.ts's names" "$DIND $DIND_DATA_VOLUME" "$NAMES"
+fi
+assert_eq "the health check is pointed at the project dind's socket" \
+  "${INNER_SOCKET#unix://}" "/run/dind-sock/docker.sock"
+
+CALLS=""
+supervisor() { CALLS="$CALLS|$*"; }
+compose()    { CALLS="$CALLS|compose $*"; }
+docker()     { CALLS="$CALLS|docker $*"; }
+restart_dind
+assert_eq "rung 2 restarts it through the supervisor, and nothing else" "$CALLS" "|ask reset acme/widgets"
+CALLS=""
+delete_data_root
+assert_eq "rung 3 is the supervisor's purge, then a fresh ensure" "$CALLS" \
+  "|ask purge acme/widgets|ask ensure acme/widgets"
+
+# The guard is the same function, and still refuses in this mode.
+CALLS=""
+confirm_data_root_reset() { CALLS="$CALLS|prompted"; return 1; }
+reset_data_root "" >/dev/null 2>&1
+assert_eq "rung 3 on a project dind still needs the flag" "${CALLS:-nothing ran}" "nothing ran"
+assert_contains "and the refusal names the project's own command" \
+  "$(explain_data_root_reset 2>&1)" "dind reset acme/widgets $RESET_DATA_ROOT_FLAG"
+assert_contains "and what it would cost: this project's store alone" \
+  "$(explain_data_root_reset 2>&1)" "acme/widgets's own image store"
+unset -f supervisor compose docker confirm_data_root_reset
+define_from_cli_constant DIND_DATA_VOLUME
+
+group "dind is reachable"
+assert_contains "cli.sh help lists it" "$(bash "$CLI" help 2>&1)" "dind list"
+assert_eq "its subcommands complete, and its flags are not mistaken for them" \
+  "$(_desolate_cli_subs dind | tr '\n' ' ')" "list reset df gc "
+COMP_WORDS=(cli.sh dind reset acme ""); COMP_CWORD=4; _desolate_cli
+assert_contains "tab completion offers the reset flag" "${COMPREPLY[*]:-}" "--reset-data-root"
+COMP_WORDS=(cli.sh dind gc ""); COMP_CWORD=3; _desolate_cli
+assert_contains "and gc's" "${COMPREPLY[*]:-}" "--orphans"
 
 group "the volume rung 3 deletes is the one compose declares"
 # cli.sh names it as a string; compose renders it from its project name. They

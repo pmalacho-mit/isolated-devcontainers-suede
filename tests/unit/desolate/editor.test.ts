@@ -14,6 +14,9 @@ import {
   SERVER_BIN,
   editorCustomizations,
   editorStartScript,
+  externalEnvironment,
+  targetEnvironment,
+  externalProfile,
   isValidExtensionId,
   isValidToken,
   mintToken,
@@ -191,20 +194,23 @@ describe("customizations.*.settings, applied", () => {
     assert.equal(closes.length, 1, "the heredoc is closed more than once");
   });
 
-  test("declaring none REMOVES the file, so deleting the key is visible", () => {
-    // A project that drops the key would otherwise keep the settings it no
-    // longer declares, forever, with nothing to point at.
+  test("declaring none leaves desolate's defaults alone: a dropped setting does not linger", () => {
+    // The whole file is rewritten at every start, so a project that drops a
+    // setting has it gone at the next one.
     const none = script();
-    assert.match(none, /grep -q 'Managed by desolate'/);
-    assert.match(none, /rm -f "\$DATA"\/data\/Machine\/settings\.json/);
-    assert.doesNotMatch(none, /cat > "\$DATA"\/data\/Machine/);
+    assert.match(none, /cat > "\$DATA"\/data\/Machine\/settings\.json/);
+    assert.ok(none.includes('"terminal.integrated.macOptionClickForcesSelection": true'));
+    assert.ok(!none.includes("editor.tabSize"));
+    assert.ok(script([], TOKEN, settings).includes("Managed by desolate"));
   });
 
-  test("...and only a file desolate wrote is removed", () => {
-    // The removal is guarded by the marker desolate puts IN the file, so a
-    // Machine settings file somebody else created is never deleted.
-    assert.ok(script([], TOKEN, settings).includes("Managed by desolate"));
-    assert.match(script(), /if \[ -f .* \] && grep -q 'Managed by desolate'/);
+  test("desolate's defaults are beneath the project's: a project sets them back", () => {
+    // Option+drag selects in a terminal whose program has the mouse -- tmux,
+    // Claude inside it -- which nothing else lets you copy from on a Mac.
+    assert.ok(script([], TOKEN, settings).includes('"terminal.integrated.macOptionClickForcesSelection": true'));
+    const off = script([], TOKEN, { "terminal.integrated.macOptionClickForcesSelection": false });
+    assert.ok(off.includes('"terminal.integrated.macOptionClickForcesSelection": false'));
+    assert.ok(!off.includes('"terminal.integrated.macOptionClickForcesSelection": true'));
   });
 });
 
@@ -265,5 +271,60 @@ describe("reading customizations out of a spec", () => {
   test("a spec with no customizations at all is not a crash", () => {
     assert.deepEqual(editorCustomizations(), { extensions: [], settings: {} });
     assert.deepEqual(editorCustomizations({}), { extensions: [], settings: {} });
+  });
+});
+
+describe("DESOLATE_TARGET: who a container is, to its agent", () => {
+  test("the project's own tree is main; a worktree is its name", () => {
+    assert.deepEqual(targetEnvironment({ project: "acme/widgets" }),
+      [["DESOLATE_TARGET", "main"], ["DESOLATE_PROJECT", "acme/widgets"]]);
+    assert.deepEqual(targetEnvironment({ project: "acme/widgets", worktree: "issue-42" })[0], ["DESOLATE_TARGET", "issue-42"]);
+  });
+
+  test("a name a shell would read never reaches one", () => {
+    for (const bad of [{ project: "a;b" }, { project: "a", worktree: "$(x)" }, { project: "-x" }, { project: "a b" }])
+      assert.throws(() => targetEnvironment(bad), EditorScriptError, JSON.stringify(bad));
+  });
+
+  test("and it is exported for the editor's terminals with the ports", () => {
+    const env = [...targetEnvironment({ project: "acme/widgets", worktree: "w" }), ...externalEnvironment(new Map([["5173", 8081]]))];
+    assert.match(externalProfile(env), /^export DESOLATE_TARGET=w$/m);
+    assert.match(editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48), env), /export DESOLATE_TARGET=w/);
+  });
+});
+
+describe("DESOLATE_EXTERNAL_<port> (#17)", () => {
+  test("each dev-server port is exported with its host port and a URL; the editor is not", () => {
+    assert.deepEqual(externalEnvironment(new Map([["editor", 8080], ["5173", 8081]])), [
+      ["DESOLATE_EXTERNAL_5173", "8081"],
+      ["DESOLATE_EXTERNAL_5173_URL", "http://127.0.0.1:8081"],
+    ]);
+  });
+
+  test("anything that is not a port pair never reaches a shell", () => {
+    for (const bad of [[["5173;rm -rf /", 8081]], [["web", 8081]], [["5173", 0]], [["5173", 8081.5]], [["0", 8081]]] as [string, number][][])
+      assert.throws(() => externalEnvironment(new Map(bad)), EditorScriptError, JSON.stringify(bad));
+  });
+
+  test("the profile exports them for login shells", () => {
+    const profile = externalProfile(externalEnvironment(new Map([["5173", 8081]])));
+    assert.match(profile, /^export DESOLATE_EXTERNAL_5173=8081$/m);
+    assert.match(profile, /^export DESOLATE_EXTERNAL_5173_URL=http:\/\/127\.0\.0\.1:8081$/m);
+  });
+
+  test("the start script exports them BEFORE the server starts, so its terminals inherit them", () => {
+    const external = externalEnvironment(new Map([["5173", 8081]]));
+    const script = editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48), external);
+    const exported = script.indexOf("export DESOLATE_EXTERNAL_5173=8081");
+    assert.ok(exported >= 0, "not exported");
+    assert.ok(exported < script.indexOf("setsid nohup"), "exported after the server starts");
+  });
+
+  test("a server running with a different map is restarted rather than kept", () => {
+    const script = editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48),
+      externalEnvironment(new Map([["5173", 8081]])));
+    assert.match(script, /WANT='DESOLATE_EXTERNAL_5173=8081 DESOLATE_EXTERNAL_5173_URL=http:\/\/127\.0\.0\.1:8081'/);
+    assert.match(script, /if listening && \[ "\$HAVE" != "\$WANT" \]; then/);
+    assert.match(script, /printf '%s' "\$WANT" > "\$DATA\/desolate-external"/);
   });
 });

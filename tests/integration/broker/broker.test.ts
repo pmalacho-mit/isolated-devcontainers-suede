@@ -116,12 +116,22 @@ before(async () => {
   resetRunner();
 
   // Stub runner: record argv, succeed. Reaching it at all is the failure signal
-  // for every hostile case below.
+  // for every hostile case below. `--populate` it ALSO does what the real
+  // runner's sandbox does -- check the worktree out -- so the broker's next
+  // step has a spec to read; a project named `populate-fails` makes it fail.
   const stub = path.join(tmp, "stub-runner.ts");
   fs.writeFileSync(
     stub,
     `import * as fs from "node:fs";\n` +
-      `fs.appendFileSync(${JSON.stringify(runnerLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n` +
+      `import { execFileSync } from "node:child_process";\n` +
+      `const argv = process.argv.slice(2);\n` +
+      `fs.appendFileSync(${JSON.stringify(runnerLog)}, JSON.stringify(argv) + "\\n");\n` +
+      `if (argv[0] === "--uncommitted" && argv.at(-1) === "dirty") process.exit(3);\n` +
+      `if (argv[0] === "--populate") {\n` +
+      `  const project = argv.at(-1), worktree = argv[argv.indexOf("--worktree") + 1];\n` +
+      `  if (project === "populate-fails") process.exit(7);\n` +
+      `  execFileSync("git", ["-C", ${JSON.stringify(workspaces)} + "/" + project + "/.worktrees/" + worktree, "checkout", "--force", "-q"]);\n` +
+      `}\n` +
       `console.log("stub runner ok");\n`,
   );
 
@@ -556,20 +566,23 @@ describe("request-level validation", () => {
     assert.equal(result(msgs).ok, false);
   });
 
-  test("list returns project names only", async () => {
+  test("list names no target: it reaches the runner as --list alone", async () => {
+    // The runner reads /workspaces itself (projects.ts, its names tested in
+    // tests/unit/desolate/projects.test.ts); the broker only relays.
     project("ok-project", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
     const msgs = await ask({ op: "list" });
     assert.equal(result(msgs).ok, true);
-    assert.ok(result(msgs).projects.includes("ok-project"));
+    assert.deepEqual(runnerInvocations(), [["--list"]]);
   });
 });
 
 // ===========================================================================
 describe("worktrees are targets of their own", () => {
   // ===========================================================================
-  // The broker never creates one -- `git worktree add` fires the repository's
-  // hooks and this process holds the inner Docker socket. It only has to route
-  // an existing one correctly, and refuse every name that is not one.
+  // Starting one never creates it: that is `worktree-add`, below, which the
+  // runner does in the worktree's sandbox. A start only has to route an
+  // existing one correctly, and refuse every name that is not one.
 
   const worktreeSpec = (name: string) => {
     const dir = path.join(
@@ -668,15 +681,6 @@ describe("worktrees are targets of their own", () => {
     assert.deepEqual(runnerInvocations(), []);
   });
 
-  test("list names worktrees in the form you would type back", async () => {
-    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
-    worktreeSpec("feature123");
-    const msgs = await ask({ op: "list" });
-    assert.ok(
-      result(msgs).projects.includes("acme/widgets@feature123"),
-      `${result(msgs).projects}`,
-    );
-  });
 });
 
 // ===========================================================================
@@ -968,5 +972,302 @@ describe("preconditions", () => {
       encoding: "utf8",
     }).trim();
     assert.match(v, /\d+\.\d+/);
+  });
+});
+
+// ===========================================================================
+describe("a worktree the editor created is populated before its spec is read", () => {
+  // ===========================================================================
+  // The editor creates worktrees with --no-checkout (worktrees.ts), so until
+  // its sandbox has run there is no .devcontainer/ to snapshot. Found by
+  // starting one through the nested stack: the broker failed with "no
+  // devcontainer.json" before the runner -- which owns the sandbox -- ever ran.
+  const gitProject = (name: string) => {
+    const dir = project(name, JSON.stringify({ image: "alpine:3" }));
+    const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { stdio: "ignore" });
+    git("init", "-q", "-b", "main", ".");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "add", "-A");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+    git("worktree", "add", "-q", "--no-checkout", "-b", "wip", ".worktrees/wip");
+    return dir;
+  };
+
+  test("start runs --populate first, then starts from the populated spec", async () => {
+    gitProject("fresh-wt");
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "fresh-wt", worktree: "wip" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    const calls = runnerInvocations();
+    assert.deepEqual(calls[0], ["--populate", "--worktree", "wip", "fresh-wt"]);
+    assert.equal(calls.length, 2, JSON.stringify(calls));
+    assert.ok(calls[1].includes("--config"), JSON.stringify(calls[1]));
+  });
+
+  test("a populated worktree is not populated again", async () => {
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "fresh-wt", worktree: "wip" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    assert.ok(!runnerInvocations().some((argv) => argv[0] === "--populate"));
+  });
+
+  test("a failed populate stops the start, and says so", async () => {
+    gitProject("populate-fails");
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "populate-fails", worktree: "wip" });
+    assert.equal(result(msgs).ok, false);
+    assert.equal(result(msgs).exit, 7);
+    assert.deepEqual(runnerInvocations().map((argv) => argv[0]), ["--populate"]);
+  });
+});
+
+describe("worktree add and remove: the editor asks, the runner runs git in a sandbox", () => {
+  // ===========================================================================
+  // git in the editor followed links the project planted -- `.git`,
+  // `.worktrees`, `.git/info/exclude` -- into OTHER projects (measured,
+  // worktrees.ts). So the editor's `worktree add|remove` are requests, and
+  // what reaches the runner is names it re-validates, never paths.
+  const widgets = () => {
+    project("acme/widgets", JSON.stringify({ image: "alpine:3" }));
+    fs.mkdirSync(path.join(workspaces, "acme/widgets/.worktrees"), { recursive: true });
+  };
+
+  test("add reaches the runner as --create-worktree, the branch defaulting to the name", async () => {
+    widgets();
+    resetRunner();
+    let msgs = await ask({ op: "worktree-add", project: "acme/widgets", worktree: "fresh" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    msgs = await ask({ op: "worktree-add", project: "acme/widgets", worktree: "other", branch: "feature/123" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    assert.deepEqual(runnerInvocations(), [
+      ["--create-worktree", "--branch", "fresh", "--worktree", "fresh", "acme/widgets"],
+      ["--create-worktree", "--branch", "feature/123", "--worktree", "other", "acme/widgets"],
+    ]);
+  });
+
+  test("add refuses a name, a branch or a project that is not one, before the runner", async () => {
+    widgets();
+    fs.symlinkSync(os.tmpdir(), path.join(workspaces, "linked"));
+    const refused = [
+      { worktree: "../escape" }, { worktree: "a/b" }, { worktree: ".hidden" }, { worktree: "-x" },
+      { worktree: "ok", branch: "-b" }, { worktree: "ok", branch: "a b" }, { worktree: "ok", branch: "" },
+      { worktree: "ok", branch: 7 }, { worktree: "ok", force: true },
+      { project: "linked", worktree: "ok" }, { project: "nowhere", worktree: "ok" },
+      { worktree: undefined },
+    ];
+    for (const fields of refused) {
+      resetRunner();
+      const msgs = await ask({ op: "worktree-add", project: "acme/widgets", ...fields });
+      assert.equal(result(msgs).ok, false, `accepted: ${JSON.stringify(fields)}`);
+      assert.deepEqual(runnerInvocations(), [], JSON.stringify(fields));
+    }
+  });
+
+  test("remove reaches the runner as --remove-worktree, forced only when asked", async () => {
+    widgets();
+    fs.mkdirSync(path.join(workspaces, "acme/widgets/.worktrees/done"), { recursive: true });
+    resetRunner();
+    for (const force of [undefined, false, true]) {
+      const msgs = await ask({ op: "worktree-remove", project: "acme/widgets", worktree: "done", force });
+      assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    }
+    assert.deepEqual(runnerInvocations(), [
+      ["--remove-worktree", "--worktree", "done", "acme/widgets"],
+      ["--remove-worktree", "--worktree", "done", "acme/widgets"],
+      ["--remove-worktree", "--force", "--worktree", "done", "acme/widgets"],
+    ]);
+  });
+
+  test("remove refuses a worktree that is missing, a link, or forced by anything but true", async () => {
+    widgets();
+    project("other/repo", JSON.stringify({ image: "alpine:3" }));
+    fs.symlinkSync(path.join(workspaces, "other/repo"), path.join(workspaces, "acme/widgets/.worktrees/linked-away"));
+    fs.mkdirSync(path.join(workspaces, "acme/widgets/.worktrees/real"), { recursive: true });
+    for (const fields of [{ worktree: "ghost" }, { worktree: "linked-away" }, { worktree: "real", force: "yes" }, {}]) {
+      resetRunner();
+      const msgs = await ask({ op: "worktree-remove", project: "acme/widgets", ...fields });
+      assert.equal(result(msgs).ok, false, `accepted: ${JSON.stringify(fields)}`);
+      assert.deepEqual(runnerInvocations(), [], JSON.stringify(fields));
+    }
+  });
+
+  test("no other op carries a branch or a force", async () => {
+    widgets();
+    fs.mkdirSync(path.join(workspaces, "acme/widgets/.worktrees/real"), { recursive: true });
+    for (const op of ["start", "stop", "ports"]) {
+      resetRunner();
+      const msgs = await ask({ op, project: "acme/widgets", worktree: "real", force: true });
+      assert.equal(result(msgs).ok, false, op);
+      assert.deepEqual(runnerInvocations(), [], op);
+    }
+  });
+});
+
+// ===========================================================================
+describe("--ports --move reaches the runner only in its one shape", () => {
+  // ===========================================================================
+  test("a label and a port arrive as exactly three argv words", async () => {
+    project("move-me", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
+    const msgs = await ask({ op: "ports", project: "move-me", move: { label: "editor", port: 8095 } });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    assert.deepEqual(runnerInvocations()[0], ["--ports", "--move", "editor", "8095", "move-me"]);
+  });
+
+  for (const [why, move] of [
+    ["a flag smuggled as the label", { label: "--rebuild", port: 8095 }],
+    ["a port that is a string", { label: "editor", port: "8095" }],
+    ["a port that is not an integer", { label: "editor", port: 8095.5 }],
+    ["an extra field", { label: "editor", port: 8095, also: "--purge" }],
+    ["a label that is no label", { label: "web", port: 8095 }],
+  ] as const)
+    test(`refuses ${why}, before the runner`, async () => {
+      resetRunner();
+      const msgs = await ask({ op: "ports", project: "move-me", move });
+      assert.equal(result(msgs).ok, false);
+      assert.deepEqual(runnerInvocations(), []);
+    });
+
+  test("move on any op but ports is refused, before the runner", async () => {
+    resetRunner();
+    const msgs = await ask({ op: "start", project: "move-me", move: { label: "editor", port: 8095 } });
+    assert.equal(result(msgs).ok, false);
+    assert.deepEqual(runnerInvocations(), []);
+  });
+});
+
+describe("purge is not the editor's (docs/agents.md)", () => {
+  // ===========================================================================
+  // The first factory let the editor purge a worktree. That is the Mac's
+  // (`cli.sh worktree remove`), so the broker -- the editor's only way in --
+  // must not speak it.
+  test("it never reaches the runner, for a project or a worktree", async () => {
+    project("no-factory", JSON.stringify({ image: "alpine:3" }));
+    fs.mkdirSync(path.join(workspaces, "no-factory", ".worktrees", "issue-1"), { recursive: true });
+    for (const at of [{}, { worktree: "issue-1" }]) {
+      resetRunner();
+      const msgs = await ask({ op: "purge", project: "no-factory", ...at });
+      assert.equal(result(msgs).ok, false, `purge ${JSON.stringify(at)}: ${JSON.stringify(msgs)}`);
+      assert.deepEqual(runnerInvocations(), []);
+    }
+  });
+});
+
+describe("bundle and pull: a push's and a pull's project halves (transfer.ts)", () => {
+  // ===========================================================================
+  const name = "desolate-transfer-0123456789abcdef.bundle";
+  test("each reaches the runner with its bundle's name, for a project or a worktree", async () => {
+    project("pushes", JSON.stringify({ image: "alpine:3" }));
+    fs.mkdirSync(path.join(workspaces, "pushes", ".worktrees", "issue-1"), { recursive: true });
+    resetRunner();
+    assert.equal(result(await ask({ op: "bundle", project: "pushes", transfer: name })).ok, true);
+    assert.equal(result(await ask({ op: "pull", project: "pushes", worktree: "issue-1", transfer: name })).ok, true);
+    assert.deepEqual(runnerInvocations(), [
+      ["--bundle", name, "pushes"],
+      ["--pull", name, "--worktree", "issue-1", "pushes"],
+    ]);
+    resetRunner();
+    assert.equal(result(await ask({ op: "pull", project: "pushes", transfer: name, fetch: true })).ok, true);
+    assert.deepEqual(runnerInvocations(), [["--pull", name, "--fetch-only", "pushes"]]);
+  });
+
+  for (const [why, query] of [
+    ["no bundle name", { op: "bundle", project: "pushes" }],
+    ["a name that is a path", { op: "bundle", project: "pushes", transfer: "../../other/.git/x.bundle" }],
+    ["a name that is a flag", { op: "pull", project: "pushes", transfer: "--rebuild" }],
+    ["a bundle name on another op", { op: "start", project: "pushes", transfer: name }],
+    ["fetch-only on another op", { op: "bundle", project: "pushes", transfer: name, fetch: true }],
+    ["fetch-only that is not a boolean", { op: "pull", project: "pushes", transfer: name, fetch: "yes" }],
+  ] as const)
+    test(`refuses ${why}, before the runner`, async () => {
+      resetRunner();
+      assert.equal(result(await ask(query)).ok, false);
+      assert.deepEqual(runnerInvocations(), []);
+    });
+});
+
+describe("review: what a push would send (review.ts)", () => {
+  // ===========================================================================
+  test("reaches the runner as --review, for a project or a worktree", async () => {
+    project("reviews", JSON.stringify({ image: "alpine:3" }));
+    fs.mkdirSync(path.join(workspaces, "reviews", ".worktrees", "issue-1"), { recursive: true });
+    resetRunner();
+    assert.equal(result(await ask({ op: "review", project: "reviews" })).ok, true);
+    assert.equal(result(await ask({ op: "review", project: "reviews", worktree: "issue-1" })).ok, true);
+    assert.deepEqual(runnerInvocations(), [["--review", "reviews"], ["--review", "--worktree", "issue-1", "reviews"]]);
+  });
+
+  for (const [why, query] of [
+    ["a bundle name", { op: "review", project: "reviews", transfer: "desolate-transfer-0123456789abcdef.bundle" }],
+    ["fetch-only", { op: "review", project: "reviews", fetch: true }],
+    ["a branch", { op: "review", project: "reviews", branch: "main" }],
+    ["a worktree that is a path", { op: "review", project: "reviews", worktree: "../other" }],
+  ] as const)
+    test(`refuses ${why}, before the runner`, async () => {
+      resetRunner();
+      assert.equal(result(await ask(query)).ok, false);
+      assert.deepEqual(runnerInvocations(), []);
+    });
+});
+
+describe("--json, for programs (F2)", () => {
+  // ===========================================================================
+  test("list and ports pass it to the runner", async () => {
+    project("json-p", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
+    assert.equal(result(await ask({ op: "list", json: true })).ok, true);
+    assert.equal(result(await ask({ op: "ports", project: "json-p", json: true })).ok, true);
+    assert.deepEqual(runnerInvocations(), [["--list", "--json"], ["--ports", "--json", "json-p"]]);
+  });
+
+  for (const [why, req] of [
+    ["on an op that prints nothing to parse", { op: "start", project: "json-p", json: true }],
+    ["as anything but a boolean", { op: "list", json: "--rebuild" }],
+  ] as const)
+    test(`is refused ${why}, before the runner`, async () => {
+      resetRunner();
+      assert.equal(result(await ask(req)).ok, false);
+      assert.deepEqual(runnerInvocations(), []);
+    });
+});
+
+describe("dinds: the supervisor's status, for the editor's extension", () => {
+  test("reaches the runner as --dinds: a project on it is ignored, a json refused", async () => {
+    resetRunner();
+    let msgs = await ask({ op: "dinds" });
+    assert.equal(result(msgs).ok, true, JSON.stringify(msgs));
+    assert.deepEqual(runnerInvocations(), [["--dinds"]]);
+    for (const extra of [{ project: "acme/widgets" }, { json: true }]) {
+      resetRunner();
+      msgs = await ask({ op: "dinds", ...extra });
+      assert.deepEqual(runnerInvocations(), extra.project ? [["--dinds"]] : [], JSON.stringify(extra));
+    }
+  });
+});
+
+describe("a stale container's metadata is not the spec (#26)", () => {
+  // read-configuration found a workspace's container by its labels -- stopped
+  // ones too -- and answered with THAT container's build metadata. One built
+  // under docker-in-docker said "privileged" for ever, and the broker refused
+  // a clean spec. It needs a daemon to hold the container.
+  const daemon = (() => {
+    try { execFileSync("docker", ["info"], { stdio: "ignore", timeout: 20_000 }); return true; } catch { return false; }
+  })();
+
+  test("a stopped privileged container beside a clean spec does not refuse it", { skip: !daemon && "no docker daemon" }, async () => {
+    const dir = project("stale-meta", JSON.stringify({ image: "alpine:3" }));
+    const name = `desolate-it-stale-${process.pid}`;
+    execFileSync("docker", ["create", "--name", name,
+      "--label", `devcontainer.local_folder=${dir}`,
+      "--label", `devcontainer.config_file=${dir}/.devcontainer/devcontainer.json`,
+      "--label", 'devcontainer.metadata=[{"privileged":true,"capAdd":["SYS_ADMIN"]}]',
+      "alpine:3", "true"], { stdio: "ignore" });
+    try {
+      resetRunner();
+      const msgs = await ask({ op: "start", project: "stale-meta" });
+      assert.equal(result(msgs).ok, true, errorOf(msgs));
+      assert.equal(runnerInvocations().length, 1, "the runner was not reached");
+    } finally {
+      execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+    }
   });
 });

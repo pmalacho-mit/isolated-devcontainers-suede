@@ -9,10 +9,12 @@
 import { join } from "node:path";
 import type { Target } from "./projects.ts";
 
-/** ports: the host port each service had last time, so URLs stay stable.
- *  spec:  a fingerprint of what the running container was built from.
- *  token: the editor's connection token, so a bookmarked URL keeps working. */
-type Kind = "ports" | "spec" | "token";
+/** ports:  the host port each service had last time, so URLs stay stable.
+ *  spec:   a fingerprint of what the running container was built from.
+ *  token:  the editor's connection token, so a bookmarked URL keeps working.
+ *  daemon: which daemon it last ran on (policy.ts Daemon), so a stop or a
+ *          purge drives the same one the start did. */
+type Kind = "ports" | "spec" | "token" | "daemon";
 
 export const directory = (workspaces: string) => join(workspaces, ".desolate");
 

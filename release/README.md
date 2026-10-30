@@ -45,8 +45,9 @@ The name is `desolate` = **de**v + i**solate**.
 ```
 
 **One** host-reachable surface, loopback-only: `3000` by default (`VSCODE_PORT`),
-the editor, token-gated. (Plus the dev-server range, 8080-8119 by default, once a
-project is running.)
+the editor, token-gated. (Plus one loopback port per project editor and declared
+dev server while it runs, from 8080 up, each opened on demand by
+`desolate-ingress` in the VM -- never a published range.)
 
 There is deliberately no network path to the inner Docker daemon.
 
@@ -70,7 +71,7 @@ the repository.
 | # | Boundary | Verdict |
 | - | -------- | ------- |
 | 1 | A project can exfiltrate **its own** source | **Conceded, by design** |
-| 2 | A project can reach a **sibling** project's source | Holds — unless that project sets `allowPrivileged` |
+| 2 | A project can reach a **sibling** project's source | Holds — including for projects that use Docker, which get a daemon of their own |
 | 3 | A project can read the **editor's** credentials | Holds — raw keys are unreachable |
 | 4 | A project can escape to the **VM** or your **Mac** | Holds — sysbox, and it is the boundary everything else rests on |
 
@@ -98,18 +99,17 @@ are confined to its own namespace, and bind mounts are refused outright. The two
 mounts `desolate` injects — the editor server and the CA scripts — are
 per-project overlays, so a project writing to either changes only its own view.
 
-The exception is `allowPrivileged`, which a project requests **in its own
-`devcontainer.json`**. A privileged devcontainer is privileged relative to dind,
-and dind mounts `/workspaces` whole. So enabling it means:
-
-- every project's source becomes readable by that project,
-- every project's editor token in `/workspaces/.desolate/` becomes readable,
-- and proxy-injected secrets become **usable** by that project against every
-  allowlisted host.
-
-It does **not** reach the keyring (no mounts, no network) or the VM (sysbox).
-Treat `allowPrivileged` as "this project may read all my other projects", and
-note that it is currently grantable by cloning a repository that declares it.
+**Projects that use Docker get a daemon of their own.** There used to be an
+exception here: `allowPrivileged`, which the `docker-in-docker` feature needed,
+made a devcontainer privileged inside the one dind every project shares --
+root over all of them. Both are gone. A project that declares
+`docker-outside-of-docker` instead gets its own sysbox dind, started by the
+supervisor (the one container holding the VM's docker socket), whose
+`/workspaces` holds **only that project**. Its devcontainer holds that dind's
+socket and nothing more: unprivileged (CapEff 0), and root over a daemon that
+can see one project's files and images. The socket is not the boundary -- the
+one-project view and sysbox around the dind are. A project's worktrees share its
+daemon, as they already share its `.git`.
 
 ### 3. Credentials: usable while compromised, never copyable
 
@@ -156,7 +156,9 @@ destinations, and nothing is ever stored in a container. What is bounded is
 bounded is whether a compromised project can learn the value: an allowlisted
 host that will transform what you send it can be asked to hand the key back in
 a form the response scrubber does not match. See
-[What this does not give you](#what-this-does-not-give-you).
+[What this does not give you](#what-this-does-not-give-you) -- and
+[Confining a secret to headers](#confining-a-secret-to-headers), which closes
+that for a credential that only ever travels in a header.
 
 ### 4. The VM and your Mac
 
@@ -374,8 +376,8 @@ proxy can only do its job if containers trust its certificate. That's what the
 publisher is for, and it's why a devcontainer that skips installing the CA gets
 TLS errors.
 
-Your own dev servers (ports 8080-8119 by default) are deliberately left out of
-all this -- that range belongs to your projects.
+Your own dev servers (host ports from 8080 up) are deliberately left out of all
+this -- those ports belong to your projects.
 
 > [!NOTE]
 > `./cli.sh up` may re-run the proxy installation by invoking `cli.sh vm install` with the `--proxy-only` flag. The firewall rules are tied to the name of the network the stack runs on, and that name can change out from under them -- which would turn interception off silently. So `up` checks on every start and repairs it if needed (see [Why `up` re-checks the proxy](#why-up-re-checks-the-proxy)). `--proxy-only` skips the sysbox half, which restarts docker and would kill the stack that just started.
@@ -403,7 +405,7 @@ Open the printed `http://127.0.0.1:3000/?tkn=...` URL. That's your editor.
 secrets machinery work end to end:
 
 ```bash
-./cli.sh proxy test     # substitution + scrubbing, then a blocked exfil (403)
+./cli.sh proxy test     # substitution + scrubbing, then an audited LEAK-SUSPECT pass-through
 ```
 
 ### Why `up` re-checks the proxy
@@ -475,15 +477,88 @@ the rules would go stale again each time.
 ./cli.sh worktree add owner/repo wip     # a second branch, in its own devcontainer
 ./cli.sh worktree list owner/repo
 ./cli.sh worktree remove owner/repo wip
+./cli.sh export owner/repo [path]        # copy files out to ./<name> (a tar when piped)
+./cli.sh exec owner/repo [--worktree wip] -- cmd...   # run a command (an agent) in its devcontainer
+./cli.sh push owner/repo [--worktree wip]     # its checked-out branch to GitHub (never git in the editor)
+./cli.sh pull owner/repo [--worktree wip]     # GitHub's branches in as origin/*, fast-forwarded
+./cli.sh desolate --status       # each target's status, as its agent last set it
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
 ./cli.sh reset-inner            # the inner daemon is wedged: report, then recover
+./cli.sh dind list              # project daemons: state, idle time, image store, headroom
+./cli.sh dind reset owner/repo  # one project's daemon is wedged: the same ladder, for it alone
+./cli.sh dind df                # disk, per daemon; `dind gc` gives build cache back
 ./cli.sh down                   # stop (down -v also deletes volumes; confirms)
 ```
 
-**Getting code in and out:** use the browser editor directly -- drag a folder
-into the file explorer to add it, and right-click -> Download to pull files
-out. There is no separate copy tool.
+**Getting code in:** drag a folder into the browser editor's file explorer.
+
+### Getting files out
+
+Three cases, by where the file lives:
+
+- **In the workspace** (`/workspaces/<project>/...`) -- `./cli.sh export`, on
+  your Mac. `/workspaces` is one volume the editor container mounts, and that
+  container runs on the daemon your Mac's docker CLI already talks to, so this
+  is a plain `docker cp` of the bytes every devcontainer sees:
+
+  ```bash
+  ./cli.sh export acme/widgets dist            # -> ./dist (refuses to overwrite)
+  ./cli.sh export acme/widgets > widgets.tar   # piped: a tar stream of the project
+  ```
+
+  The path is resolved inside the editor with symlinks followed, and refused
+  if it lands outside that project -- a link a project planted cannot turn an
+  export of its own files into a copy of another project's.
+- **Inside a devcontainer but outside the workspace** (its `/home`, a cache, a
+  build output in a container) -- through the daemon it runs on:
+  `./cli.sh observe docker cp <container>:<path> - > out.tar`, or for a
+  project with a daemon of its own,
+  `./cli.sh observe --project owner/repo docker cp <container>:<path> - > out.tar`.
+  `observe ps` (with the same `--project`) names the containers.
+- **One file, from the browser** -- right-click -> Download in the editor. A
+  folder download uses the browser's File System Access API, and Chrome refuses
+  some destinations (your home directory's root, `~/Library`, a volume root)
+  with a message about system files: pick a fresh empty folder instead.
+
+### The desolate panel in the editor
+
+The outer editor has a **desolate** view in its activity bar, built into the
+image (nothing is installed from a marketplace):
+
+- **Projects** -- every project and its worktrees, running or stopped, with
+  their ports, and each one's **status** (its agent's colour on the icon, its
+  message beside it; refreshed every 3 s). Start, stop, rebuild (asked first),
+  open its editor or a port in a new tab, copy its URL, add or remove a
+  worktree, and **Push** (asked first) or **Pull** its branch -- through
+  `desolate --push`/`--pull`, never git in the project.
+- **Dinds** -- each project dind's health, whether it is in use or for how long
+  idle, its memory and image store, and the VM's headroom.
+
+It holds no power of its own: each action runs the command you would type in
+the editor's terminal (`desolate`, `worktree`), and its log is the
+**desolate** output channel, with editor tokens left out. It works in
+Restricted Mode, which is where this editor should stay for a folder of other
+people's code. Resetting a dind stays on the Mac: `./cli.sh dind reset`.
+
+### `/desolate` inside every container
+
+Every devcontainer, and every dind, has desolate's directory read-only at
+`/desolate`. It comes from the VM, and each project gets its own copy-on-write
+view of it:
+
+| Path | What it is |
+| --- | --- |
+| `/desolate/ca/ca.pem` | the proxy's CA (the public certificate only) |
+| `/desolate/ca/install-ca.sh` | trusts it in this container; desolate runs it as root on every start |
+| `/desolate/ca/trust-proxy-in-builds.sh` | trusts it in this container's own builds ("Building your own containers") |
+| `/desolate/status` | an agent's status, through `.git` ([docs/agents.md](../docs/agents.md)) |
+| `/desolate/net` | joins this devcontainer to its project's compose networks |
+| `/desolate/AGENTS.md` | what an agent in here should know |
+
+It used to be `/desolate-ca`, flat. Nothing answers at the old path: a container
+made before the move needs `desolate --rebuild`, and a project's own config
+that names `/desolate-ca/...` needs the new path.
 
 ## Privilege separation (why the editor can't touch the daemon)
 
@@ -548,7 +623,8 @@ The rules, and what each is actually defending:
 - **`dockerComposeFile` is refused.** A compose-mode devcontainer declares its
   privilege in the compose file, which this policy does not read; `privileged`,
   `pid: host`, `network_mode: host` and `- /:/host` are all expressible there.
-  Run compose _inside_ a devcontainer with the docker-in-docker feature instead.
+  Run compose _from_ a devcontainer with the docker-outside-of-docker feature
+  instead: the services run on the project's own daemon.
 - **Policy is enforced on the CLI's own `mergedConfiguration`**, not on our
   parse of the file. That is where a _feature_'s `privileged` / `capAdd` /
   `securityOpt` / `mounts` land -- a feature could otherwise inject
@@ -589,11 +665,17 @@ The rules, and what each is actually defending:
   built an image containing a sibling project's file -- see "A project may only
   reach its own folder" below.
 - **`appPort` is refused** (it collides with the relay bind).
-- **Privilege must be opted into explicitly**, in the project's own file:
-  `"customizations": {"desolate": {"allowPrivileged": true}}`. The
-  docker-in-docker feature needs it; the point is that it can no longer be
-  inherited _silently_ from a third-party feature, and that `git log` shows
-  which projects are in the escalated tier.
+- **`privileged` is refused outright**, and so is the `docker-in-docker`
+  feature (with the way out in the message). The `allowPrivileged` opt-in no
+  longer exists. On a project's own daemon -- `docker-outside-of-docker` --
+  `capAdd` and `securityOpt` are allowed (the socket is root over that dind
+  anyway, and features such as rust need `SYS_PTRACE`), except a seccomp
+  profile from a project path or switching off `no-new-privileges`; the one bind
+  allowed is that feature's own socket mount, exactly as it declares it. On the
+  shared daemon none of that is allowed, and a security option may only restate
+  or tighten the default: `no-new-privileges`, `seccomp=builtin`,
+  `apparmor=docker-default`. Options are judged as docker parses them, so
+  `seccomp:<path>` is the same option as `seccomp=<path>`.
 - **`shadowImages` entries must parse as image references** -- not a path, not a
   URL, and at most 32 of them. Unlike mounts and ports this one carries no
   cross-project risk (the tags land in the project's own disposable daemon), so
@@ -695,12 +777,14 @@ daemon, must not mount the socket volume, and the broker socket must be
 present. `tests/integration/stack` goes further and runs the attacks from
 inside the editor container.
 
-**Known limit:** a project that uses the docker-in-docker feature is privileged
-_within the sysbox userns_ on the inner daemon, so within one stack it remains
-possible for such a project, if compromised, to reach sibling containers'
-on-disk data. The broker cannot fix that -- it can only make you write the
-opt-in down. Run genuinely untrusted code in a separate stack (trust tier), not
-just a separate project.
+**What a project's own daemon does not change:** the socket a
+`docker-outside-of-docker` devcontainer holds is root over its project's dind,
+so a compromised project owns its own images, containers and worktrees -- the
+same trust domain its `.git` already was. It reaches no other project: that
+dind's `/workspaces` is a `volume-subpath` of one project, measured by
+`samples/sample-siblings/diagnose.sh` ("daemon's workspaces: only ..."). Run
+genuinely untrusted code in a separate stack (trust tier), not just a separate
+project.
 
 **Also unfixed by the broker:** all devcontainers share the inner daemon's
 default bridge with `icc=true`, so they can reach each other over the network
@@ -781,15 +865,17 @@ collide):
 "customizations": { "desolate": { "ports": [5173] } }
 ```
 
-`desolate` allocates a free host port from **8080-8119** at start, remembers it
-per project (stable URLs across restarts), and forwards it via a socat relay.
+`desolate` allocates a free host port from **8080 up** at start, remembers it
+per project (stable URLs across restarts), and forwards it via a socat relay and
+`desolate-ingress`, which opens that port on the VM's loopback only while the
+project runs.
 Start your dev server bound to `0.0.0.0` (e.g. `npx vite --host 0.0.0.0`); the
 URL `desolate` printed answers once the server is up. Do **not** put `appPort`
 in devcontainer.json -- `desolate` hard-fails on it, because it collides with
 the relay's port bind.
 
-Each project spends one port on its editor plus one per declared port, so the
-default range holds roughly five or six projects at once.
+Each project spends one port on its editor plus one per declared port. There is
+no range to run out of: the ports are listeners, not a publish made in advance.
 
 ## Editor extensions and settings
 
@@ -815,8 +901,16 @@ own Dev Containers extension uses. The precedence is therefore the familiar one:
 your own User settings lose to the project's, and the project's lose to a
 `.vscode/settings.json` committed in the repo. The file is rewritten on every
 start and carries a `Managed by desolate` header, so edit it and your changes go
-away -- put personal preferences in User settings instead. Removing the key from
-`devcontainer.json` removes the file, so turning a setting off works too.
+away -- put personal preferences in User settings instead. Removing a setting
+from `devcontainer.json` removes it at the next start, so turning one off works too.
+
+Beneath the project's settings, desolate adds one default of its own:
+`terminal.integrated.macOptionClickForcesSelection: true`. A program that has the
+mouse -- tmux, and Claude Code inside it, as an agent's worktree runs them -- takes
+a drag for itself, so nothing gets selected and copying says "The terminal has no
+selection to copy". With this on, **Option+drag** on a Mac makes the terminal's
+own selection, which ⌘C copies. (It costs Option+drag's column selection in the
+terminal; a project that wants that back sets it to `false`.)
 
 Two limits worth knowing. Settings whose scope VS Code defines as
 `application` (a small set, e.g. `update.mode`) cannot be set at Machine scope
@@ -837,6 +931,9 @@ image from your base with the CA installed, tags it
 `desolate-ca/base:<hash>`, and starts the project from that. It happens once per
 base image, is cached in the inner daemon afterwards, and nothing about it
 bypasses the proxy -- the build just trusts it like every other container does.
+The base is first pinned to the digest it resolves to there (`image:tag@sha256:...`,
+said at the start), and the derivative is built from and keyed on that pin, so
+a tag that moves upstream cannot change what a cached derivative stands for.
 
 **Projects that build from their own `Dockerfile` are not covered.** The `FROM`
 is yours, so `desolate` cannot derive it; build-time HTTPS in such a project
@@ -882,7 +979,7 @@ it. `desolate` publishes a script into every devcontainer for this -- run it
 from **your own terminal inside the devcontainer**:
 
 ```bash
-/desolate-ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim
+/desolate/ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim
 ```
 
 That does two things:
@@ -956,7 +1053,7 @@ trust-proxy: deriving desolate-ca/python:3.12-slim
     | LABEL desolate.ca.fingerprint=<sha256 of the CA>
     | USER vscode
 
-             build context: /desolate-ca  (contains only the public CA cert)
+             build context: /desolate/ca  (contains only the public CA cert)
 ```
 
 Use `--print-recipe` to read it _before_ anything is built. The recipe is shown
@@ -981,7 +1078,7 @@ For those, deliver the same derivative by pointing the base image's own tag at
 it, in this devcontainer's daemon:
 
 ```bash
-/desolate-ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
+/desolate/ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
 ```
 
 `FROM node:22-bookworm-slim` in that daemon now resolves to the CA-trusting
@@ -1011,10 +1108,11 @@ not all of them:
 | ---------------------------------------------- | ------ | ------------------------------------------------------------------- |
 | `docker build`, `docker compose build`         | binds  | the CLI asks BuildKit to prefer a local image                       |
 | `POST /build?version=1` (classic builder)      | binds  | the classic builder reads the local store and nothing else          |
-| `POST /build?version=2` (BuildKit, Engine API) | **no** | resolves the tag at the registry, pins `FROM ...@sha256:<upstream>` |
+| `POST /build?version=2` (BuildKit, Engine API) | on a project's own daemon, for Docker Hub images | it resolves the tag at a registry -- the project dind's mirror first, which `--shadow` filled (below); on the shared daemon, or for another registry, **no** |
 
-That last row is the one that bites, because it is what part of the SDK world
+That last row is the one that bit, because it is what part of the SDK world
 posts by default -- `dockerode` with `version: "2"`, and tools built on it.
+Where it still does -- the shared daemon, or a base from another registry --
 BuildKit is handed a tag, asks the registry what it points to, and builds from
 the digest it gets back. The local tag is never consulted, so the build gets the
 pristine base: it downloads an image you already have a derivative of, then
@@ -1037,11 +1135,22 @@ Or ask that build for the **classic builder** -- `version: "1"` in `dockerode`,
 `DOCKER_BUILDKIT=0` for anything shelling out to the CLI -- which reads the
 local store and nothing else.
 
-Two fixes that look right and are not: a CA in `buildkitd.toml` (that is
-BuildKit's registry client, not your `RUN` steps' HTTPS), and pointing the
-daemon's `registry-mirrors` at a registry serving the derivatives. `docker pull`
-honours those mirrors; the BuildKit inside the same daemon ignores them, so the
-build resolves upstream exactly as before.
+A fix that looks right and is not: a CA in `buildkitd.toml` (that is
+BuildKit's registry client, not your `RUN` steps' HTTPS). One that looked wrong
+and is not, any more: pointing the daemon's `registry-mirrors` at a registry
+serving the derivatives. On the classic image store BuildKit ignored those
+mirrors; on the containerd store -- docker 29's default, and every project
+daemon's -- a `version=2` build honours them and builds on the mirror's
+derivative (measured: `tests/probes/buildkit-shadow.sh`, S7). So a project
+dind lists one at `127.0.0.1:5995` in its own namespace, and `--shadow` starts
+it there on first use (`desolate-mirror`, a pinned `registry:2`) and pushes the
+derivative to it under the base's own name; `--unshadow` takes it out again.
+Its daemon then gets the derivative for every builder, and for `docker pull` --
+so on a project's own daemon a pull no longer undoes the shadow. Docker Hub
+images only: `registry-mirrors` covers no other registry. A dind that never
+shadows has nothing listening there, and its pulls go straight on to Docker Hub
+(measured: `tests/environments/mirror/run.sh`). The mirror is loopback inside
+the dind: no other project reaches it.
 
 To stop doing this by hand, a project can declare the images once:
 
@@ -1068,8 +1177,8 @@ protection, which is why `desolate --stop` now asks a project's daemon to stop
 its containers and then itself before stopping the container that holds them --
 best-effort and bounded, so a project whose daemon is already hung cannot hang
 the stop as well. It needs the
-`docker-in-docker` feature (the tag has to land in a daemon of the project's
-own); without one, the start says so and carries on. A bare tag is enough here
+`docker-outside-of-docker` feature (the tag has to land in a daemon of the
+project's own); without one, the start says so and carries on. A bare tag is enough here
 and a digest is not accepted: this is a development trust store, not a
 reproducible build input, and the derivative is rebuilt from the pinned digest
 of whatever the tag resolved to anyway.
@@ -1111,6 +1220,33 @@ If you would rather keep all of this out of your project entirely, reference a
 **pre-built image** (`image: myapp:dev`) instead of building in place. Nothing
 needs deriving, and it is closer to what production actually does.
 
+### Giving a project more memory
+
+A project's daemon has one memory ceiling, and everything in it shares it:
+- the devcontainer and its editor and language servers;
+- an agent working there;
+- the project's compose services, dev servers and image builds.
+
+It's 6 GiB unless the project says otherwise:
+
+```jsonc
+"customizations": { "desolate": { "memory": "12g" } }   // whole megabytes or gigabytes
+```
+
+Raising it is live: the next `desolate <project>` raises the running daemon's
+ceiling with `docker update`, and nothing restarts. Lowering it is not: a
+ceiling under what is running would OOM-kill it, so a lower value takes effect
+when the daemon is next made (`./cli.sh down`, then `up`). A value above what
+the VM has, less `DESOLATE_DIND_MEM_FLOOR`, is refused.
+
+Ceilings may add up to more than the VM. Six projects at 10 GiB on a 40 GiB VM
+is fine: a ceiling is a cap, not a reservation, and a new daemon is admitted on
+what the VM has *free*. What the ceiling buys is where the damage lands. A
+project that runs away is OOM-killed inside its own daemon, rather than the
+VM's kernel picking a victim anywhere on the VM, which could be another
+project, the proxy or the editor. Give the VM itself more with Colima
+(`colima start --memory`).
+
 ### Applying changes to devcontainer.json
 
 ```bash
@@ -1141,43 +1277,41 @@ Rebuilding is never automatic, because it destroys anything written inside the
 container outside `/workspaces` -- packages installed ad hoc, a local database.
 `/workspaces` itself is a volume and survives.
 
-### Changing the range
+### How a host port reaches your Mac
 
-8080-8119 is the default, not a constant. Forty ports sounds generous until you
-count: every target takes one for its editor before it asks for a single dev
-server, and a project's worktrees are targets of their own. Set both bounds in
-the `.env` next to `docker-compose.yml` and restart:
+There is no published range. Each host port is a file in the VM's
+`/run/desolate-ingress/ports/`, written by `desolate` once the port's relay is
+up and removed when the target stops, and `desolate-ingress` (a VM service,
+`release/proxy/vm/ingress.py`) opens `127.0.0.1:<port>` for each one. Lima
+forwards any VM loopback listener to the Mac's loopback within a fraction of a
+second, so the URL works with nothing published by docker at all.
+
+The forwarder refuses anything outside its bounds and logs it: a port below
+1024 (Lima forwards those onto your LAN), an address that is not a dind's, or a
+bridge's own gateway (the VM itself). Its uid can open connections to dind
+bridges and nowhere else -- an nftables rule, counted, that does not trust the
+forwarder's own checks. `./cli.sh preflight` proves the whole path from your
+Mac: it opens a port on demand and fetches through it.
+
+Allocation starts at `DESOLATE_PORT_BASE` (8080) and takes the lowest free port,
+keeping a target's previous ports when it can. Set the base in the `.env` next
+to `docker-compose.yml` if 8080 is busy on your Mac; nothing else needs to agree
+with it.
+
+### When your Mac already holds the port
+
+If something on your Mac already listens on a port a target wants, Lima does not
+forward it -- and does not retry once the Mac lets go. `./cli.sh desolate` warns
+before a start when that is the case. Move just that one label:
 
 ```bash
-DESOLATE_PORT_MIN=8080
-DESOLATE_PORT_MAX=8159
+./cli.sh desolate --ports acme/widgets --move editor 8095   # or: --move 5173 8096
 ```
 
-```bash
-./cli.sh up          # recreates dind (the publish) and the orchestrator (the allocator)
-```
-
-Set **both** variables, and change them only here. They feed two places that
-have to agree: the range dind publishes to the Mac, and the range `desolate`
-allocates relays from. Of the two ways to get that wrong, only one is loud --
-publishing more than you allocate merely wastes port bindings, while allocating
-more than you publish produces a relay that binds happily inside dind and is
-simply unreachable from the Mac, so the URL never answers and nothing logs an
-error. Driving both from one pair of variables is what prevents that;
-`cli.sh preflight` re-checks it against the _running_ containers, which is the
-case config alone cannot catch (an `.env` edit without a restart).
-
-### When the range runs out
-
-There is no queue and no overflow range: `desolate <project>` stops with a
-listing of every port in the range and what holds it, and does nothing else.
-Allocation happens before `devcontainer up`, so a refusal leaves nothing
-half-started and does not disturb the port maps of projects already running.
-
-The usual cause is simply too many projects at once -- `desolate --stop <other>`
-frees a port immediately. The other cause is worth knowing: a devcontainer
-deleted by hand rather than through `desolate --stop` leaves its relays behind,
-still holding their ports. `./cli.sh observe ps` lists them as
+A running target's relay and forward move with it; a stopped one keeps the new
+port for its next start. The usual other cause of a missing port is a
+devcontainer deleted by hand rather than through `desolate --stop`, which leaves
+its relays behind: `./cli.sh observe ps` lists them as
 `desolate-relay-<project>-<port>`, or `desolate-relay-<project>--wt--<worktree>-<port>`
 for a worktree; `./cli.sh reset-inner` sweeps the ones that are no longer
 running.
@@ -1273,7 +1407,7 @@ its own devcontainer with its own editor, ports and volumes:
 ./cli.sh worktree add pmalacho-mit/suede fix 'hotfix/123'
 ./cli.sh desolate pmalacho-mit/suede --worktree wip   # opens it; creates it if absent
 ./cli.sh worktree list pmalacho-mit/suede
-./cli.sh worktree remove pmalacho-mit/suede wip       # stop it first
+./cli.sh worktree remove pmalacho-mit/suede wip       # stop it first; --force discards changes
 ```
 
 They live in a fixed, dot-prefixed place, so they can never be mistaken for
@@ -1309,9 +1443,28 @@ repo twice -- two projects are a real boundary; two worktrees are not.
   safe direction. Like every other mount, it is decided when the container is
   created, so a project already running when you add your first worktree needs
   `desolate --rebuild <project>` before the mask appears.
-- **`git worktree list` inside a worktree names paths that are not there.** Its
-  siblings and the main tree are not mounted in that container. They are locked,
-  so nothing prunes them; the output is just confusing.
+- **A new worktree is empty until it first starts.** `worktree add` asks the
+  orchestrator to create it, with `--no-checkout`, in a throwaway container
+  that mounts the project and nothing else; `desolate --worktree` checks it out
+  in the same kind of container at first start -- so the repository's hooks,
+  filters and fsmonitor run there, never in the editor, which reaches every
+  project. git in the editor also followed links a project planted: with its
+  `.git` or `.worktrees` pointing into another project, `add` made a branch in
+  that project's repository. In the sandbox those links point at nothing. A
+  post-checkout hook that needs tools the sandbox lacks (it is `alpine/git`,
+  with git-lfs) fails there with a warning; the files still land.
+- **`worktree remove` checks for uncommitted changes first, in the sandbox.**
+  From the editor or the Mac, it refuses -- listing what it found -- if
+  anything would be lost, including files put by hand into a worktree that
+  was never started. `--force` skips the check. Then the worktree's container
+  and volumes are purged, and git removes it, in the sandbox again.
+- **A worktree's container holds its whole project.** It is mounted as the
+  project's root, with the worktree as its folder, so the main tree and its
+  siblings are there too (its editor opens only the worktree). Not the
+  worktree and `.git` as two mounts: the project can turn either into a link
+  to another project's directory, and on the shared daemon a mount follows
+  it. A project cannot replace its own root, so every link inside resolves
+  inside the container, where no other project is.
 
 ### Why every desolate worktree is locked
 
@@ -1344,6 +1497,60 @@ decides who owns a volume, so it can only ever refuse itself.
 
 A project with no worktree is named exactly as it always was. Nothing about an
 existing stack moves.
+
+## Agents, and a factory on top
+
+desolate runs a repository and its worktrees in isolated devcontainers; what an
+agent does in one, and what decides when it starts, is yours. A software
+factory is a harness on your Mac built on these primitives
+([docs/agents.md](../docs/agents.md)). [examples/factory/](../examples/factory/)
+has sketches: `claude/claude-dispatcher.sh` turns labelled GitHub issues into
+worktrees running Claude Code on your subscription, and draft PRs. The
+primitives:
+
+```bash
+./cli.sh worktree add acme/widgets issue-42              # a place for one piece of work
+./cli.sh desolate acme/widgets --worktree issue-42       # start it
+./cli.sh exec acme/widgets --worktree issue-42 -- claude -p "..."   # run an agent in it
+./cli.sh desolate --status --json                        # what every agent last said
+```
+
+**Status, through `.git`.** An agent says how it is going with
+`/desolate/status set <color> <message>` -- `orange` "needs a
+human", `green` "ready for a PR", `red` "authentication failed". It is a file
+in that target's git dir: never committed, never pushed, seen by exactly that
+project's containers. desolate shows it -- the icon's colour and the message in
+the editor's panel, `desolate --status` -- and never acts on it.
+
+**No forge credential is in the stack.** Polling GitHub and opening PRs happen
+on your Mac, with your own `gh`; you push the branch from the outer editor, as
+any other.
+
+**Agents' credentials are placeholders.** Claude Code sends whatever token it
+is given as the bearer, with no local check of its shape (measured:
+`tests/probes/agent-token-placeholder.sh`), so the real token stays in the VM
+and is bound to the one project that may spend it:
+
+```bash
+./cli.sh secret add ACME-CLAUDE-TOKEN --hosts api.anthropic.com --projects acme/widgets
+```
+
+```jsonc
+"containerEnv": { "CLAUDE_CODE_OAUTH_TOKEN": "ACME-CLAUDE-TOKEN" }   // or ANTHROPIC_API_KEY
+```
+
+Every target of the project -- `main` and each worktree -- starts logged in; a
+worker in another project cannot spend it. For Claude Code on a subscription,
+`examples/factory/claude/claude-helper.sh` does this per session instead. It keeps
+an `ANTHROPIC_API_KEY`, or a repository's own `apiKeyHelper`, from taking Claude
+off the subscription, because both outrank the OAuth token
+([docs/agents.md](../docs/agents.md)).
+
+**What is and is not a boundary.** A project's agents share one trust domain:
+any of them can write any target's status, so a status is the agent's claim --
+check what it claims (that a branch builds, say) before acting on it. What
+bounds a hostile agent is what reaches outside the project: `exec` is the
+Mac's alone, and the push is yours.
 
 ## Secrets: placeholders in, real values never
 
@@ -1425,13 +1632,62 @@ breaks either is refused rather than stored, or dropped rather than loaded:
 The `network` rules in `settings.json` are a separate list with a separate job
 and still accept `{"host": "*"}` -- see "What this does not give you" below.
 
+### Confining a secret to headers
+
+Most credentials travel in a header (`Authorization`, `x-api-key`) and need
+nothing else. Name it, and the proxy substitutes the secret there alone --
+never in a body or URL, where a host that computes on what it is sent could be
+asked to return it transformed:
+
+```bash
+./cli.sh secret add DESOLATE-CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization
+./cli.sh secret list      # ... [headers: authorization]
+```
+
+Anywhere else in a request, the placeholder is only its name: a prompt saying
+"reverse this: DESOLATE-CLAUDE-OAUTH" hands the model the name, and that is all
+that comes back. What remains is what a host does with the header itself; pick
+one it reads and does not repeat. A secret that must reach a body or a query
+string (a form-posted client secret, a `?key=` API) cannot be confined, and
+keeps the limit below. `examples/factory/claude/claude-helper.sh` stores
+Claude's token this way, and will not use one stored without it.
+
+### Scoping a secret to projects
+
+A project with a daemon of its own (`docker-outside-of-docker`) reaches the
+proxy from its own bridge address, so the proxy knows which project a request
+came from. Every `./cli.sh proxy audit` line names it (`-` for the shared
+daemon and the editor), and a secret can be bound to the projects that may
+spend it:
+
+```bash
+./cli.sh secret add ACME-DEPLOY-KEY --hosts api.github.com --projects acme/widgets,acme/api
+./cli.sh secret list                        # ... (only for: acme/widgets, acme/api)
+./cli.sh proxy audit --project acme/widgets # its requests alone
+```
+
+From any other source -- another project, the shared daemon, an address the
+proxy cannot attribute -- a request carrying that placeholder toward an
+allowlisted host is refused (403, `verdict=DENY-SCOPE`), not passed on: it was
+headed somewhere the real value would be accepted, by someone it was not meant
+for. A secret without `--projects` behaves as before. A `network` rule in
+`settings.json` may carry `"projects": [...]` the same way; without it, it
+applies to everyone. Scoped rules fail closed. An `allow` with `projects`
+admits only those projects. A `deny` with `projects` also catches traffic
+no project can be named for -- the shared daemon and the editor -- because a
+project picks its daemon in its own spec, and on the shared one it is
+unattributed: a deny that ignored that traffic would be one it could step
+around. Its cost: a deny scoped to one project also stops every project on
+the shared daemon from reaching that host. A `projects` that is not a list
+makes an allow apply to no one, and a deny apply to everyone.
+
 ### The one entry that is not a secret
 
 `./cli.sh secret list` shows `DESOLATE-SELFTEST-PLACEHOLDER -> httpbin.org`.
 That is a **test fixture**, not a credential. Its value is fake and published,
 and it exists so `./cli.sh preflight` can prove leak detection is actually
 running -- by sending it toward a host it is not allowlisted for and demanding
-a 403. Without it those probes cannot fail closed, so they report
+the `LEAK-SUSPECT` audit line for that request. Without it those probes cannot fail closed, so they report
 `secrets can be exfiltrated` against a perfectly healthy addon. `vm install`
 re-asserts it on every run and `secret rm` refuses it
 (`--force` if you really mean to).
@@ -1441,17 +1697,21 @@ placeholder matched **only as a complete request header value** rather than
 anywhere in a request. Its name is a string this project publishes -- in these
 docs, in `addon.py`, in the test suite -- so under the ordinary substring rule
 every request that merely *mentioned* it was a 403 toward anything but
-`httpbin.org`: `git push` of this repo, an agent sending a diff to a model API,
-pasting preflight output into a ticket. The flag separates the probe from prose
-about the probe. Do not set it on a real secret; it would mean that secret
+`httpbin.org` (and, since #12, would be an audited suspect): `git push` of this
+repo, an agent sending a diff to a model API, pasting preflight output into a
+ticket. The flag separates the probe from prose about the probe. Do not set it on a real secret; it would mean that secret
 travels unnoticed in a body or a URL.
 
 ### Why this is stronger than a secrets file
 
 - **Exfiltration is bounded.** The real value is only ever put on the wire
   toward that secret's allowlisted hosts. Sending the placeholder anywhere else
-  is refused with 403 and logged -- so the honeypot case is caught, not just
-  survived. This is the guarantee the design actually rests on; the two below
+  sends just that -- the placeholder, never substituted -- and writes an
+  `AUDIT verdict=LEAK-SUSPECT` line naming it (`./cli.sh proxy audit`), so the
+  honeypot case is caught, not just survived. It used to be a 403, which
+  refused a `git push` of code that merely mentions a placeholder although
+  nothing secret was in flight (#12). A placeholder over plaintext is still
+  refused outright. This is the guarantee the design actually rests on; the two below
   are weaker than they read, and "What this does not give you" says how.
 - **Nothing to find at rest.** There is no key material on any
   container-reachable filesystem. Even an escape into the dind container finds
@@ -1515,7 +1775,9 @@ are not will bite:
   What still holds is the bound: the real value can only ever be **sent to that
   secret's allowlisted hosts**. Bounding where a secret may go is the guarantee
   this design makes. Keeping it unknown to a compromised container is not, and
-  the scrubber should not be read as making that promise.
+  the scrubber should not be read as making that promise -- except for a
+  secret [confined to headers](#confining-a-secret-to-headers), which never
+  reaches what a host computes on.
 - **Secrets are not scoped per project.** The proxy sees requests from the
   whole stack and cannot tell which devcontainer sent one. Any project can
   _use_ any other project's placeholder toward that secret's allowlisted hosts
@@ -1613,8 +1875,19 @@ Boundaries, strongest first:
 - **project <-> editor** -- the weakest boundary in the stack, and the one that
   is not enforced by a mechanism at all. They share `/workspaces` read-write,
   and a repository's `.git/config`, `.git/hooks/` and `.gitattributes` are
-  executable configuration consumed by the editor's git. Assume any project you
-  open in the outer editor can execute there. The design response is not to
+  executable configuration consumed by the editor's git. The git desolate runs
+  there for you (`worktree add`, `list`, `remove`) switches off hooks, fsmonitor
+  and the pager on its command line and never reads file content, so no filter
+  runs either (tests/integration/worktrees, E17) -- but git you type in the
+  editor's terminal obeys the repository like any git does. So pushing and
+  pulling go through `desolate --push`/`--pull` (and the panel's buttons),
+  which run the project's half in its sandbox and the editor's in a cache of
+  the remote that only desolate's clean git touches, to the repository
+  `repo add` registered
+  ([docs/agents.md](../docs/agents.md)); and the editor's interactive shell
+  refuses typed git in `/workspaces/*` (`command git` gets past it -- a guard
+  for what you type, not a boundary).
+  Assume any project you work on in the outer editor can execute there. The design response is not to
   prevent it but to make it survivable: there is nothing in that container worth
   stealing, only capabilities that stop when it restarts.
 - **dind <-> containers** -- Linux namespaces, and the weakest of the three.
@@ -1632,7 +1905,7 @@ Boundaries, strongest first:
   | Mount            | Executed by                                                                          | If poisoned                                     |
   | ---------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------- |
   | `/vscode-server` | every devcontainer, on start                                                         | code execution as each project's user           |
-  | `/desolate-ca`   | `install-ca.sh`, via `docker exec -u 0` in every devcontainer, and dind's entrypoint | **root** execution in every project and in dind |
+  | `/desolate`      | `ca/install-ca.sh`, via `docker exec -u 0` in every devcontainer, and dind's entrypoint | **root** execution in every project and in dind |
 
   Shared and writable, either is cross-project code execution needing no
   privilege at all -- overwrite one file, and every other project runs it.
@@ -1645,10 +1918,10 @@ Boundaries, strongest first:
   per project instead of a copy.
 
   A read-only _flag_ would not have been enough, and that was measured rather
-  than assumed. `MS_RDONLY` is per-mount, so a devcontainer with
-  `allowPrivileged` -- holding `CAP_SYS_ADMIN` in dind's user namespace -- can
-  `mount -o remount,bind,rw` its own copy and write **through to the shared
-  file**. An overlay's lower layer is not writable through the overlay by any
+  than assumed. `MS_RDONLY` is per-mount, so a privileged devcontainer -- as
+  `allowPrivileged` used to allow, holding `CAP_SYS_ADMIN` in dind's user
+  namespace -- could `mount -o remount,bind,rw` its own copy and write
+  **through to the shared file**. An overlay's lower layer is not writable through the overlay by any
   means, so the same attempt changes only that project's own upper.
 
   `desolate` **refuses to start a project** if an overlay cannot be built --
@@ -1661,13 +1934,12 @@ Boundaries, strongest first:
   `E6` for the editor binary, `E7` for the CA scripts -- including the
   privileged remount.
 
-Note that a `--privileged` devcontainer is privileged _relative to dind_, and
-dind's own root is already an unprivileged VM user. Capabilities in a
-non-initial user namespace apply only to resources that namespace owns, so such
-a container cannot load kernel modules, touch VM devices, or reach the VM
-however it misbehaves. sysbox is what bounds the damage to dind's contents --
-which is precisely why `allowPrivileged` warns about _siblings_ and nothing
-beyond them.
+Note that even a `--privileged` container -- which a project's devcontainer can
+still start as a SIBLING through its own daemon's socket -- is privileged
+_relative to that dind_, and the dind's root is an unprivileged VM user.
+Capabilities in a non-initial user namespace apply only to resources that
+namespace owns, so it cannot load kernel modules, touch VM devices, or reach the
+VM however it misbehaves; and the dind it is root over holds one project.
 
 ## Verifying containment
 
@@ -1698,7 +1970,7 @@ under sysbox with an active user-namespace (`uid_map` shows container-root
 mapping to a non-zero VM uid). It also now proves the _proxy policy_ is live,
 not merely that the proxy is running: an addon that fails to load leaves a
 working transparent proxy that substitutes nothing, so preflight trips the
-leak detector on purpose and expects a 403.
+leak detector on purpose and demands the `LEAK-SUSPECT` audit line it writes.
 
 To see it yourself, from a terminal inside any devcontainer:
 
@@ -1779,8 +2051,15 @@ machine.
 | Variable                     | Default         | What it does                                                                                                                                                            |
 | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
-| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. Must sit **outside** `DESOLATE_PORT_MIN..MAX` -- dind publishes that whole range, and `cli.sh up` refuses a collision. |
-| `DESOLATE_PORT_MIN` / `_MAX` | `8080` / `8119` | Host port range for project editors and dev servers. Feeds **both** dind's publish and the allocator -- change them together, here, and nowhere else.                   |
+| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. The port allocator is told it and never hands it to a dev server.                                                      |
+| `DESOLATE_PORT_BASE`         | `8080`          | Where project editor and dev-server host ports are allocated from (>= 1024). No upper bound: each is a listener `desolate-ingress` opens on demand.                      |
+| `DESOLATE_DIND_IDLE`         | `30`            | Minutes a project daemon may sit with no devcontainer running before it is stopped. Its images stay; the next start is warm.                                             |
+| `DESOLATE_MAX_DINDS`         | `16`            | Project daemons running at once. A newcomer past it stops the longest-idle one; a daemon with a devcontainer running is never stopped for it.                            |
+| `DESOLATE_DIND_GRACE`        | `15`            | Minutes after a project daemon was started or last busy during which it is never stopped to make room -- its devcontainer may still be building.                       |
+| `DESOLATE_DIND_MEM_FLOOR`    | `2147483648`    | Bytes of VM memory kept free. A project daemon that would start below it is refused, naming the busy daemons in the way, after idle ones have been stopped.              |
+| `DESOLATE_DIND_MEMORY`       | `6g`            | Memory ceiling of each project daemon, everything it runs included. One project can ask for its own: `customizations.desolate.memory` ("Giving a project more memory"). |
+| `DESOLATE_DIND_CPUS`         | `4`             | CPU ceiling of each project daemon (never more than the VM has).                                                                                                        |
+| `DESOLATE_DIND_BUILD_CACHE`  | `20GB`          | BuildKit's garbage-collection target in every project daemon: build cache above it is collected as builds run. `./cli.sh dind gc` collects all of it now.                  |
 | `COLIMA_PROFILE`             | `desolate`      | Which Colima VM `cli.sh` talks to. Set it if you run more than one.                                                                                                     |
 | `DESOLATE_SKIP_VM_CHECK`     | unset           | Skips the egress-interception check in `cli.sh up`. **Not recommended** -- it does not repair anything, it only stops `up` refusing to run with containers unprotected. |
 
@@ -1819,6 +2098,30 @@ which recreates the affected containers.
   for **every** project, so every base image is pulled again and every build
   cache is gone. It confirms before doing it. `/workspaces` is a separate volume
   and is never touched by any rung.
+
+- **One project's builds hang, or its daemon is wedged** -- a project that uses
+  `docker-outside-of-docker` runs on a daemon of its own, and recovering it is
+  the same ladder pointed at that daemon alone. No other project, and not the
+  editor, is touched by any rung:
+
+  ```bash
+  ./cli.sh dind list                                  # which state is it in?
+  ./cli.sh dind reset owner/repo                      # report; sweep and restart it
+  ./cli.sh dind reset owner/repo --reset-data-root    # last rung: ITS image store only
+  ```
+
+- **The VM's disk is filling up** -- see where it went, then give it back:
+
+  ```bash
+  ./cli.sh dind df                  # images, containers, volumes, build cache, per daemon
+  ./cli.sh dind gc owner/repo       # or --all: build cache, dangling images, unused anonymous volumes
+  ./cli.sh dind gc --orphans        # once: the docker-in-docker volumes left on the shared daemon
+  ```
+
+  `gc` never removes a named volume -- what a project's compose file declares
+  survives it -- and `/workspaces` is not a volume on any of these daemons. A
+  project's own image store goes when the project is purged
+  (`desolate --purge owner/repo`), unless it still has worktrees, which share it.
 
 - **`cli.sh up` says sysbox is missing** -- you're either not on the Colima
   context (`docker context use colima-desolate`) or sysbox isn't installed/

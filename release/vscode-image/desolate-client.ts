@@ -10,20 +10,27 @@
 //   desolate --stop all             (or --stop --all)
 //   desolate --ports myproject
 //   desolate --list                 what is running right now
+//   desolate --status [--json] [project]     each target's status (status.ts)
+//   desolate --push [--worktree w] [--allow-default] project   its branch to GitHub (transfer.ts)
+//   desolate --pull [--worktree w] project   GitHub's branches in, fast-forwarded
+//   desolate --review [--worktree w] [--json] project   what a push would send (review.ts)
+//   desolate --list --json | desolate --ports myproject --json   for programs
 //
 // The broker validates both the project name and the project's
 // devcontainer.json spec before acting -- see broker.ts.
 //
-// Creating a worktree happens HERE rather than in the broker, and that is
-// deliberate: `git worktree add` fires the repository's own hooks, and the
-// broker's process holds the inner Docker socket. This container already runs
-// git against project content, so it is the one place that costs nothing.
+// A worktree that is not there yet is created first, by asking the broker:
+// the orchestrator runs git for it in the worktree's sandbox, never here
+// (worktrees.ts).
 
-import * as net from "node:net";
+import { ask } from "./broker-client.ts";
 import { ensure as ensureWorktree } from "./worktrees.ts";
 import { EVERY_TARGET, meansEveryTarget } from "./projects.ts";
+import { statusRows } from "./status.ts";
+import { DEFAULT_BRANCH_EXIT, pull, push, TransferError } from "./transfer.ts";
+import { describeReview, keepReview, parseReview, REVIEWED, reviewDirectory } from "./review.ts";
+import { BUSY_EXIT } from "./locks.ts";
 
-const SOCKET = process.env.DESOLATE_BROKER ?? "/run/broker/desolate.sock";
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
 process.stdout.on("error", (err: NodeJS.ErrnoException) => {
@@ -38,7 +45,15 @@ function usage(code = 0): never {
   const out = code === 0 ? console.log : console.error;
   out("usage: desolate [--stop|--ports|--rebuild] [--worktree <name>] <project>");
   out("       desolate --list                    what is running right now");
+  out("       desolate --dinds                   every project dind and the VM's headroom, as JSON");
+  out("       desolate --status [--json] [<project>]   each target's status (desolate-status, inside)");
   out("       desolate --stop all|--stop --all   stop every running target");
+  out("       desolate --push [--worktree <name>] [--allow-default] <project>");
+  out("                                          push its checked-out branch to its GitHub repository");
+  out("       desolate --pull [--worktree <name>] [--fetch-only] <project>");
+  out("                                          fetch that repository into origin/*, and fast-forward");
+  out("       desolate --review [--worktree <name>] [--json] <project>");
+  out("                                          what a push would send: its commits and files");
   out("");
   out("  --rebuild  recreate the container from the current devcontainer.json.");
   out("             Plain start REUSES an existing container and does not");
@@ -69,6 +84,90 @@ function refuse(...lines: string[]): never {
 const argv = process.argv.slice(2);
 if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") usage();
 
+// Each target's status, read here: a file in its git dir the editor already
+// sees (status.ts), so no broker, and nothing runs.
+if (argv[0] === "--status") {
+  const rest = argv.slice(1);
+  const json = rest.includes("--json");
+  const words = rest.filter((word) => word !== "--json");
+  if (words.some((word) => word.startsWith("-")) || words.length > 1) refuse("usage: desolate --status [--json] [project]");
+  const only = words[0]?.replace(/\/+$/, "").replace(new RegExp(`^${WORKSPACES}/`), "");
+  const rows = statusRows(WORKSPACES, only);
+  if (json) {
+    console.log(JSON.stringify(rows));
+  } else if (!rows.some((row) => row.status)) {
+    console.log(only ? `no status for ${only}` : "no target has a status");
+  } else {
+    const shown = rows.filter((row) => row.status);
+    const width = Math.max(...shown.map((row) => row.target.length));
+    for (const { target, status } of shown)
+      console.log(`  ${target.padEnd(width)}  ${status!.color.padEnd(6)}  ${status!.message}  (${status!.updated})`);
+  }
+  process.exit(0);
+}
+
+// Push and pull run git HERE, in a scratch repository that has nothing of the
+// project's (transfer.ts) -- the project's half is asked of the broker. Never
+// `git push`/`git pull` in a project from this editor: that is the project's
+// own git, hooks and all, with every deploy key in reach.
+if (argv[0] === "--push" || argv[0] === "--pull") {
+  const which = argv[0];
+  const words = argv.slice(1);
+  let worktree: string | undefined, allowDefault = false, fetchOnly = false;
+  const projects: string[] = [];
+  while (words.length) {
+    const word = words.shift()!;
+    if (word === "--worktree") worktree = words.shift() || refuse("--worktree expects a name");
+    else if (word === "--allow-default" && which === "--push") allowDefault = true;
+    else if (word === "--fetch-only" && which === "--pull") fetchOnly = true;
+    else if (word.startsWith("-")) refuse(`unknown option '${word}' for ${which}`);
+    else projects.push(word.replace(/\/+$/, "").replace(new RegExp(`^${WORKSPACES}/`), ""));
+  }
+  if (projects.length !== 1) refuse(`usage: desolate ${which} [--worktree <name>]${which === "--push" ? " [--allow-default]" : ""} <project>`);
+  (which === "--push" ? push(projects[0], { worktree, allowDefault }) : pull(projects[0], { worktree, fetchOnly }))
+    .then((said) => { console.log(`desolate: ${said}`); process.exit(0); })
+    .catch((err) => {
+      if (!(err instanceof TransferError)) throw err;
+      if (err.busy || err.defaultBranch !== undefined) {
+        console.error(`desolate: ${err.message}`);
+        process.exit(err.busy ? BUSY_EXIT : DEFAULT_BRANCH_EXIT);
+      }
+      refuse(err.message);
+    });
+} else if (argv[0] === "--review") {
+  // What a push would send, said by the target's sandbox (docker.ts
+  // reviewScript) and read here: its records are kept from the terminal, and
+  // each changed file's two sides are kept in this editor's cache for the
+  // extension's diff view -- never written into the project.
+  const words = argv.slice(1);
+  let worktree: string | undefined, json = false;
+  const projects: string[] = [];
+  while (words.length) {
+    const word = words.shift()!;
+    if (word === "--worktree") worktree = words.shift() || refuse("--worktree expects a name");
+    else if (word === "--json") json = true;
+    else if (word.startsWith("-")) refuse(`unknown option '${word}' for --review`);
+    else projects.push(word.replace(/\/+$/, "").replace(new RegExp(`^${WORKSPACES}/`), ""));
+  }
+  if (projects.length !== 1) refuse("usage: desolate --review [--worktree <name>] [--json] <project>");
+  const said: string[] = [];
+  ask({ op: "review", project: projects[0], ...(worktree ? { worktree } : {}) }, (line) => {
+    if (line.startsWith(`${REVIEWED}\t`)) { said.push(line); return false; }
+    if (json) console.error(line);
+    return !json;
+  }).then((code) => {
+    const { review, blobs, ended } = parseReview(said);
+    if (code === BUSY_EXIT) {
+      console.error("desolate: its target is busy with something else (above); review again once that is done");
+      process.exit(BUSY_EXIT);
+    }
+    if (code !== 0 || !ended) refuse(`the review of ${projects[0]}${worktree ? `@${worktree}` : ""} did not finish (exit ${code})`);
+    const kept = keepReview(review, blobs, reviewDirectory(projects[0], worktree));
+    console.log(json ? JSON.stringify(kept) : describeReview(kept));
+    process.exit(0);
+  });
+} else {
+
 // Order-independent, and an unrecognised --flag is REFUSED rather than dropped.
 // The old parsing only ever looked at argv[0], so `desolate myproj --rebuild`
 // (or a typo like --build) silently became a plain start: you were told the
@@ -76,14 +175,15 @@ if (argv.length === 0 || argv[0] === "-h" || argv[0] === "--help") usage();
 // already refuses unknown options; this side has to agree, or the two disagree
 // about what the same command line means.
 const OPS: Record<string, string> = {
-  "--list": "list", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild",
+  "--list": "list", "--dinds": "dinds", "--stop": "stop", "--ports": "ports", "--rebuild": "rebuild",
 };
 /** Flags that consume the next argument. */
 const VALUES = ["--worktree", "--branch"] as const;
 /** Flags that qualify an op rather than being one. */
-const MODIFIERS = ["--all"] as const;
+const MODIFIERS = ["--all", "--json"] as const;
 
 let op = "start";
+let move: { label: string; port: number } | undefined;
 const value: Record<string, string | undefined> = {};
 const modifier = new Set<string>();
 const rest: string[] = [];
@@ -94,6 +194,11 @@ while (queue.length) {
     // Two ops in one command line is a mistake, not a precedence question.
     if (op !== "start") refuse(`'${a}' conflicts with the operation already given`);
     op = OPS[a];
+  } else if (a === "--move") {
+    const label = queue.shift(), port = queue.shift();
+    if (!label || !port || !/^(editor|[1-9][0-9]{0,4})$/.test(label) || !/^[1-9][0-9]{0,4}$/.test(port))
+      refuse("--move takes a label (editor, or a container port) and a host port");
+    move = { label: label!, port: Number(port) };
   } else if ((MODIFIERS as readonly string[]).includes(a)) {
     modifier.add(a);
   } else if ((VALUES as readonly string[]).includes(a)) {
@@ -116,6 +221,8 @@ if (value["--branch"] !== undefined && worktree === undefined)
   refuse("--branch only means something with --worktree");
 
 if (modifier.has("--all") && op !== "stop") refuse("--all only means something with --stop");
+if (move && op !== "ports") refuse("--move only means something with --ports");
+if (modifier.has("--json") && op !== "list" && op !== "ports") refuse("--json only means something with --list or --ports");
 
 // The two spellings of "everything". `--all` says so outright; the bare word
 // only widens when no project of that name is there to be meant instead, which
@@ -129,12 +236,15 @@ const spelling = op === "list" ? "--list" : `--stop ${modifier.has("--all") ? "-
 const unaccountedFor = stopsEverything ? rest.filter((word) => word !== EVERY_TARGET) : rest;
 
 let request: Record<string, unknown>;
-if (op === "list" || stopsEverything) {
+if (op === "dinds") {
+  if (rest.length || worktree !== undefined) refuse("--dinds acts on every dind, so it takes no project");
+  request = { op: "dinds" };
+} else if (op === "list" || stopsEverything) {
   if (unaccountedFor.length)
     refuse(`${spelling} acts on every target, so it takes no project`,
            `got '${unaccountedFor.join(" ")}'`);
   if (worktree !== undefined) refuse(`${spelling} takes no worktree`);
-  request = { op: op === "list" ? "list" : "stop-all" };
+  request = { op: op === "list" ? "list" : "stop-all", ...(modifier.has("--json") && op === "list" ? { json: true } : {}) };
 } else {
   if (rest.length !== 1) {
     console.error(rest.length === 0
@@ -142,44 +252,17 @@ if (op === "list" || stopsEverything) {
       : `desolate: '${op}' takes ONE project, got ${rest.length}: ${rest.join(" ")}`);
     usage(1);
   }
-  request = { op, project: rest[0], worktree };
+  request = { op, project: rest[0], worktree, ...(move ? { move } : {}), ...(modifier.has("--json") ? { json: true } : {}) };
 }
 
-// Before the broker is asked to start it, because the broker cannot: it would
-// have to run git, and it holds the inner Docker socket.
-if (worktree !== undefined && (op === "start" || op === "rebuild"))
-  ensureWorktree(String(rest[0]), worktree, value["--branch"]);
+// Created before the broker is asked to start it -- by the broker as well, in
+// a request of its own, so a refusal to create says so rather than reading as
+// a missing worktree.
+const created = worktree !== undefined && (op === "start" || op === "rebuild")
+  ? ensureWorktree(String(rest[0]), worktree, value["--branch"])
+  : Promise.resolve(0);
 
-const conn = net.createConnection(SOCKET);
-let exitCode = 0;
-let buffer = "";
-
-conn.on("connect", () => conn.write(JSON.stringify(request) + "\n"));
-
-conn.on("data", chunk => {
-  buffer += chunk.toString();
-  let idx: number;
-  while ((idx = buffer.indexOf("\n")) >= 0) {
-    const line = buffer.slice(0, idx).trim();
-    buffer = buffer.slice(idx + 1);
-    if (!line) continue;
-    let msg: any;
-    try { msg = JSON.parse(line); } catch { console.log(line); continue; }
-    if (msg.log !== undefined) { console.log(msg.log); continue; }
-    if (msg.error) { console.error(`desolate: ${msg.error}`); }
-    if (msg.ok === false) exitCode = typeof msg.exit === "number" ? msg.exit : 1;
-  }
-});
-
-conn.on("error", (err: NodeJS.ErrnoException) => {
-  if (err.code === "ENOENT" || err.code === "ECONNREFUSED") {
-    console.error("desolate: cannot reach the orchestrator broker.");
-    console.error(`         socket: ${SOCKET}`);
-    console.error("         Is the stack up?  (on your Mac: ./cli.sh ps)");
-  } else {
-    console.error(`desolate: ${err.message}`);
-  }
-  process.exit(1);
-});
-
-conn.on("close", () => process.exit(exitCode));
+created
+  .then((code) => (code === 0 ? ask(request) : code))
+  .then((code) => process.exit(code));
+}

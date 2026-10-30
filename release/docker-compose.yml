@@ -5,25 +5,32 @@
 #                                     │  unix socket (broker-run volume)
 #                                     ▼
 #                               [orchestrator: broker.ts]
-#                                     │  DOCKER_HOST=unix:///run/inner/docker.sock
-#                                     ▼
-#                               [dind: inner dockerd]  ◀── devcontainers live HERE
-#                                     │  unix socket (shared volume, never TCP)
-#                                     ▼
-#                               observe.sh, via `docker exec` on the orchestrator
+#                                │                    │  unix socket (supervisor-run)
+#        DOCKER_HOST=/run/inner/ │                    ▼
+#                                │          [supervisor] ── the VM docker socket
+#                                ▼                    │  creates, stops, reaps
+#           [dind: shared dockerd]                    ▼
+#             projects that need no docker   [desolate-dind-<project>]  one per
+#                                              project that uses docker (sysbox,
+#                                              sees ONLY that project's files)
+#
+#   browser ──127.0.0.1:<port>──(Lima)──▶ desolate-ingress, a VM process, opened
+#   on demand per editor / dev server ──▶ the target's dind ──▶ its relay
 #
 # Invariants:
-#   - The HOST docker socket is never mounted anywhere.
-#   - The inner dockerd listens ONLY on a unix socket inside a named volume.
-#   - Only the orchestrator mounts that socket. The editor reaches the daemon
+#   - The VM's docker socket is mounted by the supervisor and NOTHING else.
+#   - Every dockerd listens ONLY on a unix socket inside a named volume.
+#   - Only the orchestrator mounts those sockets. The editor reaches a daemon
 #     solely through the broker's fixed op vocabulary, never directly.
-#   - The only host-reachable surface is VSCODE_PORT (default 3000) -- the editor,
-#     token-gated -- bound to 127.0.0.1. Nothing else is published except the
-#     dev-server range.
+#   - The only published port is VSCODE_PORT (default 3000) -- the editor,
+#     token-gated -- bound to 127.0.0.1. Every other port a project uses is a
+#     loopback listener desolate-ingress opens for it while it runs.
 #   - dind sits on its OWN bridge (dindnet), NOT the one carrying the editor.
 #     Devcontainers live inside dind and egress through its address, so sharing
 #     a bridge with vscode put the editor -- and the git deploy keys in it --
 #     one routable hop from every project. See networks: at the bottom.
+#     Project dinds each get a bridge of their own (br-d-<hash>), covered by the
+#     same nftables rules by shape.
 
 name: desolate
 
@@ -89,15 +96,16 @@ services:
       volume-init:
         condition: service_completed_successfully
     # Runs UNPRIVILEGED under the sysbox runtime: container-root maps to an
-    # unprivileged VM user, so a compromised dind cannot reach the VM/host, and
-    # the docker-in-docker feature works nested without privilege.
+    # unprivileged VM user, so a compromised dind cannot reach the VM/host. A
+    # project that uses Docker gets a dind of its own, run the same way by the
+    # supervisor (below); the docker-in-docker feature is refused (policy.ts).
     runtime: sysbox-runc
     # Install the proxy CA before dockerd starts: image pulls traverse the
     # intercepting proxy, so the daemon must trust it. No-op if not installed.
     entrypoint:
       - /bin/sh
       - -c
-      - '[ -x /desolate-ca/install-ca.sh ] && /desolate-ca/install-ca.sh >/dev/null 2>&1 || true; exec dockerd-entrypoint.sh "$$@"'
+      - '[ -x /desolate/ca/install-ca.sh ] && /desolate/ca/install-ca.sh >/dev/null 2>&1 || true; exec dockerd-entrypoint.sh "$$@"'
       - --
     environment:
       DOCKER_TLS_CERTDIR: ""          # no TCP listener at all -> no TLS needed
@@ -112,6 +120,12 @@ services:
       # soft limit, which one language server + bundler + watcher would exhaust.
       # 524288 is sysbox's ceiling for dind and cannot be exceeded.
       - --default-ulimit=nofile=65536:524288
+      # Its own docker0 and networks, outside every subnet the VM's daemon hands
+      # out: unpinned, a `down`/`up` once gave dindnet the very subnet docker0
+      # held, and the VM could no longer reach this dind (dind.ts INNER_POOL,
+      # which project dinds get too; tests/static/02 holds the two equal).
+      - --bip=10.234.255.1/24
+      - --default-address-pool=base=10.234.0.0/17,size=24
     # The daemon's OWN limits, which are NOT the flag above: dockerd and
     # containerd hold fds for every container at once, so they get the full
     # ceiling rather than one container's allowance.
@@ -120,7 +134,7 @@ services:
         soft: 524288
         hard: 524288
     volumes:
-      - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
+      - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
       - inner-run:/run/inner          # the inner socket lives here
       - dind-sysbox-data:/var/lib/docker  # inner images/containers
       # MUST match the vscode mount path so devcontainer bind mounts resolve
@@ -154,16 +168,13 @@ services:
       timeout: 3s
       retries: 24
       start_period: 15s
-    ports:
-      # Reaches editors/apps running INSIDE devcontainers. Chain:
-      #   Mac 127.0.0.1:PORT -> dind's netns :PORT -> socat relay container
-      #   (joined to the devcontainer's network) -> devcontainer bridge IP.
-      # Widen the range in .env with the following variables:
-      #   DESOLATE_PORT_MIN=8080
-      #   DESOLATE_PORT_MAX=8159
-      # The SAME two variables are handed to the orchestrator, which is what
-      # desolate.ts allocates from. Do NOT hardcode either side.
-      - "127.0.0.1:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8119}:${DESOLATE_PORT_MIN:-8080}-${DESOLATE_PORT_MAX:-8119}"
+    # NO ports. Editors and dev servers inside devcontainers reach the Mac
+    # through desolate-ingress, a VM process (release/proxy/vm/ingress.py):
+    #   Mac 127.0.0.1:P -> (Lima) -> VM 127.0.0.1:P, opened on demand
+    #   -> this dind's address :P -> socat relay (published HERE, inside it)
+    #   -> devcontainer IP.
+    # The range this used to publish is gone, and with it the ceiling on how
+    # many editors and dev servers can be up at once.
     # NOT devnet. dind is the container world; devnet is the editor world.
     networks: [dindnet]
     restart: unless-stopped
@@ -184,13 +195,13 @@ services:
     environment:
       DOCKER_HOST: unix:///run/inner/docker.sock
       DESOLATE_BROKER: /run/broker/desolate.sock
-      # The range desolate.ts allocates relay ports from. MUST be the same two
-      # variables dind publishes above.
-      DESOLATE_PORT_MIN: ${DESOLATE_PORT_MIN:-8080}
-      DESOLATE_PORT_MAX: ${DESOLATE_PORT_MAX:-8119}
+      # Where host-port allocation starts (ports.ts); >= 1024, as the ingress
+      # forwards nothing lower. And the editor's own port, which it must skip.
+      DESOLATE_PORT_BASE: ${DESOLATE_PORT_BASE:-8080}
+      VSCODE_PORT: ${VSCODE_PORT:-3000}
     entrypoint: ["/usr/local/bin/with-ca", "tsx", "/usr/local/lib/desolate/broker.ts"]
     volumes:
-      - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
+      - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
       - inner-run:/run/inner        # the daemon socket lives here ONLY
       - workspaces:/workspaces
       # Read-only for the same reason as dind's copy above: the orchestrator
@@ -199,11 +210,46 @@ services:
       # way to poison the binary every project executes.
       - server-dist:/server-dist:ro
       - broker-run:/run/broker
+      - supervisor-run:/run/supervisor   # the supervisor's request socket -- this service only
+      - /run/desolate-ingress/ports:/run/ingress/ports   # one file per forwarded host port
+      - dind-sockets:/run/dind-sockets   # every project dind's socket, one directory each
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
     pids_limit: 2048
     networks: [devnet]
+    restart: unless-stopped
+
+  # The ONE holder of the VM's docker socket (supervisor.ts). It creates and
+  # stops project dinds and does nothing else: a fixed vocabulary over a unix
+  # socket in supervisor-run, which only the orchestrator mounts. No network --
+  # it speaks unix sockets only -- and no workspace: a project it is asked for
+  # is a volume-subpath docker resolves, not a directory it reads.
+  supervisor:
+    build: ./vscode-image           # same image; a different entrypoint again
+    container_name: desolate-supervisor
+    depends_on:
+      dind:
+        condition: service_healthy   # it publishes the shared dind's address at start
+    user: "0:0"                     # the VM socket is root's
+    entrypoint: ["tsx", "/usr/local/lib/desolate/supervisor.ts"]
+    environment:
+      DESOLATE_DIND_IDLE: ${DESOLATE_DIND_IDLE:-30}
+      DESOLATE_DIND_GRACE: ${DESOLATE_DIND_GRACE:-15}
+      DESOLATE_MAX_DINDS: ${DESOLATE_MAX_DINDS:-16}
+      DESOLATE_DIND_MEM_FLOOR: ${DESOLATE_DIND_MEM_FLOOR:-2147483648}
+      DESOLATE_DIND_MEMORY: ${DESOLATE_DIND_MEMORY:-6g}
+      DESOLATE_DIND_CPUS: ${DESOLATE_DIND_CPUS:-4}
+      DESOLATE_DIND_BUILD_CACHE: ${DESOLATE_DIND_BUILD_CACHE:-20GB}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # the VM daemon: THIS SERVICE ONLY
+      - supervisor-run:/run/supervisor
+      - /run/desolate-ingress/dinds:/run/ingress/dinds   # dind addresses, for desolate-ingress
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 512
+    network_mode: none
     restart: unless-stopped
 
   # The ONLY container that holds raw private keys.
@@ -267,6 +313,9 @@ services:
       # so a malicious extension here cannot create containers, 
       # mount other projects' volumes, or exec into siblings.
       DESOLATE_BROKER: /run/broker/desolate.sock
+      # Which terminal printed hints name (hints.ts). cli.sh's own execs into
+      # this container override it with `mac`.
+      DESOLATE_PLANE: editor
       # Deliberately NOT set: GPG_AGENT_INFO, GIT_ASKPASS.
       # Nothing forwards your HOST agents into this stack -- SSH_AUTH_SOCK
       # below is the stack's own keyring, not yours. It is an agent socket, so
@@ -293,7 +342,7 @@ services:
       - --connection-token=${VSCODE_TOKEN:?set VSCODE_TOKEN in .env}
     volumes:
       # NOTE: inner-run is deliberately ABSENT -- no docker socket here.
-      - /var/lib/desolate-proxy/public:/desolate-ca:ro   # proxy CA (public cert only)
+      - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
       - workspaces:/workspaces        # full read/write: the universal editor
       - vscode-home:/home/workspace   # settings + extensions persist here
       - broker-run:/run/broker        # narrow request channel to orchestrator
@@ -311,9 +360,8 @@ services:
       - keyring-run:/run/keyring:ro
     ports:
       # Set VSCODE_PORT in .env to move the editor off 3000 (e.g. when something
-      # else on your Mac already uses it). It MUST stay outside of
-      # DESOLATE_PORT_MIN..MAX -- dind publishes that whole range on the same
-      # loopback address, and the two publishes would collide;
+      # else on your Mac already uses it). The port allocator is told it, and
+      # never hands it to a dev server.
       - "127.0.0.1:${VSCODE_PORT:-3000}:3000"
     security_opt:
       - no-new-privileges:true
@@ -323,6 +371,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  supervisor-run:  # the supervisor's request socket -- supervisor + orchestrator
+  dind-sockets:    # project dind sockets, one subpath each -- dinds + orchestrator
   keyring-keys:   # private keys -- keyring only
   keyring-run:    # agent socket + public keys -- keyring + editor
   inner-run:

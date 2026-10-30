@@ -1,0 +1,108 @@
+#!/bin/sh
+# desolate-status -- say how this target's work is going: a colour and a line.
+#
+#   /desolate/status set <color> <message...>
+#   /desolate/status clear
+#   /desolate/status show
+#   /desolate/status path
+#   /desolate/status note [text...]    (no text: read it from stdin; --clear removes it)
+#   /desolate/status board
+#
+# Colours: gray, blue, green, yellow, orange, red. What they mean is up to
+# whoever reads them; a useful convention is blue working, orange needs a
+# human, red failed, green done.
+#
+# desolate SHOWS it -- in the editor's panel beside this project or worktree,
+# in `desolate --status`, and to a harness on the Mac through
+# `./cli.sh desolate --status --json` -- and never acts on it (docs/agents.md).
+#
+# It lives in this target's git dir (`git rev-parse --git-dir`): `.git` for the
+# project's own tree, `.git/worktrees/<name>` for a worktree. So it is this
+# target's alone, never committed, never in `git status`, never pushed, and
+# seen by exactly the containers of this project. Written whole and renamed
+# into place, so a reader never sees half of one.
+#
+# The NOTE beside it is longer prose for the other agents working in this
+# project -- what you are doing, what you need from them, what you decided --
+# and BOARD shows every target's status and note: the project's tree and each
+# of its worktrees, all of which share this .git. That is how agents working
+# on the same repository coordinate (/desolate/AGENTS.md).
+set -eu
+LC_ALL=C
+export LC_ALL
+
+die() { echo "desolate-status: $*" >&2; exit 1; }
+
+command -v git >/dev/null 2>&1 || die "no git here"
+GIT_DIR_=$(git -c core.hooksPath=/dev/null -c core.fsmonitor=false rev-parse --absolute-git-dir 2>/dev/null) \
+  || die "not inside a git repository"
+FILE="$GIT_DIR_/desolate-status.json"
+NOTE="$GIT_DIR_/desolate-note.md"
+NOTE_MAX=16384
+
+# One JSON string: backslash, quote and control characters escaped, anything
+# else (UTF-8 included) as itself.
+json_str() {
+  printf '%s' "$1" | awk '
+    BEGIN { ORS = ""; for (i = 1; i < 32; i++) ctl[sprintf("%c", i)] = sprintf("\\u%04x", i); printf "\"" }
+    { out = ""
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (c == "\\") out = out "\\\\"; else if (c == "\"") out = out "\\\""
+        else if (c in ctl) out = out ctl[c]; else out = out c
+      }
+      # The newline between lines, escaped AFTER the line is: put in first, its
+      # backslash would have been escaped again.
+      print (NR > 1 ? "\\n" : "") out }
+    END { printf "\"" }'
+}
+
+case "${1:-}" in
+  set)
+    [ $# -ge 3 ] || die "usage: desolate-status set <color> <message...>"
+    shift; color=$1; shift
+    case "$color" in gray|blue|green|yellow|orange|red) ;; *) die "'$color' is not a colour (gray, blue, green, yellow, orange, red)" ;; esac
+    message="$*"
+    [ "${#message}" -le 200 ] || echo "desolate-status: the message is over 200 characters; it is shown cut" >&2
+    tmp="$FILE.$$"
+    printf '{"color":"%s","message":%s,"updated":"%s"}\n' \
+      "$color" "$(json_str "$message")" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
+    mv -f "$tmp" "$FILE" ;;
+  clear)
+    rm -f "$FILE" ;;
+  show)
+    [ -f "$FILE" ] && cat "$FILE" || echo "no status" ;;
+  path)
+    echo "$FILE" ;;
+  note)
+    shift
+    if [ "${1:-}" = --clear ]; then rm -f "$NOTE"; exit 0; fi
+    tmp="$NOTE.$$"
+    if [ $# -gt 0 ]; then printf '%s\n' "$*" > "$tmp"; else cat > "$tmp"; fi
+    if [ "$(wc -c < "$tmp")" -gt "$NOTE_MAX" ]; then
+      head -c "$NOTE_MAX" "$tmp" > "$tmp.cut" && mv -f "$tmp.cut" "$tmp"
+      echo "desolate-status: the note is over $NOTE_MAX bytes; it was cut" >&2
+    fi
+    mv -f "$tmp" "$NOTE" ;;
+  board)
+    common=$(cd "$(git -c core.hooksPath=/dev/null rev-parse --git-common-dir)" && pwd -P)
+    field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" "$2" 2>/dev/null | head -n 1; }
+    show_target() { # <name> <its git dir>
+      mine=""; [ "$(cd "$2" && pwd -P)" = "$(cd "$GIT_DIR_" && pwd -P)" ] && mine="  (you)"
+      if [ -f "$2/desolate-status.json" ]; then
+        printf '== %s [%s] %s  (%s)%s\n' "$1" "$(field color "$2/desolate-status.json")" \
+          "$(field message "$2/desolate-status.json")" "$(field updated "$2/desolate-status.json")" "$mine"
+      else
+        printf '== %s (no status)%s\n' "$1" "$mine"
+      fi
+      [ ! -f "$2/desolate-note.md" ] || { head -c "$NOTE_MAX" "$2/desolate-note.md"; echo; }
+    }
+    show_target main "$common"
+    for admin in "$common"/worktrees/*; do
+      [ -d "$admin" ] || continue
+      show_target "$(basename "$admin")" "$admin"
+    done ;;
+  *)
+    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2 ;;
+esac

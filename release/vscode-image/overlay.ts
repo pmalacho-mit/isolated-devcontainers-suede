@@ -18,8 +18,12 @@ import type { Target } from "./projects.ts";
 export const SERVER_SRC = "/server-dist";
 /** Where that server appears inside the devcontainer. */
 export const SERVER_DST = "/vscode-server";
-/** The proxy CA, bind-mounted from the VM (public cert only). */
-export const CA_DIR = "/desolate-ca";
+/** desolate's read-only directory, bind-mounted from the VM: the proxy CA
+ *  (public cert only) under ca/, and the helpers a container needs. The same
+ *  path in a dind, the orchestrator and every devcontainer. */
+export const DESOLATE_DIR = "/desolate";
+/** The proxy CA, within it. */
+export const CA_DIR = `${DESOLATE_DIR}/ca`;
 
 /** Label carrying the identity of the lower a cached view was built from. */
 export const OVERLAY_KEY_LABEL = "desolate.overlay.key";
@@ -55,9 +59,9 @@ export const SHARED_DIRECTORIES: readonly SharedDirectory[] = [
       any project overwrite the binary every other project runs.`,
   },
   {
-    name: "desolate-ca",
-    lower: CA_DIR,
-    target: CA_DIR,
+    name: "desolate",
+    lower: DESOLATE_DIR,
+    target: DESOLATE_DIR,
     proof: `${CA_DIR}/ca.pem`,
     identityFile: `${CA_DIR}/ca.pem`,
     missing: "the proxy CA is missing",

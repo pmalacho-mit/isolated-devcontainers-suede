@@ -8,10 +8,18 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 
 import {
+  RECLAIMED,
+  STATUS_RAN,
   createDocker,
+  reclaimArgv,
   parseMounts,
+  parseWorktreeChanges,
+  relayWithFallback,
   parseNetworkAttachments,
   parseWorkspaceCandidates,
   selectWorkspaceContainer,
@@ -371,8 +379,8 @@ describe("exec and helper containers", () => {
     // install-ca.sh writes to the system trust store; the devcontainer's
     // default user is usually not root.
     const { docker, calls } = recorder();
-    docker.container.execAsRoot("cid", ["/desolate-ca/install-ca.sh"]);
-    assert.deepEqual(calls[0], ["exec", "-u", "0", "cid", "/desolate-ca/install-ca.sh"]);
+    docker.container.execAsRoot("cid", ["/desolate/ca/install-ca.sh"]);
+    assert.deepEqual(calls[0], ["exec", "-u", "0", "cid", "/desolate/ca/install-ca.sh"]);
   });
 
   test("the docker-in-docker probe is one exec, spelled once", () => {
@@ -423,7 +431,7 @@ describe("exec and helper containers", () => {
 
   test("a helper never receives a bind mount of a shared directory", () => {
     // -v <name>:<target> is a named volume; -v /path:<target> is a bind, and a
-    // bind of /server-dist or /desolate-ca is the poisonable shape.
+    // bind of /server-dist or /desolate is the poisonable shape.
     const { docker, calls } = recorder();
     docker.inVolume("alpine:3", "myapp-vscode-server", "/vscode-server", ["test", "-e", "/x"]);
     const mount = calls[0][calls[0].indexOf("-v") + 1];
@@ -484,14 +492,275 @@ describe("images", () => {
   test("the build reads its Dockerfile from stdin, never from disk", () => {
     // Writing it out would put a file the editor could race into the build.
     const { docker, calls, built } = recorder();
-    docker.image.build("desolate-ca/base:abc", "FROM alpine\n", "/desolate-ca");
-    assert.deepEqual(calls[0], ["build", "-t", "desolate-ca/base:abc", "-f", "-", "/desolate-ca"]);
+    docker.image.build("desolate-ca/base:abc", "FROM alpine\n", "/desolate/ca");
+    assert.deepEqual(calls[0], ["build", "-t", "desolate-ca/base:abc", "-f", "-", "/desolate/ca"]);
     assert.deepEqual(built, ["FROM alpine\n"]);
   });
 
   test("the build context is the CA directory, so ca.pem is COPYable", () => {
     const { docker, calls } = recorder();
-    docker.image.build("t", "FROM alpine", "/desolate-ca");
-    assert.equal(calls[0].at(-1), "/desolate-ca");
+    docker.image.build("t", "FROM alpine", "/desolate/ca");
+    assert.equal(calls[0].at(-1), "/desolate/ca");
+  });
+});
+
+describe("a worktree's sandbox", () => {
+  const spec = {
+    image: "alpine/git@sha256:abc",
+    label: "desolate.worktree-sandbox=acme/widgets@alpha",
+    dir: "/workspaces/acme/widgets/.worktrees/alpha",
+    mounts: ["type=bind,source=/workspaces/acme/widgets,target=/workspaces/acme/widgets"],
+    seconds: 600,
+  };
+  const argvFor = (op: "checkout" | "changes") => {
+    const { runner, calls } = recorder();
+    const docker = createDocker(runner);
+    if (op === "checkout") docker.checkoutWorktree({ ...spec, caFile: "/desolate/ca/ca.pem" });
+    else docker.worktreeChanges(spec);
+    return calls[0];
+  };
+
+  for (const op of ["checkout", "changes"] as const) {
+    test(`${op}: as the editor user, gone when it exits, labelled for a sweep`, () => {
+      const argv = argvFor(op);
+      assert.deepEqual(argv.slice(0, 2), ["run", "--rm"]);
+      assert.equal(argv[argv.indexOf("--user") + 1], "1000:1000");
+      assert.equal(argv[argv.indexOf("--label") + 1], spec.label);
+    });
+
+    test(`${op}: exactly the mounts it was handed, and nothing privileged`, () => {
+      const argv = argvFor(op);
+      const given = argv.flatMap((word, i) => (word === "--mount" ? [argv[i + 1]] : []));
+      assert.deepEqual(given, spec.mounts);
+      for (const flag of ["--privileged", "--cap-add", "-v", "--volume", "--network"])
+        assert.ok(!argv.includes(flag), `${flag} in ${argv}`);
+      assert.ok(argv.indexOf("--workdir") < argv.indexOf(spec.image), "flags must precede the image");
+    });
+  }
+
+  test("checkout is bounded from inside, and trusts the proxy for lfs", () => {
+    const argv = argvFor("checkout");
+    assert.equal(argv[argv.indexOf("--entrypoint") + 1], "timeout");
+    assert.deepEqual(argv.slice(argv.indexOf(spec.image) + 1), [
+      "600",
+      "git",
+      "-c",
+      "http.sslCAInfo=/desolate/ca/ca.pem",
+      "checkout",
+      "--force",
+    ]);
+  });
+
+  test("the changes check prints its marker only after a clean, silent git status", () => {
+    const script = argvFor("changes").at(-1)!;
+    assert.match(script, /^timeout 600 git status --porcelain --ignore-submodules=none /);
+    assert.match(script, /\[ "\$ran" = 0 \] && \[ ! -s \/tmp\/warnings \] && echo desolate-status-ran/);
+  });
+});
+
+describe("reading the changes check", () => {
+  test("clean is the marker and nothing after it", () => {
+    assert.deepEqual(parseWorktreeChanges(STATUS_RAN), []);
+  });
+
+  test("each changed or untracked path is one line", () => {
+    assert.deepEqual(parseWorktreeChanges(`${STATUS_RAN}\n M src/app.ts\n?? notes.txt`), [
+      " M src/app.ts",
+      "?? notes.txt",
+    ]);
+  });
+
+  test("no marker is not clean: the check did not run", () => {
+    for (const text of ["", "fatal: not a git repository", "Unable to find image"])
+      assert.equal(parseWorktreeChanges(text), null, text);
+  });
+});
+
+describe("a project dind's create argv", () => {
+  const spec = {
+    name: "desolate-dind-acme__widgets",
+    label: "desolate.dind=acme/widgets",
+    network: "br-d-3f2a9c1e5b",
+    runtime: "sysbox-runc" as const,
+    image: "docker:29-dind",
+    project: "acme/widgets",
+    volumes: {
+      data: "dind-data-acme__widgets",
+      workspaces: "desolate_workspaces",
+      sockets: "desolate_dind-sockets",
+      socketSubpath: "acme__widgets",
+      serverDist: "desolate_server-dist",
+      health: "desolate_inner-health",
+    },
+    caDirectory: "/var/lib/desolate-proxy/public",
+    limits: { memory: "4g", pids: 4096, cpus: "4" },
+    daemonJson: '{"builder":{"gc":{"enabled":true,"defaultKeepStorage":"20GB"}}}',
+  };
+  const argvFor = (overrides: Partial<typeof spec> | { runtime: "runc" } = {}) => {
+    const { runner, calls } = recorder();
+    createDocker(runner).dind.create({ ...spec, ...overrides } as any);
+    return calls[0];
+  };
+  const mounts = (argv: string[]) => argv.flatMap((word, i) => (word === "--mount" ? [argv[i + 1]] : []));
+
+  test("publishes nothing and has no restart policy", () => {
+    const argv = argvFor();
+    for (const flag of ["-p", "--publish", "-P", "--publish-all", "--restart"])
+      assert.ok(!argv.includes(flag), `${flag} in ${argv}`);
+  });
+
+  test("runs under sysbox and is NOT privileged", () => {
+    const argv = argvFor();
+    assert.equal(argv[argv.indexOf("--runtime") + 1], "sysbox-runc");
+    assert.ok(!argv.includes("--privileged"));
+    assert.ok(!argv.some((word) => word.startsWith("--cap-add")));
+  });
+
+  test("runc means privileged, and is spelled that way rather than hidden", () => {
+    const argv = argvFor({ runtime: "runc" });
+    assert.ok(argv.includes("--privileged"));
+    assert.ok(!argv.includes("--runtime"));
+  });
+
+  test("sees ONE project, at its own path, as a subpath of the workspaces volume", () => {
+    const workspace = mounts(argvFor()).filter((m) => m.includes("desolate_workspaces"));
+    assert.deepEqual(workspace, [
+      "type=volume,source=desolate_workspaces,target=/workspaces/acme/widgets,volume-subpath=acme/widgets",
+    ]);
+  });
+
+  test("listens in its own directory of the shared sockets volume", () => {
+    assert.ok(mounts(argvFor()).includes(
+      "type=volume,source=desolate_dind-sockets,target=/run/dind-sock,volume-subpath=acme__widgets",
+    ));
+  });
+
+  test("keeps its images in a volume of its own, and mounts the rest read-only", () => {
+    const all = mounts(argvFor());
+    assert.ok(all.includes("type=volume,source=dind-data-acme__widgets,target=/var/lib/docker"));
+    for (const shared of ["desolate_server-dist", "desolate_inner-health", "/var/lib/desolate-proxy/public"])
+      assert.match(all.find((m) => m.includes(shared))!, /,readonly$/, shared);
+  });
+
+  test("has desolate's directory at /desolate, and only there", () => {
+    const ca = mounts(argvFor()).filter((m) => m.includes("/var/lib/desolate-proxy/public"));
+    assert.deepEqual(ca, ["type=bind,source=/var/lib/desolate-proxy/public,target=/desolate,readonly"]);
+    assert.match(argvFor().join(" "), /\/desolate\/ca\/install-ca\.sh/, "the entrypoint installs the CA from its new path");
+  });
+
+  test("its ceiling is read, and raised live with swap kept at as much again", () => {
+    // Measured (runc, docker 29): created with --memory alone, MemorySwap is
+    // twice it, and `update --memory` alone is refused for being above it.
+    const { runner, calls } = recorder(["6442450944", "not a number"]);
+    const docker = createDocker(runner);
+    assert.equal(docker.dind.memoryLimit("d"), 6442450944);
+    assert.ok(Number.isNaN(docker.dind.memoryLimit("d")));
+    docker.dind.raiseMemory("d", 12 * 1024 ** 3);
+    assert.deepEqual(calls.at(-1), ["update", "--memory", String(12 * 1024 ** 3), "--memory-swap", String(24 * 1024 ** 3), "d"]);
+  });
+
+  test("is bounded: memory, pids and cpus", () => {
+    const argv = argvFor();
+    assert.equal(argv[argv.indexOf("--memory") + 1], "4g");
+    assert.equal(argv[argv.indexOf("--pids-limit") + 1], "4096");
+    assert.equal(argv[argv.indexOf("--cpus") + 1], "4");
+  });
+
+  test("dockerd listens on the socket the devcontainer binds, for the editor's group", () => {
+    const argv = argvFor();
+    const daemon = argv.slice(argv.indexOf("dockerd"));
+    assert.deepEqual(daemon, [
+      "dockerd",
+      "--host=unix:///run/dind-sock/docker.sock",
+      "--group=1000",
+      "--default-ulimit=nofile=65536:524288",
+    ]);
+    // and the alias docker-outside-of-docker's own mount takes its source from
+    assert.match(argv[argv.indexOf("-c") + 1], /ln -sf \/run\/dind-sock\/docker\.sock \/var\/run\/docker\.sock/);
+  });
+
+  test("carries its daemon.json in, for the BuildKit GC", () => {
+    const argv = argvFor();
+    assert.ok(argv.includes(`DESOLATE_DAEMON_JSON=${spec.daemonJson}`));
+  });
+
+  test("is labelled so a sweep that knows no targets finds it", () => {
+    const argv = argvFor();
+    assert.equal(argv[argv.indexOf("--label") + 1], "desolate.dind=acme/widgets");
+  });
+});
+
+describe("a relay that falls back to the project's dind", () => {
+  test("tries the devcontainer, then the dind, at the same port -- quoted for socat's parser", () => {
+    assert.equal(
+      relayWithFallback("172.17.0.5", "172.17.0.1", 8000),
+      'system:"socat - TCP:172.17.0.5:8000,connect-timeout=2 || exec socat - TCP:172.17.0.1:8000"',
+    );
+  });
+
+  test("nothing but addresses and a port reaches the shell it runs in", () => {
+    for (const [first, then, port] of [
+      ["172.17.0.5; rm -rf /", "172.17.0.1", 8000],
+      ["172.17.0.5", "$(id)", 8000],
+      ["172.17.0.5", "172.17.0.1", 0],
+      ["172.17.0.5", "172.17.0.1", 8000.5],
+      ["999.1.1.1", "172.17.0.1", 8000],
+    ] as const)
+      assert.throws(() => relayWithFallback(first, then, port), /refusing/, JSON.stringify([first, then, port]));
+  });
+
+  test("relay.start uses it only when asked", () => {
+    const base = { image: "alpine/socat", name: "r", label: "l", network: "bridge", hostPort: 8082, targetIp: "172.17.0.5", targetPort: 8000 };
+    const { runner, calls } = recorder();
+    const docker = createDocker(runner);
+    docker.relay.start(base);
+    docker.relay.start({ ...base, fallbackIp: "172.17.0.1" });
+    assert.equal(calls[0].at(-1), "tcp:172.17.0.5:8000");
+    assert.match(calls[1].at(-1)!, /^system:"socat - TCP:172\.17\.0\.5:8000.* TCP:172\.17\.0\.1:8000"$/);
+  });
+});
+
+describe("reclaiming root-owned files (#15)", () => {
+  const argv = reclaimArgv("img@sha256:x", "/workspaces/acme/widgets", ".worktrees/wip/out", 1000);
+  const flag = (name: string) => argv.flatMap((arg, i) => (arg === name ? [argv[i + 1]] : []));
+
+  test("mounts the PROJECT root, and reaches the path inside it", () => {
+    assert.deepEqual(flag("--mount"), ["type=bind,source=/workspaces/acme/widgets,target=/w"]);
+    assert.equal(argv.at(-1), "/w/.worktrees/wip/out");
+  });
+
+  test("runs as root with no network and only what a chown needs", () => {
+    assert.deepEqual(flag("--network"), ["none"]);
+    assert.deepEqual(flag("--user"), ["0:0"]);
+    assert.deepEqual(flag("--cap-drop"), ["ALL"]);
+    assert.deepEqual(flag("--cap-add").sort(), ["CHOWN", "DAC_OVERRIDE", "DAC_READ_SEARCH"]);
+    assert.ok(argv.includes("no-new-privileges"));
+  });
+
+  test("changes links, not what they name, and takes the path as an argument, never as script", () => {
+    const script = argv[argv.indexOf("-c") + 1];
+    assert.match(script, /chown -R -h 1000:1000 -- "\$1"/);
+    assert.doesNotMatch(script, /\.worktrees|widgets/);
+  });
+
+  // The script is a program in another language inside this one: run it, on a
+  // tree this process owns (a chown to one's own uid needs no privilege).
+  test("the script runs, and counts what it changed", () => {
+    const tree = fs.mkdtempSync(path.join(os.tmpdir(), "reclaim-"));
+    fs.mkdirSync(path.join(tree, "a/b"), { recursive: true });
+    fs.writeFileSync(path.join(tree, "a/b/f"), "x");
+    const uid = process.getuid!();
+    const own = reclaimArgv("i", "/p", ".", uid);
+    const script = own[own.indexOf("-c") + 1];
+    const out = execFileSync("sh", ["-c", script, "reclaim", tree], { encoding: "utf8" });
+    // Everything already ours, unless this runs with a gid that differs from its uid.
+    assert.match(out, new RegExp(`^${RECLAIMED} \\d+$`, "m"));
+    fs.rmSync(tree, { recursive: true, force: true });
+  });
+
+  test("a run that did not finish is null, not zero", () => {
+    assert.equal(recorder([`${RECLAIMED} 3`]).docker.reclaim("i", "/p", ".", 1000), 3);
+    assert.equal(recorder([""]).docker.reclaim("i", "/p", ".", 1000), null);
+    assert.equal(recorder(["chown: /w/x: Operation not permitted"]).docker.reclaim("i", "/p", ".", 1000), null);
   });
 });

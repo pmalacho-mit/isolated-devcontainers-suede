@@ -27,14 +27,61 @@ export interface ResolvedSpec {
  * @throws if the devcontainer CLI errors out, or if cannot retrieve both
  * `ResolvedSpec.configuration` and `ResolvedSpec.mergedConfiguration`
  */
+/** Why `read-configuration` failed, from what execFileSync threw. A timeout
+ *  leaves only what the CLI printed before it was killed -- its version
+ *  banner, often -- so it is named as a timeout rather than quoted as an error. */
+export const describeResolveFailure = (err: any, timeoutMs: number) => {
+  /** How much of a failed CLI invocation's output to quote back to the caller */
+  const tailChars = 400;
+  const timedOut = err?.code === "ETIMEDOUT" || err?.signal === "SIGTERM";
+  const detail = String(err?.stderr || err?.stdout || err?.message || err).trim().slice(-tailChars);
+  return `could not resolve devcontainer.json (refusing to start)${
+    timedOut ? `: it did not finish in ${timeoutMs / 1000}s (resolving features fetches them; try again)` : ""
+  }: ${detail}`;
+};
+
+/**
+ * The label `read-configuration` is told to find this workspace's container
+ * by, and that no container carries. Without it the CLI looks the container up
+ * by the workspace's own labels and, if one exists -- stopped ones included --
+ * takes `mergedConfiguration` from THAT container's image metadata instead of
+ * resolving the spec: a container built when the spec said docker-in-docker
+ * answered "privileged" for ever, and the broker refused a clean spec (#26).
+ * With it, every caller judges the spec as it is declared; an existing
+ * container is compared against that separately (policy.ts builtBeyondDeclared).
+ * Measured on @devcontainers/cli 0.88.0: honoured, features still resolved.
+ */
+export const RESOLVE_ID_LABEL = "desolate.resolve=spec";
+
+/**
+ * The user a devcontainer's tools run as, from the `devcontainer.metadata`
+ * label the CLI stamped it with: the LAST entry naming a `remoteUser` wins
+ * (the spec's own entry comes after its features'), then `containerUser`.
+ * undefined when neither is named -- the image's own user, then.
+ */
+export const remoteUserOf = (metadataLabel: string): string | undefined => {
+  let entries: unknown;
+  try {
+    entries = JSON.parse(metadataLabel);
+  } catch {
+    return undefined;
+  }
+  const list = (Array.isArray(entries) ? entries : [entries]).filter(
+    (entry): entry is Record<string, unknown> => entry !== null && typeof entry === "object");
+  const named = (key: string) =>
+    [...list].reverse().map((entry) => entry[key]).find((value): value is string =>
+      typeof value === "string" && /^[A-Za-z0-9._-][A-Za-z0-9._@-]{0,63}$/.test(value));
+  return named("remoteUser") ?? named("containerUser");
+};
+
 export const resolveSpec = (
   workspace: string,
   config: string,
 ): ResolvedSpec => {
   let stdout: string;
+  /** Generous: resolving features is a NETWORK operation. */
+  const timeoutMs = 120000;
   try {
-    /** Generous: resolving features is a NETWORK operation. */
-    const timeoutMs = 120000;
     stdout = run(
       "devcontainer",
       [
@@ -44,6 +91,8 @@ export const resolveSpec = (
         workspace,
         "--override-config",
         config,
+        "--id-label",
+        RESOLVE_ID_LABEL,
       ],
       {
         encoding: "utf8",
@@ -52,14 +101,7 @@ export const resolveSpec = (
       },
     );
   } catch (err: any) {
-    /** How much of a failed CLI invocation's output to quote back to the caller */
-    const tailChars = 400;
-    const detail = String(
-      err?.stderr || err?.stdout || err?.message || err,
-    ).slice(-tailChars);
-    throw new Error(
-      `could not resolve devcontainer.json (refusing to start): ${detail}`,
-    );
+    throw new Error(describeResolveFailure(err, timeoutMs));
   }
 
   // The CLI interleaves progress lines with its JSON result, so take the LAST

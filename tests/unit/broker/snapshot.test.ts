@@ -26,6 +26,8 @@ import {
   snapshotFile,
   snapshot,
   SNAPSHOT_DIRECTORY_MODE,
+  ensureDirectory,
+  initDirectory,
 } from "../../../release/vscode-image/snapshot.ts";
 import { target } from "../../../release/vscode-image/projects.ts";
 
@@ -498,5 +500,43 @@ describe("the node behaviour snapshot.ts works around", () => {
       "the JS path no longer honours dereference either -- the diagnosis in " +
         "snapshot.ts's header is out of date",
     );
+  });
+});
+
+describe("the direct runner's snapshot directory, which every invocation ensures", () => {
+  test("another runner ensuring it leaves a start's snapshot where the start will read it", () => {
+    // The panel asks `--list` every 10 s, each a runner of its own; a start
+    // from the Mac reads its snapshot back seconds after writing it. Emptying
+    // the directory there failed those starts as "Failed to parse".
+    const box = sandbox();
+    box.project("myapp", { [NESTED]: '{"image":"alpine:3"}' });
+    const frozen = snapshot(target(box.workspaces, "myapp"), box);
+    ensureDirectory(box.specs);
+    assert.equal(fs.readFileSync(frozen, "utf8"), '{"image":"alpine:3"}');
+    // What every invocation did before: the start's copy gone from under it.
+    initDirectory(box.specs);
+    assert.equal(fs.existsSync(frozen), false);
+  });
+
+  test("made when it is not there, and only its owner's", () => {
+    const box = sandbox();
+    const fresh = path.join(box.specs, "..", "direct-specs");
+    ensureDirectory(fresh);
+    assert.equal(fs.statSync(fresh).mode & 0o777, SNAPSHOT_DIRECTORY_MODE);
+    fs.chmodSync(fresh, 0o755);
+    ensureDirectory(fresh);
+    assert.equal(fs.statSync(fresh).mode & 0o777, SNAPSHOT_DIRECTORY_MODE, "its mode is put back");
+  });
+
+  test("a link in its place is replaced by a directory, and what it pointed at is left alone", () => {
+    const box = sandbox();
+    const elsewhere = path.join(box.specs, "..", "elsewhere");
+    fs.mkdirSync(elsewhere);
+    fs.writeFileSync(path.join(elsewhere, "keep"), "x");
+    const location = path.join(box.specs, "..", "linked-specs");
+    fs.symlinkSync(elsewhere, location);
+    ensureDirectory(location);
+    assert.ok(fs.lstatSync(location).isDirectory() && !fs.lstatSync(location).isSymbolicLink());
+    assert.equal(fs.readFileSync(path.join(elsewhere, "keep"), "utf8"), "x");
   });
 });

@@ -273,14 +273,32 @@ RUN set -eux; \
 # runtime inside the image with "cannot find module".
 COPY --chown=1000:1000 *.ts /usr/local/lib/desolate/
 
+# The desolate extension (T4.7, F6), BUILT IN to the outer editor's tree and no
+# other: bundled here by the esbuild that tsx already depends on -- nothing is
+# fetched for it, and nothing is installed when the editor starts -- into the
+# shell root, which devcontainers are never seeded from. It runs only the
+# commands below (extension/extension.mts); tests/static/08 holds it to that.
+COPY --chown=1000:1000 extension/ /usr/local/lib/desolate/extension/
+RUN set -eux; \
+  out="${DESOLATE_SHELL_ROOT}/extensions/desolate"; \
+  mkdir -p "$out/media"; \
+  node -e 'const esbuild = require(require.resolve("esbuild", { paths: [process.argv[1]] })); \
+    esbuild.buildSync({ entryPoints: [process.argv[2]], bundle: true, platform: "node", format: "cjs", \
+                        target: "node20", external: ["vscode"], outfile: process.argv[3], logLevel: "warning" })' \
+    "$(npm root -g)/tsx" /usr/local/lib/desolate/extension/extension.mts "$out/extension.js"; \
+  cp /usr/local/lib/desolate/extension/package.json "$out/"; \
+  cp /usr/local/lib/desolate/extension/media/desolate.svg "$out/media/"; \
+  test -s "$out/extension.js"; \
+  test ! -e "${DESOLATE_SERVER_ROOT}/extensions/desolate"
+
 # Create wrappers for supporting scripts so they can be invoked plainly.
 # Every wrapper goes through `with-ca` so `docker exec` from the mac works.
 #   desolate      (vscode)       -> broker client over the unix socket
 #   desolate-run  (orchestrator) -> the real thing; useless without the socket
 #   newrepo       (vscode)       -> git only, no daemon access needed
-#   worktree      (vscode)       -> git only, and git ONLY belongs here: it obeys
-#                                   the project's own config and hooks, which the
-#                                   orchestrator must never execute
+#   worktree      (vscode)       -> add/remove ask the broker (the orchestrator
+#                                   runs git for them in the worktree's sandbox);
+#                                   `list` is hardened git, here
 RUN printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/desolate-client.ts "$@"\n' > /usr/local/bin/desolate \
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/desolate.ts "$@"\n' > /usr/local/bin/desolate-run \
   && printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/newrepo.ts "$@"\n' > /usr/local/bin/newrepo \
@@ -299,14 +317,16 @@ RUN printf '#!/bin/sh\nexec /usr/local/bin/with-ca tsx /usr/local/lib/desolate/d
 # shells, so both arrive here. No bash-completion package needed: `complete`
 # and `compgen` are builtins, and only helpers like _init_completion are not.
 COPY completion.bash /etc/bash_completion.d/desolate
+# And, by the same route, no typed git in a project (git-guard.bash).
+COPY git-guard.bash /etc/desolate/git-guard.bash
 RUN set -eux; \
     test -f /etc/bash.bashrc; \
-    printf '\ncase $- in *i*)\n  for f in /etc/bash_completion.d/*; do [ -r "$f" ] && . "$f"; done; unset f ;;\nesac\n' \
+    printf '\ncase $- in *i*)\n  for f in /etc/bash_completion.d/* /etc/desolate/git-guard.bash; do [ -r "$f" ] && . "$f"; done; unset f ;;\nesac\n' \
       >> /etc/bash.bashrc; \
-    # Assert that an interactive bash ACTUALLY reaches it. A completion that
+    # Assert that an interactive bash ACTUALLY reaches both. A completion that
     # silently never registers is indistinguishable from never adding one, and
     # this is the only step in the chain that cannot be checked by reading.
-    bash -ic 'complete -p desolate >/dev/null'
+    bash -ic 'complete -p desolate >/dev/null && [ "$(type -t git)" = function ]'
 
 # Optional: pre-bake pinned extensions from Open VSX instead of letting the
 # running editor pull them ad hoc. Example:

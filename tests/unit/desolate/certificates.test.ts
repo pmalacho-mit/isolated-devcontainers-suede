@@ -350,7 +350,7 @@ describe("the shadowImages job", () => {
   test("it calls the script that is actually shipped", () => {
     assert.match(
       body,
-      /\/desolate-ca\/trust-proxy-in-builds\.sh --image "\$1" --shadow/,
+      /\/desolate\/ca\/trust-proxy-in-builds\.sh --image "\$1" --shadow/,
     );
     assert.ok(
       fs.existsSync(
@@ -379,7 +379,7 @@ describe("installing the CA, and the daemon restart it forces", () => {
     // back on its feet. Any of those failing has exactly one meaning, and none
     // of them is spelled out in more than one place.
     assert.deepEqual(steps, [
-      "/desolate-ca/install-ca.sh >/dev/null 2>&1 || exit 1",
+      "/desolate/ca/install-ca.sh >/dev/null 2>&1 || exit 1",
       "this_container_runs_a_daemon || exit 0",
       "restart_and_wait || { report_daemon_never_came_back; exit 1; }",
     ]);

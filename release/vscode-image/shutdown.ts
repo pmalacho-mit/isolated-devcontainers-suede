@@ -39,3 +39,16 @@ export const devcontainer = (docker: Docker, cid: string, say: Report) => {
   quiesce(docker, cid, say);
   return docker.container.stop(cid);
 };
+
+/**
+ * Stop a project DIND (the supervisor's): its containers first, for the reason
+ * above, then the dind itself. Not the daemon step: dockerd IS the dind's
+ * workload, so stopping it from inside ends the container under the very exec
+ * waiting for it -- which reported every stop as one that "did not stop in
+ * time" -- and `docker stop` already hands dockerd its SIGTERM through init.
+ */
+export const dind = (docker: Docker, name: string, say: Report) => {
+  if (docker.container.hasDockerCli(name))
+    stepOver(say, "the project's containers", () => docker.container.stopInnerContainers(name));
+  return docker.container.stop(name);
+};

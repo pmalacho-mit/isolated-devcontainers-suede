@@ -18,6 +18,8 @@ import {
 import { createServer } from "node:net";
 import { dirname } from "node:path";
 import { resolveSpec } from "./devcontainer.ts";
+import { PLANE_VARIABLE } from "./hints.ts";
+import { awaitsCheckout, validBranch } from "./worktrees.ts";
 import {
   snapshot,
   initDirectory as initSnapshotDirectory,
@@ -30,9 +32,9 @@ import {
   volumeNamespace,
   type Target,
 } from "./projects.ts";
-import { enforcePolicy, PolicyError } from "./policy.ts";
-import type { Flags } from "./args.ts";
-import { identity, noop } from "./utils.ts";
+import { daemonOf, enforcePolicy, PolicyError } from "./policy.ts";
+import { TRANSFER_NAME, type Flags } from "./args.ts";
+import { identity, noop, relayLines } from "./utils.ts";
 
 type Config = {
   workspaces: string;
@@ -76,14 +78,26 @@ const config = environment.tryOverride({
  *  and none for `validate` to check. Named once: the request TYPE and the
  *  runtime guard below both read it, and a shape either of them alone accepted
  *  would be a shape the other rejects. */
-const globalOperations = ["list", "stop-all"] as const;
+const globalOperations = ["list", "stop-all", "dinds"] as const;
 type GlobalOperation = (typeof globalOperations)[number];
+
+/** Ops on a worktree that has to be NAMED, and whose git the runner does in
+ *  its sandbox -- the editor must not (worktrees.ts). */
+const worktreeOperations = ["worktree-add", "worktree-remove"] as const;
+
+/** The project's halves of `desolate --push` and `--pull` (transfer.ts): a
+ *  bundle, named by the editor, made or taken in the target's sandbox. */
+const transferOperations = ["bundle", "pull"] as const;
 
 const operations = [
   "start",
   "rebuild",
   "stop",
   "ports",
+  /** What a push would send, read in the target's sandbox: `desolate --review`. */
+  "review",
+  ...worktreeOperations,
+  ...transferOperations,
   ...globalOperations,
 ] as const;
 type Operation = (typeof operations)[number];
@@ -95,13 +109,45 @@ const isGlobalOperation = (op: string) =>
 const globalArgv: Record<GlobalOperation, string[]> = {
   list: ["--list"],
   "stop-all": ["--stop", "--all"],
+  dinds: ["--dinds"],
 };
 
 type Request = {
   [op in Operation]: op extends GlobalOperation
-    ? { op: op }
-    : { op: op; project: string; worktree?: string };
+    ? { op: op; json?: boolean }
+    : op extends "worktree-add"
+      ? { op: op; project: string; worktree: string; branch?: string; from?: string }
+      : op extends "worktree-remove"
+        ? { op: op; project: string; worktree: string; force?: boolean }
+        : op extends "ports"
+          ? { op: op; project: string; worktree?: string; move?: { label: string; port: number }; json?: boolean }
+          : op extends "bundle" | "pull"
+            ? { op: op; project: string; worktree?: string; transfer: string; fetch?: boolean }
+            : { op: op; project: string; worktree?: string };
 }[Operation];
+
+/** Absent, or of this type. */
+const optional = (query: object, key: string, type: "string" | "boolean") =>
+  !(key in query) ||
+  (query as Record<string, unknown>)[key] === undefined ||
+  typeof (query as Record<string, unknown>)[key] === type;
+
+
+/** `--move`'s two values, held to what the runner's grammar accepts: a label
+ *  is `editor` or a container port, and the port an integer. Nothing else
+ *  reaches its argv. */
+const isMove = (move: unknown): move is { label: string; port: number } =>
+  move !== null &&
+  typeof move === "object" &&
+  "label" in move &&
+  "port" in move &&
+  Object.keys(move).length === 2 &&
+  typeof move.label === "string" &&
+  /^(editor|[1-9][0-9]{0,4})$/.test(move.label) &&
+  typeof move.port === "number" &&
+  Number.isInteger(move.port) &&
+  move.port >= 1 &&
+  move.port <= 65535;
 
 type GlobalRequest = Extract<Request, { op: GlobalOperation }>;
 
@@ -130,12 +176,22 @@ const request = {
     "op" in query &&
     typeof query.op === "string" &&
     operations.includes(query["op"] as Operation) &&
+    (!("json" in query) || ((query.op === "list" || query.op === "ports") && typeof query.json === "boolean")) &&
     (isGlobalOperation(query.op) ||
       ("project" in query &&
         typeof query.project === "string" &&
-        (!("worktree" in query) ||
-          query.worktree === undefined ||
-          typeof query.worktree === "string"))),
+        optional(query, "worktree", "string") &&
+        (query.op === "worktree-add" || query.op === "worktree-remove"
+          ? "worktree" in query && typeof query.worktree === "string"
+          : true) &&
+        (query.op === "worktree-add" ? optional(query, "branch", "string") : !("branch" in query)) &&
+        (query.op === "worktree-add" ? optional(query, "from", "string") : !("from" in query)) &&
+        (query.op === "worktree-remove" ? optional(query, "force", "boolean") : !("force" in query)) &&
+        (!("move" in query) || (query.op === "ports" && isMove(query.move))) &&
+        ((transferOperations as readonly string[]).includes(query.op)
+          ? "transfer" in query && typeof query.transfer === "string" && TRANSFER_NAME.test(query.transfer)
+          : !("transfer" in query)) &&
+        (query.op === "pull" ? optional(query, "fetch", "boolean") : !("fetch" in query)))),
 };
 
 /**
@@ -189,19 +245,21 @@ type Send = (payload: string | Record<string, any>) => void;
 
 const spawnDesolate = (argv: string[], send: Send) =>
   new Promise<number>((resolve) => {
-    const { env } = process;
+    // Every request reaching the broker came from the editor container, so
+    // that is where the hints desolate prints should send the reader.
+    const env = { ...process.env, [PLANE_VARIABLE]: "editor" };
     const child = spawn("tsx", [config.runner, ...argv], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const relay = (buf: Buffer) => {
-      for (const line of buf.toString().split("\n")) {
-        if (line.trim()) send(JSON.stringify({ log: line }));
-      }
-    };
-    child.stdout.on("data", relay);
-    child.stderr.on("data", relay);
-    child.on("close", (code) => resolve(code ?? 1));
+    const out = relayLines(send), err = relayLines(send);
+    child.stdout.on("data", out);
+    child.stderr.on("data", err);
+    child.on("close", (code) => {
+      out.flush();
+      err.flush();
+      resolve(code ?? 1);
+    });
   });
 
 /** One target's argv: the flags built for it, then the names that select it. */
@@ -227,25 +285,66 @@ async function handle(req: unknown, send: Send) {
     // and nothing it could widen: the runner reads /workspaces itself, under
     // the same rules it applies to a named one.
     if (namesNoTarget(req)) {
-      const code = await spawnDesolate(globalArgv[req.op], send);
+      const argv = req.op === "list" && req.json ? [...globalArgv.list, "--json"] : globalArgv[req.op];
+      const code = await spawnDesolate(argv, send);
+      return send({ ok: code === 0, exit: code });
+    }
+
+    if (req.op === "worktree-add") {
+      // Validated as a project -- the worktree is not there yet -- and its
+      // name and branch on their own. The runner refuses one that is there.
+      validate(req.project);
+      if (!validWorktree(req.worktree))
+        throw new Error(`invalid worktree name: ONE path segment, starting with a letter or digit`);
+      const branch = req.branch ?? req.worktree;
+      if (!validBranch(branch)) throw new Error(`invalid branch name`);
+      // Where a new branch starts: a ref git will resolve, held to the same
+      // rule so it cannot reach git as an option.
+      if (req.from !== undefined && !validBranch(req.from)) throw new Error(`invalid start point`);
+      const target = resolveTarget(config.workspaces, req.project, req.worktree);
+      const from: Flags[] = req.from !== undefined ? [["--from", req.from]] : [];
+      const code = await spawnDesolate(targetArgv(target, ["--create-worktree", ["--branch", branch], ...from]), send);
       return send({ ok: code === 0, exit: code });
     }
 
     const target = validate(req.project, req.worktree);
     let flags: Flags[];
     switch (req.op) {
+      case "worktree-remove":
+        flags = ["--remove-worktree", ...(req.force ? (["--force"] as const) : [])];
+        break;
       case "start":
       case "rebuild": {
+        // The editor creates a worktree with nothing checked out, so there is
+        // no spec to read until its sandbox has populated it (worktrees.ts).
+        // Done by the runner, which owns that sandbox, and before the snapshot.
+        if (awaitsCheckout(target)) {
+          const populated = await spawnDesolate(targetArgv(target, ["--populate"]), send);
+          if (populated !== 0) return send({ ok: false, exit: populated });
+        }
         const configPath = snapshot(target, config);
         const resolved = resolveSpec(target.dir, configPath);
-        enforcePolicy(target, resolved, listTargets(config.workspaces));
+        enforcePolicy(target, resolved, listTargets(config.workspaces), daemonOf(resolved));
         flags = [["--config", configPath]];
         if (req.op === "rebuild") flags.push("--rebuild");
         break;
       }
       case "stop":
+        flags = ["--stop"];
+        break;
+      case "bundle":
+        flags = [["--bundle", req.transfer]];
+        break;
+      case "pull":
+        flags = [["--pull", req.transfer], ...(req.fetch ? (["--fetch-only"] as const) : [])];
+        break;
+      case "review":
+        flags = ["--review"];
+        break;
       case "ports":
-        flags = [`--${req.op}`];
+        flags = ["--ports"];
+        if (req.move) flags.push(["--move", req.move.label, String(req.move.port)]);
+        if (req.json) flags.push("--json");
         break;
     }
 

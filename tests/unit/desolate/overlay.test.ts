@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import {
   CA_DIR,
+  DESOLATE_DIR,
   SERVER_DST,
   SERVER_SRC,
   SHARED_DIRECTORIES,
@@ -32,18 +33,20 @@ describe("both shared directories get a view", () => {
     assert.equal(entry.target, SERVER_DST);
   });
 
-  test("the proxy CA dir is one of them", () => {
-    // Higher impact than the server: install-ca.sh is executed as root in every
-    // devcontainer AND in dind's entrypoint.
-    const entry = SHARED_DIRECTORIES.find((d) => d.lower === CA_DIR);
-    assert.ok(entry, `no overlay for ${CA_DIR}`);
-    assert.equal(entry.target, CA_DIR);
+  test("desolate's own directory, the proxy CA in it, is one of them", () => {
+    // Higher impact than the server: ca/install-ca.sh is executed as root in
+    // every devcontainer AND in dind's entrypoint.
+    const entry = SHARED_DIRECTORIES.find((d) => d.lower === DESOLATE_DIR);
+    assert.ok(entry, `no overlay for ${DESOLATE_DIR}`);
+    assert.equal(entry.target, DESOLATE_DIR);
+    assert.equal(CA_DIR, `${DESOLATE_DIR}/ca`);
+    assert.equal(entry.proof, `${CA_DIR}/ca.pem`);
   });
 
   test("nothing else is smuggled into the list", () => {
     assert.deepEqual(
       SHARED_DIRECTORIES.map((d) => d.lower).sort(),
-      [CA_DIR, SERVER_SRC].sort(),
+      [DESOLATE_DIR, SERVER_SRC].sort(),
     );
   });
 
@@ -92,6 +95,7 @@ describe("the volumes a view is made of", () => {
         named(project),
         { configuration, mergedConfiguration: { ...configuration } },
         [named(project)],
+        "shared",
       );
     }
   });
@@ -110,6 +114,7 @@ describe("the volumes a view is made of", () => {
           named("web"),
           { configuration, mergedConfiguration: { ...configuration } },
           [named("web"), named("web-vscode-server")],
+          "shared",
         ),
       /belongs to project 'web-vscode-server'/,
     );

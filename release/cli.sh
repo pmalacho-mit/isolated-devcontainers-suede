@@ -11,9 +11,16 @@
 #   ./isolated-devcontainers-suede/cli.sh repo add owner/repo       # per-repo deploy key + clone
 #   ./isolated-devcontainers-suede/cli.sh worktree add owner/repo wip   # a branch in its own devcontainer
 #   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
+#   ./isolated-devcontainers-suede/cli.sh export owner/repo [path]  # copy files out (tar when piped)
+#   ./isolated-devcontainers-suede/cli.sh reclaim owner/repo [path] # give root-owned files back to the editor
+#   ./isolated-devcontainers-suede/cli.sh exec owner/repo [--worktree wip] -- cmd...   # run it in the devcontainer
+#   ./isolated-devcontainers-suede/cli.sh push|pull owner/repo [--worktree wip]       # its branch, to and from GitHub
+#   ./isolated-devcontainers-suede/cli.sh suede deliver|report|upstream ...            # suede dependencies (docs/suede-factory.md)
+#   ./isolated-devcontainers-suede/cli.sh desolate --status [--json] [owner/repo]       # what each agent last said
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
+#   ./isolated-devcontainers-suede/cli.sh dind list | reset <project> | df | gc   # project daemons
 #   ./isolated-devcontainers-suede/cli.sh <any command...>          # runs in the editor container
 #
 # Requires Colima + sysbox (see README "Setup"). `up` refuses to start if the
@@ -26,7 +33,9 @@ COLIMA_PROFILE="${COLIMA_PROFILE:-desolate}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # The header comment, however long it grows: every line after the shebang
+  # up to the first that is not a comment.
+  awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
   exit "${1:-0}"
 }
 
@@ -94,8 +103,50 @@ EOF
 # escaping its quotes, which made it invalid jq -- \" is not legal inside a
 # \(...) interpolation -- so `secret list` never worked at all. Emitting TSV and
 # formatting on the Mac leaves the remote side nothing to misparse.
+# Each row: the name, how many projects it is scoped to (0: every source), how
+# many headers it is confined to (0: anywhere in a request), those projects,
+# those headers, then its hosts -- counts rather than joined lists, since
+# joining needs a quoted separator.
 # tests/static/05-cli-queries.sh executes this against a fixture.
-SECRET_LIST_JQ='.secrets|to_entries[]|[.key]+.value.hosts|@tsv'
+SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length),(.value.headers//[]|length)]+(.value.projects//[])+(.value.headers//[])+.value.hosts|@tsv'
+# The proxy's AUDIT lines, as journald holds them. mitmdump under systemd
+# prefixes each with its time -- `[12:03:33.715] AUDIT verdict=...` -- and
+# every reader here once anchored on `^AUDIT`, so on the VM `proxy audit`
+# printed nothing and preflight's leak oracle never matched (measured
+# 2026-10-26). This prints each AUDIT line's fields, prefix or not: `sed -nE`.
+AUDIT_FIELDS_SED='s/^(\[[0-9:.]*\] )?AUDIT //p'
+# `proxy logs --project <p>`: the AUDIT lines whose project field is <p>,
+# compared as a string, printed whole. A grep for `project=$P$` read <p> as a
+# regex, so a `.` in a name matched any character.
+PROJECT_AUDIT_AWK='{ line = $0; sub(/^\[[0-9:.]*\] /, "", line) } index(line, "AUDIT ") == 1 && substr(line, length(line) - length(want) + 1) == want'
+# One request's LEAK-SUSPECT line, by the unique path it was sent to: what
+# `proxy test` and preflight's oracle look for. `grep -E`, with the path.
+# How many journal lines to read for <n> AUDIT lines: a request writes about
+# eight (connect, the line itself, the response, disconnects), so `-n <n>` alone
+# read <n> journal lines and usually held no AUDIT line at all.
+audit_window() { echo $(( $1 * 50 )); }
+leak_suspect_line() { grep -aE "^(\[[0-9:.]*\] )?AUDIT verdict=LEAK-SUSPECT .* path=/$1 " | tail -n 1; }
+
+# `export`, run INSIDE the editor where the files are:
+#   sh -c "$EXPORT_TAR_SH" sh <workspaces> <project> <relative-path>
+# writes a tar of that path to stdout, or exits 2 (no such project), 3 (no such
+# path) or 4 (it resolves outside the project). A project is one or two
+# segments, neither starting with a dot, and must BE /workspaces/<project> --
+# not a link to some other project. Symlinks in the path are followed for the
+# check, and then the archive is made from the parent directory, entered and
+# re-checked first: tar works relative to that pinned directory and archives a
+# link as a link, so swapping a component after the check gains nothing.
+# tests/static/05-cli-queries.sh executes it against a fixture tree.
+EXPORT_TAR_SH='
+  case "$2" in ""|/*|*/|*//*|*/*/*|.*|*/.*) exit 2 ;; esac
+  base=$(realpath -e "$1") || exit 2
+  root=$(realpath -e "$1/$2" 2>/dev/null) || exit 2
+  [ "$root" = "$base/$2" ] || exit 2
+  path=$(realpath -e "$root/$3" 2>/dev/null) || exit 3
+  case "$path" in "$root"|"$root"/*) ;; *) exit 4 ;; esac
+  cd "$(dirname "$path")" || exit 3
+  case "$(pwd -P)/" in "$root"/*|"$(dirname "$root")"/) ;; *) exit 4 ;; esac
+  exec tar -cf - -- "$(basename "$path")"'
 
 # Existing placeholders that OVERLAP the one being added ($n): either contains
 # the other. Same quoting discipline as SECRET_LIST_JQ -- it travels as a bare
@@ -257,7 +308,7 @@ ensure_vm_proxy() {
     why="both networks resolve to '$live' -- the editor/container split is gone"
   elif ! vm sudo nft list table inet desolate >/dev/null 2>&1; then
     why="the nftables ruleset is not loaded"
-  elif ! vm systemctl is-active --quiet desolate-proxy desolate-nft desolate-proxy-ca desolate-dnsmasq; then
+  elif ! vm systemctl is-active --quiet desolate-proxy desolate-nft desolate-proxy-ca desolate-dnsmasq desolate-ingress; then
     why="a VM proxy unit is not active"
   fi
 
@@ -333,6 +384,48 @@ INNER_PATIENCE=20
 SETTLE_SECONDS=60
 RESET_DATA_ROOT_FLAG=--reset-data-root
 
+# The ladder below acts on whichever daemon these name. They start out naming
+# the shared one, for `reset-inner`; `dind reset <project>` points them at that
+# project's own (select_project_dind), and every rung is the same code for both.
+DIND_KIND=shared
+DIND_PROJECT=""
+RESET_COMMAND=reset-inner
+DIND_DATA_SCOPE="the image store shared by every project"
+
+SUPERVISOR=desolate-supervisor
+# Run where the supervisor's socket is: the supervisor's own container.
+supervisor() { docker exec "$SUPERVISOR" tsx /usr/local/lib/desolate/supervisor.ts "$@"; }
+
+require_supervisor() {
+  docker inspect -f '{{.State.Status}}' "$SUPERVISOR" 2>/dev/null | grep -qx running && return 0
+  echo "cli.sh: $SUPERVISOR is not running -- project dinds are its to drive. Start the stack:  $0 up" >&2
+  exit 1
+}
+
+# What projects.ts accepts (validName), closely enough to refuse anything that
+# would make a different docker name: `name` or `owner/name`, each segment
+# starting alphanumeric, and no `__`.
+# A worktree has no dind of its own; it shares its project's.
+valid_project() {
+  printf '%s' "$1" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?' \
+    && case "$1" in *__*) false ;; esac
+}
+
+# Point the ladder at one project's dind (dind.ts names; supervisor.ts drives).
+select_project_dind() {
+  valid_project "$1" || {
+    echo "cli.sh: '$1' is not a project name (name or owner/name; a worktree uses its project's dind)" >&2
+    exit 1
+  }
+  DIND_KIND=project
+  DIND_PROJECT=$1
+  DIND=desolate-dind-${1//\//__}
+  DIND_DATA_VOLUME=dind-data-${1//\//__}
+  INNER_SOCKET=unix:///run/dind-sock/docker.sock
+  RESET_COMMAND="dind reset $1"
+  DIND_DATA_SCOPE="$1's own image store (no other project's)"
+}
+
 dind_running() {
   docker inspect -f '{{.State.Status}}' "$DIND" 2>/dev/null | grep -qx running
 }
@@ -340,7 +433,11 @@ dind_running() {
 require_dind() {
   docker inspect "$DIND" >/dev/null 2>&1 && return 0
   echo "cli.sh: $DIND does not exist -- there is no inner daemon to recover." >&2
-  echo "        Start the stack first:  $0 up" >&2
+  if [ "$DIND_KIND" = shared ]; then
+    echo "        Start the stack first:  $0 up" >&2
+  else
+    echo "        $DIND_PROJECT gets one the first time it starts:  $0 desolate $DIND_PROJECT" >&2
+  fi
   exit 1
 }
 
@@ -359,7 +456,7 @@ require_classifier() {
 # One line, and the classifier's verdict as this function's status.
 inner_health() {
   dind_running || { echo "inner daemon: down -- $DIND is not running"; return 1; }
-  docker exec "$DIND" sh "$INNER_HEALTH"
+  docker exec -e "DESOLATE_INNER_SOCKET=${INNER_SOCKET#unix://}" "$DIND" sh "$INNER_HEALTH"
 }
 
 # Inner-daemon queries go through dind and NOT through the orchestrator that
@@ -406,30 +503,63 @@ report_inner_daemon() {
   return "$verdict"
 }
 
+# Removes the containers carrying a label in the given states. A daemon that
+# cannot answer the listing says so: "no stale relays" would be a guess.
 sweep_inner() {
-  local what=$1 ids=$2
+  local what=$1 ids
+  shift
+  if ! ids=$(inner_ids "$@"); then
+    echo "  cannot sweep $what: the daemon did not answer"
+    return 0
+  fi
   if [ -z "${ids//[[:space:]]/}" ]; then
     echo "  no stale $what"
     return 0
   fi
-  echo "  removing $(printf '%s\n' "$ids" | wc -l | tr -d ' ') stale $what"
-  # shellcheck disable=SC2086  # several ids, deliberately word-split
-  inner_docker rm -f $ids >/dev/null 2>&1 || echo "  ...some of them would not go"
+  # Container ids and nothing else, read line by line and never word-split:
+  # on a project's dind the listing is printed by binaries the project can
+  # replace, and an unquoted `$ids` would glob-expand what it printed against
+  # THIS machine's filesystem and hand the matches back to its daemon.
+  local id kept=() ignored=0
+  while IFS= read -r id; do
+    case "$id" in
+      "") ;;
+      *[!0-9a-f]*) ignored=$((ignored + 1)) ;;
+      *) if [ "${#id}" -ge 12 ] && [ "${#id}" -le 64 ]; then kept+=("$id"); else ignored=$((ignored + 1)); fi ;;
+    esac
+  done <<EOF
+$(printf '%s\n' "$ids" | tr -s '[:space:]' '\n')
+EOF
+  [ "$ignored" -gt 0 ] && echo "  ignored $ignored entr$([ "$ignored" = 1 ] && echo y || echo ies) in the listing that are not container ids"
+  if [ "${#kept[@]}" -eq 0 ]; then
+    echo "  no stale $what"
+    return 0
+  fi
+  echo "  removing ${#kept[@]} stale $what"
+  inner_docker rm -f "${kept[@]}" >/dev/null 2>&1 || echo "  ...some of them would not go"
+}
+
+# The daemon's container alone. A project dind is the supervisor's: it
+# withdraws the dind from the ingress first and republishes it once healthy.
+restart_dind() {
+  if [ "$DIND_KIND" = shared ]; then
+    compose restart "$DIND_SERVICE"
+  else
+    supervisor ask reset "$DIND_PROJECT" >/dev/null
+  fi
 }
 
 # Rung 2. Remove what reconciliation is choking on, then restart the daemon
 # alone -- the editor, the keyring and every other project stay up.
 sweep_and_restart_dind() {
-  echo "-- rung 2: sweeping stale objects, then restarting $DIND_SERVICE --"
-  sweep_inner "relays that are no longer running" \
-    "$(inner_ids desolate.relay created exited dead restarting)"
+  echo "-- rung 2: sweeping stale objects, then restarting $DIND --"
+  sweep_inner "relays that are no longer running" desolate.relay created exited dead restarting
   # `dead` only. A STOPPED devcontainer is one `desolate --stop` deliberately
   # kept so the next start is fast; `dead` is what docker leaves behind when it
   # could not finish removing one, and that is the object reconciliation trips on.
-  sweep_inner "devcontainers the daemon could not finish removing" \
-    "$(inner_ids devcontainer.local_folder dead)"
-  echo "  restarting $DIND_SERVICE (nothing else in the stack is touched)"
-  compose restart "$DIND_SERVICE" || echo "cli.sh: the restart itself failed" >&2
+  sweep_inner "devcontainers the daemon could not finish removing" devcontainer.local_folder dead
+  echo "  restarting $DIND (nothing else in the stack is touched)"
+  restart_dind || echo "cli.sh: the restart itself failed" >&2
 }
 
 data_root_reset_requested() { [ "${1:-}" = "$RESET_DATA_ROOT_FLAG" ]; }
@@ -438,19 +568,18 @@ explain_data_root_reset() {
   cat >&2 <<EOF
 cli.sh: the sweep did not bring the inner daemon back.
 
-What is left is deleting its data root, $DIND_DATA_VOLUME -- the image store
-shared by every project. That is not something to arrive at by falling through,
-so ask for it:
-  $0 reset-inner $RESET_DATA_ROOT_FLAG
+What is left is deleting its data root, $DIND_DATA_VOLUME -- $DIND_DATA_SCOPE.
+That is not something to arrive at by falling through, so ask for it:
+  $0 $RESET_COMMAND $RESET_DATA_ROOT_FLAG
 EOF
 }
 
 confirm_data_root_reset() {
   cat <<EOF
-This DELETES $DIND_DATA_VOLUME. Every base image is pulled again and every build
-cache is gone, for every project; every devcontainer inside it is recreated from
-its spec on the next start, so anything written in one outside /workspaces goes
-with it. /workspaces is a separate volume and is NOT touched.
+This DELETES $DIND_DATA_VOLUME, $DIND_DATA_SCOPE. Every base image in it is
+pulled again and its build cache is gone; every devcontainer inside it is
+recreated from its spec on the next start, so anything written in one outside
+/workspaces goes with it. /workspaces is a separate volume and is NOT touched.
 EOF
   local answer
   read -r -p "Type 'yes' to confirm: " answer
@@ -464,11 +593,100 @@ reset_data_root() {
   data_root_reset_requested "${1:-}" || { explain_data_root_reset; return 1; }
   confirm_data_root_reset || return 1
   echo "-- rung 3: resetting the inner daemon's data root --"
+  delete_data_root
+}
+
+delete_data_root() {
+  if [ "$DIND_KIND" = project ]; then
+    # purge: container, image store and bridge; ensure: a new one, admitted
+    # and healthy, exactly as the project's next start would make it.
+    supervisor ask purge "$DIND_PROJECT" >/dev/null || return 1
+    supervisor ask ensure "$DIND_PROJECT" >/dev/null
+    return
+  fi
   # Removed, not stopped: a volume with a container still referencing it cannot
   # be deleted, and a half-done rung 3 is the worst state of all.
   compose rm -sf "$DIND_SERVICE" || return 1
   docker volume rm "$DIND_DATA_VOLUME" || return 1
   compose up -d "$DIND_SERVICE"
+}
+
+# ── dind df | gc: what the daemons hold, and giving it back (#14) ──────────
+
+# Every daemon a project can be on, running, one per line: "<container> <socket>".
+running_daemons() {
+  dind_running && echo "$DIND /run/inner/docker.sock"
+  docker ps --filter "label=desolate.dind" --filter status=running --format '{{.Names}}' \
+    | sort | sed 's|$| /run/dind-sock/docker.sock|'
+}
+
+stopped_project_dinds() {
+  docker ps -a --filter "label=desolate.dind" --filter status=exited --filter status=created \
+    --format '{{.Names}}' | sort
+}
+
+# On ONE daemon, by its container: the docker CLI each dind image carries,
+# pointed at the socket that daemon listens on.
+daemon_docker() {
+  local name=$1 socket=$2
+  shift 2
+  docker exec "$name" docker -H "unix://$socket" "$@"
+}
+
+dind_df() {
+  local name socket usage
+  printf '%-40s %-14s %-10s %s\n' DAEMON TYPE SIZE RECLAIMABLE
+  while read -r name socket; do
+    [ -n "$name" ] || continue
+    # Bounded, like every query here: one wedged daemon must not hide the rest.
+    if ! usage=$(docker exec "$name" timeout "$INNER_PATIENCE" docker -H "unix://$socket" \
+                   system df --format '{{.Type}}\t{{.Size}}\t{{.Reclaimable}}' 2>/dev/null); then
+      printf '%-40s %s\n' "$name" "(did not answer -- see: $0 dind list)"
+      continue
+    fi
+    printf '%s\n' "$usage" | while IFS=$'\t' read -r type size reclaimable; do
+      printf '%-40s %-14s %-10s %s\n' "$name" "$type" "$size" "$reclaimable"
+    done
+  done < <(running_daemons)
+  for name in $(stopped_project_dinds); do
+    printf '%-40s %s\n' "$name" "(stopped -- its image store size is in: $0 dind list)"
+  done
+}
+
+# Build cache, then dangling images, then ANONYMOUS volumes nothing uses.
+# `volume prune` without -a has left named volumes alone since docker 23, and
+# the dinds run 29: a project's declared volumes survive this, and /workspaces
+# is not a volume on any of these daemons at all.
+gc_daemon() {
+  local name=$1 socket=$2
+  echo "-- $name --"
+  daemon_docker "$name" "$socket" builder prune -af | tail -n 1
+  daemon_docker "$name" "$socket" image prune -f | tail -n 1
+  daemon_docker "$name" "$socket" volume prune -f | tail -n 1
+}
+
+# The nested daemons docker-in-docker used to start kept their state in these,
+# on the SHARED daemon. No project can start one any more (policy.ts refuses
+# the feature), so every one left is an orphan; one still referenced by a
+# container -- a stopped devcontainer from before -- is refused by docker
+# itself, and said so, rather than forced.
+gc_orphans() {
+  local volumes volume
+  volumes=$(inner_docker volume ls -q 2>/dev/null | grep -E '^dind-var-lib-(docker|containerd)-' || true)
+  if [ -z "$volumes" ]; then
+    echo "cli.sh: no docker-in-docker volumes are left on $DIND."
+    return 0
+  fi
+  echo "These are the volumes docker-in-docker features kept on $DIND, the shared daemon:"
+  printf '%s\n' "$volumes" | sed 's/^/  /'
+  local answer
+  read -r -p "Type 'yes' to delete them: " answer
+  [ "$answer" = yes ] || { echo "cli.sh: nothing deleted."; return 1; }
+  for volume in $volumes; do
+    inner_docker volume rm "$volume" >/dev/null 2>&1 \
+      && echo "  removed $volume" \
+      || echo "  kept $volume: something still uses it ($(inner_docker ps -aq --filter "volume=$volume" | paste -sd, -))"
+  done
 }
 
 # Poll quietly, then print the verdict once -- a line per probe would bury it.
@@ -501,7 +719,11 @@ reset_inner() {
   fi
 
   echo "cli.sh: the inner daemon is still not answering after a full reset." >&2
-  echo "        Its own log is the next thing to read:  $0 logs $DIND_SERVICE" >&2
+  if [ "$DIND_KIND" = shared ]; then
+    echo "        Its own log is the next thing to read:  $0 logs $DIND_SERVICE" >&2
+  else
+    echo "        Its own log is the next thing to read:  docker logs $DIND" >&2
+  fi
   return 1
 }
 
@@ -548,36 +770,68 @@ editor_url() {
   fi
 }
 
-# VSCODE_PORT must not land inside the range dind publishes: both are published on
-# 127.0.0.1 on the same daemon, so they would fight over the same address. dind
-# starts first (vscode depends_on it), so the loser is the EDITOR -- and the
-# symptom is "the editor container is not running" long after the port numbers
-# have gone out of mind. Refuse before starting instead.
+# Before a start: does THIS Mac already listen on a port the target had last
+# time? Lima then forwards nothing for it, and never retries once the Mac lets
+# go (tests/probes/vm-loopback-forward.sh L6) -- so the URL would just not
+# answer. Said before the start, with the command that moves it. Only a start
+# is checked; every other op passes through untouched, and so does a target
+# with nothing saved yet.
+warn_if_the_mac_holds_saved_ports() {
+  local project="" worktree="" arg
+  while [ $# -gt 0 ]; do
+    arg=$1; shift
+    case "$arg" in
+      --stop|--ports|--purge|--list|--uncommitted|--populate|-h|--help) return 0 ;;
+      --worktree) worktree=${1:-}; shift ;;
+      --config|--branch) shift ;;
+      -*) ;;
+      *) project=$arg ;;
+    esac
+  done
+  [ -n "$project" ] && command -v lsof >/dev/null 2>&1 || return 0
+  local where=("$project"); [ -n "$worktree" ] && where+=(--worktree "$worktree")
+  docker exec "$ORCHESTRATOR" desolate-run --ports "${where[@]}" 2>/dev/null \
+    | awk '/-> http:\/\/127\.0\.0\.1:/ { label=$1; sub(/^container:/, "", label);
+                                          n=split($NF, a, ":"); print label, a[n] }' \
+    | while read -r label port; do
+        if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+          echo "cli.sh: WARNING -- something on this Mac already listens on $port ($label's port)." >&2
+          echo "        Lima will not forward it, so that URL will not answer. Move it:" >&2
+          echo "          ./cli.sh desolate --ports ${where[*]} --move $label <a free port>" >&2
+        fi
+      done
+}
+
+# The stack bind-mounts the ingress's two directories out of the VM, so they
+# must exist BEFORE compose runs -- or `up` dies with "bind source path does not
+# exist" and says nothing about why. They come with desolate-ingress, which a
+# VM provisioned before it does not have: install it first (--proxy-only, so
+# docker is not restarted), and refuse if that does not take.
+require_vm_ingress() {
+  [ "${DESOLATE_SKIP_VM_CHECK:-0}" = 1 ] && return 0
+  if vm test -d /run/desolate-ingress/ports && vm test -d /run/desolate-ingress/dinds \
+     && vm systemctl is-active --quiet desolate-ingress; then
+    return 0
+  fi
+  echo "cli.sh: the VM has no desolate-ingress yet (dev-server ports reach the Mac through it)."
+  echo "cli.sh: installing the VM proxy layer, which carries it..."
+  vm_install --proxy-only && vm test -d /run/desolate-ingress/ports \
+    && vm systemctl is-active --quiet desolate-ingress && return 0
+  echo "cli.sh: FAILED to install desolate-ingress -- see the installer output above." >&2
+  echo "        Fix it, then:  ./cli.sh vm install --proxy-only && ./cli.sh up" >&2
+  return 1
+}
+
+# A malformed VSCODE_PORT fails here, in words, rather than as a compose error.
 require_free_vscode_port() {
-  local port min max
+  local port
   port=$(vscode_port)
-  min=$(env_value DESOLATE_PORT_MIN); min=${min:-8080}
-  max=$(env_value DESOLATE_PORT_MAX); max=${max:-8119}
   case "$port" in
     ''|*[!0-9]*)
       echo "cli.sh: VSCODE_PORT='$port' is not a port number (1-65535)" >&2; exit 1 ;;
   esac
   if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
     echo "cli.sh: VSCODE_PORT=$port is out of range (1-65535)" >&2; exit 1
-  fi
-  if [ "$port" -ge "$min" ] && [ "$port" -le "$max" ]; then
-    cat >&2 <<EOF
-cli.sh: VSCODE_PORT=$port is inside DESOLATE_PORT_MIN..MAX ($min-$max).
-
-dind publishes that whole range on 127.0.0.1 for dev-server relays, and the
-editor would be publishing the same address -- they cannot both have it, and the
-editor is the one that loses (it starts after dind).
-
-Fix either side in $SCRIPT_DIR/.env, then './cli.sh up':
-  VSCODE_PORT=3000                       # outside $min-$max
-  DESOLATE_PORT_MIN / DESOLATE_PORT_MAX  # move the range instead
-EOF
-    exit 1
   fi
 }
 
@@ -670,6 +924,7 @@ case "$CMD" in
              require_matching_vm || exit 1
              require_sysbox
              require_free_vscode_port
+             require_vm_ingress || exit 1
              compose up -d --build "$@"
              ensure_vm_proxy || exit 1
              if [ -x "$SCRIPT_DIR/preflight.sh" ]; then "$SCRIPT_DIR/preflight.sh" || true; fi
@@ -681,7 +936,28 @@ case "$CMD" in
                echo "This DELETES all workspaces, settings and inner images."
                read -r -p "Type 'yes' to confirm: " a; [ "$a" = yes ] || exit 1
              fi
-             compose down "$@" ;;
+             compose down "$@"
+             # Project dinds are the supervisor's, not compose's, so compose
+             # cannot see them. Stopped and removed here with their bridges;
+             # their image stores (dind-data-*) stay unless -v, like compose's.
+             DINDS=$(docker ps -aq --filter label=desolate.dind)
+             if [ -n "$DINDS" ]; then
+               echo "cli.sh: removing $(echo "$DINDS" | wc -w | tr -d ' ') project dind(s)"
+               # shellcheck disable=SC2086
+               docker rm -f $DINDS >/dev/null
+             fi
+             for net in $(docker network ls -q --filter label=desolate.dind); do
+               docker network rm "$net" >/dev/null 2>&1 || echo "cli.sh: network $net still in use; left"
+             done
+             # Nothing the ingress forwards to is left, and a dind's address is
+             # one docker may hand a DIFFERENT dind next time: a stale entry
+             # would forward to it. So both directories go with the stack.
+             vm sudo sh -c 'rm -f /run/desolate-ingress/ports/* /run/desolate-ingress/dinds/*' 2>/dev/null \
+               || echo "cli.sh: could not clear the ingress's files in the VM; the supervisor prunes dinds/ when it starts"
+             if [ "${1:-}" = "-v" ]; then
+               # shellcheck disable=SC2046
+               docker volume rm $(docker volume ls -q --filter name='^dind-data-') >/dev/null 2>&1 || true
+             fi ;;
 
   build)     compose build "$@" ;;
 
@@ -698,6 +974,47 @@ case "$CMD" in
              fi
              reset_inner "$FLAG" ;;
 
+  dind)      # Project dinds (supervisor.ts drives them; this asks it). The
+             # shared daemon keeps its own commands: reset-inner, and --all.
+             SUB="${1:-list}"; shift || true
+             case "$SUB" in
+               list)
+                 require_supervisor
+                 supervisor list ;;
+               reset)
+                 require_supervisor
+                 select_project_dind "${1:?usage: cli.sh dind reset <project> [$RESET_DATA_ROOT_FLAG]}"
+                 FLAG="${2:-}"
+                 if [ -n "$FLAG" ] && ! data_root_reset_requested "$FLAG"; then
+                   echo "usage: cli.sh dind reset <project> [$RESET_DATA_ROOT_FLAG]" >&2
+                   exit 1
+                 fi
+                 require_dind
+                 require_classifier
+                 reset_inner "$FLAG" ;;
+               df)
+                 dind_df ;;
+               gc)
+                 # An if-chain, not a case: completion reads this dispatch's
+                 # case labels as subcommands, and these are flags.
+                 GC="${1:-}"
+                 if [ "$GC" = --orphans ]; then
+                   dind_running || { echo "cli.sh: $DIND is not running" >&2; exit 1; }
+                   gc_orphans
+                 elif [ "$GC" = --all ]; then
+                   while read -r NAME SOCKET; do
+                     [ -n "$NAME" ] && gc_daemon "$NAME" "$SOCKET"
+                   done < <(running_daemons)
+                 elif [ -z "$GC" ] || [ "${GC#-}" != "$GC" ]; then
+                   echo "usage: cli.sh dind gc {<project>|--all|--orphans}" >&2; exit 1
+                 else
+                   select_project_dind "$GC"
+                   dind_running || { echo "cli.sh: $DIND is not running; gc reads a running daemon" >&2; exit 1; }
+                   gc_daemon "$DIND" "${INNER_SOCKET#unix://}"
+                 fi ;;
+               *) echo "usage: cli.sh dind {list|reset <project> [$RESET_DATA_ROOT_FLAG]|df|gc {<project>|--all|--orphans}}" >&2; exit 1 ;;
+             esac ;;
+
   logs)      compose logs "${@:--f --tail=100}" ;;
   ps)        compose ps ;;
   preflight) exec "$SCRIPT_DIR/preflight.sh" ;;
@@ -710,11 +1027,49 @@ case "$CMD" in
              SUB="${1:-list}"; shift || true
              case "$SUB" in
                add)
-                 NAME="${1:?usage: cli.sh secret add NAME --hosts a.com,b.com}"; shift
-                 HOSTS=""
+                 NAME="${1:?usage: cli.sh secret add NAME --hosts a.com,b.com [--projects owner/repo,other] [--headers authorization]}"; shift
+                 HOSTS="" PROJECTS="" HEADERS=""
                  while [ $# -gt 0 ]; do
-                   case "$1" in --hosts) HOSTS="$2"; shift 2 ;; *) shift ;; esac
+                   case "$1" in
+                     --hosts) HOSTS="$2"; shift 2 ;;
+                     --projects) PROJECTS="${2:?--projects takes a comma-separated list}"; shift 2 ;;
+                     --headers) HEADERS="${2:?--headers takes a comma-separated list of header names}"; shift 2 ;;
+                     *) shift ;;
+                   esac
                  done
+                 # --headers confines substitution to those request headers:
+                 # never a body or URL, where a host that computes on what it
+                 # is sent (any LLM API) could hand the value back transformed
+                 # (addon.py "A SECRET CONFINED TO HEADERS"). Absent: anywhere.
+                 HEADERS_JSON=null
+                 if [ -n "$HEADERS" ]; then
+                   case ",$HEADERS," in *,,*)
+                     echo "cli.sh: --headers has an empty entry (a stray comma?)" >&2; exit 1 ;; esac
+                   IFS=, read -ra PARTS <<<"$HEADERS"
+                   HEADERS_JSON=""
+                   for H in "${PARTS[@]}"; do
+                     printf '%s' "$H" | grep -Eqx '[A-Za-z0-9][A-Za-z0-9-]*' \
+                       || { echo "cli.sh: --headers entry '$H' is not a header name" >&2; exit 1; }
+                     HEADERS_JSON="${HEADERS_JSON:+$HEADERS_JSON,}\"$(printf '%s' "$H" | tr 'A-Z' 'a-z')\""
+                   done
+                   HEADERS_JSON="[$HEADERS_JSON]"
+                 fi
+                 # --projects binds the secret to requests from those projects'
+                 # own daemons (addon.py "WHICH PROJECT"); absent, any source.
+                 PROJECTS_JSON=null
+                 if [ -n "$PROJECTS" ]; then
+                   case ",$PROJECTS," in *,,*)
+                     echo "cli.sh: --projects has an empty entry (a stray comma?)" >&2; exit 1 ;; esac
+                   # Split by `read`, which never globs: the list that is
+                   # validated is the list that is stored.
+                   IFS=, read -ra PARTS <<<"$PROJECTS"
+                   PROJECTS_JSON=""
+                   for P in "${PARTS[@]}"; do
+                     valid_project "$P" || { echo "cli.sh: --projects entry '$P' is not a project name (name or owner/name)" >&2; exit 1; }
+                     PROJECTS_JSON="${PROJECTS_JSON:+$PROJECTS_JSON,}\"$P\""
+                   done
+                   PROJECTS_JSON="[$PROJECTS_JSON]"
+                 fi
                  [ -n "$HOSTS" ] || { echo "cli.sh: --hosts is required (a secret with no allowlist is refused by the proxy)" >&2; exit 1; }
                  case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
                  # HOSTS is interpolated into a remote shell command via `colima ssh`,
@@ -739,8 +1094,16 @@ case "$CMD" in
                      exit 1; }
                  done
                  HOSTS_JSON=$(printf '%s' "$HOSTS" | awk -F, '{printf "["; for(i=1;i<=NF;i++){printf "%s\"%s\"", (i>1?",":""), $i}; printf "]"}')
-                 printf 'value for %s (input hidden): ' "$NAME" >&2
-                 stty -echo 2>/dev/null; IFS= read -r VALUE; stty echo 2>/dev/null; echo >&2
+                 # From a terminal, typed unseen; from a pipe (a script handing
+                 # over a token), read as it comes. Not `stty ... 2>/dev/null;`
+                 # alone: under set -e a failing stty, with no terminal to set,
+                 # ended the command with nothing said.
+                 if [ -t 0 ]; then
+                   printf 'value for %s (input hidden): ' "$NAME" >&2
+                   stty -echo; IFS= read -r VALUE || true; stty echo; echo >&2
+                 else
+                   IFS= read -r VALUE || true
+                 fi
                  [ -n "$VALUE" ] || { echo "cli.sh: empty value" >&2; exit 1; }
                  # `read -r` strips the trailing newline but KEEPS a carriage
                  # return, so a key pasted from anything CRLF-flavoured is stored
@@ -782,10 +1145,10 @@ case "$CMD" in
                      echo "        value, with the leftover characters glued on. Pick a name that" >&2
                      echo "        neither contains nor is contained by those." >&2
                      exit 1; }
-                   jq --arg n "$1" --arg v "$V" --argjson h "$2" \
-                      ".secrets[\$n] = {value: \$v, hosts: \$h}" "$F" > "$T" \
+                   jq --arg n "$1" --arg v "$V" --argjson h "$2" --argjson p "$4" --argjson c "$5" \
+                      ".secrets[\$n] = ({value: \$v, hosts: \$h} + (if \$p == null then {} else {projects: \$p} end) + (if \$c == null then {} else {headers: \$c} end))" "$F" > "$T" \
                      && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" \
-                     && echo "stored"' _ "$NAME" "$HOSTS_JSON" "$SECRET_COLLISION_JQ"
+                     && echo "stored"' _ "$NAME" "$HOSTS_JSON" "$SECRET_COLLISION_JQ" "$PROJECTS_JSON" "$HEADERS_JSON"
                  echo "Use it by putting the PLACEHOLDER in your devcontainer.json:"
                  echo "  \"containerEnv\": { \"YOUR_ENV_VAR\": \"$NAME\" }"
                  ;;
@@ -807,9 +1170,14 @@ case "$CMD" in
                    echo "  (no secrets stored yet)"
                  else
                    # Formatting happens HERE, on the Mac, where quoting is ours.
+                   # "  NAME  ->  hosts   [headers: h]   (only for: p, q)" -- the
+                   # scope last, which examples/factory/claude reads.
                    printf '%s\n' "$OUT" | awk -F'\t' '{
-                     hosts=$2; for (i=3; i<=NF; i++) hosts = hosts ", " $i
-                     printf "  %s  ->  %s\n", $1, hosts
+                     n = $2; m = $3; scope = ""; headers = ""; hosts = ""
+                     for (i = 4; i < 4 + n; i++) scope = scope (scope == "" ? "" : ", ") $i
+                     for (i = 4 + n; i < 4 + n + m; i++) headers = headers (headers == "" ? "" : ", ") $i
+                     for (i = 4 + n + m; i <= NF; i++) hosts = hosts (hosts == "" ? "" : ", ") $i
+                     printf "  %s  ->  %s%s%s\n", $1, hosts, (m > 0 ? "   [headers: " headers "]" : ""), (n > 0 ? "   (only for: " scope ")" : "")
                    }'
                  fi
                  ;;
@@ -828,7 +1196,7 @@ case "$CMD" in
                    jq --arg n "$1" "del(.secrets[\$n])" "$F" > "$T" \
                    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" && echo removed' _ "$NAME"
                  ;;
-               *) echo "usage: cli.sh secret {add NAME --hosts a,b | list | rm NAME [--force]}" >&2; exit 1 ;;
+               *) echo "usage: cli.sh secret {add NAME --hosts a,b [--projects p,q] [--headers h] | list | rm NAME [--force]}" >&2; exit 1 ;;
              esac ;;
 
   vm)        SUB="${1:-status}"; shift || true
@@ -862,7 +1230,18 @@ case "$CMD" in
   proxy)     SUB="${1:-status}"; shift || true
              case "$SUB" in
                status) colima ssh -p "$COLIMA_PROFILE" -- sudo systemctl --no-pager --plain status desolate-proxy | head -8 ;;
-               logs)   colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${1:-50}" --no-pager ;;
+               logs)   # --project <p>: only the AUDIT lines its own daemon's requests made.
+                       if [ "${1:-}" = --project ]; then
+                         P="${2:?usage: cli.sh proxy logs --project <project> [n]}"
+                         valid_project "$P" || { echo "cli.sh: '$P' is not a project name" >&2; exit 1; }
+                         N="${3:-50}"
+                         case "$N" in *[!0-9]*|"") echo "cli.sh: proxy logs --project takes a line count" >&2; exit 1 ;; esac
+                         # The last N of ITS lines, not its lines among the last N.
+                         colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "$(audit_window "$N")" --no-pager -o cat \
+                           | awk -v want=" project=$P" "$PROJECT_AUDIT_AWK" | tail -n "$N"
+                       else
+                         colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "${1:-50}" --no-pager
+                       fi ;;
                audit)  # What was contacted, and whether a secret went with it.
                        #
                        # Reads the AUDIT lines addon.py emits (one per request,
@@ -874,15 +1253,24 @@ case "$CMD" in
                        # in journald, which is not the 0600 file secrets are
                        # supposed to live in. Names only; that is the point of
                        # the column.
+                       #
+                       # --project <p> keeps the requests that came from that
+                       # project's own daemon (addon.py "WHICH PROJECT").
+                       ONLY=""
+                       if [ "${1:-}" = --project ]; then
+                         ONLY="${2:?usage: cli.sh proxy audit [--project <project>] [n]}"
+                         valid_project "$ONLY" || { echo "cli.sh: '$ONLY' is not a project name" >&2; exit 1; }
+                         shift 2
+                       fi
                        N="${1:-200}"
-                       case "$N" in *[!0-9]*) echo "cli.sh: proxy audit takes a line count" >&2; exit 1 ;; esac
+                       case "$N" in *[!0-9]*|"") echo "cli.sh: proxy audit takes a line count" >&2; exit 1 ;; esac
+                       # The last N requests, read from enough journal to hold them.
                        colima ssh -p "$COLIMA_PROFILE" -- \
-                         sudo journalctl -u desolate-proxy -n "$N" --no-pager -o cat \
-                       | grep -a "^AUDIT " \
-                       | sed -e 's/^AUDIT //' \
-                       | awk '
+                         sudo journalctl -u desolate-proxy -n "$(audit_window "$N")" --no-pager -o cat \
+                       | sed -nE "$AUDIT_FIELDS_SED" \
+                       | awk -v only="$ONLY" '
                            {
-                             verdict=""; method=""; host=""; path=""; secrets="";
+                             verdict=""; method=""; host=""; path=""; secrets=""; suspect=""; project="-";
                              for (i = 1; i <= NF; i++) {
                                split($i, kv, "=");
                                v = substr($i, index($i, "=") + 1);
@@ -891,11 +1279,17 @@ case "$CMD" in
                                else if (kv[1] == "host")  host = v;
                                else if (kv[1] == "path")  path = v;
                                else if (kv[1] == "secrets") secrets = v;
+                               else if (kv[1] == "suspect") suspect = v;
+                               else if (kv[1] == "project") project = v;
                              }
+                             if (only != "" && project != only) next;
                              if (secrets == "-") secrets = "";
-                             printf "%-14s %-6s %s%s%s\n", verdict, method, host, path,
-                                    (secrets == "" ? "" : "   <- " secrets);
-                           }'
+                             if (suspect == "-") suspect = "";
+                             printf "%-14s %-6s %-20s %s%s%s%s\n", verdict, method, project, host, path,
+                                    (secrets == "" ? "" : "   <- " secrets),
+                                    (suspect == "" ? "" : "   NOT substituted: " suspect);
+                           }' \
+                       | tail -n "$N"
                        ;;
                test)   ensure_running
                        # `with-ca` is load-bearing: the orchestrator trusts the
@@ -907,10 +1301,19 @@ case "$CMD" in
                        docker exec "$ORCHESTRATOR" with-ca sh -c \
                          'curl -s https://httpbin.org/headers -H "Authorization: Bearer DESOLATE-SELFTEST-PLACEHOLDER"' \
                          | grep -i authorization || echo "   (no response -- is the proxy up?)"
-                       echo "-- leak detection (expects 403):"
+                       # Since #12 the placeholder goes out unsubstituted rather
+                       # than being refused, so the evidence is the audit line.
+                       echo "-- leak detection (expects the placeholder passed UNSUBSTITUTED, audited LEAK-SUSPECT):"
+                       # A path no earlier run used, so a stale line cannot answer.
+                       MARK="desolate-proxy-test-$(date +%s)-$$"
                        docker exec "$ORCHESTRATOR" with-ca sh -c \
-                         'curl -s -o /dev/null -w "%{http_code}\n" https://example.com -H "X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER"' ;;
-               *) echo "usage: cli.sh proxy {status|logs [n]|test}" >&2; exit 1 ;;
+                         "curl -s -o /dev/null -w '   HTTP %{http_code}\n' https://example.com/$MARK -H 'X-Exfil: DESOLATE-SELFTEST-PLACEHOLDER'"
+                       sleep 1
+                       colima ssh -p "$COLIMA_PROFILE" -- \
+                         sudo journalctl -u desolate-proxy --since -2min --no-pager -o cat \
+                       | leak_suspect_line "$MARK" \
+                       | sed 's/^/   /' | grep . || echo "   (no LEAK-SUSPECT line -- leak detection is NOT live)" ;;
+               *) echo "usage: cli.sh proxy {status|logs [--project <p>] [n]|audit [--project <p>] [n]|test}" >&2; exit 1 ;;
              esac ;;
 
   repo)      ensure_running
@@ -946,31 +1349,148 @@ case "$CMD" in
              esac ;;
 
   worktree)  ensure_running
-             # `git worktree add` fires the repository's own hooks, so it runs
-             # in the EDITOR container, which already executes project content.
-             # The orchestrator holds the inner Docker socket and must never.
+             # Creating and removing one runs git in the worktree's sandbox,
+             # which the orchestrator starts and which mounts only its project
+             # -- never in the editor, which reaches every project
+             # (worktrees.ts). `list` runs hardened git in the editor; `add`
+             # asks the broker from there, as the editor's own `worktree` does.
              SUB="${1:-list}"; shift || true
              case "$SUB" in
                list|add)
-                 exec docker exec "${TTY[@]}" "$CONTAINER" worktree "$SUB" "$@" ;;
+                 exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" worktree "$SUB" "$@" ;;
                remove)
-                 PROJ="${1:?usage: cli.sh worktree remove <project> <name>}"
-                 NAME="${2:?usage: cli.sh worktree remove <project> <name>}"
-                 # Order matters and neither half can do the other's job: the
-                 # container and its volumes live on the inner daemon (the
-                 # orchestrator's side), the worktree itself is git (the
-                 # editor's side). Purge first -- once git has removed the
-                 # directory there is nothing left to identify the container by.
-                 docker exec "$ORCHESTRATOR" desolate-run --purge --worktree "$NAME" "$PROJ" || exit 1
-                 exec docker exec "${TTY[@]}" "$CONTAINER" worktree remove "$PROJ" "$NAME" ;;
-               *) echo "usage: cli.sh worktree {list <project>|add <project> <name> [<branch>]|remove <project> <name>}" >&2; exit 1 ;;
+                 PROJ="${1:?usage: cli.sh worktree remove <project> <name> [--force]}"
+                 NAME="${2:?usage: cli.sh worktree remove <project> <name> [--force]}"
+                 case "${3:-}" in
+                   "") REMOVE=(--remove-worktree) ;;
+                   --force) REMOVE=(--remove-worktree --force) ;;
+                   *) echo "usage: cli.sh worktree remove <project> <name> [--force]" >&2; exit 1 ;;
+                 esac
+                 # Root-owned output first (#15): neither the check below nor
+                 # git can read or delete what a container left as root. Its
+                 # failure is said, not fatal -- the removal then says why.
+                 docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim --worktree "$NAME" "$PROJ" \
+                   || echo "cli.sh: could not reclaim root-owned files in $PROJ@$NAME; the removal may refuse them" >&2
+                 # Refused if anything in it would be lost (asked in its
+                 # sandbox) unless --force; then purged, then removed.
+                 exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run "${REMOVE[@]}" --worktree "$NAME" "$PROJ" ;;
+               *) echo "usage: cli.sh worktree {list <project>|add <project> <name> [<branch>]|remove <project> <name> [--force]}" >&2; exit 1 ;;
              esac ;;
 
+  reclaim)   ensure_running
+             # Files a container wrote as root, given back to the editor (#15).
+             # The path is relative to the project and refused if it leaves it
+             # (args.ts, then desolate.ts against the real directory).
+             PROJ="${1:?usage: cli.sh reclaim <project> [<path inside it>]}"
+             if [ -n "${2:-}" ]; then
+               exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim --path "$2" "$PROJ"
+             fi
+             exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --reclaim "$PROJ" ;;
+
+  push|pull) ensure_running
+             # Done in the editor, where the deploy keys are -- and never as the
+             # project's own git, which would run its hooks and config there
+             # (transfer.ts). The same as `desolate --push` in its terminal.
+             exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$CONTAINER" desolate "--$CMD" "$@" ;;
+
+  suede)     ensure_running
+             # A project's suede dependencies (docs/suede-factory.md). The
+             # Mac's: the editor's desolate and its panel do not offer these,
+             # and the dependency is always named here, never read from the
+             # project. The project's git runs in its sandbox (orchestrator);
+             # keys and caches are the editor's.
+             SUB="${1:-}"; shift || true
+             SUEDE_USAGE="usage: cli.sh suede {deliver <project> <owner/repo> | report <project> [--ref <ref>] | upstream <project> <dir> [--ref <ref>]}"
+             case "$SUB" in
+               deliver)
+                 [ $# -eq 2 ] || { echo "$SUEDE_USAGE" >&2; exit 1; }
+                 exec docker exec -e DESOLATE_PLANE=mac "$CONTAINER" with-ca tsx /usr/local/lib/desolate/suede.ts deliver "$1" "$2" ;;
+               report)
+                 PROJ="${1:?$SUEDE_USAGE}"; shift
+                 exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --suede-report "$@" "$PROJ" ;;
+               upstream)
+                 PROJ="${1:?$SUEDE_USAGE}"; DIR="${2:?$SUEDE_USAGE}"; shift 2
+                 NAME="desolate-transfer-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n').bundle"
+                 OUT=$(docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --suede-build "$DIR" --transfer "$NAME" "$@" "$PROJ") \
+                   || { printf '%s\n' "$OUT" >&2; exit 1; }
+                 LINE=$(printf '%s\n' "$OUT" | grep '^BUILT ' | tail -n 1)
+                 [ -n "$LINE" ] || { printf '%s\n' "$OUT" >&2; echo "cli.sh: the sandbox said nothing of a proposal" >&2; exit 1; }
+                 if [ "$LINE" = "BUILT none" ]; then echo "UPSTREAMED none"; exit 0; fi
+                 read -r _ COMMIT PIN TAG CONSUMER PATCH _ <<< "$LINE"
+                 case "$TAG" in *__*) DEP="${TAG%%__*}/${TAG#*__}" ;; *) echo "cli.sh: $DIR's remote names no owner/repo" >&2; exit 1 ;; esac
+                 SAID=$(docker exec -e DESOLATE_PLANE=mac "$CONTAINER" with-ca tsx /usr/local/lib/desolate/suede.ts upstream \
+                          "$PROJ" "$DEP" "$NAME" "$COMMIT" "$PIN" "$CONSUMER") || { printf '%s\n' "$SAID" >&2; exit 1; }
+                 BRANCH=$(printf '%s\n' "$SAID" | sed -n 's/^UPSTREAMED //p')
+                 echo "UPSTREAMED $DEP $BRANCH $COMMIT $PATCH" ;;
+               *) echo "$SUEDE_USAGE" >&2; exit 1 ;;
+             esac ;;
+
+  exec)      ensure_running
+             # A command in a running target's devcontainer, as its user -- how
+             # a harness on this Mac starts an agent (docs/agents.md). The
+             # Mac's alone: the editor has no way into a devcontainer.
+             PROJ="${1:?usage: cli.sh exec <project> [--worktree <name>] -- <command...>}"; shift
+             WT=()
+             if [ "${1:-}" = --worktree ]; then
+               WT=(--worktree "${2:?--worktree takes a name}"); shift 2
+             fi
+             [ "${1:-}" = -- ] && shift
+             [ $# -gt 0 ] || { echo "usage: cli.sh exec <project> [--worktree <name>] -- <command...>" >&2; exit 1; }
+             exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --exec ${WT[@]+"${WT[@]}"} "$PROJ" -- "$@" ;;
+
+  export)    ensure_running
+             # Getting files out (#13). /workspaces is one volume the editor
+             # mounts, and the editor runs on the daemon this Mac's docker CLI
+             # already talks to -- so `docker cp` from it reads the same bytes
+             # every devcontainer sees, with no inner daemon involved.
+             PROJ="${1:?usage: cli.sh export <project> [<path inside it>]}"
+             REL="${2:-.}"
+             export_explain() {
+               case "$1" in
+                 0) return 0 ;;
+                 2) echo "cli.sh: no such project: $PROJ" >&2 ;;
+                 3) echo "cli.sh: no such path in $PROJ: $REL" >&2 ;;
+                 4) echo "cli.sh: '$REL' resolves outside $PROJ (a symlink?); refusing" >&2 ;;
+                 *) echo "cli.sh: could not export '$REL' from the editor container (exit $1)" >&2 ;;
+               esac
+               exit 1
+             }
+             if [ ! -t 1 ]; then
+               # A tar stream, so a pipe or a redirect gets something binary-clean:
+               #   ./cli.sh export acme/widgets dist > dist.tar
+               set +e
+               docker exec "$CONTAINER" with-ca sh -c "$EXPORT_TAR_SH" sh /workspaces "$PROJ" "$REL"
+               export_explain $?
+               exit 0
+             fi
+             # On a terminal: unpack beside you, never over something already there.
+             # Into a fresh directory first, so the name is the archive's own.
+             STAGE=$(mktemp -d ./.desolate-export.XXXXXX)
+             trap 'rm -rf "$STAGE"' EXIT
+             set +e
+             docker exec "$CONTAINER" with-ca sh -c "$EXPORT_TAR_SH" sh /workspaces "$PROJ" "$REL" \
+               | tar -xf - -C "$STAGE"
+             WHY=("${PIPESTATUS[@]}")
+             set -e
+             export_explain "${WHY[0]}"
+             [ "${WHY[1]}" = 0 ] || { echo "cli.sh: could not unpack the export" >&2; exit 1; }
+             NAME=$(ls -A "$STAGE")
+             [ -e "./$NAME" ] && { echo "cli.sh: ./$NAME already exists; refusing to overwrite it" >&2; exit 1; }
+             mv "$STAGE/$NAME" "./$NAME"
+             echo "cli.sh: exported $PROJ/${REL#./} to ./$NAME" ;;
+
   desolate)  ensure_running
+             # Statuses are files in each target's git dir; the editor reads
+             # them (status.ts), strictly, with no more reach than it has.
+             if [ "${1:-}" = --status ]; then
+               exec docker exec -e DESOLATE_PLANE=mac "$CONTAINER" desolate "$@"
+             fi
+             warn_if_the_mac_holds_saved_ports "$@"
              # From the Mac we use the DIRECT runner in the orchestrator (the
              # Mac is already trusted). Inside the editor, `desolate` is a
-             # broker client -- the editor has no daemon access.
-             exec docker exec "${TTY[@]}" "$ORCHESTRATOR" desolate-run "$@" ;;
+             # broker client -- the editor has no daemon access. DESOLATE_PLANE
+             # makes the follow-up commands it prints the Mac's spelling (#9).
+             exec docker exec "${TTY[@]}" -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run "$@" ;;
 
   shell|bash) ensure_running
              # with-ca, because `docker exec` inherits NOTHING the entrypoint

@@ -1,6 +1,6 @@
 # Run from INSIDE the devcontainer's terminal:
 #   cd /workspaces/sample-fastapi
-#   /desolate-ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim   # once
+#   /desolate/ca/trust-proxy-in-builds.sh --service api --image python:3.12-slim   # once
 #   docker compose up --build
 #
 # That first line derives a base image trusting the egress proxy's CA and writes
