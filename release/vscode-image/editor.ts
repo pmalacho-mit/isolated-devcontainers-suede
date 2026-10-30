@@ -79,9 +79,21 @@ export class EditorScriptError extends Error {}
  */
 const MACHINE_SETTINGS = "data/Machine/settings.json";
 
-/** In the file, so the "nothing declared any more" path can tell a file
- *  desolate wrote from one somebody else did, and only remove its own. */
+/** In the file, so whoever opens it can tell where it came from. */
 const SETTINGS_MARKER = "Managed by desolate";
+
+/**
+ * What every devcontainer's editor gets unless its project says otherwise:
+ * written with the project's settings, at Machine scope, beneath them -- so a
+ * project's `customizations.*.settings` can set any of these back.
+ */
+export const EDITOR_DEFAULT_SETTINGS: Record<string, JSONValue> = {
+  // A terminal whose program has the mouse -- tmux, and Claude Code inside it,
+  // as an agent's worktree runs them -- takes a drag for that program: nothing
+  // is selected, and copying says "The terminal has no selection to copy". On
+  // a Mac, Option+drag then makes the terminal's own selection -- with this on.
+  "terminal.integrated.macOptionClickForcesSelection": true,
+};
 
 /** Quoted, so the shell expands NOTHING between the markers: a project's
  *  settings are data, and no value in them can become code. Safe only while no
@@ -89,18 +101,14 @@ const SETTINGS_MARKER = "Managed by desolate";
 const SETTINGS_HEREDOC = "__DESOLATE_SETTINGS_EOF__";
 
 /**
- * Put the project's settings in place -- or take desolate's own file away when
- * it stops declaring any, so that deleting the key from devcontainer.json is
- * something that can be seen to have worked.
+ * Put desolate's defaults and the project's settings in place, the whole file
+ * rewritten at every start -- so a setting deleted from devcontainer.json is
+ * gone at the next start, which can be seen to have worked.
  *
  * @throws EditorScriptError if the serialized JSON could close the heredoc.
  */
 const settingsScript = (settings: Record<string, JSONValue>) => {
   const file = `"$DATA"/${MACHINE_SETTINGS}`;
-
-  if (!Object.keys(settings).length)
-    return `
-if [ -f ${file} ] && grep -q '${SETTINGS_MARKER}' ${file}; then rm -f ${file}; fi`;
 
   // JSON.stringify escapes newlines inside strings, so a line here is always
   // JSON syntax and never a bare word -- but the whole safety of the quoting
@@ -116,9 +124,10 @@ if [ -f ${file} ] && grep -q '${SETTINGS_MARKER}' ${file}; then rm -f ${file}; f
   return `
 mkdir -p "$DATA"/data/Machine
 cat > ${file} <<'${SETTINGS_HEREDOC}'
-// ${SETTINGS_MARKER}: customizations.*.settings, from devcontainer.json.
-// Rewritten on every start. Put settings of your OWN in User settings; this is
-// the Machine scope, which sits above User and below the workspace's .vscode/.
+// ${SETTINGS_MARKER}: its defaults, then customizations.*.settings from
+// devcontainer.json, which win. Rewritten on every start. Put settings of your
+// OWN in User settings; this is the Machine scope, which sits above User and
+// below the workspace's .vscode/.
 ${json}
 ${SETTINGS_HEREDOC}`;
 };
@@ -265,7 +274,7 @@ if [ ! -x "$SRV" ]; then
   echo 'desolate: server not found in container -- is the base image glibc (Debian/Ubuntu)?' >&2
   exit 1
 fi
-${settingsScript(settings)}
+${settingsScript({ ...EDITOR_DEFAULT_SETTINGS, ...settings })}
 for e in ${extensions.map((e) => `'${e}'`).join(" ")}; do
   "$SRV" --install-extension "$e" \\
       --extensions-dir "$DATA/extensions" --server-data-dir "$DATA" \\

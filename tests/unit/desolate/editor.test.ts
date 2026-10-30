@@ -194,20 +194,23 @@ describe("customizations.*.settings, applied", () => {
     assert.equal(closes.length, 1, "the heredoc is closed more than once");
   });
 
-  test("declaring none REMOVES the file, so deleting the key is visible", () => {
-    // A project that drops the key would otherwise keep the settings it no
-    // longer declares, forever, with nothing to point at.
+  test("declaring none leaves desolate's defaults alone: a dropped setting does not linger", () => {
+    // The whole file is rewritten at every start, so a project that drops a
+    // setting has it gone at the next one.
     const none = script();
-    assert.match(none, /grep -q 'Managed by desolate'/);
-    assert.match(none, /rm -f "\$DATA"\/data\/Machine\/settings\.json/);
-    assert.doesNotMatch(none, /cat > "\$DATA"\/data\/Machine/);
+    assert.match(none, /cat > "\$DATA"\/data\/Machine\/settings\.json/);
+    assert.ok(none.includes('"terminal.integrated.macOptionClickForcesSelection": true'));
+    assert.ok(!none.includes("editor.tabSize"));
+    assert.ok(script([], TOKEN, settings).includes("Managed by desolate"));
   });
 
-  test("...and only a file desolate wrote is removed", () => {
-    // The removal is guarded by the marker desolate puts IN the file, so a
-    // Machine settings file somebody else created is never deleted.
-    assert.ok(script([], TOKEN, settings).includes("Managed by desolate"));
-    assert.match(script(), /if \[ -f .* \] && grep -q 'Managed by desolate'/);
+  test("desolate's defaults are beneath the project's: a project sets them back", () => {
+    // Option+drag selects in a terminal whose program has the mouse -- tmux,
+    // Claude inside it -- which nothing else lets you copy from on a Mac.
+    assert.ok(script([], TOKEN, settings).includes('"terminal.integrated.macOptionClickForcesSelection": true'));
+    const off = script([], TOKEN, { "terminal.integrated.macOptionClickForcesSelection": false });
+    assert.ok(off.includes('"terminal.integrated.macOptionClickForcesSelection": false'));
+    assert.ok(!off.includes('"terminal.integrated.macOptionClickForcesSelection": true'));
   });
 });
 

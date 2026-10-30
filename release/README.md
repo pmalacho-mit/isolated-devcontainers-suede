@@ -901,8 +901,16 @@ own Dev Containers extension uses. The precedence is therefore the familiar one:
 your own User settings lose to the project's, and the project's lose to a
 `.vscode/settings.json` committed in the repo. The file is rewritten on every
 start and carries a `Managed by desolate` header, so edit it and your changes go
-away -- put personal preferences in User settings instead. Removing the key from
-`devcontainer.json` removes the file, so turning a setting off works too.
+away -- put personal preferences in User settings instead. Removing a setting
+from `devcontainer.json` removes it at the next start, so turning one off works too.
+
+Beneath the project's settings, desolate adds one default of its own:
+`terminal.integrated.macOptionClickForcesSelection: true`. A program that has the
+mouse -- tmux, and Claude Code inside it, as an agent's worktree runs them -- takes
+a drag for itself, so nothing gets selected and copying says "The terminal has no
+selection to copy". With this on, **Option+drag** on a Mac makes the terminal's
+own selection, which ⌘C copies. (It costs Option+drag's column selection in the
+terminal; a project that wants that back sets it to `false`.)
 
 Two limits worth knowing. Settings whose scope VS Code defines as
 `application` (a small set, e.g. `update.mode`) cannot be set at Machine scope
