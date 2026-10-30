@@ -3,7 +3,8 @@
 # `gh` and `cli.sh`: --all over the stack's projects, an issue whose marker
 # names an existing PR's branch, and what green and gray do with it; a PR you
 # opened yourself, issues that cannot be read, and worktrees of closed issues;
-# a target busy or not answering yet, and a ^C mid-start.
+# a target busy or not answering yet, and a ^C mid-start; what counts toward
+# --max-agents -- an agent whose worktree runs.
 #
 # The stand-ins answer from files in $STUB_DIR, and record every call; the
 # dispatcher's agent is `true`, so nothing starts.
@@ -39,15 +40,25 @@ cat > "$STUB/bin/cli" <<'EOF'
 printf 'cli %s\n' "$*" >> "$STUB_DIR/calls"
 case "$1 $2" in
   "desolate --status") cat "$STUB_DIR/statuses" ;;
-  "desolate --list") echo '[]' ;;
+  "desolate --list")
+    [ ! -e "$STUB_DIR/list-fails" ] || { echo "desolate: cannot reach the daemon" >&2; exit 1; }
+    jq -cRn '[inputs | select(length > 0) | split(" ") | {project: .[0], worktree: .[1]}]' < "$STUB_DIR/running" ;;
   "worktree remove") [ ! -e "$STUB_DIR/remove-fails" ] || { echo "desolate: issue-3 has uncommitted changes" >&2; exit 1; } ;;
   "desolate acme/app")
     [ ! -e "$STUB_DIR/start-busy" ] || exit 75
     [ ! -e "$STUB_DIR/start-slow" ] || sleep 30 ;;
   "exec acme/app") [ ! -e "$STUB_DIR/exec-fails" ] || exit 1 ;;
 esac
+# What runs: a start of a worktree adds it, its --stop takes it away.
+if [ "$1" = desolate ] && [ "${3:-}" = --worktree ]; then
+  case "${5:-}" in
+    "") echo "$2 $4" >> "$STUB_DIR/running" ;;
+    --stop) grep -vxF "$2 $4" "$STUB_DIR/running" > "$STUB_DIR/running.new"; mv "$STUB_DIR/running.new" "$STUB_DIR/running" ;;
+  esac
+fi
 exit 0
 EOF
+: > "$STUB/running"
 chmod +x "$STUB/bin/gh" "$STUB/bin/cli"
 
 MARKER='<!-- desolate-dispatch: {"branch":"downstream/acme/app-aaaa","start":"origin/downstream/acme/app-aaaa","fetch":true,"pr":12} -->'
@@ -147,7 +158,7 @@ assert_contains "  and its agent no longer counts" "$(ls "$STUB/state/acme__widg
 echo '[{"number":3,"title":"Plain work","body":"do it"}]' > "$STUB/app-issues"
 
 group "--max-agents: no more agents start while that many are working"
-rm -rf "$STUB/state"; mkdir -p "$STUB/state"
+rm -rf "$STUB/state"; mkdir -p "$STUB/state"; : > "$STUB/running"
 jq -n --arg body "x" '[{number: 7, title: "a", body: $body}]' > "$STUB/widget-issues"
 statuses "" ""
 : > "$STUB/calls"
@@ -164,7 +175,7 @@ tick
 assert_contains "a pr that is no number is no pr: the worktree gets issue/8" "$(cat "$STUB/calls")" "cli worktree add acme/widget issue-8 issue/8"
 
 group "a target being started already, or not answering yet: the agent waits"
-rm -rf "$STUB/state"; mkdir -p "$STUB/state"
+rm -rf "$STUB/state"; mkdir -p "$STUB/state"; : > "$STUB/running"
 echo '[]' > "$STUB/widget-issues"; echo '[{"number":3,"title":"Plain work","body":"do it"}]' > "$STUB/app-issues"
 statuses "" ""
 touch "$STUB/start-busy"
@@ -182,7 +193,7 @@ assert_contains "  and the agent starts" "$(ls "$STUB/state/acme__app")" "issue-
 
 group "a ^C mid-start stops it cleanly, and says the start goes on"
 if command -v setsid >/dev/null; then
-  rm -rf "$STUB/state"; mkdir -p "$STUB/state"; touch "$STUB/start-slow"; : > "$STUB/calls"
+  rm -rf "$STUB/state"; mkdir -p "$STUB/state"; : > "$STUB/running"; touch "$STUB/start-slow"; : > "$STUB/calls"
   # Its own process group, as a terminal's foreground job is: a ^C reaches
   # the dispatcher and the command it is waiting on alike. TERM, which the trap
   # takes as it takes INT: a background job here starts with INT ignored.
@@ -199,5 +210,39 @@ if command -v setsid >/dev/null; then
 else
   skip "a ^C mid-start" "no setsid"
 fi
+
+group "a worktree you stopped is not working: its place is free, and it is not started again"
+rm -rf "$STUB/state"; mkdir -p "$STUB/state"; : > "$STUB/running"
+echo '[{"number":3,"title":"Plain work","body":"do it"}]' > "$STUB/app-issues"
+jq -n '[{number: 7, title: "a", body: "x"}]' > "$STUB/widget-issues"
+statuses "" ""
+capped() { # <max agents>
+  : > "$STUB/calls"
+  PATH="$STUB/bin:$PATH" DESOLATE_CLI="$STUB/bin/cli" FACTORY_STATE="$STUB/state" FACTORY_AGENT=true \
+    bash "$ROOT/examples/factory/gh-dispatcher.sh" --all --once --max-agents "$1" </dev/null > "$STUB/out" 2>&1
+}
+capped 1
+assert_contains "issue-3 runs, so #7 waits" "$(cat "$STUB/out")" "#7: waiting -- 1 agents are working"
+# Its PR waits to be merged: you stop its worktree, from the panel.
+STUB_DIR="$STUB" "$STUB/bin/cli" desolate acme/app --worktree issue-3 --stop
+capped 1
+assert_contains "stopped, its place is #7's" "$(cat "$STUB/calls")" "cli worktree add acme/widget issue-7"
+assert_not_contains "  and issue-3 is not started again behind your back" "$(cat "$STUB/calls")" "cli desolate acme/app --worktree issue-3"
+assert_contains "  its agent is still the dispatcher's, for when its issue closes" "$(ls "$STUB/state/acme__app")" "issue-3.agent"
+
+group "what runs could not be read: every agent counts"
+jq -n '[{number: 7, title: "a", body: "x"}, {number: 9, title: "b", body: "y"}]' > "$STUB/widget-issues"
+touch "$STUB/list-fails"
+capped 2
+assert_contains "a failed read lifts no cap: #9 waits" "$(cat "$STUB/out")" "#9: waiting -- 2 agents are working"
+rm -f "$STUB/list-fails"
+capped 2
+assert_contains "read again, only #7 runs: #9 starts" "$(cat "$STUB/calls")" "cli worktree add acme/widget issue-9"
+
+group "another project's worktree of the same name is not this one's"
+rm -rf "$STUB/state"; mkdir -p "$STUB/state"; echo "acme/widget issue-3" > "$STUB/running"
+echo '[{"number":3,"title":"Plain work","body":"do it"}]' > "$STUB/app-issues"; echo '[]' > "$STUB/widget-issues"
+tick
+assert_contains "acme/app's issue-3 is started, though acme/widget's runs" "$(cat "$STUB/calls")" "cli desolate acme/app --worktree issue-3"
 
 summary

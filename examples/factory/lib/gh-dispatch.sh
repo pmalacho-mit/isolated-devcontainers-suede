@@ -26,7 +26,10 @@
 #   3. no agent started here yet, and the target answers (`cli.sh exec -- true`):
 #      agent_start, with the issue as its task and desolate-status as its voice
 #      -- unless --max-agents (default 3) are already working, across every
-#      project: then it waits a tick;
+#      project: then it waits a tick. Working is started here, on an open
+#      issue, with its worktree running: stop a worktree (its PR waits to be
+#      merged, say) and its place is free; start it again, and
+#      `claude-helper.sh resume`, to carry on;
 #   4. its status (`cli.sh desolate --status --json`):
 #        the agent's own access broken (agent_blocked: a failed login, say) --
 #                       you are told, here and by a notification, and asked to
@@ -222,7 +225,7 @@ dispatch_tick() {
 
     if [ ! -e "$STATE/$name.agent" ]; then
       [ -n "$can_start" ] || continue
-      if [ "$(working_agents)" -ge "$MAX_AGENTS" ]; then
+      if [ "$(working_agents "$running")" -ge "$MAX_AGENTS" ]; then
         log "#$n: waiting -- $MAX_AGENTS agents are working (--max-agents)"
         continue
       fi
@@ -233,7 +236,8 @@ dispatch_tick() {
         log "#$n: a worktree on $branch"
         "$CLI" worktree add "$PROJECT" "$name" "$branch" ${start:+"$start"} || { log "#$n: worktree add failed"; continue; }
       fi
-      if ! jq -e --arg w "$name" 'any(.[]?; .worktree == $w)' <<< "${running:-[]}" >/dev/null; then
+      # This project's: what runs is every project's, and issue numbers repeat.
+      if ! jq -e --arg p "$PROJECT" --arg w "$name" 'any(.[]?; .project == $p and .worktree == $w)' <<< "${running:-[]}" >/dev/null; then
         log "#$n: starting it"
         local code=0
         "$CLI" desolate "$PROJECT" --worktree "$name" </dev/null || code=$?
@@ -323,13 +327,21 @@ dispatch_project() { # <project> <repo>
   dispatch_tick || log "$PROJECT: tick failed; trying again next time"
 }
 
-# Agents this has started that are still on an open issue: an .agent file is
-# moved aside once its issue closes -- .done when its worktree is removed or
-# gone, .kept when the worktree was left to you.
-working_agents() {
-  local count=0 file
+# Agents this has started that are working: an .agent file -- moved aside once
+# its issue closes, .done when its worktree is removed or gone, .kept when the
+# worktree was left to you -- whose worktree runs. One you stopped (its PR
+# waits to be merged) does not count until it runs again. When what runs could
+# not be read, every agent counts: a cap is not lifted by a failed read.
+working_agents() { # <what runs, as `desolate --list --json` prints it>
+  local count=0 file project known=""
+  jq -e 'type == "array"' <<< "${1:-}" >/dev/null 2>&1 && known=1
   for file in "${FACTORY_STATE:-$HOME/.local/state/desolate-factory}"/*/issue-*.agent; do
-    [ -e "$file" ] && count=$((count + 1))
+    [ -e "$file" ] || continue
+    project=$(basename "$(dirname "$file")"); project=${project//__//}
+    if [ -z "$known" ] || jq -e --arg p "$project" --arg w "$(basename "$file" .agent)" \
+         'any(.[]; .project == $p and .worktree == $w)' <<< "$1" >/dev/null; then
+      count=$((count + 1))
+    fi
   done
   echo "$count"
 }

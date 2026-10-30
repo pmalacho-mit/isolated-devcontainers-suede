@@ -135,4 +135,10 @@ examples/factory/suede/suede-factory.sh run
 examples/factory/suede/suede-factory.sh sync acme/app               # ask for syncs by hand
 ```
 
+**`--max-agents` counts agents whose worktree runs.** An agent is the dispatcher's until its issue closes, which stops and removes the worktree. Done with one for now, but not ready to merge its PR? Stop its worktree (the panel's Stop, or `./cli.sh desolate --stop <project> --worktree issue-<n>`) and its place goes to the next issue. The dispatcher won't start it again. To carry on with it later, start it from the panel, then:
+
+```bash
+examples/factory/claude/claude-helper.sh resume <owner/repo> --worktree issue-<n>    # the same conversation: a stopped container keeps its files
+```
+
 More: `docs/agents.md` (desolate's primitives), `docs/suede-factory.md` (the suede side, with examples).
