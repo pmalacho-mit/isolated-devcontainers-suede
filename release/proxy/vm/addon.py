@@ -644,17 +644,38 @@ class DesolateProxy:
                 or address.is_reserved or address.is_unspecified)
 
     @staticmethod
-    def host_header(flow):
-        """The Host / :authority the client CLAIMED, minus any port. Untrusted."""
-        raw = flow.request.host_header
-        if not raw:
-            return None
+    def _without_port(raw):
         raw = raw.strip()
         if raw.startswith("["):                 # [::1]:443
             return raw.split("]", 1)[0][1:].lower()
         if raw.count(":") == 1:                 # host:port (never a bare IPv6)
             raw = raw.rsplit(":", 1)[0]
         return raw.lower()
+
+    @classmethod
+    def host_header(cls, flow):
+        """The Host / :authority the client CLAIMED, minus any port. Untrusted."""
+        raw = flow.request.host_header
+        if not raw:
+            return None
+        return cls._without_port(raw)
+
+    @classmethod
+    def claimed_names(cls, flow):
+        """EVERY name the request claims as its destination, minus ports: the
+        request target's authority (HTTP/2 :authority, or an HTTP/1 request
+        written in absolute form) and each Host header there is. mitmproxy's
+        host_header is one of these -- :authority when there is one, else the
+        first Host -- and a front end serving many names behind one
+        certificate may route by another. Untrusted, every one."""
+        names = []
+        authority = getattr(flow.request, "authority", "") or ""
+        if authority.strip():
+            names.append(cls._without_port(authority))
+        for value in flow.request.headers.get_all("host"):
+            if value and value.strip():
+                names.append(cls._without_port(value))
+        return names
 
     def _network_allowed(self, host, method, project=None):
         for rule in self.network:
@@ -805,6 +826,21 @@ class DesolateProxy:
                             f"Host header '{claimed}' does not match the TLS destination "
                             f"'{proven}'; refusing to substitute a secret")
                 return
+            # And every OTHER name the request carries: a second Host header,
+            # or an :authority / absolute-form target that disagrees with the
+            # Host. `claimed` is whichever of those mitmproxy prefers; a front
+            # end behind the proven certificate may route by the other, and
+            # the secret would go where the SNI did not prove.
+            claims = self.claimed_names(flow)
+            hosts = flow.request.headers.get_all("host")
+            if len(hosts) > 1 or any(name != proven for name in claims):
+                log.warning(f"LEAK  request names {sorted(set(claims))} as its destination "
+                            f"({len(hosts)} Host header(s)), TLS SNI is {proven!r}, "
+                            f"while carrying {sorted(found)} -- blocked")
+                self._block(flow, 403,
+                            f"the request names {sorted(set(claims))} as its destination, "
+                            f"not only the TLS destination '{proven}'; refusing to substitute a secret")
+                return
         # A placeholder toward a host its allowlist does not cover is not
         # refused: nothing secret is in flight, only a name. It goes out as
         # written -- never substituted, which is the bound -- and is recorded.
@@ -917,11 +953,18 @@ class DesolateProxy:
         # confirms a hit by comparing the whole encoded body.
         body = self.decoded_body(flow.response)
         scrubbed = body
+        trailers = getattr(flow.response, "trailers", None)
         for name, entry in self._real_secrets().items():
             value, bvalue = entry["value"], entry["value"].encode()
             for k, v in list(flow.response.headers.items(multi=True)):
                 if value in v:
                     flow.response.headers[k] = v.replace(value, name)
+            # Trailers are headers that arrive after the body; a secret echoed
+            # there is as echoed as one in a header.
+            if trailers:
+                for k, v in list(trailers.items(multi=True)):
+                    if value in v:
+                        trailers[k] = v.replace(value, name)
             if bvalue in scrubbed:
                 scrubbed = scrubbed.replace(bvalue, name.encode())
                 log.warning(f"SCRUB response from {flow.request.pretty_host} echoed secret "
@@ -929,6 +972,41 @@ class DesolateProxy:
 
         if scrubbed is not body:
             flow.response.content = scrubbed
+
+    def websocket_message(self, flow: http.HTTPFlow):
+        """A WebSocket is an HTTP response that never ends: a server echoing a
+        secret in a frame is a server echoing it in a body. The newest message
+        is scrubbed as a body is; one that cannot be is dropped, not passed."""
+        try:
+            self._websocket_message(flow)
+        except Exception:
+            log.exception("desolate-proxy websocket scrub failed; dropping message (fail-closed)")
+            messages = getattr(getattr(flow, "websocket", None), "messages", None)
+            if messages:
+                messages[-1].drop()
+
+    def _websocket_message(self, flow: http.HTTPFlow):
+        # A frame can arrive long after the upgrade request that loaded the
+        # settings; a secret added since is scrubbed too.
+        self._maybe_reload()
+        if not self.scrub_responses or not self.secrets:
+            return
+        websocket = getattr(flow, "websocket", None)
+        if not websocket or not websocket.messages:
+            return
+        message = websocket.messages[-1]
+        if message.from_client:
+            return  # outbound frames are never substituted into: a placeholder stays a placeholder
+        content = message.content
+        scrubbed = content
+        for name, entry in self._real_secrets().items():
+            bvalue = entry["value"].encode()
+            if bvalue in scrubbed:
+                scrubbed = scrubbed.replace(bvalue, name.encode())
+                log.warning(f"SCRUB websocket message from {flow.request.pretty_host} echoed secret "
+                            f"{name!r}; replaced with placeholder")
+        if scrubbed is not content:
+            message.content = scrubbed
 
 
 addons = [DesolateProxy()]

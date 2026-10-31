@@ -131,7 +131,8 @@ process.stdout.on("error", (err: NodeJS.ErrnoException) => {
   throw err;
 });
 
-const HELPER_IMAGE = "alpine:3"; // tiny, for volume setup + verification
+// By digest: a tag can be moved. The index of alpine:3 when pinned.
+const HELPER_IMAGE = "alpine:3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"; // tiny, for volume setup + verification
 
 const die = (msg: string): never => {
   console.error(`desolate: ${msg}`);
@@ -1377,7 +1378,7 @@ const editorUrl = (target: Target): string => {
 
   const id = devcontainerId(target.dir);
   const folder = (id && containerWorkspaceFolder(target.dir, id)) || target.dir;
-  return `http://127.0.0.1:${port}/?tkn=${token}&folder=${folder}`;
+  return `http://127.0.0.1:${port}/?tkn=${token}&folder=${encodeURIComponent(folder)}`;
 };
 
 /**
@@ -1999,7 +2000,7 @@ async function runTarget(
 
   console.log(`\n  ${name} is ready:\n`);
   console.log(
-    `    http://127.0.0.1:${editorPort}/?tkn=${token}&folder=${folder}\n`,
+    `    http://127.0.0.1:${editorPort}/?tkn=${token}&folder=${encodeURIComponent(folder)}\n`,
   );
 
   for (const [label, port] of map)

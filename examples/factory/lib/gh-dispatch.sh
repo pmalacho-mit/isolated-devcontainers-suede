@@ -93,7 +93,9 @@ declare -F agent_renew   >/dev/null || agent_renew()   { return 1; }
 declare -F agent_resume  >/dev/null || agent_resume()  { :; }
 declare -F agent_hint    >/dev/null || agent_hint()    { echo "fix the agent's access, then restart it"; }
 
-log() { printf '%s %s: %s\n' "$(date +%H:%M:%S)" "$DISPATCHER" "$*"; }
+# Printed to a terminal: control characters -- an agent's or a project's
+# escape sequences, in a file name or a message -- are not.
+log() { printf '%s %s: %s\n' "$(date +%H:%M:%S)" "$DISPATCHER" "$*" | tr -d '\000-\010\013-\037\177'; }
 
 # Said here, and where you will see it if this terminal is out of sight.
 notify() {
@@ -105,7 +107,10 @@ notify() {
 }
 
 # The marker's field, or the default. An issue body is anyone's text: only a
-# well-formed marker counts, and every value is checked where it is used.
+# well-formed marker counts, and every value is checked where it is used --
+# and only in an issue YOU filed (the suede factory files them as you): a
+# marker edited into someone else's issue names a branch, a start point, a PR
+# to take over, and anyone who can label an issue could write one.
 marker_field() { # <body> <field> <default>
   local marker value
   marker=$(printf '%s\n' "$1" | sed -n 's/^<!-- desolate-dispatch: \({.*}\) -->$/\1/p' | head -n 1)
@@ -205,7 +210,7 @@ dispatch_tick() {
   local issues statuses running
   # What is not read is not closed: worktrees are removed below for the issues
   # missing from this, so a failed read ends the tick.
-  if ! issues=$(gh issue list -R "$REPO" --label "$LABEL" --state open --limit 100 --json number,title,body 2> "$STATE/.issues-error"); then
+  if ! issues=$(gh issue list -R "$REPO" --label "$LABEL" --state open --limit 100 --json number,title,body,author 2> "$STATE/.issues-error"); then
     if grep -q "has disabled issues" "$STATE/.issues-error"; then
       [ -e "$STATE/.issues-off" ] || log "$REPO has issues turned off; skipped while it does"
       : > "$STATE/.issues-off"
@@ -227,6 +232,11 @@ dispatch_tick() {
   while IFS= read -r issue; do
     n=$(jq -r .number <<< "$issue"); title=$(jq -r .title <<< "$issue"); body=$(jq -r '.body // ""' <<< "$issue")
     name=issue-$n
+    # A marker counts only in an issue you filed; in another's it is text.
+    if [ "$(jq -r '.author.login // ""' <<< "$issue")" != "$(my_login)" ] && [ -n "$(marker_field "$body" branch "")$(marker_field "$body" pr "")$(marker_field "$body" start "")" ]; then
+      [ -e "$STATE/$name.marker-ignored" ] || { log "#$n: its desolate-dispatch marker is ignored: the issue is not yours"; mkdir -p "$STATE"; : > "$STATE/$name.marker-ignored"; }
+      body=""
+    fi
     branch=$(marker_field "$body" branch "issue/$n"); start=$(marker_field "$body" start "$BASE")
     fetch=$(marker_field "$body" fetch ""); pr=$(marker_field "$body" pr ""); base=$(marker_field "$body" base "$PR_BASE")
     case "$pr" in *[!0-9]*) pr="" ;; esac
@@ -358,6 +368,12 @@ working_agents() { # <what runs, as `desolate --list --json` prints it>
     fi
   done
   echo "$count"
+}
+
+# Your GitHub login, asked once a run: whose issues a marker counts in.
+my_login() {
+  [ -n "${MY_LOGIN:-}" ] || MY_LOGIN=$(gh api user --jq .login 2>/dev/null || true)
+  printf '%s' "$MY_LOGIN"
 }
 
 # Every project in the stack whose name is owner/repo.

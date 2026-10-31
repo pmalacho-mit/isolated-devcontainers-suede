@@ -1497,3 +1497,95 @@ def test_a_confinement_that_cannot_be_read_drops_the_secret(tmp_path, caplog, he
     assert CONFINED not in addon.secrets, "never widened to everywhere"
     assert SECRET_NAME in addon.secrets
     assert "not a list of header names" in caplog.text
+
+
+# ===========================================================================
+# every name a request claims (audit M5)
+# ===========================================================================
+
+def test_M5_a_second_host_header_naming_another_host_is_refused(tmp_path):
+    """mitmproxy's host_header is the first Host; a front end serving many
+    names behind one certificate may route by the second."""
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    f.request.headers.add("Host", "evil.example.com")
+    addon.request(f)
+    assert blocked(f), "a second Host header was NOT blocked"
+    assert not carries_value(f)
+
+
+def test_M5_an_authority_disagreeing_with_the_sni_is_refused(tmp_path):
+    """HTTP/2's :authority, or an HTTP/1 request written in absolute form,
+    names a destination too -- and it need not be the Host header's."""
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    f.request.authority = "evil.example.com"
+    addon.request(f)
+    assert blocked(f), "an :authority naming another host was NOT blocked"
+    assert not carries_value(f)
+
+
+def test_M5_an_authority_agreeing_with_the_sni_is_fine_port_and_all(tmp_path):
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    f.request.authority = "api.openai.com:443"
+    addon.request(f)
+    assert not blocked(f)
+    assert f.request.headers["Authorization"] == f"Bearer {SECRET_VALUE}"
+
+
+def test_M5_without_a_placeholder_nothing_is_refused_for_its_names(tmp_path):
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    f.request.headers.add("Host", "evil.example.com")
+    addon.request(f)
+    assert not blocked(f)
+
+
+# ===========================================================================
+# trailers and websocket frames are responses too (audit L6)
+# ===========================================================================
+
+def test_L6_a_secret_echoed_in_a_response_trailer_is_scrubbed(tmp_path):
+    from mitmproxy.http import Headers
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    addon.request(f)  # loads the settings, as every response's request does
+    f.response = tutils.tresp(content=b"ok")
+    f.response.trailers = Headers([(b"X-Debug", f"key={SECRET_VALUE}".encode())])
+    addon.response(f)
+    assert f.response.trailers["X-Debug"] == f"key={SECRET_NAME}"
+
+
+def test_L6_a_secret_echoed_in_a_server_websocket_frame_is_scrubbed(tmp_path):
+    from mitmproxy.websocket import WebSocketMessage
+    from wsproto.frame_protocol import Opcode
+    _, addon, _ = load_addon(tmp_path)
+    f = tflow.twebsocketflow()
+    f.websocket.messages.append(WebSocketMessage(Opcode.TEXT, False, f"token {SECRET_VALUE} here".encode()))
+    addon.websocket_message(f)
+    assert f.websocket.messages[-1].content == f"token {SECRET_NAME} here".encode()
+
+
+def test_L6_a_client_websocket_frame_is_left_alone(tmp_path):
+    from mitmproxy.websocket import WebSocketMessage
+    from wsproto.frame_protocol import Opcode
+    _, addon, _ = load_addon(tmp_path)
+    f = tflow.twebsocketflow()
+    f.websocket.messages.append(WebSocketMessage(Opcode.TEXT, True, f"{SECRET_NAME}".encode()))
+    addon.websocket_message(f)
+    assert f.websocket.messages[-1].content == SECRET_NAME.encode(), "a placeholder stays a placeholder"
+
+
+def test_L6_a_websocket_scrub_failure_drops_the_frame(tmp_path, monkeypatch):
+    from mitmproxy.websocket import WebSocketMessage
+    from wsproto.frame_protocol import Opcode
+    _, addon, _ = load_addon(tmp_path)
+    f = tflow.twebsocketflow()
+    f.websocket.messages.append(WebSocketMessage(Opcode.TEXT, False, SECRET_VALUE.encode()))
+    monkeypatch.setattr(addon, "_real_secrets", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    addon.websocket_message(f)
+    assert f.websocket.messages[-1].dropped

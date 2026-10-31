@@ -26,6 +26,7 @@ cat > "$STUB/bin/gh" <<'EOF'
 printf 'gh %s\n' "$*" >> "$STUB_DIR/calls"
 case "$1 $2" in
   "repo view") echo main ;;
+  "api user") echo me ;;
   "issue list")
     case "$*" in *acme/widget*) f=widget ;; *) f=app ;; esac
     [ ! -e "$STUB_DIR/$f-issues-fail" ] || { cat "$STUB_DIR/$f-issues-fail" >&2; exit 1; }
@@ -72,7 +73,7 @@ chmod +x "$STUB/bin/gh" "$STUB/bin/cli"
 
 MARKER='<!-- desolate-dispatch: {"branch":"downstream/acme/app-aaaa","start":"origin/downstream/acme/app-aaaa","fetch":true,"pr":12} -->'
 jq -n --arg body "Review the upstream PR.
-$MARKER" '[{number: 7, title: "Upstream from acme/app", body: $body}]' > "$STUB/widget-issues"
+$MARKER" '[{number: 7, title: "Upstream from acme/app", body: $body, author: {login: "me"}}]' > "$STUB/widget-issues"
 echo '[{"number":3,"title":"Plain work","body":"do it"}]' > "$STUB/app-issues"
 statuses() { # <widget issue-7 color> <app issue-3 color>
   jq -cn --arg w "$1" --arg a "$2" '[
@@ -187,10 +188,22 @@ assert_not_contains "the second waits" "$(cat "$STUB/calls")" "cli worktree add 
 assert_contains "  and says why" "$(cat "$STUB/out")" "waiting -- 1 agents are working"
 
 group "a marker is checked, not trusted"
-jq -n --arg body '<!-- desolate-dispatch: {"pr":"12; rm -rf /"} -->' '[{number: 8, title: "x", body: $body}]' > "$STUB/widget-issues"
+jq -n --arg body '<!-- desolate-dispatch: {"pr":"12; rm -rf /"} -->' '[{number: 8, title: "x", body: $body, author: {login: "me"}}]' > "$STUB/widget-issues"
 statuses "" ""
 tick
 assert_contains "a pr that is no number is no pr: the worktree gets issue/8" "$(cat "$STUB/calls")" "cli worktree add acme/widget issue-8 issue/8"
+
+group "a marker in an issue you did not file is text (audit L3)"
+# Anyone who can label an issue can write a marker into one: a branch to
+# start from, a PR to take over. Only in an issue YOU filed does it count.
+jq -n --arg body "Looks upstream-ish.
+$MARKER" '[{number: 11, title: "Not mine", body: $body, author: {login: "someone-else"}}]' > "$STUB/widget-issues"
+tick
+assert_contains "the worktree gets issue/11, not the marker's branch" "$(cat "$STUB/calls")" "cli worktree add acme/widget issue-11 issue/11"
+assert_not_contains "  and the marker's PR is not taken" "$(cat "$STUB/calls")" "pr edit 12"
+assert_contains "  said once" "$(cat "$STUB/out")" "#11: its desolate-dispatch marker is ignored: the issue is not yours"
+tick
+assert_not_contains "  not twice" "$(cat "$STUB/out")" "marker is ignored"
 
 group "a target being started already, or not answering yet: the agent waits"
 rm -rf "$STUB/state"; mkdir -p "$STUB/state"; : > "$STUB/running"

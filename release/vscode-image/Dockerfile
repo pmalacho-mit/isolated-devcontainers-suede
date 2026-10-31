@@ -30,6 +30,7 @@ ARG NODE_VERSION=24.18.0
 ARG GIT_LFS_VERSION=3.7.1
 # Install git subrepo to use [suede](https://suede.sh/) workflows
 ARG GIT_SUBREPO_VERSION=0.4.9
+ARG GIT_SUBREPO_COMMIT=ea108868fe0998c912c411830bfc50dc259cc635
 ARG DEVCONTAINERS_CLI_NPM_VERSION=0.88.0
 ARG TSX_NPM_VERSION=4.23.1
 
@@ -121,29 +122,45 @@ RUN set -eux; \
 RUN set -eux; \
   arch="$(uname -m)"; \
   case "$arch" in \
-  aarch64|arm64) NODE_ARCH=arm64 ;; \
-  x86_64)        NODE_ARCH=x64 ;; \
+  aarch64|arm64) NODE_ARCH=arm64; NODE_SHA=58c9520501f6ae2b52d5b210444e24b9d0c029a58c5011b797bc1fe7105886f6 ;; \
+  x86_64)        NODE_ARCH=x64;   NODE_SHA=55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742 ;; \
   *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
   esac; \
-  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
-  | tar -xJ -C /usr/local --strip-components=1; \
+  # Pinned to the sha256 nodejs.org publishes (SHASUMS256.txt): this runs in
+  # the orchestrator, which is VM root through the docker socket, so a
+  # download is a download of what was reviewed or nothing.
+  curl -fsSL -o /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz"; \
+  echo "${NODE_SHA}  /tmp/node.tar.xz" | sha256sum -c -; \
+  tar -xJ -C /usr/local --strip-components=1 -f /tmp/node.tar.xz; rm -f /tmp/node.tar.xz; \
   node --version; npm --version
 
 # Install docker CLI, compose, and buildx
 RUN set -eux; \
   arch="$(uname -m)"; \
   case "$arch" in \
-  aarch64|arm64) DOCKER_ARCH=aarch64; COMPOSE_ARCH=aarch64; BUILDX_ARCH=arm64 ;; \
-  x86_64)        DOCKER_ARCH=x86_64;  COMPOSE_ARCH=x86_64;  BUILDX_ARCH=amd64 ;; \
+  aarch64|arm64) DOCKER_ARCH=aarch64; COMPOSE_ARCH=aarch64; BUILDX_ARCH=arm64; \
+    DOCKER_SHA=8d16d8b3b158c132a9fb9963d4b4345746f925e287e154c9ed880ac257baf292; \
+    COMPOSE_SHA=aa611e811d0ea25897839c404bfb5bf93ce706dc51c500a4457890f5d0606a86; \
+    BUILDX_SHA=c4248d6cbc4a619a7e0b4609c11e509ad4ac0b475e1c64817c0ac20c5d90c766 ;; \
+  x86_64)        DOCKER_ARCH=x86_64;  COMPOSE_ARCH=x86_64;  BUILDX_ARCH=amd64; \
+    DOCKER_SHA=d6204aea92238e2453d5445c885b9d2e5eb8f82915568ec50edf9dbe12a3ac74; \
+    COMPOSE_SHA=f9ebc6ebdb19d769b793c245a736caaeb198c62587f13b25c660c13b4987f959; \
+    BUILDX_SHA=d41ece72044243b4f58b343441ae37446d9c29a7d6b5e11c61847bbcf8f7dfda ;; \
   *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
   esac; \
-  curl -fsSL "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_VERSION}.tgz" \
-  | tar xz --strip-components=1 -C /usr/local/bin docker/docker; \
+  # Pinned: compose's and buildx's from the checksums.txt of each release;
+  # docker's static tarball publishes none, so its sha256 was taken of the
+  # download at pinning time and is what every later build must get.
+  curl -fsSL -o /tmp/docker.tgz "https://download.docker.com/linux/static/stable/${DOCKER_ARCH}/docker-${DOCKER_VERSION}.tgz"; \
+  echo "${DOCKER_SHA}  /tmp/docker.tgz" | sha256sum -c -; \
+  tar xz --strip-components=1 -C /usr/local/bin -f /tmp/docker.tgz docker/docker; rm -f /tmp/docker.tgz; \
   mkdir -p /usr/local/lib/docker/cli-plugins; \
   curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \
   "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${COMPOSE_ARCH}"; \
+  echo "${COMPOSE_SHA}  /usr/local/lib/docker/cli-plugins/docker-compose" | sha256sum -c -; \
   curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx \
   "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-${BUILDX_ARCH}"; \
+  echo "${BUILDX_SHA}  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c -; \
   chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
   /usr/local/lib/docker/cli-plugins/docker-buildx
 
@@ -162,12 +179,14 @@ RUN set -eux; \
 # /home/workspace, but every `docker exec` still gets the same git config.)
 RUN set -eux; \
   case "$(uname -m)" in \
-  aarch64|arm64) LFS_ARCH=arm64 ;; \
-  x86_64)        LFS_ARCH=amd64 ;; \
+  aarch64|arm64) LFS_ARCH=arm64; LFS_SHA=73a9c90eeb4312133a63c3eaee0c38c019ea7bfa0953d174809d25b18588dd8d ;; \
+  x86_64)        LFS_ARCH=amd64; LFS_SHA=1c0b6ee5200ca708c5cebebb18fdeb0e1c98f1af5c1a9cba205a4c0ab5a5ec08 ;; \
   *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
   esac; \
-  curl -fsSL "https://github.com/git-lfs/git-lfs/releases/download/v${GIT_LFS_VERSION}/git-lfs-linux-${LFS_ARCH}-v${GIT_LFS_VERSION}.tar.gz" \
-  | tar xz -C /tmp; \
+  # Pinned to the release's sha256sums.asc.
+  curl -fsSL -o /tmp/git-lfs.tar.gz "https://github.com/git-lfs/git-lfs/releases/download/v${GIT_LFS_VERSION}/git-lfs-linux-${LFS_ARCH}-v${GIT_LFS_VERSION}.tar.gz"; \
+  echo "${LFS_SHA}  /tmp/git-lfs.tar.gz" | sha256sum -c -; \
+  tar xz -C /tmp -f /tmp/git-lfs.tar.gz; rm -f /tmp/git-lfs.tar.gz; \
   install -m 0755 "/tmp/git-lfs-${GIT_LFS_VERSION}/git-lfs" /usr/local/bin/git-lfs; \
   rm -rf "/tmp/git-lfs-${GIT_LFS_VERSION}"; \
   git lfs install --system; \
@@ -176,9 +195,13 @@ RUN set -eux; \
 # Install git-subrepo.
 # It's a set of bash scripts, so it lives in /opt and is put on
 # PATH; GIT_SUBREPO_ROOT is how it finds its own lib/ and man/.
+# By commit, not by tag: a tag can be moved. GIT_SUBREPO_COMMIT is what the
+# 0.4.9 tag pointed at when it was pinned.
 RUN set -eux; \
-  git clone --quiet --depth 1 --branch "${GIT_SUBREPO_VERSION}" \
-  https://github.com/ingydotnet/git-subrepo /opt/git-subrepo; \
+  git init --quiet /opt/git-subrepo; \
+  git -C /opt/git-subrepo fetch --quiet --depth 1 https://github.com/ingydotnet/git-subrepo "${GIT_SUBREPO_COMMIT}"; \
+  git -C /opt/git-subrepo checkout --quiet FETCH_HEAD; \
+  [ "$(git -C /opt/git-subrepo rev-parse HEAD)" = "${GIT_SUBREPO_COMMIT}" ]; \
   rm -rf /opt/git-subrepo/.git
 ENV GIT_SUBREPO_ROOT=/opt/git-subrepo
 ENV PATH=/opt/git-subrepo/lib:$PATH

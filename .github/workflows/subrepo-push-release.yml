@@ -14,7 +14,9 @@ env:
   # Base URL for the hosted suede scripts this workflow curls as $SUEDE_SCRIPTS/<path>.
   # Point it at your canonical host/ref; every referenced script must be reachable there.
   # (git-subrepo is installed separately on purpose — it's a third-party tool, not a suede script.)
-  SUEDE_SCRIPTS: https://raw.githubusercontent.com/pmalacho-mit/suede/refs/heads/main/scripts
+  # Pinned to a commit, not main: these scripts run here with a token in
+  # scope, so what runs is what was reviewed. Move the pin to take an update.
+  SUEDE_SCRIPTS: https://raw.githubusercontent.com/pmalacho-mit/suede/bd86c2e7e0b4774120cb890292108f73591cc031/scripts
 
 jobs:
   push:

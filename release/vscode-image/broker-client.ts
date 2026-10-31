@@ -6,6 +6,7 @@
 // requests and read back its stream of log lines and a final status.
 
 import * as net from "node:net";
+import { plainText } from "./utils.ts";
 
 const SOCKET = process.env.DESOLATE_BROKER ?? "/run/broker/desolate.sock";
 
@@ -32,9 +33,10 @@ export const ask = (
         buffer = buffer.slice(idx + 1);
         if (!line) continue;
         let msg: any;
-        try { msg = JSON.parse(line); } catch { console.log(line); continue; }
-        if (msg.log !== undefined) { if (onLog(String(msg.log))) console.log(msg.log); continue; }
-        if (msg.error) { console.error(`desolate: ${msg.error}`); }
+        // What the broker relays is a project's output: never raw to a terminal.
+        try { msg = JSON.parse(line); } catch { console.log(plainText(line)); continue; }
+        if (msg.log !== undefined) { if (onLog(String(msg.log))) console.log(plainText(String(msg.log))); continue; }
+        if (msg.error) { console.error(`desolate: ${plainText(String(msg.error))}`); }
         if (msg.ok === false) exitCode = typeof msg.exit === "number" ? msg.exit : 1;
       }
     });

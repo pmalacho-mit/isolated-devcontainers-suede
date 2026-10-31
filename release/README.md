@@ -397,6 +397,12 @@ Four pieces get installed:
 | CA publisher   | `:18081` | Hands out the proxy's certificate, so containers can trust it for HTTPS             |
 | nftables rules | kernel   | Force all container traffic through the above, rather than trusting them to opt in  |
 
+The three listeners bind every address, because the bridges they serve come
+and go with `cli.sh up`; the rules are what decide who reaches them: the
+desolate bridges (the proxy only for a connection the REDIRECT sent, never one
+made to `:18080` itself) and the VM's own loopback, and no other interface --
+not the one the Mac's network is on.
+
 The certificate matters more than it sounds: HTTPS traffic is encrypted, so the
 proxy can only do its job if containers trust its certificate. That's what the
 publisher is for, and it's why a devcontainer that skips installing the CA gets

@@ -83,7 +83,7 @@ sequenceDiagram
 
 **`desolate:run`** on an issue means an agent should work on it. The dispatcher reads only that label.
 
-An issue can also carry a **hidden marker** with details its number can't express. The suede factory writes these; the dispatcher reads them (`lib/gh-dispatch.sh`):
+An issue can also carry a **hidden marker** with details its number can't express. The suede factory writes these; the dispatcher reads them (`lib/gh-dispatch.sh`), and only in an issue **you** filed: anyone who can label an issue could write a marker into one, naming a branch to start from or a PR to take over, so in another author's issue the marker is text, and the dispatcher says so once.
 
 ```html
 <!-- desolate-dispatch: {"branch":"downstream/acme/app-5e0c…","start":"origin/downstream/acme/app-5e0c…","fetch":true,"pr":12} -->

@@ -231,7 +231,8 @@ const docker = createDocker(runner);
 
 type Say = (line: string) => void;
 
-const HELPER_IMAGE = "alpine:3";
+// By digest: a tag can be moved. The index of alpine:3 when pinned.
+const HELPER_IMAGE = "alpine:3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a";
 
 /** When each dind was last seen hosting a devcontainer, by name. A dind first
  *  seen idle counts from that moment: after a restart of this process, the

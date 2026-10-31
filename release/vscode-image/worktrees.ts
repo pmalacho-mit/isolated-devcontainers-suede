@@ -47,6 +47,7 @@
  * FILES rather than asking git anything.
  */
 /// <reference types="node" />
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ask } from "./broker-client.ts";
@@ -59,7 +60,7 @@ import {
   type Target,
 } from "./projects.ts";
 import { hint } from "./hints.ts";
-import { isEntryPoint, run } from "./utils.ts";
+import { isEntryPoint, run, plainText } from "./utils.ts";
 
 /** Overridable so the whole tool can be pointed at a throwaway workspace, the
  *  same way the broker's paths are. Nothing sets it in production. */
@@ -427,8 +428,14 @@ const main = async ([command, project, name, branch, start]: string[]): Promise<
   if (!project) return die(`no project given\n${USAGE}`);
 
   switch (command) {
-    case "list":
-      return git(targetFrom(project), "worktree", "list");
+    case "list": {
+      // Captured and printed plain: the paths and branches are the project's.
+      const target = targetFrom(project);
+      const listed = spawnSync("git", [...hardenedGit(target), "worktree", "list"], { encoding: "utf8" });
+      if (listed.stdout) process.stdout.write(plainText(listed.stdout));
+      if (listed.stderr) process.stderr.write(plainText(listed.stderr));
+      return listed.status ?? 1;
+    }
     case "add": {
       if (!name) return die(`'add' needs a worktree name\n${USAGE}`);
       const code = await add(targetFrom(project, name), branch || name, start);
