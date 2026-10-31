@@ -327,7 +327,7 @@ services:
       # specified in `command` and nothing else. The path must match
       # DESOLATE_SERVER_ROOT and SERVER_BIN (vscode-image/editor.ts).
       - /usr/local/bin/with-ca
-      # Seeds the workspace-trust defaults on first start; see shell-entry.sh.
+      # Holds the workspace-trust defaults at every start; see shell-entry.sh.
       - /usr/local/bin/shell-entry
       # The SHELL root, not the server root: same build, hardlinked, with the
       # git/github extensions removed. This editor can reach the keyring's agent
@@ -340,11 +340,18 @@ services:
       - --host=0.0.0.0                # inside the container; host binding is 127.0.0.1 below
       - --port=3000
       - --connection-token=${VSCODE_TOKEN:?set VSCODE_TOKEN in .env}
+      # Extensions this editor installs go to the tmpfs below, and are gone at
+      # the next start. It is a launcher: its one extension is built into the
+      # shell root, and one installed here would run beside the agent socket
+      # -- and, in the home volume, would run again after every restart.
+      - --extensions-dir=/home/workspace/.vscodium-server/extensions
+    tmpfs:
+      - /home/workspace/.vscodium-server/extensions
     volumes:
       # NOTE: inner-run is deliberately ABSENT -- no docker socket here.
       - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
       - workspaces:/workspaces        # full read/write: the universal editor
-      - vscode-home:/home/workspace   # settings + extensions persist here
+      - vscode-home:/home/workspace   # settings persist here (extensions: the tmpfs above)
       - broker-run:/run/broker        # narrow request channel to orchestrator
       # Agent socket + PUBLIC keys. keyring-keys is deliberately absent.
       #

@@ -17,7 +17,7 @@ const workspaces = join(root, "workspaces");
 const cacheRoot = join(root, "cache");
 process.env.DESOLATE_WORKSPACES = workspaces;
 process.env.DESOLATE_REMOTE_CACHE = cacheRoot;
-const { push, pull, registrationOf, defaultBranchOf, cloneThroughCache, TransferError } = await import("../../../release/vscode-image/transfer.ts");
+const { push, pull, registrationOf, defaultBranchOf, cloneThroughCache, TransferError, sshFor } = await import("../../../release/vscode-image/transfer.ts");
 const { bundleScript, pullScript } = await import("../../../release/vscode-image/docker.ts");
 
 const git = (cwd: string, ...args: string[]) =>
@@ -271,5 +271,29 @@ describe("the cache's lock", () => {
     writeFileSync(lock, "999999999");   // no such process
     await pull("acme/widgets", { registration, ask: puller });
     assert.ok(!existsSync(lock), "the lock outlived the pull");
+  });
+});
+
+describe("the ssh config a push goes out with (audit M3)", () => {
+  test("written per use from the keyring's exports, never read from ~/.ssh: one alias, one public key, GitHub's host keys from the image, strictly", () => {
+    const written: Record<string, string> = {};
+    const command = sshFor({ tag: "acme__widgets", ownerRepo: "acme/widgets", url: "git@github.com-acme__widgets:acme/widgets.git" },
+      (name, text) => { written[name] = text; return `/scratch/${name}`; });
+    assert.equal(command, "ssh -F /scratch/ssh_config");
+    const config = written.ssh_config;
+    assert.match(config, /^Host github\.com-acme__widgets$/m);
+    assert.match(config, /^  IdentityFile \/run\/keyring\/pub\/acme__widgets\.pub$/m);
+    assert.match(config, /^  IdentitiesOnly yes$/m);
+    assert.match(config, /^  UserKnownHostsFile \/etc\/desolate\/github_known_hosts$/m);
+    assert.match(config, /^  StrictHostKeyChecking yes$/m);
+    assert.doesNotMatch(config, /ProxyCommand|\.ssh\//, "nothing from the home volume");
+  });
+
+  test("the host keys shipped are GitHub's three, as api.github.com/meta lists them", () => {
+    const file = new URL("../../../release/vscode-image/github_known_hosts", import.meta.url).pathname;
+    const keys = readFileSync(file, "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
+    assert.deepEqual(keys.map((line) => line.split(" ").slice(0, 2).join(" ")).sort(),
+      ["github.com ecdsa-sha2-nistp256", "github.com ssh-ed25519", "github.com ssh-rsa"]);
+    assert.ok(keys.every((line) => /^github\.com \S+ [A-Za-z0-9+/=]+$/.test(line)));
   });
 });

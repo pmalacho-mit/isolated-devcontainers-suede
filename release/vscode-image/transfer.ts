@@ -48,7 +48,44 @@ import { BUSY_EXIT } from "./locks.ts";
 
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 /** newrepo.ts's: the per-repository host aliases live there. */
-const SSH_CONFIG = `${homedir()}/.ssh/config`;
+/** GitHub's host keys, in the image (Dockerfile): the only known_hosts the
+ *  ssh below consults. */
+const GITHUB_KNOWN_HOSTS = process.env.DESOLATE_GITHUB_KNOWN_HOSTS ?? "/etc/desolate/github_known_hosts";
+
+/**
+ * The ssh command for one registration, written fresh for this process:
+ * `~/.ssh/config` is in the home volume, which a compromised editor writes and
+ * a restart keeps, and a `ProxyCommand` planted there would run at the next
+ * push, with the keys -- so it is not read. The config says the one thing
+ * that matters, from the keyring's own exports: THIS host alias offers THIS
+ * public key and no other, so with several deploy keys in the agent, pushing
+ * to one repository cannot authenticate as another. Host keys come from the
+ * image, strictly: no trust-on-first-use, no ~/.ssh/known_hosts.
+ *
+ * `write` puts the file somewhere this process owns and removes afterwards
+ * (a scratch directory), since /tmp is the container's and outlives a restart.
+ */
+export const sshFor = (registration: Registration, write: (name: string, text: string) => string): string => {
+  const config = [
+    `Host github.com-${registration.tag}`,
+    `  HostName github.com`,
+    `  User git`,
+    `  IdentityFile ${KEYRING_RUN}/pub/${registration.tag}.pub`,
+    `  IdentitiesOnly yes`,
+    `  UserKnownHostsFile ${GITHUB_KNOWN_HOSTS}`,
+    `  GlobalKnownHostsFile /dev/null`,
+    `  StrictHostKeyChecking yes`,
+    ``,
+  ].join("\n");
+  return `ssh -F ${write("ssh_config", config)}`;
+};
+
+/** The scratch directory's writer for sshFor: a file of its own, 0600. */
+const writerIn = (scratch: string) => (name: string, text: string) => {
+  const file = join(scratch, name);
+  writeFileSync(file, text, { mode: 0o600 });
+  return file;
+};
 const KEYRING_RUN = process.env.DESOLATE_KEYRING_RUN ?? "/run/keyring";
 /** The editor's own: a project never mounts it. */
 const CACHE_ROOT = remoteCacheRoot();
@@ -113,7 +150,9 @@ export const cleanGit = (args: string[], options: { capture?: boolean; ssh?: str
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
-    GIT_SSH_COMMAND: options.ssh ?? `ssh -F ${SSH_CONFIG}`,
+    // Every call that reaches a remote names its ssh (sshFor); one that does
+    // not fails here rather than reach for a config in the home volume.
+    GIT_SSH_COMMAND: options.ssh ?? "/bin/false",
   });
   const result = spawnSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
     env,
@@ -263,6 +302,16 @@ const refresh = (cache: Cache, registration: Registration, ssh?: string) => {
  * HEAD names the remote's default branch, so the clone checks that out.
  */
 export function cloneThroughCache(registration: Registration, dest: string, options: { ssh?: string; env?: NodeJS.ProcessEnv } = {}) {
+  const sshScratch = mkdtempSync(join(tmpdir(), "desolate-ssh-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(sshScratch)) };
+  try {
+    return cloneThroughCacheWith(registration, dest, options);
+  } finally {
+    rmSync(sshScratch, { recursive: true, force: true });
+  }
+}
+
+function cloneThroughCacheWith(registration: Registration, dest: string, options: { ssh?: string; env?: NodeJS.ProcessEnv }) {
   const cache = openCache(registration);
   try {
     refresh(cache, registration, options.ssh);
@@ -316,6 +365,7 @@ export async function push(project: string, options: Options = {}): Promise<stri
   const name = transferName();
   const files = transferFiles(projectDir, name);
   const scratch = mkdtempSync(join(tmpdir(), "desolate-push-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(scratch)) };
   try {
     refresh(cache, registration, options.ssh);
     // What the sandbox may leave out: the cache's newest branch tips, and what
@@ -393,6 +443,7 @@ export async function pull(project: string, options: Options = {}): Promise<stri
 
   const cache = openCache(registration);
   const scratch = mkdtempSync(join(tmpdir(), "desolate-pull-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(scratch)) };
   const created: string[] = [];
   try {
     refresh(cache, registration, options.ssh);
@@ -476,6 +527,7 @@ export function deliver(project: string, ownerRepo: string, options: DependencyO
   const registration = registrationFor(ownerRepo, options);
   const cache = openCache(registration);
   const scratch = mkdtempSync(join(tmpdir(), "desolate-deliver-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(scratch)) };
   try {
     refresh(cache, registration, options.ssh);
     const release = branchesOf(cache).find(([, name]) => name === "release")?.[0];
@@ -519,6 +571,7 @@ export function pushUpstream(project: string, ownerRepo: string, built: Built, o
     fail("a proposal names commits, in full");
   const cache = openCache(registration);
   const scratch = mkdtempSync(join(tmpdir(), "desolate-upstream-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(scratch)) };
   const inside = join(".git", built.name);
   try {
     refresh(cache, registration, options.ssh);

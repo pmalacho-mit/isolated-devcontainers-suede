@@ -286,10 +286,11 @@ function doClone(repo: Repo): void {
     // fills it, and the project is cloned from it, so neither the first push
     // nor the first pull fetches the history again.
     try {
+      // Its ssh config is transfer.ts's own, written per use from the
+      // keyring's exports -- not ~/.ssh/config, which is in the home volume.
       cloneThroughCache(
         { tag: repo.tag, ownerRepo: repo.ownerRepo, url: `git@${repo.hostAlias}:${repo.ownerRepo}.git` },
         dest,
-        { ssh: gitSshCommand() },
       );
     } catch (err: any) {
       die(`clone failed (${err?.message ?? err}) -- is the deploy key registered on GitHub yet?

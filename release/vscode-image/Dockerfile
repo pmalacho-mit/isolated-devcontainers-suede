@@ -271,14 +271,20 @@ RUN set -eux; \
 # Every .ts in the directory, rather than a hand-kept list: a module extracted
 # during a refactor and forgotten here does not fail the build, it fails at
 # runtime inside the image with "cannot find module".
-COPY --chown=1000:1000 *.ts /usr/local/lib/desolate/
+# Root's, readable by all: the editor (uid 1000) runs this code and must not be
+# able to rewrite it -- a compromised editor that could would survive a restart
+# in the container's writable layer. Nothing writes here at runtime.
+COPY *.ts /usr/local/lib/desolate/
+# GitHub's host keys, for the ssh config transfer.ts writes per use: the only
+# known_hosts it consults, so a ~/.ssh/known_hosts in the home volume is not.
+COPY github_known_hosts /etc/desolate/github_known_hosts
 
 # The desolate extension (T4.7, F6), BUILT IN to the outer editor's tree and no
 # other: bundled here by the esbuild that tsx already depends on -- nothing is
 # fetched for it, and nothing is installed when the editor starts -- into the
 # shell root, which devcontainers are never seeded from. It runs only the
 # commands below (extension/extension.mts); tests/static/08 holds it to that.
-COPY --chown=1000:1000 extension/ /usr/local/lib/desolate/extension/
+COPY extension/ /usr/local/lib/desolate/extension/
 RUN set -eux; \
   out="${DESOLATE_SHELL_ROOT}/extensions/desolate"; \
   mkdir -p "$out/media"; \
@@ -326,7 +332,11 @@ RUN set -eux; \
     # Assert that an interactive bash ACTUALLY reaches both. A completion that
     # silently never registers is indistinguishable from never adding one, and
     # this is the only step in the chain that cannot be checked by reading.
-    bash -ic 'complete -p desolate >/dev/null && [ "$(type -t git)" = function ]'
+    bash -ic 'complete -p desolate >/dev/null && [ "$(type -t git)" = function ]'; \
+    # And through the terminal profile the editor is held to (editor-settings.ts):
+    # `--rcfile /dev/null` reads no rc file from the home volume and STILL reads
+    # /etc/bash.bashrc, or the completion and the guard would be gone with it.
+    bash --rcfile /dev/null -ic 'complete -p desolate >/dev/null && [ "$(type -t git)" = function ]'
 
 # Optional: pre-bake pinned extensions from Open VSX instead of letting the
 # running editor pull them ad hoc. Example:

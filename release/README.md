@@ -143,11 +143,37 @@ without the editor holding any of them.
 
 **What this buys, precisely.** A compromised editor can *use* your deploy keys
 for as long as it is compromised — it can push to repositories you have
-configured. It cannot *copy* one. The incident therefore ends when you restart a
-container, rather than when you have rotated every deploy key on every
+configured. It cannot *copy* one. The incident therefore ends when you restart
+the editor, rather than when you have rotated every deploy key on every
 repository and audited what was done with them in the meantime. That is the
 whole claim, and it is worth being exact about, because "the keys are safe" is
 not what is being said.
+
+**What a restart puts back, and what it does not.** The editor's `$HOME` is a
+volume, and a compromised editor runs as the user who owns it, so "restart"
+only ends an incident if what runs at the next start does not come from that
+volume. Held at every start, or kept out of the volume altogether:
+
+- the editor's own code is root's in the image, so it cannot be rewritten in
+  place; `./cli.sh down` / `up` recreates the container besides;
+- the security settings (workspace trust, automatic tasks, extension updates)
+  are put back by `editor-settings.ts` before the server starts; the rest of
+  `settings.json` is yours;
+- the terminal profile is held to a bash that reads no rc file from `$HOME`
+  (`--rcfile /dev/null`), so a planted `~/.bashrc` runs nothing;
+- extensions installed in this editor live on a tmpfs, gone at the next start;
+- the ssh config `desolate` pushes and pulls with is written per use from the
+  keyring's exports — host alias, public key, `IdentitiesOnly`, GitHub's host
+  keys from the image — so `~/.ssh/config` and `~/.ssh/known_hosts` in the
+  volume are not consulted. (`newrepo` still writes `~/.ssh/config`, for a
+  `git` you type yourself.)
+
+What a restart does *not* undo is anything else in the volume: `~/.gitconfig`,
+the rest of your settings, the server's own state. After an incident, discard
+the volume: `./cli.sh reset-editor` stops the editor, removes `vscode-home`,
+and starts it again; `./cli.sh repo add <owner/repo>` then writes each
+registered repository's ssh and git config again (its key is the keyring's, and
+kept). Projects and devcontainers are other volumes, and are not touched.
 
 Proxy secrets work the same way, and want the same exactness. Placeholders go
 into the container, real values are substituted at the proxy toward proven

@@ -20,6 +20,7 @@
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
+#   ./isolated-devcontainers-suede/cli.sh reset-editor              # discard the outer editor's home (after an incident)
 #   ./isolated-devcontainers-suede/cli.sh dind list | reset <project> | df | gc   # project daemons
 #   ./isolated-devcontainers-suede/cli.sh <any command...>          # runs in the editor container
 #
@@ -973,6 +974,28 @@ case "$CMD" in
                exit 1
              fi
              reset_inner "$FLAG" ;;
+
+  reset-editor)
+             # The outer editor's home volume, discarded: its settings,
+             # ~/.ssh/config, ~/.gitconfig, shell rc files, server state. For
+             # after an incident in that editor -- a restart already puts back
+             # its code (root's), its security settings and the ssh config
+             # desolate pushes with (release/README.md); this is the rest.
+             # Nothing of yours but that editor's preferences: projects are
+             # another volume, deploy keys are the keyring's, and `repo add`
+             # of a registered repository writes its config again.
+             ensure_running
+             echo "This discards the outer editor's home: its settings, ~/.ssh/config, ~/.gitconfig and"
+             echo "shell rc files. Projects, deploy keys and devcontainers are not touched."
+             read -r -p "Type 'yes' to continue: " a; [ "$a" = yes ] || exit 1
+             compose stop vscode
+             compose rm -f vscode
+             VOL=$(docker volume ls -q --filter label=com.docker.compose.volume=vscode-home)
+             [ -n "$VOL" ] || { echo "cli.sh: no vscode-home volume found" >&2; exit 1; }
+             docker volume rm $VOL
+             compose up -d vscode
+             echo "cli.sh: the editor starts again with a fresh home. Registered repositories:"
+             echo "        ./cli.sh repo add <owner/repo>  writes each one's ssh and git config again (its key is kept)." ;;
 
   dind)      # Project dinds (supervisor.ts drives them; this asks it). The
              # shared daemon keeps its own commands: reset-inner, and --all.

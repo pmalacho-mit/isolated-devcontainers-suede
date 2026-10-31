@@ -72,24 +72,38 @@ assert_not_contains "and not the unpruned server root" "$CFG" \
   "/home/.desolate-server/bin/codium-server"
 assert_contains "the seeding entrypoint is in the chain" "$CFG" \
   "/usr/local/bin/shell-entry"
+assert_contains "extensions this editor installs land on a tmpfs, gone at the next start" "$CFG" \
+  "--extensions-dir=/home/workspace/.vscodium-server/extensions"
+assert_contains "  (the tmpfs)" "$CFG" "- /home/workspace/.vscodium-server/extensions"
 
 group "workspace trust is ON, in the direction that matters"
-# Comments in shell-entry.sh discuss the false value at length; strip them, or
-# the assertion below passes on its own documentation.
-SEED=$(grep -v '^[[:space:]]*//' "$ENTRY" | grep -v '^#')
+# The values live in editor-settings.ts (HELD), which shell-entry runs at every
+# start. Comments there discuss the false value; strip them, or the assertion
+# below passes on its own documentation.
+HELD_TS="$RELEASE/vscode-image/editor-settings.ts"
+SEED=$(grep -v '^[[:space:]]*//' "$HELD_TS" | grep -v '^ \*')
 assert_contains "trust is enabled" "$SEED" '"security.workspace.trust.enabled": true'
 assert_not_contains "trust is never disabled" "$SEED" \
   '"security.workspace.trust.enabled": false'
 assert_contains "the startup prompt is never offered" "$SEED" \
   '"security.workspace.trust.startupPrompt": "never"'
 assert_contains "automatic tasks are off" "$SEED" '"task.allowAutomaticTasks": "off"'
+assert_contains "the terminal reads no rc file from the home volume" "$SEED" '"--rcfile", "/dev/null"'
 
-group "the seed does not overwrite a user's own settings"
-# It runs on every start. Seeding unconditionally would silently revert any
-# change the user made, which is both rude and a good way to have the file
-# ignored entirely.
-assert_contains "it only writes when the file is absent" "$SEED" '[ ! -f "$SETTINGS" ]'
-assert_contains "and execs the real command afterwards" "$SEED" 'exec "$@"'
+group "the settings are held at EVERY start, and the user's own left alone"
+# $HOME is a volume a compromised editor can write; seeding once left workspace
+# trust one write away from off, for good (audit M3). Holding puts back only
+# the settings in HELD -- tests/unit/desolate/editor-settings.test.ts shows the
+# rest of the file untouched -- so a restart ends what a compromise set.
+ENTRY_SH=$(grep -v '^#' "$ENTRY")
+assert_contains "shell-entry runs the holder, unconditionally" "$ENTRY_SH" 'tsx /usr/local/lib/desolate/editor-settings.ts "$SETTINGS"'
+assert_not_contains "  not only when the file is absent" "$ENTRY_SH" '[ ! -f "$SETTINGS" ]'
+assert_contains "  and refuses to start the editor when it cannot" "$ENTRY_SH" 'exit 1'
+assert_contains "and execs the real command afterwards" "$ENTRY_SH" 'exec "$@"'
+assert_contains "the editor's code is root's: a compromised editor cannot rewrite it in place" "$DF" 'COPY *.ts /usr/local/lib/desolate/'
+assert_not_contains "  not the editor's own" "$DF" 'COPY --chown=1000:1000 *.ts'
+assert_contains "the rc-less bash still reaches completion and the guard: asserted at build" "$DF" \
+  "bash --rcfile /dev/null -ic 'complete -p desolate"
 
 group "the desolate extension is the shell root's only addition, and holds no new power"
 EXT="$RELEASE/vscode-image/extension"
