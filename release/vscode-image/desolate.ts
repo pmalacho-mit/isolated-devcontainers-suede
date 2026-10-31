@@ -1563,6 +1563,41 @@ const forcedRemoval = (target: Target) => {
   return hint.anywhere(`worktree remove ${args}`, `./cli.sh worktree remove ${args}`);
 };
 
+/** The inode of `dir`, which must be a directory itself -- not a link to
+ *  one -- at this moment: what verifyWorkspaceMount measures against. */
+function inodeOfDirectory(dir: string): string {
+  const stat = fs.lstatSync(dir, { throwIfNoEntry: false });
+  if (!stat?.isDirectory()) return die(`${dir} is not a directory`);
+  return String(stat.ino);
+}
+
+/**
+ * The directory the container got as its workspace is the one that was
+ * checked (audit M4). The broker compared realpaths when it took the request
+ * and this runner again just before `up`, but the daemon resolves the bind
+ * source on its own, moments later, and /workspaces is the editor's to write:
+ * a symlink swapped in meanwhile -- at /run/inner, say, where the shared
+ * daemon's socket is -- would hand the container the link's target. So the
+ * container is asked what it got, from the far side: the inode of its
+ * workspace folder against the directory's, measured before anything began.
+ * One filesystem, so one inode means one directory. A container that got
+ * something else is stopped and removed before anything is said to be ready.
+ */
+function verifyWorkspaceMount(target: Target, expectedInode: string): void {
+  const source = target.worktree ? target.projectDir : target.dir;
+  const id = devcontainerId(target.dir);
+  if (!id) return die(`no container for ${target.name} after 'devcontainer up'`);
+  const inside = docker.container.mounts(id).find((mount) => mount.source === source)?.destination;
+  const got = inside ? docker.container.inodeOf(id, inside) : "";
+  if (got === expectedInode) return;
+  docker.container.stop(id);
+  docker.container.remove([id]);
+  die(`${target.name}'s container did not get ${source} as its workspace${
+    inside ? ` (inode ${got || "unreadable"} inside, ${expectedInode} here)` : " (no bind of it)"
+  }: something replaced the path between the check and the start. The container was removed;
+    look at ${source} and its parents for a link before starting it again.`);
+}
+
 /**
  * A target must be the directory its names denote -- not a link that a
  * project put where its worktree, or its `.worktrees`, should be. The broker
@@ -1844,6 +1879,10 @@ async function runTarget(
   noCache = false,
 ): Promise<void> {
   const { name, dir } = target;
+  // The path, checked HERE and not only by the broker: it is checked again
+  // just before `up`, and what `up` delivered is measured after (audit M4).
+  refuseUnlessItsOwnPath(target);
+  const workspaceInode = inodeOfDirectory(target.worktree ? target.projectDir : dir);
   populateWorktree(target);
   config ??= dieOnError(() => snapshot(target, { specs: DIRECT_SPEC_DIR }));
 
@@ -1937,7 +1976,9 @@ async function runTarget(
   const token = connectionToken(target);
 
   desolog(`starting devcontainer for ${name} ...`);
+  refuseUnlessItsOwnPath(target);
   devcontainerUp(target, config, noCache);
+  verifyWorkspaceMount(target, workspaceInode);
   if (willCreate) spec.save(target, fingerprint);
   installProxyCa(dir);
   shadowBaseImages(dir, project.shadowImages);

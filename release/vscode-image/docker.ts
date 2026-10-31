@@ -765,6 +765,17 @@ export const createDocker = (run: Runner) => {
       argv: string[],
       { quiet = true, timeoutMs }: RunOptions = {},
     ) => run.status(["exec", "-u", "0", cid, ...argv], { quiet, timeoutMs }),
+    /** The inode of `path` INSIDE the container, as its own `stat` says --
+     *  "" when it could not be asked. What a bind mount actually delivered,
+     *  measured from the far side (desolate.ts verifyWorkspaceMount). */
+    inodeOf: (cid: string, path: string): string => {
+      try {
+        const said = query("exec", "-u", "0", cid, "stat", "-c", "%i", "--", path).trim();
+        return /^\d+$/.test(said) ? said : "";
+      } catch {
+        return "";
+      }
+    },
 
     /** Whether the container has a docker CLI, and so a daemon of its own --
      *  which is what the docker-in-docker feature installs.

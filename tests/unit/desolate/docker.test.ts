@@ -383,6 +383,15 @@ describe("exec and helper containers", () => {
     assert.deepEqual(calls[0], ["exec", "-u", "0", "cid", "/desolate/ca/install-ca.sh"]);
   });
 
+  test("inodeOf asks the container's own stat, as root, and takes only a number (audit M4)", () => {
+    // What a bind mount delivered, measured from the far side: the inode the
+    // container sees at its workspace, against the directory's here.
+    const { docker, calls } = recorder(["1234567\n", "stat: cannot stat '/w': No such file\n"]);
+    assert.equal(docker.container.inodeOf("cid", "/workspaces/acme/app"), "1234567");
+    assert.deepEqual(calls[0], ["exec", "-u", "0", "cid", "stat", "-c", "%i", "--", "/workspaces/acme/app"]);
+    assert.equal(docker.container.inodeOf("cid", "/w"), "", "an error line is not an inode");
+  });
+
   test("the docker-in-docker probe is one exec, spelled once", () => {
     // "does this container have a daemon of its own" is asked wherever a tag or
     // a build has to land inside it. Spelled at each call site it would drift.

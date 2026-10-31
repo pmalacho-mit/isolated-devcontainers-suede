@@ -1393,6 +1393,13 @@ gets is an ssh-agent socket and the public half.
 Exactly one level of nesting is allowed. `a/b/c` is refused, and so is anything
 resolving outside `/workspaces` -- the broker compares the _resolved_ path
 against the workspaces root, so a symlink named legally still cannot escape.
+The runner compares it again just before `devcontainer up`, and after `up` asks
+the new container what it got: the inode of its workspace folder, against the
+directory's here, measured before anything began. The daemon resolves the bind
+source on its own, moments after any check, and `/workspaces` is the editor's
+to write; a link swapped in during that moment would otherwise hand the
+container the link's target. A container that got anything else is stopped and
+removed before it is said to be ready.
 
 **Docker names cannot contain `/`.** So a nested project's volumes, relay
 containers and state files use an encoded form: `owner/repo` becomes
