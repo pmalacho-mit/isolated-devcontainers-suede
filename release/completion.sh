@@ -171,7 +171,7 @@ _desolate_cli_line_project() {
     elif [ "$i" -eq "$COMP_CWORD" ]; then :
     else
       case "$w" in
-        --worktree|--branch|--config|--ref|--hosts|--projects|--headers) skip=1 ;;
+        --worktree|--branch|--config|--ref|--hosts|--projects|--headers|--expect) skip=1 ;;
         --move) skip=2 ;;
         -*) ;;
         *) printf '%s' "$w"; return 0 ;;
@@ -224,7 +224,7 @@ _desolate_cli_flags() {
         *)       [ "$COMP_CWORD" -eq 2 ] && printf '%s ' --status
                  echo "--list --dinds --stop --ports --purge --all --json --rebuild --no-cache --worktree --config" ;;
       esac ;;
-    push) echo "--worktree --allow-default" ;;
+    push) echo "--worktree --allow-default --expect" ;;
     pull) echo "--worktree --fetch-only" ;;
     exec) echo "--worktree" ;;
   esac

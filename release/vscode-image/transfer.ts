@@ -150,6 +150,8 @@ export const cleanGit = (args: string[], options: { capture?: boolean; ssh?: str
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
+    // The cache is a full clone; nothing here should fetch on its own account.
+    GIT_NO_LAZY_FETCH: "1",
     // Every call that reaches a remote names its ssh (sshFor); one that does
     // not fails here rather than reach for a config in the home volume.
     GIT_SSH_COMMAND: options.ssh ?? "/bin/false",
@@ -192,6 +194,17 @@ const writeAll = (fd: number, bytes: Buffer) => {
 };
 
 const transferName = () => `desolate-transfer-${randomBytes(8).toString("hex")}.bundle`;
+
+/** A name git takes as a branch and nothing else: no option, no refspec
+ *  syntax, no reaching past refs/heads/ -- `check-ref-format` has the last
+ *  word, after the shapes it is lenient about. */
+export const isBranchName = (name: string) =>
+  name.length > 0 && name.length <= 255 &&
+  !name.startsWith("-") &&
+  !/[\s\x00-\x1f\x7f:*?\[\\^~]/.test(name) &&
+  !name.includes("..") && !name.includes("@{") &&
+  !name.endsWith("/") && !name.endsWith(".lock") &&
+  cleanGit(["check-ref-format", `refs/heads/${name}`], { capture: true }).ok;
 
 /** `git ls-remote --symref <url> HEAD`'s answer: the remote's default branch. */
 export const defaultBranchOf = (lsRemote: string) =>
@@ -345,6 +358,8 @@ export interface Options {
   worktree?: string;
   /** Push to the remote's default branch, which is refused otherwise. */
   allowDefault?: boolean;
+  /** Push only if the branch is still at this commit -- the one reviewed. */
+  expect?: string;
   /** Pull: set origin/* only; nothing checked out moves. */
   fetchOnly?: boolean;
   /** For tests: the registration, and how git reaches it. */
@@ -386,6 +401,14 @@ export async function push(project: string, options: Options = {}): Promise<stri
     if (code === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); push again once that is done", { busy: true });
     if (code !== 0 || !bundled) return fail(`its sandbox did not bundle the branch (exit ${code})`);
     const { branch, commit } = bundled;
+    // The branch is the sandbox's word -- the project's git over its own refs
+    // -- and it goes into refspecs. A name git would not take as a branch, or
+    // one that would reach past refs/heads/, is refused before it does.
+    if (!isBranchName(branch)) return fail(`its sandbox named '${branch}' as the branch checked out, which is no branch name`);
+    // What was reviewed is what is sent: a branch that moved since -- an
+    // agent committed again -- is reviewed again, not pushed as it was.
+    if (options.expect && commit !== options.expect)
+      return fail(`${branch} is at ${commit.slice(0, 12)}, not the ${options.expect.slice(0, 12)} that was reviewed: it moved since. Review it again, then push`);
 
     const outgoing = `refs/desolate/outgoing/${branch}`;
     if (bundled.bundled) {

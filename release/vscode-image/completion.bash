@@ -112,7 +112,7 @@ _desolate_line_project() {
         elif [ "$i" -eq "$COMP_CWORD" ]; then :
         else
             case "$w" in
-                --worktree|--branch|--config) skip=1 ;;
+                --worktree|--branch|--config|--expect) skip=1 ;;
                 --move) skip=2 ;;
                 -*) ;;
                 *) printf '%s' "$w"; return 0 ;;
@@ -174,7 +174,7 @@ _desolate_complete_desolate() {
     [ "$COMP_CWORD" -eq 1 ] && first=
     case "$first" in
         --status) flags="--json" ;;
-        --push)   flags="--worktree --allow-default" ;;
+        --push)   flags="--worktree --allow-default --expect" ;;
         --pull)   flags="--worktree --fetch-only" ;;
         --review) flags="--worktree --json" ;;
         *)

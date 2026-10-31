@@ -386,7 +386,10 @@ export function activate(context: vscode.ExtensionContext) {
       ...(review?.uncommitted ? { detail: `${review.uncommitted} uncommitted change${review.uncommitted === 1 ? " is" : "s are"} not sent.` } : {}),
     }, "Push");
     if (sure !== "Push") return;
-    let { code } = await act(target, "pushing…", "desolate", ["--push", ...targetArgs(target)], [DEFAULT_BRANCH_EXIT]);
+    // Exactly what was reviewed: desolate refuses the push if the branch has
+    // moved since (an agent committed again), and the review is redone.
+    const expect = review ? ["--expect", review.head] : [];
+    let { code } = await act(target, "pushing…", "desolate", ["--push", ...expect, ...targetArgs(target)], [DEFAULT_BRANCH_EXIT]);
     if (code === DEFAULT_BRANCH_EXIT) {
       // Refused for being the repository's default branch (transfer.ts): the
       // person may mean it, so they are asked -- once more, and plainly.
@@ -396,7 +399,7 @@ export function activate(context: vscode.ExtensionContext) {
         { modal: true, detail: `This updates ${branch} on GitHub directly, with no pull request to review it in. It is never a force-push: GitHub refuses it if ${branch} moved there since your last pull.` },
         `Push to ${branch}`);
       if (anyway !== `Push to ${branch}`) return;
-      ({ code } = await act(target, "pushing…", "desolate", ["--push", "--allow-default", ...targetArgs(target)]));
+      ({ code } = await act(target, "pushing…", "desolate", ["--push", "--allow-default", ...expect, ...targetArgs(target)]));
     }
     if (code === 0 && reviewing && targetKey(reviewing.target) === targetKey(target)) await startReview(target);
   };

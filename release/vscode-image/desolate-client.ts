@@ -11,7 +11,7 @@
 //   desolate --ports myproject
 //   desolate --list                 what is running right now
 //   desolate --status [--json] [project]     each target's status (status.ts)
-//   desolate --push [--worktree w] [--allow-default] project   its branch to GitHub (transfer.ts)
+//   desolate --push [--worktree w] [--allow-default] [--expect c] project   its branch to GitHub (transfer.ts)
 //   desolate --pull [--worktree w] project   GitHub's branches in, fast-forwarded
 //   desolate --review [--worktree w] [--json] project   what a push would send (review.ts)
 //   desolate --list --json | desolate --ports myproject --json   for programs
@@ -48,7 +48,7 @@ function usage(code = 0): never {
   out("       desolate --dinds                   every project dind and the VM's headroom, as JSON");
   out("       desolate --status [--json] [<project>]   each target's status (desolate-status, inside)");
   out("       desolate --stop all|--stop --all   stop every running target");
-  out("       desolate --push [--worktree <name>] [--allow-default] <project>");
+  out("       desolate --push [--worktree <name>] [--allow-default] [--expect <commit>] <project>");
   out("                                          push its checked-out branch to its GitHub repository");
   out("       desolate --pull [--worktree <name>] [--fetch-only] <project>");
   out("                                          fetch that repository into origin/*, and fast-forward");
@@ -113,18 +113,23 @@ if (argv[0] === "--status") {
 if (argv[0] === "--push" || argv[0] === "--pull") {
   const which = argv[0];
   const words = argv.slice(1);
-  let worktree: string | undefined, allowDefault = false, fetchOnly = false;
+  let worktree: string | undefined, expect: string | undefined, allowDefault = false, fetchOnly = false;
   const projects: string[] = [];
   while (words.length) {
     const word = words.shift()!;
     if (word === "--worktree") worktree = words.shift() || refuse("--worktree expects a name");
     else if (word === "--allow-default" && which === "--push") allowDefault = true;
+    else if (word === "--expect" && which === "--push") {
+      // The commit reviewed, in full: the push is refused if the branch moved.
+      expect = words.shift();
+      if (!/^[0-9a-f]{40,64}$/.test(expect ?? "")) refuse("--expect takes the commit the branch was reviewed at, in full");
+    }
     else if (word === "--fetch-only" && which === "--pull") fetchOnly = true;
     else if (word.startsWith("-")) refuse(`unknown option '${word}' for ${which}`);
     else projects.push(word.replace(/\/+$/, "").replace(new RegExp(`^${WORKSPACES}/`), ""));
   }
-  if (projects.length !== 1) refuse(`usage: desolate ${which} [--worktree <name>]${which === "--push" ? " [--allow-default]" : ""} <project>`);
-  (which === "--push" ? push(projects[0], { worktree, allowDefault }) : pull(projects[0], { worktree, fetchOnly }))
+  if (projects.length !== 1) refuse(`usage: desolate ${which} [--worktree <name>]${which === "--push" ? " [--allow-default] [--expect <commit>]" : ""} <project>`);
+  (which === "--push" ? push(projects[0], { worktree, allowDefault, ...(expect ? { expect } : {}) }) : pull(projects[0], { worktree, fetchOnly }))
     .then((said) => { console.log(`desolate: ${said}`); process.exit(0); })
     .catch((err) => {
       if (!(err instanceof TransferError)) throw err;

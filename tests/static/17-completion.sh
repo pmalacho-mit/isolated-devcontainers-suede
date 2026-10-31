@@ -45,7 +45,7 @@ assert_eq "--status takes --json alone" "$(editor --status --)" "--json"
 assert_eq "--status, --push, --pull only as the first word" "$(editor acme/app --pu)" ""
 assert_eq "beside --stop: --all and --worktree" "$(editor --stop --)" "--all --worktree"
 assert_eq "beside --ports: --json, --move, --worktree" "$(editor --ports acme/app --)" "--json --move --worktree"
-assert_eq "a flag on the line already is not offered again" "$(editor --push --worktree wip --)" "--allow-default"
+assert_eq "a flag on the line already is not offered again" "$(editor --push --worktree wip --)" "--allow-default --expect"
 assert_eq "--worktree: the project's worktrees" "$(editor acme/app --worktree "")" "wip"
 assert_eq "  the project may come after the cursor" \
   "$(offers_at _desolate_complete_desolate 3 desolate --push --worktree "" acme/app)" "wip"

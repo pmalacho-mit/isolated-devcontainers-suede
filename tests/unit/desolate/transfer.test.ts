@@ -17,7 +17,7 @@ const workspaces = join(root, "workspaces");
 const cacheRoot = join(root, "cache");
 process.env.DESOLATE_WORKSPACES = workspaces;
 process.env.DESOLATE_REMOTE_CACHE = cacheRoot;
-const { push, pull, registrationOf, defaultBranchOf, cloneThroughCache, TransferError, sshFor } = await import("../../../release/vscode-image/transfer.ts");
+const { push, pull, registrationOf, defaultBranchOf, cloneThroughCache, TransferError, sshFor, isBranchName } = await import("../../../release/vscode-image/transfer.ts");
 const { bundleScript, pullScript } = await import("../../../release/vscode-image/docker.ts");
 
 const git = (cwd: string, ...args: string[]) =>
@@ -110,6 +110,26 @@ describe("push", () => {
     assert.equal(git(root, "--git-dir", elsewhere, "for-each-ref").length, 0, "the project's url rewrite sent it elsewhere");
     for (const name of ["pre-push", "ssh-command"]) assert.ok(!existsSync(marker(name)), `the project's ${name} ran`);
     assert.deepEqual(leftovers(), [], "a transfer file is left behind");
+  });
+
+  test("a branch name the sandbox reports that git would not take is refused before any refspec (audit M2)", async () => {
+    for (const bad of ["-option", "a:b", "a*", "a..b", "x/", "a@{1}", "a.lock", "a?b", "a[b", "a\\b", "~a", "a^"]) {
+      const lying = async (_request: Record<string, unknown>, onLog: (line: string) => boolean) => {
+        onLog(`BUNDLED ${bad} ${"a".repeat(40)} none`);
+        return 0;
+      };
+      await assert.rejects(push("acme/widgets", { registration, ask: lying }), (err: Error) =>
+        err instanceof TransferError && /no branch name/.test(err.message), bad);
+    }
+    for (const good of ["feature", "issue/42", "a.b-c_d", "v1.2.3", "UPPER"]) assert.ok(isBranchName(good), good);
+  });
+
+  test("--expect: the commit reviewed is the one pushed, or nothing is (audit L1)", async () => {
+    const head = git(project, "rev-parse", "HEAD");
+    await assert.rejects(push("acme/widgets", { registration, ask: bundler, expect: "f".repeat(40) }), (err: Error) =>
+      err instanceof TransferError && /moved since\. Review it again/.test(err.message) && err.message.includes(head.slice(0, 12)));
+    assert.deepEqual(leftovers(), [], "a transfer file is left behind");
+    assert.match(await push("acme/widgets", { registration, ask: bundler, expect: head }), /^pushed feature/);
   });
 
   test("again, with nothing new: no bundle at all, and nothing refused", async () => {
