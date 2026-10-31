@@ -720,13 +720,26 @@ while the approved snapshot still said `harmless`. The window is the whole
 resolve → enforce → spawn → build sequence, and a lost attempt costs the
 attacker nothing.
 
-Refusing local features closes the reachable form of this. What remains is a
-_published_ feature whose registry content changes between the two reads, which
-needs a registry the attacker controls; pin features by digest
-(`...@sha256:...`) if that is in your threat model. The complete fix is to make
-the CLI read the snapshot rather than the project -- e.g. by bind-mounting the
-frozen copy over `.devcontainer/` in the orchestrator's own mount namespace for
-the duration of the build -- which is not implemented.
+Refusing local features closes the project-side form of this. The registry-side
+form -- a _published_ feature whose content differs between the two reads, which
+any author of a hostile `devcontainer.json` can arrange by serving the feature
+from a host they run -- is closed by **pinning every feature to a digest before
+the check**. `desolate` resolves each tag with the CLI's own resolver
+(`devcontainer upgrade`, run over a scratch copy of the spec), rewrites the id
+to `<registry>/<path>@sha256:...` in the derived spec, and both the policy's
+read and `devcontainer up` fetch by that digest -- the CLI hashes the manifest
+and the layer it receives and refuses a mismatch, so both reads see the same
+bytes or nothing starts. `up` runs with `--no-lockfile`: the lockfile it would
+read sits beside the project's own config, where an entry can send even a
+pinned id to another manifest. A project's own `devcontainer-lock.json` is still
+honoured as a statement of which digest it wants for a tag.
+
+What cannot be pinned is refused, with the way out in the message: an
+`https://` tarball feature (a URL carries no digest), a GitHub-releases id
+(`owner/repo/feature`, resolved outside any digest), and a feature that
+`dependsOn` others (its own manifest is pinned, but its dependencies are
+fetched by their ids, by tag, at both reads). Publish the feature to a
+registry, or use one without dependencies.
 
 ### A project may only reach its own folder
 

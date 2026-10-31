@@ -1031,12 +1031,20 @@ describe("features must be fetched, not read from the project", () => {
         },
       }),
     );
-    allows(
+    // An https:// tarball once passed as "fetched". It is refused now: a URL
+    // carries no digest, and the runner pins every feature to one before
+    // `up` (feature-pins.ts) -- the metadata this check read must be what runs.
+    refuses(
       spec({
         image: "x",
         features: { "https://example.com/feature.tgz": {} },
       }),
+      /tarball, which cannot be pinned/,
     );
+    // A GitHub-releases id -- an owner, not a registry -- is resolved through
+    // the GitHub API, outside any digest.
+    refuses(spec({ image: "x", features: { "owner/repo/feature:1": {} } }), /can be pinned to a\s+digest/);
+    allows(spec({ image: "x", features: { ["ghcr.io/devcontainers/features/node@sha256:" + "a".repeat(64)]: {} } }));
   });
 
   test("docker-in-docker is refused by id, with the way out in the message", () => {

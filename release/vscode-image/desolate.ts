@@ -57,6 +57,7 @@ import { parse as parseJsonc } from "./jsonc.ts";
 import { isEntryPoint, isWithin, run, sha16, type JSONValue } from "./utils.ts";
 import { parseArgs, USAGE, type Args, type Command } from "./args.ts";
 import { BUSY_EXIT, hold, holderOf } from "./locks.ts";
+import { pinFeatures, unpinned, type Lockfile } from "./feature-pins.ts";
 import { hint } from "./hints.ts";
 import {
   createDocker,
@@ -771,6 +772,46 @@ const mustMirrorItsOwnPath = (
 };
 
 /**
+ * The CLI's own resolution of `features`, as the lockfile `devcontainer
+ * upgrade` writes (feature-pins.ts). `upgrade` takes a workspace folder and no
+ * --config, so it is run over a scratch workspace holding only the spec.
+ */
+const resolveFeatures = (features: Record<string, unknown>): Lockfile => {
+  fs.mkdirSync(RUN_CONFIG_DIR, { recursive: true, mode: 0o700 });
+  const ws = fs.mkdtempSync(`${RUN_CONFIG_DIR}/resolve-`);
+  try {
+    fs.mkdirSync(`${ws}/.devcontainer`, { mode: 0o700 });
+    fs.writeFileSync(`${ws}/.devcontainer/devcontainer.json`, JSON.stringify({ image: HELPER_IMAGE, features }));
+    desolog(`resolving the features to digests ...`);
+    const code = run.status("devcontainer", ["upgrade", "--workspace-folder", ws], { quiet: true, timeoutMs: 180000 });
+    if (code !== 0) die(`could not resolve the features to digests ('devcontainer upgrade' exited ${code}; is the registry reachable?)`);
+    let text: string;
+    try {
+      text = fs.readFileSync(`${ws}/.devcontainer/devcontainer-lock.json`, "utf8");
+    } catch {
+      return die(`the resolver wrote no lockfile for the features`);
+    }
+    const lock = parseJsonc(text);
+    if (typeof lock !== "object" || lock === null) return die(`the resolver's lockfile is not an object`);
+    return lock as Lockfile;
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+};
+
+/** The project's own lockfile beside its snapshotted spec, if it ships one:
+ *  a `.devcontainer/` layout's comes along with the directory. */
+const projectLockfile = (config: string): Lockfile | undefined => {
+  const file = path.join(path.dirname(config), path.basename(config).startsWith(".") ? ".devcontainer-lock.json" : "devcontainer-lock.json");
+  try {
+    const lock = parseJsonc(fs.readFileSync(file, "utf8"));
+    return typeof lock === "object" && lock !== null ? (lock as Lockfile) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
  * Narrow, derived rewrites of a validated spec. Returns the --config path to
  * use from here on (unchanged when nothing applies).
  */
@@ -829,6 +870,17 @@ function deriveRunConfig(
   if (tag) {
     spec.image = tag;
     applied.push(`base image ${tag} (trusts the proxy CA)`);
+  }
+
+  // Features by digest, so the policy and `up` read one content (feature-pins.ts).
+  if (spec.features !== undefined) {
+    if (typeof spec.features !== "object" || spec.features === null || Array.isArray(spec.features))
+      return die(`"features" in ${name}'s devcontainer config is not an object`);
+    const pinned = dieOnError(() => pinFeatures(spec.features as Record<string, unknown>, resolveFeatures, projectLockfile(src)));
+    if (pinned.notes.length) {
+      spec.features = pinned.features as JSONValue;
+      applied.push(`features pinned to the digests checked: ${pinned.notes.join("; ")}`);
+    }
   }
 
   if (applied.length === 0) return src; // nothing changed, config = runConfig
@@ -966,6 +1018,11 @@ const devcontainerUp = (target: Target, config: string, noCache = false) => {
     target.dir,
     ...overrideConfigFlag(config),
     ...injectedMounts(target).flatMap((mount) => ["--mount", mount]),
+    // The features are pinned in their ids (feature-pins.ts). The lockfile
+    // `up` would read is the one beside the WORKSPACE's config -- the
+    // project's -- and an entry there sends even a pinned id to the manifest
+    // IT names. So: none.
+    "--no-lockfile",
   ];
 
   if (noCache) args.push("--build-no-cache");
@@ -1839,6 +1896,11 @@ async function runTarget(
       (refusing to start -- this is a desolate bug, not a problem with
       your devcontainer.json): ${err?.message ?? err}`);
   }
+  // What `up` reads for each feature is what the policy read, or nothing
+  // runs: the ids say digests (feature-pins.ts), or deriveRunConfig has a bug.
+  const loose = unpinned(derived.configuration.features);
+  if (loose.length)
+    die(`features would reach 'devcontainer up' unpinned (${loose.join(", ")}) -- a desolate bug, not a problem with your devcontainer.json`);
   // Only once it will run: a refused start must not change which daemon
   // --stop and --purge drive.
   daemons.save(target, daemon);

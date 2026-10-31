@@ -365,11 +365,18 @@ assert_eq "deliver: in the editor, where the keys are, by path" "$(dexecs)" \
 dcli report acme/consumer --ref origin/main >/dev/null
 assert_eq "report: the orchestrator's runner, in the project's sandbox" "$(dexecs)" \
   "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--suede-report|--ref|origin/main|acme/consumer| "
-OUT=$(dcli upstream acme/consumer widget --ref origin/main)
+OUT=$(dcli upstream acme/consumer widget acme/widget --ref origin/main)
 C40=$(printf 'c%.0s' $(seq 40)); P40=$(printf 'p%.0s' $(seq 40)); A40=$(printf 'a%.0s' $(seq 40))
 assert_eq "upstream: built in the sandbox, pushed from the editor, one bundle name for both" "$(dexecs)" \
   "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--suede-build|widget|--transfer|NAME|--ref|origin/main|acme/consumer| exec|-e|DESOLATE_PLANE=mac|desolate-vscode|with-ca|tsx|/usr/local/lib/desolate/suede.ts|upstream|acme/consumer|acme/widget|NAME|$C40|$P40|$A40| "
 assert_eq "  and says what it proposed, where" "$OUT" "UPSTREAMED acme/widget downstream/acme/consumer-aaaa $C40 patchid"
+# The dependency is the caller's word (audit H1): the sandbox's, from the
+# project's .gitrepo, must agree, or nothing is pushed.
+OUT=$(dcli upstream acme/consumer widget acme/other --ref origin/main); CODE=$?
+assert_eq "upstream to a repository the folder is no copy of: refused" "$CODE" "1"
+assert_contains "  saying whose copy it is" "$OUT" "widget in acme/consumer is a copy of acme/widget, not of acme/other; nothing is pushed"
+assert_not_contains "  and the editor's push never ran" "$(dexecs)" "suede.ts|upstream"
+assert_contains "upstream wants the dependency named" "$(dcli upstream acme/consumer widget)" "usage: cli.sh suede"
 assert_contains "anything else is refused, with the usage" "$(dcli frobnicate)" "usage: cli.sh suede"
 rm -rf "$DSTUB"
 
