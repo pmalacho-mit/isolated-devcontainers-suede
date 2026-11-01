@@ -99,6 +99,16 @@ export const sockets = {
   /** One project's socket, as the orchestrator reaches it. */
   forOrchestrator: (target: Target) =>
     `/run/dind-sockets/${projectNamespace(target)}/docker.sock`,
+  /** Where the supervisor mounts the whole of it (docker-compose.yml). */
+  supervisorMount: "/run/dind-sockets",
+  /** A dind's socket, as the supervisor reaches it, from the dind's name:
+   *  the subpath is the project namespace the name carries. Asked over the
+   *  socket and not by `docker exec` into the dind, whose filesystem is the
+   *  project's to rewrite -- an exec runs a binary from it, as root. */
+  forSupervisor: (dindName: string) => {
+    if (!dindName.startsWith(`${PREFIX}-`)) throw new Error(`${dindName} is not a project dind`);
+    return `/run/dind-sockets/${dindName.slice(PREFIX.length + 1)}/docker.sock`;
+  },
 };
 
 /** The network a project dind sits on is named for the bridge it pins, so a

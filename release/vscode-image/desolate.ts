@@ -58,6 +58,7 @@ import { isEntryPoint, isWithin, run, sha16, type JSONValue } from "./utils.ts";
 import { parseArgs, USAGE, type Args, type Command } from "./args.ts";
 import { BUSY_EXIT, hold, holderOf } from "./locks.ts";
 import { pinFeatures, unpinned, type Lockfile } from "./feature-pins.ts";
+import { buildsFromDockerfile, buildSpec, imageSpec } from "./dockerfile-build.ts";
 import { hint } from "./hints.ts";
 import {
   createDocker,
@@ -1564,6 +1565,40 @@ const forcedRemoval = (target: Target) => {
   return hint.anywhere(`worktree remove ${args}`, `./cli.sh worktree remove ${args}`);
 };
 
+/**
+ * Build a Dockerfile project's image before the policy judges it, and return
+ * the --config path of a spec that names the image by id (dockerfile-build.ts).
+ */
+function buildBeforeJudging(target: Target, config: string, resolved: ResolvedSpec, noCache: boolean): string {
+  const spec = resolved.configuration as Record<string, unknown>;
+  const configFile = (spec.configFilePath as { fsPath?: string } | undefined)?.fsPath;
+  if (typeof configFile !== "string") return die(`the CLI did not say which file it read for ${target.name}; refusing to build`);
+  const scratch = `${RUN_CONFIG_DIR}/${target.namespace}-build`;
+  fs.rmSync(scratch, { recursive: true, force: true });
+  fs.mkdirSync(`${scratch}/.devcontainer`, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(`${scratch}/.devcontainer/devcontainer.json`,
+    JSON.stringify(buildSpec(spec, path.dirname(config), path.dirname(configFile)), null, 2));
+  const tag = `desolate-built/${target.namespace}:${Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => b.toString(16).padStart(2, "0")).join("")}`;
+  desolog(`building ${target.name}'s image from its Dockerfile first: the image is judged before anything starts ...`);
+  try {
+    const code = run.status("devcontainer", [
+      "build", "--workspace-folder", scratch, "--image-name", tag, "--no-lockfile", ...(noCache ? ["--no-cache"] : []),
+    ], { quiet: true });
+    if (code !== 0) die(`the build of ${target.name}'s Dockerfile failed (devcontainer build exited ${code})`);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+  const id = docker.image.id(tag);
+  if (!/^sha256:[0-9a-f]{64}$/.test(id)) return die(`the build of ${target.name} left no image behind as ${tag}`);
+  desolog(`built ${id.slice(0, 19)}; the spec now names it by id, label and all, for the policy and for 'up'`);
+
+  const out = `${RUN_CONFIG_DIR}/${target.namespace}`;
+  fs.mkdirSync(out, { recursive: true, mode: 0o700 });
+  const file = `${out}/devcontainer.json`;
+  fs.writeFileSync(file, JSON.stringify(imageSpec(spec, id), null, 2));
+  return file;
+}
+
 /** The inode of `dir`, which must be a directory itself -- not a link to
  *  one -- at this moment: what verifyWorkspaceMount measures against. */
 function inodeOfDirectory(dir: string): string {
@@ -1922,19 +1957,29 @@ async function runTarget(
   const fingerprint = spec.fingerprint(dir, config);
 
   config = deriveRunConfig(target, config, project, daemon);
-  const derived = resolveOrDie(target, config);
+  let derived = resolveOrDie(target, config);
 
-  try {
-    enforcePolicy(
-      target,
-      derived,
-      listTargets(WORKSPACES),
-      daemon,
-    );
-  } catch (err: any) {
-    die(`the spec desolate derived for ${name} does not pass the policy
-      (refusing to start -- this is a desolate bug, not a problem with
-      your devcontainer.json): ${err?.message ?? err}`);
+  const judge = () => {
+    try {
+      enforcePolicy(
+        target,
+        derived,
+        listTargets(WORKSPACES),
+        daemon,
+      );
+    } catch (err: any) {
+      die(`the spec desolate derived for ${name} does not pass the policy
+        (refusing to start -- this is a desolate bug, not a problem with
+        your devcontainer.json): ${err?.message ?? err}`);
+    }
+  };
+  judge();
+  if (buildsFromDockerfile(derived.configuration as Record<string, unknown>)) {
+    // The policy passed the build's inputs. Now the image it makes
+    // (dockerfile-build.ts): built, named by id, and judged with its label.
+    config = buildBeforeJudging(target, config, derived, noCache);
+    derived = resolveOrDie(target, config);
+    judge();
   }
   // What `up` reads for each feature is what the policy read, or nothing
   // runs: the ids say digests (feature-pins.ts), or deriveRunConfig has a bug.

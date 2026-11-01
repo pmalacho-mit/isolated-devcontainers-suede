@@ -253,7 +253,7 @@ const daemons = {
     const now = Date.now();
     return names.map((name) => {
       const isRunning = running.includes(name);
-      const inUse = isRunning && docker.dind.hostsDevcontainer(name);
+      const inUse = isRunning && docker.dind.hostsDevcontainer(dind.sockets.forSupervisor(name));
       if (inUse || !lastBusy.has(name)) lastBusy.set(name, now);
       return {
         name,
@@ -270,7 +270,7 @@ const daemons = {
   waitHealthy: async (name: string, settings: Settings, say: Say) => {
     let wedgedFor = 0;
     for (let second = 0; second < settings.bootSeconds; second++) {
-      const health = docker.dind.health(name);
+      const health = docker.dind.health(dind.sockets.forSupervisor(name));
       if (health === 0) return "healthy";
       wedgedFor = health === 2 ? wedgedFor + 1 : 0;
       if (wedgedFor >= 10) return "wedged";
@@ -463,7 +463,7 @@ const operations_ = {
       dinds: observed.map((daemon) => ({
         ...daemon,
         project: docker.dind.projectOf(daemon.name, dind.LABEL_KEY),
-        health: daemon.running ? healthOf(docker.dind.health(daemon.name)) : "stopped",
+        health: daemon.running ? healthOf(docker.dind.health(dind.sockets.forSupervisor(daemon.name))) : "stopped",
         imageStoreKib: docker.volumeKib(HELPER_IMAGE, dind.dataVolumeOf(daemon.name)),
       })),
       headroom: {

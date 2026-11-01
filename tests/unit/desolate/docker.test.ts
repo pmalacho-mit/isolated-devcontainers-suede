@@ -383,6 +383,41 @@ describe("exec and helper containers", () => {
     assert.deepEqual(calls[0], ["exec", "-u", "0", "cid", "/desolate/ca/install-ca.sh"]);
   });
 
+  test("a dind's health is asked over its socket, never by exec into it (audit L4)", () => {
+    // An exec runs a binary from the dind's filesystem, which the project can
+    // rewrite, in the process that holds the VM's socket.
+    const here = fs.mkdtempSync(path.join(os.tmpdir(), "desolate-dind-"));
+    const socket = path.join(here, "docker.sock");
+    try {
+      const { docker, calls } = recorder();
+      assert.equal(docker.dind.health(socket), 1, "no socket bound yet: booting");
+      assert.deepEqual(calls, [], "and nothing was run for it");
+      fs.writeFileSync(socket, "");
+      assert.equal(docker.dind.health(socket), 0);
+      assert.deepEqual(calls[0], ["-H", `unix://${socket}`, "info"]);
+      assert.ok(!calls.some((argv) => argv[0] === "exec"), "an exec into the dind");
+    } finally {
+      fs.rmSync(here, { recursive: true, force: true });
+    }
+  });
+
+  test("whether a dind hosts a devcontainer: over its socket too, and a dind that cannot be asked counts as in use", () => {
+    const here = fs.mkdtempSync(path.join(os.tmpdir(), "desolate-dind-"));
+    const socket = path.join(here, "docker.sock");
+    try {
+      assert.equal(recorder().docker.dind.hostsDevcontainer(socket), true, "no socket: not idle");
+      fs.writeFileSync(socket, "");
+      const busy = recorder(["abc123\n"]);
+      assert.equal(busy.docker.dind.hostsDevcontainer(socket), true);
+      assert.deepEqual(busy.calls[0].slice(0, 4), ["-H", `unix://${socket}`, "ps", "-q"]);
+      const idle = recorder(["", "ok"]);
+      assert.equal(idle.docker.dind.hostsDevcontainer(socket), false);
+      assert.ok(!idle.calls.some((argv) => argv[0] === "exec"));
+    } finally {
+      fs.rmSync(here, { recursive: true, force: true });
+    }
+  });
+
   test("inodeOf asks the container's own stat, as root, and takes only a number (audit M4)", () => {
     // What a bind mount delivered, measured from the far side: the inode the
     // container sees at its workspace, against the directory's here.

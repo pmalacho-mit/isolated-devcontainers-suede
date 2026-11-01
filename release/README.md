@@ -366,7 +366,7 @@ To pin a different sysbox release, check the
 through:
 
 ```bash
-SYSBOX_VERSION=0.7.0 ./cli.sh vm install
+SYSBOX_VERSION=0.7.1 ./cli.sh vm install
 ```
 
 #### 2. The egress proxy
@@ -984,6 +984,19 @@ a tag that moves upstream cannot change what a cached derivative stands for.
 is yours, so `desolate` cannot derive it; build-time HTTPS in such a project
 still fails certificate verification, and `desolate` says so explicitly when it
 sees one rather than letting you discover it mid-build.
+
+What such a project *is* covered for is its base image's say in the container.
+The CLI merges a base image's `devcontainer.metadata` label -- `privileged`,
+`capAdd`, `mounts`, `entrypoint` -- into the container it creates, and for a
+Dockerfile project that image does not exist when the policy reads the spec:
+measured, `FROM` a base carrying `[{"privileged":true}]` started privileged
+behind a spec that passed. So a Dockerfile project is **built first**, by
+`devcontainer build` over the snapshot's spec (its Dockerfile from the
+snapshot, its context from the project, never the live spec, which could say
+`build.options`), and the spec `up` starts from is rewritten to name the image
+that came out **by id**. The policy reads that spec with the label merged, and
+`up` starts that image and no other. The policy runs twice for such a project:
+on the build's inputs, then on its output.
 
 The supported path is `"image"` plus Features, which covers most of what a
 Dockerfile is usually doing anyway. If you genuinely need a custom Dockerfile,
@@ -1779,6 +1792,14 @@ travels unnoticed in a body or a URL.
 Be precise about the boundary, because the parts that look like guarantees and
 are not will bite:
 
+- **A project's own daemon is one runtime bug from the VM.** Each project
+  dind runs under sysbox, and sysbox is what makes "root inside the dind" mean
+  nothing outside it; the project has that root (its own daemon). The
+  supervisor, which holds the VM's socket, never runs a binary from inside a
+  dind -- it asks each daemon over its socket -- so what remains is sysbox's
+  own container boundary, and a flaw in it is a flaw in this design. Keep
+  `SYSBOX_VERSION` (`vm/install-sysbox.sh`, pinned by sha256) at the current
+  release; `./cli.sh vm install` moves it.
 - **Hosts are not restricted by default.** `default_action` ships as `allow`,
   so the path is default-deny but the _destination set_ is not. Set
   `default_action: "deny"` and an explicit `network` allowlist in

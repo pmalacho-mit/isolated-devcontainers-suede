@@ -5,6 +5,7 @@
  * The commands are built here rather than at the call sites for
  * readability and testability.
  */
+import { existsSync } from "node:fs";
 import type { RunOptions } from "./utils.ts";
 import { REVIEWED, REVIEW_LIMITS } from "./review.ts";
 
@@ -1014,38 +1015,29 @@ export const createDocker = (run: Runner) => {
         effect("update", "--memory", String(bytes), "--memory-swap", String(2 * bytes), name),
       /** The same verdict the shared dind's healthcheck gives -- one script,
        *  pointed at this dind's socket. 0 healthy, 1 booting, 2 wedged. */
-      health: (name: string) =>
-        run.status(
-          [
-            "exec",
-            "-e",
-            "DESOLATE_INNER_SOCKET=/run/dind-sock/docker.sock",
-            name,
-            "sh",
-            "/desolate-health/inner-health.sh",
-          ],
-          { quiet: true, timeoutMs: 10_000 },
-        ),
+      /** inner-health.sh's three verdicts -- 0 healthy, 1 booting (no socket
+       *  bound yet), 2 wedged (bound, but `info` did not answer in time) --
+       *  asked of the dind's daemon over its socket, which the supervisor
+       *  mounts. Not `docker exec` into the dind: that runs a binary from a
+       *  filesystem the project can rewrite, in the one process that holds
+       *  the VM's socket, and rides on the runtime's exec path besides. */
+      health: (socket: string) =>
+        !existsSync(socket)
+          ? 1
+          : run.status(["-H", `unix://${socket}`, "info"], { quiet: true, timeoutMs: 2_000 }) === 0
+            ? 0
+            : 2,
       /** Names of every project dind, running or not. */
       all: (labelKey: string) =>
         nonEmptyLines(query("ps", "-a", "--filter", `label=${labelKey}`, "--format", "{{.Names}}")),
       /** Is a devcontainer up inside it -- somebody's editor, so not idle?
        *  Asked of the dind's own daemon, through the alias its entrypoint
        *  links; "" (no answer) reads as in use, which never evicts. */
-      hostsDevcontainer: (name: string) =>
-        // Bounded inside the dind: a wedged daemon must not wedge the supervisor.
-        query(
-          "exec",
-          name,
-          "timeout",
-          "5",
-          "docker",
-          "ps",
-          "-q",
-          "--filter",
-          `label=${IDENTITY_LABELS.workspace}`,
-        ) !== "" ||
-        query("exec", name, "timeout", "5", "docker", "info", "--format", "ok") !== "ok",
+      hostsDevcontainer: (socket: string) =>
+        // Over the socket (see `health`); a socket not bound reads as in use.
+        !existsSync(socket) ||
+        query("-H", `unix://${socket}`, "ps", "-q", "--filter", `label=${IDENTITY_LABELS.workspace}`) !== "" ||
+        query("-H", `unix://${socket}`, "info", "--format", "ok") !== "ok",
       /** `docker stats` MemUsage per name, e.g. "490.2MiB / 15.6GiB". */
       memoryUsage: (names: string[]) =>
         names.length

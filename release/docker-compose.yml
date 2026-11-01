@@ -244,6 +244,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # the VM daemon: THIS SERVICE ONLY
       - supervisor-run:/run/supervisor
+      # Every project dind's socket, to ask its daemon how it is -- over the
+      # socket, never by `docker exec` into the dind (docker.ts dind.health).
+      - dind-sockets:/run/dind-sockets
       - /run/desolate-ingress/dinds:/run/ingress/dinds   # dind addresses, for desolate-ingress
     security_opt:
       - no-new-privileges:true
