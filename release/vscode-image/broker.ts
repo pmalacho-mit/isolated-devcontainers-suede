@@ -96,6 +96,10 @@ const operations = [
   "ports",
   /** What a push would send, read in the target's sandbox: `desolate --review`. */
   "review",
+  /** A clone's first checkout, in its sandbox: `repo add` cloned it without
+   *  one (transfer.ts cloneThroughCache). Nothing, for a target that has its
+   *  files already (worktrees.awaitsCheckout). */
+  "populate",
   ...worktreeOperations,
   ...transferOperations,
   ...globalOperations,
@@ -340,6 +344,9 @@ async function handle(req: unknown, send: Send) {
         break;
       case "review":
         flags = ["--review"];
+        break;
+      case "populate":
+        flags = ["--populate"];
         break;
       case "ports":
         flags = ["--ports"];

@@ -17,7 +17,8 @@ import { execFileSync } from "node:child_process";
 import { exchange } from "./keyring-client.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
-import { cloneThroughCache } from "./transfer.ts";
+import { ask } from "./broker-client.ts";
+import { cleanGit, cloneThroughCache } from "./transfer.ts";
 
 const WORKSPACES = "/workspaces";
 
@@ -274,8 +275,28 @@ function ensureUrlRewrites(repo: Repo): void {
   }
 }
 
+/** A clone's own config file: its `.git` a directory of its own at its own
+ *  path -- not a link, put there by the project, to another project's -- and
+ *  the file in it not a link either, which git would write through. */
+function cloneConfigOf(dest: string): string {
+  const git = `${dest}/.git`;
+  const real = (path: string) => {
+    try {
+      return fs.realpathSync(path);
+    } catch {
+      return "";
+    }
+  };
+  if (!fs.lstatSync(git, { throwIfNoEntry: false })?.isDirectory() || real(git) !== git)
+    die(`${git} is not a directory of ${dest}'s own; not writing its config`);
+  const config = `${git}/config`;
+  if (fs.lstatSync(config, { throwIfNoEntry: false })?.isSymbolicLink())
+    die(`${config} is a link; not writing through it`);
+  return config;
+}
+
 /** Idempotent, and it carries the Mac's git identity in via GIT_NAME/GIT_EMAIL. */
-function doClone(repo: Repo): void {
+async function doClone(repo: Repo): Promise<void> {
   const dest = `${WORKSPACES}/${repo.project}`;
   fs.mkdirSync(`${WORKSPACES}/${repo.owner}`, { recursive: true });
 
@@ -303,18 +324,28 @@ function doClone(repo: Repo): void {
   // `git push` typed in the editor's terminal invokes ssh itself, with no
   // GIT_SSH_COMMAND set, and would hit exactly the same lookup problem. Set on
   // the already-cloned path as well, to repair clones made before this existed.
-  execFileSync("git", [
-    "-C",
-    dest,
-    "config",
-    "core.sshCommand",
-    gitSshCommand(false),
-  ]);
+  //
+  // Written to the clone's config FILE by path, not `git -C <project>`: that
+  // is git discovering a repository the project may have rewritten since, and
+  // reading its config to write one key (audit M1).
+  const config = cloneConfigOf(dest);
+  const set = (key: string, value: string) => {
+    if (!cleanGit(["config", "--file", config, key, value]).ok) die(`could not set ${key} in ${config}`);
+  };
+  set("core.sshCommand", gitSshCommand(false));
 
   const name = process.env.GIT_NAME;
   const email = process.env.GIT_EMAIL;
-  if (name) execFileSync("git", ["-C", dest, "config", "user.name", name]);
-  if (email) execFileSync("git", ["-C", dest, "config", "user.email", email]);
+  if (name) set("user.name", name);
+  if (email) set("user.email", email);
+
+  // The clone has no checkout (transfer.ts, audit M1). Its files are written
+  // by the orchestrator, in the sandbox a worktree is checked out in -- never
+  // by git here. A no-op for a clone that has its files already.
+  const populated = await ask({ op: "populate", project: repo.project });
+  if (populated !== 0)
+    die(`${dest} is cloned, but its checkout failed (exit ${populated}; the output is above).
+        Starting it (desolate ${repo.project}) tries the checkout again.`);
 
   console.log(`READY ${dest}`);
 }
@@ -350,24 +381,27 @@ function usage(): never {
   process.exit(0);
 }
 
-const argv = process.argv.slice(2);
-switch (argv[0]) {
-  case "key":
-    ensureKey(parseRepo(argv[1], argv[2]));
-    break;
-  case "clone":
-    doClone(parseRepo(argv[1], argv[2]));
-    break;
-  case "status":
-    showStatus();
-    break;
-  case undefined:
-  case "-h":
-  case "--help":
-    usage();
-  default: {
-    const repo = parseRepo(argv[0], argv[1]);
-    ensureKey(repo);
-    doClone(repo);
+async function main(argv: string[]): Promise<void> {
+  switch (argv[0]) {
+    case "key":
+      ensureKey(parseRepo(argv[1], argv[2]));
+      break;
+    case "clone":
+      await doClone(parseRepo(argv[1], argv[2]));
+      break;
+    case "status":
+      showStatus();
+      break;
+    case undefined:
+    case "-h":
+    case "--help":
+      usage();
+    default: {
+      const repo = parseRepo(argv[0], argv[1]);
+      ensureKey(repo);
+      await doClone(repo);
+    }
   }
 }
+
+main(process.argv.slice(2));

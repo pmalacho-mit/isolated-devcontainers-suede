@@ -253,11 +253,17 @@ describe("a project cloned through its cache (`repo add`)", () => {
   const cloned = join(workspaces, "acme", "gadgets");
   const gadgets = { tag: "acme__gadgets", ownerRepo: "acme/gadgets", url: remote };
 
-  test("the clone is the remote's, with origin pointing there and the default branch checked out", () => {
+  test("the clone is the remote's, with origin pointing there and HEAD the default branch -- and no files yet", () => {
     cloneThroughCache(gadgets, cloned);
     assert.equal(git(cloned, "remote", "get-url", "origin"), remote);
     assert.equal(git(cloned, "symbolic-ref", "--short", "HEAD"), "main");
     assert.equal(git(cloned, "rev-parse", "refs/remotes/origin/feature"), git(root, "--git-dir", remote, "rev-parse", "feature"));
+    // The orchestrator checks it out, in a sandbox (worktrees.awaitsCheckout).
+    assert.deepEqual(readdirSync(cloned), [".git"]);
+    assert.equal(existsSync(join(cloned, ".git", "index")), false);
+    // ... as it does here, so the pull below has a checkout to work in.
+    git(cloned, "checkout", "--quiet", "--force");
+    assert.equal(readFileSync(join(cloned, "a.txt"), "utf8").trim(), git(root, "--git-dir", remote, "show", "main:a.txt"));
   });
 
   test("its objects are copies: no file is shared with the cache", () => {
@@ -276,6 +282,53 @@ describe("a project cloned through its cache (`repo add`)", () => {
     };
     assert.match(await pull("acme/gadgets", { registration: gadgets, ask }), /up to date/);
     assert.deepEqual(seen.slice(before).map((s) => s.bundle), ["none"]);
+  });
+});
+
+describe("a clone runs no filter the remote's content names (audit M1)", () => {
+  // The remote names a filter for every file, and the editor's git has one by
+  // that name configured -- as `git lfs install --system` configured `lfs`,
+  // which then read the remote's own .lfsconfig. Here, through
+  // GIT_CONFIG_SYSTEM: the system config, without writing /etc.
+  const filtered = join(root, "filtered.git");
+  const system = join(root, "system-gitconfig");
+  const smudged = marker("smudge");
+  const registration = { tag: "acme__filtered", ownerRepo: "acme/filtered", url: filtered };
+  before(() => {
+    const work = join(root, "filtered-work");
+    mkdirSync(work);
+    git(work, "init", "--quiet");
+    writeFileSync(join(work, ".gitattributes"), "* filter=evil\n");
+    writeFileSync(join(work, ".lfsconfig"), "[lfs]\n\turl = ssh://git@github.com-acme__widgets/acme/widgets\n");
+    commitIn(work, "payload.txt", "content\n");
+    git(work, "add", ".gitattributes", ".lfsconfig");
+    git(work, "commit", "--quiet", "-m", "attributes");
+    git(root, "init", "--quiet", "--bare", filtered);
+    git(work, "push", "--quiet", filtered, "main");
+    git(filtered, "symbolic-ref", "HEAD", "refs/heads/main");
+    writeFileSync(system, `[filter "evil"]\n\tsmudge = touch ${smudged}; cat\n`);
+  });
+
+  test("control: a plain clone with that system config runs it", () => {
+    const plain = join(root, "plain-clone");
+    rmSync(smudged, { force: true });
+    execFileSync("git", ["clone", "--quiet", filtered, plain], { env: { ...process.env, GIT_CONFIG_SYSTEM: system } });
+    assert.equal(existsSync(smudged), true, "the fixture does not exercise a filter");
+    rmSync(smudged, { force: true });
+  });
+
+  test("the editor's clone does not, and writes no file of the content", () => {
+    const dest = join(workspaces, "acme", "filtered");
+    const saved = process.env.GIT_CONFIG_SYSTEM;
+    process.env.GIT_CONFIG_SYSTEM = system;
+    try {
+      cloneThroughCache(registration, dest);
+    } finally {
+      if (saved === undefined) delete process.env.GIT_CONFIG_SYSTEM;
+      else process.env.GIT_CONFIG_SYSTEM = saved;
+    }
+    assert.equal(existsSync(smudged), false, "a filter ran in the editor");
+    assert.deepEqual(readdirSync(dest), [".git"]);
   });
 });
 

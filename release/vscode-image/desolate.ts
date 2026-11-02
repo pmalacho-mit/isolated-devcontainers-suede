@@ -990,8 +990,12 @@ const worktreeSandbox = (target: Target, mounts: string[]) => {
   };
 };
 
+/** A worktree's first checkout -- or a project root's, which `repo add` cloned
+ *  without one (transfer.ts cloneThroughCache) -- in its sandbox, never git
+ *  in the editor. */
 function populateWorktree(target: Target): void {
   if (!worktrees.awaitsCheckout(target)) return;
+  refuseUnlessItsOwnPath(target);
   const ca = SHARED_DIRECTORIES.find((mount) => mount.target === DESOLATE_DIR)!;
 
   desolog(`checking out ${target.name} in a sandbox (first start) ...`);
@@ -1007,7 +1011,7 @@ function populateWorktree(target: Target): void {
   // there is a checkout to start from.
   if (!worktrees.isPopulated(target))
     die(`the checkout of ${target.name} failed in its sandbox (exit ${code}; its output is above).
-      The worktree is left empty, and the next start tries again.`);
+      It is left empty, and the next start tries again.`);
   if (code !== 0)
     desolog(`the checkout of ${target.name} landed, but git exited ${code} -- a
       post-checkout hook failing in the sandbox, most likely (see above)`);

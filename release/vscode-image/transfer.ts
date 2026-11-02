@@ -152,6 +152,9 @@ export const cleanGit = (args: string[], options: { capture?: boolean; ssh?: str
     GIT_TERMINAL_PROMPT: "0",
     // The cache is a full clone; nothing here should fetch on its own account.
     GIT_NO_LAZY_FETCH: "1",
+    // No system config means no git-lfs filter; and should one ever be
+    // configured, it is not to read content's `.lfsconfig` here.
+    GIT_LFS_SKIP_SMUDGE: "1",
     // Every call that reaches a remote names its ssh (sshFor); one that does
     // not fails here rather than reach for a config in the home volume.
     GIT_SSH_COMMAND: options.ssh ?? "/bin/false",
@@ -312,9 +315,17 @@ const refresh = (cache: Cache, registration: Registration, ssh?: string) => {
  * `--no-hardlinks`, not a local clone's default: a hardlinked object file is
  * the same file in both, and the project can write its own .git. `origin` is
  * then the registered remote, as a clone from it would have it. The cache's
- * HEAD names the remote's default branch, so the clone checks that out.
+ * HEAD names the remote's default branch, so that is the clone's HEAD.
+ *
+ * `--no-checkout`, and through cleanGit: the editor writes the objects and
+ * refs and not one file of the content. A checkout runs over the content --
+ * its `.gitattributes` names filters, and the system git-lfs filter, run
+ * here, read the remote's own `.lfsconfig` (audit M1) -- so the files are
+ * written by the orchestrator, in the sandbox a worktree is checked out in
+ * (worktrees.awaitsCheckout): `repo add` asks for it next, and a start finds
+ * it still owed.
  */
-export function cloneThroughCache(registration: Registration, dest: string, options: { ssh?: string; env?: NodeJS.ProcessEnv } = {}) {
+export function cloneThroughCache(registration: Registration, dest: string, options: { ssh?: string } = {}) {
   const sshScratch = mkdtempSync(join(tmpdir(), "desolate-ssh-"));
   options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(sshScratch)) };
   try {
@@ -324,19 +335,17 @@ export function cloneThroughCache(registration: Registration, dest: string, opti
   }
 }
 
-function cloneThroughCacheWith(registration: Registration, dest: string, options: { ssh?: string; env?: NodeJS.ProcessEnv }) {
+function cloneThroughCacheWith(registration: Registration, dest: string, options: { ssh?: string }) {
   const cache = openCache(registration);
   try {
     refresh(cache, registration, options.ssh);
     const head = cleanGit(["-C", cache.dir, "ls-remote", "--symref", registration.url, "HEAD"], { capture: true, ssh: options.ssh });
     const main = defaultBranchOf(head.stdout);
     if (main) cleanGit(["-C", cache.dir, "symbolic-ref", "HEAD", `refs/heads/${main}`]);
-    const cloned = spawnSync("git", ["clone", "--quiet", "--no-hardlinks", "--origin", "origin", cache.dir, dest], {
-      stdio: ["ignore", "inherit", "inherit"],
-      env: options.env ?? process.env,
-    });
-    if (cloned.status !== 0) fail(`could not clone ${registration.ownerRepo} from its cache`);
-    spawnSync("git", ["-C", dest, "remote", "set-url", "origin", registration.url], { env: options.env ?? process.env });
+    if (!cleanGit(["clone", "--quiet", "--no-hardlinks", "--no-checkout", "--origin", "origin", cache.dir, dest]).ok)
+      fail(`could not clone ${registration.ownerRepo} from its cache`);
+    if (!cleanGit(["-C", dest, "remote", "set-url", "origin", registration.url]).ok)
+      fail(`could not point ${dest}'s origin at ${registration.ownerRepo}`);
     cache.remember(branchesOf(cache).map(([commit]) => commit));
   } finally {
     cache.release();

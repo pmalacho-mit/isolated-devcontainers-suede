@@ -48,7 +48,7 @@
  */
 /// <reference types="node" />
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ask } from "./broker-client.ts";
 import {
@@ -105,13 +105,28 @@ const adminDirectory = (worktree: Target) => {
   return named ? resolve(worktree.dir, named) : "";
 };
 
+/** Is this project root a clone nothing has been checked out of -- what
+ *  `repo add` leaves (transfer.ts cloneThroughCache)? A `.git` directory with
+ *  a HEAD and no index, and NOTHING beside it: a root that holds files is
+ *  someone's work, and a checkout there would overwrite it. */
+const rootAwaitsCheckout = (root: Target) => {
+  const git = join(root.dir, ".git");
+  try {
+    return lstatSync(git).isDirectory() && existsSync(join(git, "HEAD")) && !existsSync(join(git, "index"))
+      && readdirSync(root.dir).every((entry) => entry === ".git");
+  } catch {
+    return false;
+  }
+};
+
 /** Has this worktree been checked out yet?
  *
  *  `add` creates it with `--no-checkout`, which leaves the admin directory
  *  without an index; the sandboxed checkout writes one. Asked of the filesystem
- *  for the same reason `isLocked` is. A root target is always populated. */
+ *  for the same reason `isLocked` is. A root target is populated unless it is
+ *  a clone still waiting for its first checkout. */
 export const isPopulated = (worktree: Target) => {
-  if (!worktree.worktree) return true;
+  if (!worktree.worktree) return !rootAwaitsCheckout(worktree);
   const admin = adminDirectory(worktree);
   return admin !== "" && existsSync(join(admin, "index"));
 };
@@ -133,13 +148,14 @@ export const SANDBOX_LABEL = "desolate.worktree-sandbox";
 export const SANDBOX_SECONDS = 600;
 
 /** Is this a git worktree that was created and never checked out -- the state
- *  `add` leaves it in, and the only one a sandbox should populate?
+ *  `add` leaves it in, and the only one a sandbox should populate? (Or a
+ *  project root `repo add` cloned without a checkout: rootAwaitsCheckout.)
  *
  *  Narrower than `!isPopulated`: a directory with no `.git` file, or one
  *  naming an admin directory that is not there, is not a worktree waiting for
  *  files, and checking it out would fail rather than help. */
 export const awaitsCheckout = (worktree: Target) => {
-  if (!worktree.worktree) return false;
+  if (!worktree.worktree) return rootAwaitsCheckout(worktree);
   const admin = adminDirectory(worktree);
   return admin !== "" && existsSync(admin) && !existsSync(join(admin, "index"));
 };
