@@ -44,7 +44,9 @@ _desolate_cli_grammar() {
       sub(/\)$/, "", label)
       indent = match(label, /[^ ]/) - 1
       name = substr(label, indent + 1)
-      if (name ~ /\*/) next
+      # A pattern, or a flag a branch parses for itself (`--project)`): not a
+      # subcommand.
+      if (name ~ /\*/ || name ~ /^-/) next
       # `shell|bash)` and `list|add)` are several names for one branch. Split
       # here rather than downstream, or the alternates lose their CMD/SUB tag.
       n = split(name, part, "|")
@@ -63,7 +65,7 @@ _desolate_cli_verbs() {
 }
 
 _desolate_cli_subs() {
-  _desolate_cli_grammar | awk -F'\t' -v v="$1" '$1=="SUB" && $2==v {print $3}'
+  _desolate_cli_grammar | awk -F'\t' -v v="$1" '$1=="SUB" && $2==v && !seen[$3]++ {print $3}'
 }
 
 # ---------------------------------------------------------------------------
@@ -295,6 +297,20 @@ _desolate_cli() {
 
   # Position 3+: whatever the verb+subcommand pair takes.
   case "$verb $sub" in
+    "proxy learn"|"proxy enforce"|"proxy recommend"|"proxy allow")
+      case "${COMP_WORDS[COMP_CWORD-1]}" in
+        --project) _desolate_cli_offer project _desolate_cli_projects ;;
+        --then)    COMPREPLY=( $(compgen -W "deny allow" -- "$cur") ) ;;
+        --for)     ;;
+        --method)  COMPREPLY=( $(compgen -W "GET HEAD POST PUT PATCH DELETE OPTIONS" -- "$cur") ) ;;
+        *) case "$sub" in
+             learn)     COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --project --for --then)" -- "$cur") ) ;;
+             enforce)   COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --project)" -- "$cur") )
+                        [ "$COMP_CWORD" -eq 3 ] && COMPREPLY+=( $(compgen -W "deny allow" -- "$cur") ) ;;
+             recommend) COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --project)" -- "$cur") ) ;;
+             allow)     [ "$COMP_CWORD" -ge 4 ] && COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --project --method)" -- "$cur") ) ;;
+           esac ;;
+      esac ;;
     "secret rm"|"secret off") [ "$COMP_CWORD" -eq 3 ] && _desolate_cli_offer secret _desolate_cli_secrets ;;
     "secret on")
       if [ "$COMP_CWORD" -eq 3 ]; then _desolate_cli_offer secret _desolate_cli_secrets

@@ -68,6 +68,13 @@ assert_eq "  --headers: authorization" "$(mac secret add NAME --hosts x --header
 assert_eq "cli.sh suede report: --ref" "$(mac suede report acme/app --)" "--ref"
 assert_eq "cli.sh suede deliver: the dependency is a project" "$(mac suede deliver acme/app "")" "acme/app solo"
 assert_eq "cli.sh worktree remove: --force" "$(mac worktree remove acme/app wip --)" "--force"
+assert_eq "cli.sh secret: its subcommands, each once" "$(mac secret "")" "add list off on rm"
+assert_eq "cli.sh secret on: --ttl" "$(mac secret on NAME --)" "--ttl"
+assert_eq "cli.sh proxy: its subcommands, and no flag among them" "$(mac proxy "")" "allow audit enforce learn logs recommend status test"
+assert_eq "cli.sh proxy learn: its three flags" "$(mac proxy learn "")" "--for --project --then"
+assert_eq "  --then: deny or allow" "$(mac proxy learn --project acme/app --then "")" "allow deny"
+assert_eq "  --project: a project" "$(mac proxy learn --project "")" "acme/app solo"
+assert_eq "cli.sh proxy enforce: deny, allow, --project" "$(mac proxy enforce "")" "--project allow deny"
 
 group "every flag a person types is offered somewhere"
 # The client's: every quoted --flag in desolate-client.ts.
