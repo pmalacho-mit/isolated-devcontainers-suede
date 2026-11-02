@@ -45,4 +45,8 @@ assert_eq "up, check, CA, lifecycle, editor -- and the recreate in the same orde
   "devcontainerUp verifyWorkspaceMount installProxyCa runLifecycleCommands devcontainerUp verifyWorkspaceMount installProxyCa runLifecycleCommands startEditor"
 assert_eq "startEditor calls no up of its own" "$(body_of startEditor | grep -c 'devcontainerUp(')" "0"
 
+group "a project the proxy restricts is refused the shared daemon before anything starts"
+FIRST=$(body_of runTarget | grep -oE '(refuseRestrictedOnTheSharedDaemon|daemons\.use|useProjectDaemon|devcontainerUp)\(' | head -1)
+assert_eq "it is asked first, once the daemon is known" "$FIRST" "refuseRestrictedOnTheSharedDaemon("
+
 summary

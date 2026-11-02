@@ -423,4 +423,56 @@ assert_contains "a while that ended reads as off" "$ENDED" "  SCOPED  ->  b.com 
 assert_eq "  and the scope stays last (claude-helper reads it there)" "${ENDED##*ago]}" "   (only for: acme/w)"
 rm -rf "$VMSIM"
 
+group "a project restricted, through cli.sh, against a stand-in VM"
+PSIM=$(mktemp -d)
+mkdir -p "$PSIM/bin" "$PSIM/policy"
+printf '%s' '{"secrets":{},"network":[{"action":"allow","host":"*"}]}' > "$PSIM/settings.json"
+cat > "$PSIM/bin/colima" <<'EOF'
+#!/bin/bash
+shift 3; [ "$1" = -- ] && shift; [ "$1" = sudo ] && shift
+args=(); for a in "$@"; do a="${a//\/etc\/desolate-proxy\/settings.json/$SETTINGS}"; args+=("${a//\/var\/lib\/desolate-proxy\/policy/$POLICY}"); done
+exec env PATH="$STUBS:$PATH" "${args[@]}"
+EOF
+cat > "$PSIM/bin/install" <<'EOF'
+#!/bin/bash
+[ "$1" = -d ] && { shift; while [ $# -gt 1 ]; do case "$1" in -m|-o|-g) shift 2 ;; *) break ;; esac; done; mkdir -p "$@"; exit; }
+while [ $# -gt 2 ]; do case "$1" in -m|-o|-g) shift 2 ;; *) shift ;; esac; done; cp "$1" "$2"
+EOF
+# The journal: what the proxy said, a requester's text in its fields.
+cat > "$PSIM/bin/journalctl" <<'EOF'
+#!/bin/sh
+cat <<'L'
+[12:00:01.000] AUDIT verdict=LEARN method=GET host=objects.githubusercontent.com path=/asset secrets=- suspect=- project=acme/widgets agent=curl/8.5.0
+[12:00:02.000] AUDIT verdict=LEARN method=GET host=objects.githubusercontent.com path=/b secrets=- suspect=- project=acme/widgets agent=curl/8.5.0
+[12:00:03.000] AUDIT verdict=DENY-POLICY method=GET host=registry.npmjs.org path=/react secrets=- suspect=- project=acme/widgets agent=npm/10.8.2
+[12:00:04.000] AUDIT verdict=LEARN method=GET host=bad;touch${IFS}x path=/$(id) secrets=- suspect=- project=acme/widgets agent=x
+[12:00:05.000] AUDIT verdict=ALLOW method=GET host=allowed.example.com path=/ secrets=- suspect=- project=acme/widgets
+[12:00:06.000] AUDIT verdict=LEARN method=GET host=other.example.com path=/ secrets=- suspect=- project=solo agent=x
+L
+EOF
+chmod +x "$PSIM/bin/"*
+pcli() { SETTINGS="$PSIM/settings.json" POLICY="$PSIM/policy" STUBS="$PSIM/bin" PATH="$PSIM/bin:$PATH" bash "$RELEASE/cli.sh" "$@" 2>&1; }
+assert_contains "nothing restricted to begin with" "$(pcli proxy enforce)" "no project is restricted"
+assert_contains "a learn window must say what follows it" "$(pcli proxy learn --project acme/widgets --for 1h)" "say what follows the window"
+pcli proxy learn --project acme/widgets --for 1h --then deny >/dev/null
+pcli proxy enforce deny --project solo >/dev/null
+assert_eq "learning: until the VM's now plus the while, and its then" \
+  "$(jq -c '.["acme/widgets"] | {action, then, until: (.until > 1000000000)}' "$PSIM/policy/projects.json")" '{"action":"learn","then":"deny","until":true}'
+assert_contains "listed with what is left" "$(pcli proxy enforce)" "acme/widgets  learning, 60m left, then deny"
+RECOMMEND=$(pcli proxy recommend --project acme/widgets)
+assert_contains "recommend: a command per host it was refused or learned, most asked first" "$(printf '%s\n' "$RECOMMEND" | sed -n 2p)" \
+  "proxy allow objects.githubusercontent.com --project acme/widgets   # 2 request(s): GET /asset (curl/8.5.0)"
+assert_contains "  and the others" "$RECOMMEND" "proxy allow registry.npmjs.org --project acme/widgets"
+assert_contains "  a host that is not a host name is not made a command" "$RECOMMEND" "# not a host name, so not offered: bad;touch"
+assert_not_contains "  what was allowed is not recommended" "$RECOMMEND" "allowed.example.com"
+assert_not_contains "  nor another project's" "$RECOMMEND" "other.example.com"
+pcli proxy allow registry.npmjs.org --project acme/widgets >/dev/null
+pcli proxy allow registry.npmjs.org --project acme/widgets >/dev/null
+assert_eq "allow appends a rule named for the project, once" "$(jq -c '.network' "$PSIM/settings.json")" \
+  '[{"action":"allow","host":"*"},{"action":"allow","host":"registry.npmjs.org","projects":["acme/widgets"]}]'
+assert_contains "  and never everything" "$(pcli proxy allow '*' --project acme/widgets)" "does not name a destination"
+pcli proxy enforce allow --project solo >/dev/null
+assert_eq "enforce allow takes a project out" "$(jq -c 'keys' "$PSIM/policy/projects.json")" '["acme/widgets"]'
+rm -rf "$PSIM"
+
 summary

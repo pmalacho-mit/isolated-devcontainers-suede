@@ -1661,3 +1661,96 @@ def test_switching_it_back_on_takes_effect_at_the_next_request(tmp_path):
     Path(mod.SETTINGS_PATH).write_text(json.dumps(settings))
     os.utime(mod.SETTINGS_PATH, (time.time() + 5, time.time() + 5))
     assert carries_value(spend(addon), SECRET_VALUE)
+
+
+# --------------------------------------------- a project restricted --------
+# "A PROJECT RESTRICTED: LEARN, THEN ENFORCE": the default stays allow; a
+# project held to deny or learn gets what is allowed by name; learning lets
+# through and audits what would have been refused, with who asked.
+
+def restricted_addon(tmp_path, policies, network=None):
+    mod, addon = scoped_addon(tmp_path, network=network or [
+        {"action": "allow", "host": "registry.npmjs.org"},
+        {"action": "allow", "host": "pypi.org", "projects": ["acme/widgets"]},
+        {"action": "deny", "host": "evil.example"},
+        {"action": "allow", "host": "*"},
+    ])
+    policy = tmp_path / "projects.json"
+    policy.write_text(json.dumps(policies))
+    mod.POLICY_PATH = str(policy)
+    return mod, addon
+
+
+def ask(addon, address, host, ua="npm/10.8.2 node/v22.11.0 linux x64"):
+    f = from_(address, sni=host, dest="104.16.0.1", headers={"User-Agent": ua})
+    addon.request(f)
+    return f
+
+
+def test_an_unlisted_project_has_the_default_as_before(tmp_path):
+    _, addon = restricted_addon(tmp_path, {"solo": {"action": "deny"}})
+    assert not blocked(ask(addon, A_ADDRESS, "anything.example.org"))
+
+
+def test_a_denied_project_gets_what_is_allowed_by_name_and_nothing_else(tmp_path, caplog):
+    _, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "deny"}})
+    with caplog.at_level(logging.INFO):
+        refused = ask(addon, A_ADDRESS, "anything.example.org")
+    assert blocked(refused) and refused.response.status_code == 403
+    assert b"proxy recommend --project acme/widgets" in refused.response.content
+    fields = audit_fields(caplog)[-1]
+    assert (fields["verdict"], fields["project"]) == ("DENY-POLICY", "acme/widgets")
+    assert fields["agent"] == "npm/10.8.2+node/v22.11.0+linux+x64"
+    assert not blocked(ask(addon, A_ADDRESS, "registry.npmjs.org")), "a rule naming the host"
+    assert not blocked(ask(addon, A_ADDRESS, "pypi.org")), "a rule naming the project"
+    assert blocked(ask(addon, A_ADDRESS, "evil.example")), "a deny is a deny"
+
+
+def test_a_project_restricted_restricts_no_one_else(tmp_path):
+    _, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "deny"}})
+    for source in (B_ADDRESS, SHARED_ADDRESS):
+        assert not blocked(ask(addon, source, "anything.example.org"))
+    assert not blocked(ask(addon, B_ADDRESS, "pypi.org")), "unrestricted, it has the default"
+
+
+def test_learning_lets_through_and_says_what_would_have_been_refused(tmp_path, caplog, monkeypatch):
+    mod, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "learn", "until": 2_000, "then": "deny"}})
+    monkeypatch.setattr(mod, "clock", lambda: 1_000)
+    with caplog.at_level(logging.INFO):
+        learned = ask(addon, A_ADDRESS, "objects.githubusercontent.com", ua="git/2.45 (curl)")
+        named = ask(addon, A_ADDRESS, "registry.npmjs.org")
+    assert not blocked(learned) and not blocked(named)
+    verdicts = [(x["verdict"], x["host"], x.get("agent")) for x in audit_fields(caplog)]
+    assert verdicts == [("LEARN", "objects.githubusercontent.com", "git/2.45+(curl)"), ("ALLOW", "registry.npmjs.org", None)]
+
+
+@pytest.mark.parametrize("then,refused", [("deny", True), ("allow", False)])
+def test_a_learn_window_ends_into_its_then(tmp_path, monkeypatch, then, refused):
+    mod, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "learn", "until": 2_000, "then": then}})
+    monkeypatch.setattr(mod, "clock", lambda: 2_000)
+    assert blocked(ask(addon, A_ADDRESS, "anything.example.org")) is refused
+
+
+@pytest.mark.parametrize("entry", [{"action": "learn"}, {"action": "learn", "until": 5, "then": "maybe"},
+                                   {"action": "learn", "until": True, "then": "allow"}, {"action": "sometimes"}, "deny"],
+                         ids=["no window", "no then", "until a bool", "an unknown action", "not an object"])
+def test_a_policy_that_cannot_be_read_holds_the_project_to_deny(tmp_path, entry):
+    _, addon = restricted_addon(tmp_path, {"acme/widgets": entry})
+    assert blocked(ask(addon, A_ADDRESS, "anything.example.org"))
+
+
+def test_learning_never_reaches_an_internal_destination(tmp_path, monkeypatch):
+    mod, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "learn", "until": 2_000, "then": "deny"}})
+    monkeypatch.setattr(mod, "clock", lambda: 1_000)
+    f = from_(A_ADDRESS, sni="router.example", dest="192.168.1.1")
+    addon.request(f)
+    assert blocked(f) and f.response.status_code == 403
+
+
+def test_a_user_agent_reaches_the_audit_line_as_one_safe_field(tmp_path, caplog):
+    _, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "deny"}})
+    with caplog.at_level(logging.INFO):
+        ask(addon, A_ADDRESS, "anything.example.org", ua="x verdict=ALLOW \x1b]0;t\x07 " + "y" * 200)
+    agent = audit_fields(caplog)[-1]["agent"]
+    assert agent.startswith("x+verdict_ALLOW+__0;t_+") and len(agent) == 80
+    assert " " not in agent and "=" not in agent and "\x1b" not in agent

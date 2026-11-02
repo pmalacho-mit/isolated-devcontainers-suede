@@ -265,6 +265,32 @@ an agent can spend, or a body an LLM host could hand back transformed, is a
 risk only while you have the secret on.
 
 ---------------------------------------------------------------------------
+A PROJECT RESTRICTED: LEARN, THEN ENFORCE
+---------------------------------------------------------------------------
+The default stays what it was -- `default_action`, `allow` as shipped, with
+its `{"action": "allow", "host": "*"}` rule. A PROJECT can be held to less,
+one at a time, by POLICY_PATH (not settings.json: nothing in it is secret,
+and the orchestrator reads it too, to refuse such a project the shared
+daemon, where its traffic would be no project's). Per project:
+
+  {"action": "deny"}                                 enforce
+  {"action": "learn", "until": <epoch>, "then": "deny"|"allow"}
+  {"action": "allow"}                                as if not listed
+
+A project held to deny or learn gets only what is allowed BY NAME: a rule
+naming a host, or a rule naming the project; deny rules as always. The
+everyone-everything allow (`host: "*"`, no `projects`) is the default this
+replaces, so it is not consulted for it. A request nothing else allows is
+refused (`verdict=DENY-POLICY`) -- or, while it learns, let through and
+audited `verdict=LEARN`, with the User-Agent that asked, which `cli.sh proxy
+recommend` turns into the rules that would have allowed it. A learn window
+ends on the VM's clock, read at each request, into its `then`.
+
+An entry that cannot be read is a deny: unlike a scope that widens, a
+restriction that cannot be read is held. A policy file that cannot be read
+keeps the last one, as settings.json does.
+
+---------------------------------------------------------------------------
 THE SELF-TEST FIXTURE, AND WHY IT IS MATCHED DIFFERENTLY
 ---------------------------------------------------------------------------
 `preflight.sh` proves leak detection is running by tripping it: it sends a
@@ -304,6 +330,8 @@ import time
 from mitmproxy import http
 
 SETTINGS_PATH = os.environ.get("DESOLATE_SETTINGS", "/etc/desolate-proxy/settings.json")
+# Projects held to less than the default ("A PROJECT RESTRICTED").
+POLICY_PATH = os.environ.get("DESOLATE_POLICY", "/var/lib/desolate-proxy/policy/projects.json")
 # The supervisor's published dind addresses (desolate-ingress.tmpfiles): what a
 # request's source address is attributed by. See "WHICH PROJECT".
 DINDS_DIR = os.environ.get("DESOLATE_DINDS_DIR", "/run/desolate-ingress/dinds")
@@ -446,6 +474,8 @@ class DesolateProxy:
         self.allow_private_destinations = False
         self._dinds_stamp = None
         self._projects_by_address = {}
+        self.policies = {}         # project -> {"action", "until"?, "then"?}
+        self._policy_mtime = None
 
     # ---------- attribution ----------
 
@@ -544,6 +574,60 @@ class DesolateProxy:
                  f"default_action={self.default_action}, "
                  f"allow_private_destinations={self.allow_private_destinations}")
 
+    # ---------- a project restricted ----------
+
+    def _maybe_reload_policies(self):
+        try:
+            mtime = os.stat(POLICY_PATH).st_mtime
+        except FileNotFoundError:
+            if self.policies:
+                log.warning(f"{POLICY_PATH} is gone: no project is restricted any more")
+            self.policies, self._policy_mtime = {}, None
+            return
+        except OSError as e:
+            log.error(f"cannot stat {POLICY_PATH}: {e}; keeping the last policies")
+            return
+        if mtime == self._policy_mtime:
+            return
+        try:
+            with open(POLICY_PATH) as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError) as e:
+            log.error(f"failed to load {POLICY_PATH}: {e}; keeping the last policies")
+            return
+        policies = {}
+        for project, entry in raw.items():
+            if not isinstance(project, str) or not PROJECT_NAME.fullmatch(project):
+                log.error(f"policy for {project!r}: not a project name; ignored")
+                continue
+            policies[project] = self._read_policy(project, entry)
+        self.policies, self._policy_mtime = policies, mtime
+        log.info(f"loaded {len(policies)} project policy(ies): "
+                 + (", ".join(f"{p}={e['action']}" for p, e in sorted(policies.items())) or "none"))
+
+    @staticmethod
+    def _read_policy(project, entry):
+        action = entry.get("action") if isinstance(entry, dict) else None
+        if action in ("allow", "deny"):
+            return {"action": action}
+        if action == "learn":
+            until, then = entry.get("until"), entry.get("then")
+            if isinstance(until, (int, float)) and not isinstance(until, bool) and then in ("allow", "deny"):
+                return {"action": "learn", "until": until, "then": then}
+        log.error(f"policy for {project!r}: {entry!r} cannot be read; holding it to deny")
+        return {"action": "deny"}
+
+    def mode_of(self, project):
+        """allow, deny or learn: the policy this project's request is judged by."""
+        entry = self.policies.get(project) if project is not None else None
+        if entry is None:
+            return "allow"
+        if entry["action"] == "learn" and clock() >= entry["until"]:
+            return entry["then"]
+        return entry["action"]
+
     # ---------- helpers ----------
 
     def is_on(self, name):
@@ -619,7 +703,15 @@ class DesolateProxy:
                 continue
         return None
 
-    def audit(self, flow, verdict, host, route, method, secrets, suspect=(), project=None):
+    @staticmethod
+    def agent(flow):
+        """The User-Agent, as one audit field: what asked, for `proxy recommend`'s
+        why. Spaces as `+`, anything but a short safe alphabet as `_`, cut short
+        -- it is the requester's text, and it reaches a terminal on the Mac."""
+        raw = flow.request.headers.get("user-agent", "")
+        return re.sub(r"[^A-Za-z0-9./()+:;_,-]", "_", raw.replace(" ", "+"))[:80] or "-"
+
+    def audit(self, flow, verdict, host, route, method, secrets, suspect=(), project=None, agent=None):
         """One machine-readable line per request, for `cli.sh proxy audit`.
 
         Separate from the human log lines above on purpose. Those are prose and
@@ -635,7 +727,8 @@ class DesolateProxy:
         `suspect` is the placeholders that passed UNSUBSTITUTED toward a host
         their allowlist does not cover, and `project` the project the request
         came from ("-" for none). Each was appended last, so every older field
-        keeps its position for parsers that predate it.
+        keeps its position for parsers that predate it -- as is `agent`, on a
+        LEARN or DENY-POLICY line only: what asked, for `proxy recommend`.
         """
         try:
             log.info(
@@ -647,6 +740,7 @@ class DesolateProxy:
                 f"secrets={','.join(secrets) if secrets else '-'} "
                 f"suspect={','.join(suspect) if suspect else '-'} "
                 f"project={project or '-'}"
+                + (f" agent={agent}" if agent else "")
             )
         except Exception:
             # An audit line must never be the reason a request fails.
@@ -716,9 +810,16 @@ class DesolateProxy:
                 names.append(cls._without_port(value))
         return names
 
-    def _network_allowed(self, host, method, project=None):
+    def _network_allowed(self, host, method, project=None, restricted=False):
+        """Whether the rules allow it. `restricted`: the project is held to
+        what is allowed by name ("A PROJECT RESTRICTED") -- the everyone-
+        everything allow is not consulted, and nothing else allowing it is a
+        refusal whatever default_action says."""
         for rule in self.network:
             if not self._host_matches(host, [str(rule.get("host", "*")).lower()]):
+                continue
+            if (restricted and rule.get("action", "deny") == "allow" and rule.get("projects") is None
+                    and str(rule.get("host", "*")).strip() == "*"):
                 continue
             # A rule naming projects is theirs -- read so that it fails closed.
             # An ALLOW is theirs alone, and one whose scope cannot be read
@@ -740,7 +841,7 @@ class DesolateProxy:
             if m and m.upper() != method.upper():
                 continue
             return rule.get("action", "deny") == "allow"
-        return self.default_action == "allow"
+        return False if restricted else self.default_action == "allow"
 
     @staticmethod
     def _block(flow, code, msg):
@@ -820,6 +921,7 @@ class DesolateProxy:
 
     def _request(self, flow: http.HTTPFlow):
         self._maybe_reload()
+        self._maybe_reload_policies()
         method = flow.request.method
         proven = self.proven_host(flow)
         claimed = self.host_header(flow)
@@ -839,14 +941,22 @@ class DesolateProxy:
                             f"containers may not reach it through this proxy")
                 return
 
-        # 1) network policy -- on the proven name where we have one.
+        # 1) network policy -- on the proven name where we have one; for a
+        # project restricted, by name alone ("A PROJECT RESTRICTED").
         policy_host = proven or claimed or flow.request.host
-        if not self._network_allowed(policy_host, method, project):
-            log.warning(f"DENY  {method} {policy_host}{flow.request.path} (network policy)")
-            self.audit(flow, "DENY-POLICY", policy_host,
-                       flow.request.path.split("?", 1)[0], method, [], project=project)
-            self._block(flow, 403, f"network policy denied {method} {policy_host}")
-            return
+        mode = self.mode_of(project)
+        learned = False
+        if not self._network_allowed(policy_host, method, project, restricted=mode != "allow"):
+            if mode != "learn":
+                log.warning(f"DENY  {method} {policy_host}{flow.request.path} (network policy"
+                            f"{', ' + project + ' is restricted' if mode == 'deny' and project else ''})")
+                self.audit(flow, "DENY-POLICY", policy_host,
+                           flow.request.path.split("?", 1)[0], method, [], project=project, agent=self.agent(flow))
+                self._block(flow, 403, f"network policy denied {method} {policy_host}"
+                            + (f" ({project} is held to what is allowed by name: ./cli.sh proxy recommend --project {project})"
+                               if mode == "deny" and project else ""))
+                return
+            learned = True
 
         # 2) leak detection -- strictly on the proven name.
         found = self._placeholders_in_request(flow)
@@ -970,7 +1080,11 @@ class DesolateProxy:
         if substituted is not body:
             flow.request.content = substituted
 
-        if suspect:
+        if learned:
+            # Would have been refused: let through, said so, with who asked.
+            self.audit(flow, "LEARN", proven or claimed, route, method, sorted(found), suspect,
+                       project=project, agent=self.agent(flow))
+        elif suspect:
             if found:
                 log.info(f"SUBST {method} {proven}{route} <- {sorted(found)}")
             self.audit(flow, "LEAK-SUSPECT", proven, route, method, sorted(found), suspect, project=project)

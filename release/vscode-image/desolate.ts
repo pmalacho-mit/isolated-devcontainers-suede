@@ -39,6 +39,7 @@ import * as path from "node:path";
 import * as dind from "./dind.ts";
 import { hostOf, originOf } from "./hosts.ts";
 import { runPlainly, wantsPlain } from "./plain-output.ts";
+import { readPolicies, restrictionOf } from "./restrictions.ts";
 import { builtBeyondDeclared, daemonOf, enforcePolicy, type Daemon } from "./policy.ts";
 import {
   EVERY_TARGET,
@@ -1665,6 +1666,20 @@ function verifyWorkspaceMount(target: Target, expectedInode: string): void {
     look at ${source} and its parents for a link before starting it again.`);
 }
 
+/** A project the proxy holds to what is allowed by name runs on a daemon of
+ *  its own, where its requests are its own (restrictions.ts). */
+function refuseRestrictedOnTheSharedDaemon(target: Target, daemon: Daemon): void {
+  if (daemon !== "shared") return;
+  const restriction = restrictionOf(readPolicies(), target.project, Date.now() / 1000);
+  if (!restriction) return;
+  die(`${target.project} is ${restriction === "learn" ? "learning" : "held"} to what the proxy allows it by name
+    (${hint.mac(`proxy enforce`)}), and on the shared daemon its requests would be no
+    project's -- so it would have neither. Give it a daemon of its own: add
+      "features": { "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {} }
+    to its devcontainer.json -- or lift the restriction:
+      ${hint.mac(`proxy enforce allow --project ${target.project}`)}`);
+}
+
 /**
  * A target must be the directory its names denote -- not a link that a
  * project put where its worktree, or its `.worktrees`, should be. The broker
@@ -1956,6 +1971,7 @@ async function runTarget(
   const resolved = resolveOrDie(target, config);
   const project = readProjectConfig(resolved);
   const daemon = daemonOf(resolved);
+  refuseRestrictedOnTheSharedDaemon(target, daemon);
   if (project.hadLegacyAppPort)
     return die(`devcontainer.json still contains "appPort".
       desolate allocates host ports itself, and an appPort publish occupies the

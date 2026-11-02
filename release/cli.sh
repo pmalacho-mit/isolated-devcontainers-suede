@@ -130,6 +130,23 @@ PROJECT_AUDIT_AWK='{ line = $0; sub(/^\[[0-9:.]*\] /, "", line) } index(line, "A
 # eight (connect, the line itself, the response, disconnects), so `-n <n>` alone
 # read <n> journal lines and usually held no AUDIT line at all.
 audit_window() { echo $(( $1 * 50 )); }
+# The per-project policies the proxy reads (addon.py "A PROJECT RESTRICTED"),
+# in the VM; the orchestrator mounts their directory read-only. Not secret.
+POLICY_DIR=/var/lib/desolate-proxy/policy
+POLICY_JSON=$POLICY_DIR/projects.json
+# `proxy recommend`: LEARN and DENY-POLICY lines of one project, aggregated by
+# host: "<host>\t<count>\t<method> <path>\t<agent>", most asked first. The
+# fields are the requester's text; what prints them sanitizes them.
+RECOMMEND_AWK='{
+  line = $0; sub(/^\[[0-9:.]*\] /, "", line)
+  if (index(line, "AUDIT ") != 1) next
+  n = split(substr(line, 7), f, " "); delete v
+  for (i = 1; i <= n; i++) { k = f[i]; sub(/=.*/, "", k); x = f[i]; sub(/^[^=]*=/, "", x); v[k] = x }
+  if (v["project"] != want || (v["verdict"] != "LEARN" && v["verdict"] != "DENY-POLICY")) next
+  h = v["host"]; count[h]++
+  if (!(h in sample)) { sample[h] = v["method"] " " v["path"]; agent[h] = v["agent"] }
+}
+END { for (h in count) printf "%s\t%d\t%s\t%s\n", h, count[h], sample[h], agent[h] }'
 leak_suspect_line() { grep -aE "^(\[[0-9:.]*\] )?AUDIT verdict=LEAK-SUSPECT .* path=/$1 " | tail -n 1; }
 
 # `export`, run INSIDE the editor where the files are:
@@ -1381,7 +1398,104 @@ case "$CMD" in
                          sudo journalctl -u desolate-proxy --since -2min --no-pager -o cat \
                        | leak_suspect_line "$MARK" \
                        | sed 's/^/   /' | grep . || echo "   (no LEAK-SUSPECT line -- leak detection is NOT live)" ;;
-               *) echo "usage: cli.sh proxy {status|logs [--project <p>] [n]|audit [--project <p>] [n]|test}" >&2; exit 1 ;;
+               learn|enforce)
+                 # One project held to what it is allowed by name; the default
+                 # stays what it is (addon.py "A PROJECT RESTRICTED").
+                 #   proxy learn   --project P --for 1h --then deny|allow
+                 #   proxy enforce deny|allow --project P
+                 #   proxy enforce                    every project's, and how long
+                 ACTION="" P="" FOR="" THEN=""
+                 [ "$SUB" = enforce ] && case "${1:-}" in deny|allow) ACTION=$1; shift ;; esac
+                 while [ $# -gt 0 ]; do
+                   case "$1" in
+                     --project) P="${2:?--project takes a project}"; shift 2 ;;
+                     --for)     FOR="${2:?--for takes a while: 30m, 1h, 1d}"; shift 2 ;;
+                     --then)    THEN="${2:?--then takes deny or allow}"; shift 2 ;;
+                     *) echo "usage: cli.sh proxy learn --project P --for 1h --then deny|allow | proxy enforce [deny|allow --project P]" >&2; exit 1 ;;
+                   esac
+                 done
+                 if [ "$SUB" = enforce ] && [ -z "$ACTION" ] && [ -z "$P" ]; then
+                   # Every project's policy, the VM's clock for what is left.
+                   vm sudo sh -c '[ -f "$1" ] || { echo "  (no project is restricted: every project has the default)"; exit 0; }
+                     jq -r "to_entries[]|[.key,.value.action,(.value.until//-1),(.value.then//\"-\"),(now|floor)]|@tsv" "$1"' _ "$POLICY_JSON" \
+                   | awk -F'\t' 'NF == 1 { print; next } {
+                       if ($2 == "learn" && $3 > $5) printf "  %s  learning, %dm left, then %s\n", $1, ($3 - $5 + 59) / 60, $4
+                       else if ($2 == "learn") printf "  %s  %s (its learning ended)\n", $1, $4
+                       else printf "  %s  %s\n", $1, $2 }'
+                   exit 0
+                 fi
+                 valid_project "$P" || { echo "cli.sh: --project takes a project name (name or owner/name)" >&2; exit 1; }
+                 if [ "$SUB" = learn ]; then
+                   case "$THEN" in deny|allow) ;; *)
+                     echo "cli.sh: say what follows the window: --then deny (enforce what it learned) or --then allow (back to the default)" >&2; exit 1 ;; esac
+                   case "$FOR" in [1-9]*m|[1-9]*h|[1-9]*d) N=${FOR%?} ;; *) N=x ;; esac
+                   case "$N" in ''|*[!0-9]*) echo "cli.sh: --for '${FOR}' is not a while (30m, 1h, 1d)" >&2; exit 1 ;; esac
+                   case "$FOR" in *m) SECS=$((N * 60)) ;; *h) SECS=$((N * 3600)) ;; *d) SECS=$((N * 86400)) ;; esac
+                   ENTRY="{\"action\":\"learn\",\"then\":\"$THEN\",\"for\":$SECS}"
+                 else
+                   [ -n "$ACTION" ] || { echo "usage: cli.sh proxy enforce deny|allow --project P" >&2; exit 1; }
+                   ENTRY="{\"action\":\"$ACTION\"}"
+                 fi
+                 # `allow` takes the project out: listed or not, it is the default.
+                 vm sudo sh -c 'umask 022; install -d -m 0755 "$1"; F="$1/projects.json"; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
+                   [ -f "$F" ] || echo "{}" > "$F"
+                   jq --arg p "$2" --argjson e "$3" "if \$e.action == \"allow\" then del(.[\$p]) elif \$e.for then .[\$p] = {action: \"learn\", then: \$e.then, until: (now + \$e.for | floor)} else .[\$p] = \$e end" "$F" > "$T" \
+                     && install -m 0644 "$T" "$F"' _ "$POLICY_DIR" "$P" "$ENTRY" || exit 1
+                 case "$SUB:$ACTION" in
+                   learn:*)
+                     echo "$P is learning for $FOR: what nothing allows it by name goes through, audited LEARN; then $THEN."
+                     echo "  What it asked for:  $0 proxy recommend --project $P" ;;
+                   enforce:deny)
+                     echo "$P is held to what it is allowed by name; the rest is refused (403)."
+                     echo "  What it was refused:  $0 proxy recommend --project $P" ;;
+                   *) echo "$P has the default again." ;;
+                 esac
+                 [ "$SUB:$ACTION" = enforce:allow ] || echo "  It must run on a daemon of its own: on the shared one its requests are no project's, and desolate refuses to start it there." ;;
+               recommend)
+                 # The rules that would have allowed what a project was refused,
+                 # or let through while learning: `proxy allow` lines to run.
+                 P="" N=2000
+                 while [ $# -gt 0 ]; do
+                   case "$1" in --project) P="${2:-}"; shift 2 ;; *) N=$1; shift ;; esac
+                 done
+                 valid_project "$P" || { echo "usage: cli.sh proxy recommend --project P [n]" >&2; exit 1; }
+                 case "$N" in *[!0-9]*|"") echo "cli.sh: proxy recommend takes a line count" >&2; exit 1 ;; esac
+                 ROWS=$(colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "$(audit_window "$N")" --no-pager -o cat \
+                          | awk -v want="$P" "$RECOMMEND_AWK" | sort -t "$(printf '\t')" -k2,2nr)
+                 if [ -z "$ROWS" ]; then
+                   echo "  nothing $P asked for was refused or learned (in the last $N requests)"; exit 0
+                 fi
+                 echo "# $P asked for these, and no rule allows them by name:"
+                 printf '%s\n' "$ROWS" | while IFS=$(printf '\t') read -r H C WHAT WHO; do
+                   # The requester's text: a host is printed as a command only
+                   # if it is a host name, and the rest only as plain text.
+                   WHAT=$(printf '%s' "$WHAT" | LC_ALL=C tr -cd '[:print:]' | cut -c1-60)
+                   WHO=$(printf '%s' "${WHO:--}" | LC_ALL=C tr -cd 'A-Za-z0-9./()+:;_,-' | cut -c1-60)
+                   if printf '%s' "$H" | grep -Eqx '([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-9-]*[a-z0-9])?'; then
+                     printf '%s proxy allow %s --project %s   # %s request(s): %s (%s)\n' "$0" "$H" "$P" "$C" "$WHAT" "$WHO"
+                   else
+                     printf '# not a host name, so not offered: %s (%s request(s))\n' "$(printf '%s' "$H" | LC_ALL=C tr -cd '[:print:]' | cut -c1-60)" "$C"
+                   fi
+                 done ;;
+               allow)
+                 # proxy allow <host> --project P [--method M]: what a
+                 # restricted project may reach by name. Appended: a deny before
+                 # it still wins.
+                 H="${1:?usage: cli.sh proxy allow <host> --project P [--method M]}"; shift
+                 P="" M=""
+                 while [ $# -gt 0 ]; do
+                   case "$1" in --project) P="${2:-}"; shift 2 ;; --method) M="${2:-}"; shift 2 ;; *) shift ;; esac
+                 done
+                 valid_project "$P" || { echo "cli.sh: --project takes a project name" >&2; exit 1; }
+                 case "$H" in *[!A-Za-z0-9.*-]*|"") echo "cli.sh: '$H' is not a host name" >&2; exit 1 ;; esac
+                 host_pattern_pins_a_destination "$H" || { echo "cli.sh: '$H' does not name a destination ('*.example.com' does; '*' does not)" >&2; exit 1; }
+                 case "$M" in ""|GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS) ;; *) echo "cli.sh: --method takes an HTTP method" >&2; exit 1 ;; esac
+                 RULE="{\"action\":\"allow\",\"host\":\"$(printf '%s' "$H" | tr 'A-Z' 'a-z')\",\"projects\":[\"$P\"]${M:+,\"method\":\"$M\"}}"
+                 vm sudo sh -c 'umask 077; F=/etc/desolate-proxy/settings.json; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
+                   jq --argjson r "$1" "if (.network // []) | index([\$r]) then . else .network = ((.network // []) + [\$r]) end" "$F" > "$T" \
+                     && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F"' _ "$RULE" || exit 1
+                 echo "$P may reach $H${M:+ ($M)}" ;;
+               *) echo "usage: cli.sh proxy {status|logs [--project <p>] [n]|audit [--project <p>] [n]|test|learn|enforce|recommend|allow}" >&2; exit 1 ;;
              esac ;;
 
   repo)      ensure_running

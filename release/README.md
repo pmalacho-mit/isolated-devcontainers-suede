@@ -1833,6 +1833,47 @@ true, but only while you have it on. Switch on what an agent needs for the
 task, for about as long as the task, and an install script that runs later
 finds the key off.
 
+### Holding one project to less: learn, then enforce
+
+The default stays `allow`. One project you trust less can be held to what it
+is allowed by name -- without first having to know every host its tools touch:
+
+```bash
+./cli.sh proxy learn --project acme/widgets --for 1h --then deny
+#   ... use it: start it, build it, run its tests ...
+./cli.sh proxy recommend --project acme/widgets
+#   ./cli.sh proxy allow registry.npmjs.org --project acme/widgets   # 41 request(s): GET /react (npm/10.8.2+node/v22)
+#   ./cli.sh proxy allow objects.githubusercontent.com --project acme/widgets   # 2 request(s): ...
+./cli.sh proxy allow registry.npmjs.org --project acme/widgets     # the ones you agree with
+./cli.sh proxy enforce                                             # every project's, and what is left
+./cli.sh proxy enforce deny  --project acme/widgets                # now, without a window
+./cli.sh proxy enforce allow --project acme/widgets                # the default again
+```
+
+Held to deny, a project gets what a `network` rule allows by name -- a rule
+naming the host, or a rule naming the project -- and every `deny` as always.
+The shipped `{"action": "allow", "host": "*"}` is the default this replaces,
+so it is not consulted for it. Anything else is refused (403,
+`verdict=DENY-POLICY`, naming `proxy recommend`). While it learns, the same
+requests go through and are audited `verdict=LEARN` with the User-Agent that
+asked; `recommend` turns both into `proxy allow` lines, with what was asked
+and by what. `--then` is required: whether the window ends into `deny` or
+back into the default is yours to say. The end is read on the VM's clock at
+each request, as a secret's `--ttl` is.
+
+The restrictions are in `/var/lib/desolate-proxy/policy/projects.json` in
+the VM (not secret, not `settings.json`), which the orchestrator also reads,
+read-only: **a restricted project must run on a daemon of its own**. The
+proxy tells projects apart by the dind their requests come from, and on the
+shared daemon every project's requests are no project's -- a project picks its
+daemon in its own spec, so it could otherwise step around its restriction by
+declaring the shared one. desolate refuses to start it there and says what to
+add. An entry that cannot be read holds its project to deny.
+
+What it does not cover: DNS still answers every name, so a restricted project
+can still put data in a lookup; and the image pulls its own dind makes are its
+requests too, so they are among what it learns.
+
 ### The one entry that is not a secret
 
 `./cli.sh secret list` shows `DESOLATE-SELFTEST-PLACEHOLDER -> httpbin.org`.

@@ -202,6 +202,11 @@ services:
     entrypoint: ["/usr/local/bin/with-ca", "tsx", "/usr/local/lib/desolate/broker.ts"]
     volumes:
       - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
+      # The projects the proxy holds to what is allowed by name (cli.sh proxy
+      # learn|enforce): read, so none of them is started on the shared daemon,
+      # where its requests would be no project's (restrictions.ts). Not secret,
+      # and here alone -- the editor and the projects do not see it.
+      - /var/lib/desolate-proxy/policy:/run/desolate-policy:ro
       - inner-run:/run/inner        # the daemon socket lives here ONLY
       - workspaces:/workspaces
       # Read-only for the same reason as dind's copy above: the orchestrator

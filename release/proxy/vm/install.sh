@@ -99,6 +99,10 @@ else
     restore_selftest_fixture "$SETTINGS_JSON"
 fi
 install -d -m 0750 -o desolate-proxy -g desolate-proxy /var/lib/desolate-proxy
+# Per-project policies (cli.sh proxy learn|enforce; addon.py "A PROJECT
+# RESTRICTED"): not secret, read by the proxy and, mounted read-only, by the
+# orchestrator. Made here so the mount's source is a directory before compose.
+install -d -m 0755 /var/lib/desolate-proxy/policy
 # Public dir must exist before compose starts (dind bind-mounts it read-only).
 # Mounted read-only at /desolate in every container -- the only channel into a
 # devcontainer, so anything a developer or an agent needs in there arrives this
