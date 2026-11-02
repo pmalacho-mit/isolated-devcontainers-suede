@@ -66,9 +66,17 @@ log() { printf '%s %s: %s\n' "$(date +%H:%M:%S)" "$ME" "$*" >&2; }
 notify() {
   log "$*"
   printf '\a' >&2
-  if command -v osascript >/dev/null; then
-    osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "suede factory"' -e 'end run' "$*" >/dev/null 2>&1 || true
-  fi
+  # DESOLATE_NOTIFY, as cli.sh's notify_user reads it: none prints only; a
+  # command is handed "<title>" "<message>"; unset, osascript where there is one.
+  case "${DESOLATE_NOTIFY:-}" in
+    none) ;;
+    "") if command -v osascript >/dev/null; then
+          osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "suede factory"' -e 'end run' "$*" >/dev/null 2>&1 || true
+        elif command -v notify-send >/dev/null; then
+          notify-send -- "suede factory" "$*" >/dev/null 2>&1 || true
+        fi ;;
+    *) "$DESOLATE_NOTIFY" "suede factory" "$*" >/dev/null 2>&1 || true ;;
+  esac
 }
 usage() { sed -n '4,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 

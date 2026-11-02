@@ -7,7 +7,9 @@
 #   ./isolated-devcontainers-suede/cli.sh url                       # print + copy the editor URL
 #   ./isolated-devcontainers-suede/cli.sh secret add NAME --hosts a.com,b.com   # secret -> VM only
 #   ./isolated-devcontainers-suede/cli.sh secret list | on NAME [--ttl 30m] | off NAME | rm NAME
-#   ./isolated-devcontainers-suede/cli.sh proxy status | logs | test
+#   ./isolated-devcontainers-suede/cli.sh proxy status | logs | audit | test
+#   ./isolated-devcontainers-suede/cli.sh proxy learn --project P --for 1h --then deny | enforce | recommend | allow
+#   ./isolated-devcontainers-suede/cli.sh watch [seconds]           # notify when an agent asks, or a secret strays
 #   ./isolated-devcontainers-suede/cli.sh repo add owner/repo       # per-repo deploy key + clone
 #   ./isolated-devcontainers-suede/cli.sh worktree add owner/repo wip   # a branch in its own devcontainer
 #   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
@@ -130,6 +132,30 @@ PROJECT_AUDIT_AWK='{ line = $0; sub(/^\[[0-9:.]*\] /, "", line) } index(line, "A
 # eight (connect, the line itself, the response, disconnects), so `-n <n>` alone
 # read <n> journal lines and usually held no AUDIT line at all.
 audit_window() { echo $(( $1 * 50 )); }
+
+# How a notification reaches you -- pluggable, so nothing here assumes a Mac:
+#   DESOLATE_NOTIFY unset   osascript on macOS, notify-send where there is one,
+#                           and otherwise the line and the terminal's bell
+#   DESOLATE_NOTIFY=none    the line only
+#   DESOLATE_NOTIFY=<cmd>   <cmd> "<title>" "<message>"
+# The message is text an agent or a request chose: it arrives as an argument,
+# never in a script, and with no control character in it.
+notify_user() {
+  local title=$1 message
+  message=$(printf '%s' "$2" | LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g' | cut -c1-240)
+  printf '%s %s: %s\a\n' "$(date +%H:%M:%S)" "$title" "$message"
+  case "${DESOLATE_NOTIFY:-}" in
+    none) ;;
+    "")
+      if command -v osascript >/dev/null 2>&1; then
+        osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' \
+          "$title" "$message" >/dev/null 2>&1 || true
+      elif command -v notify-send >/dev/null 2>&1; then
+        notify-send -- "$title" "$message" >/dev/null 2>&1 || true
+      fi ;;
+    *) "$DESOLATE_NOTIFY" "$title" "$message" >/dev/null 2>&1 || true ;;
+  esac
+}
 # The per-project policies the proxy reads (addon.py "A PROJECT RESTRICTED"),
 # in the VM; the orchestrator mounts their directory read-only. Not secret.
 POLICY_DIR=/var/lib/desolate-proxy/policy
@@ -1066,6 +1092,47 @@ case "$CMD" in
   preflight) exec "$SCRIPT_DIR/preflight.sh" ;;
   observe)   exec "$SCRIPT_DIR/observe.sh" "$@" ;;
   url)       editor_url ;;
+
+  watch)     # What needs you, said where you will see it when the browser is
+             # not: a target that turns orange (asks) or red (is stuck), and a
+             # request the proxy flagged -- a placeholder toward a host it is
+             # not for, or one scoped or switched away from its sender. Each
+             # once, as it happens. notify_user says how; DESOLATE_NOTIFY=none
+             # prints only. Ctrl-C ends it.
+             EVERY="${1:-30}"
+             case "$EVERY" in *[!0-9]*|""|0) echo "usage: cli.sh watch [seconds]" >&2; exit 1 ;; esac
+             ensure_running
+             echo "watching every ${EVERY}s: targets that ask or are stuck, and secrets that stray (Ctrl-C to stop)"
+             declare -A SEEN=()
+             CURSOR=$(vm sudo journalctl -u desolate-proxy -n 0 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
+             while :; do
+               # Status: one line per target in orange or red, its message
+               # stripped of control characters by jq before anything prints it.
+               STATES=$(docker exec "$CONTAINER" desolate --status --json </dev/null 2>/dev/null \
+                 | jq -r '.[] | select(.status.color == "orange" or .status.color == "red")
+                          | [.target, .status.color, (.status.updated // ""), ((.status.message // "") | gsub("[\u0000-\u001f\u007f-\u009f]"; "?"))] | @tsv' 2>/dev/null || true)
+               while IFS=$'\t' read -r WHO COLOR WHEN WHAT; do
+                 [ -n "$WHO" ] || continue
+                 [ "${SEEN[$WHO]:-}" = "$COLOR $WHEN" ] && continue
+                 SEEN[$WHO]="$COLOR $WHEN"
+                 notify_user "desolate: $WHO $([ "$COLOR" = orange ] && echo asks || echo 'is stuck')" "$WHAT"
+               done <<< "$STATES"
+               # The proxy: what it flagged since the last look, by journal cursor.
+               if [ -n "$CURSOR" ]; then
+                 LINES=$(vm sudo journalctl -u desolate-proxy --after-cursor="$CURSOR" --show-cursor --no-pager -o cat 2>/dev/null || true)
+                 NEXT=$(printf '%s\n' "$LINES" | sed -n 's/^-- cursor: //p' | tail -1)
+                 [ -n "$NEXT" ] && CURSOR=$NEXT
+                 printf '%s\n' "$LINES" | sed -nE "$AUDIT_FIELDS_SED" | while read -r FIELDS; do
+                   V=$(printf '%s' "$FIELDS" | sed -n 's/^verdict=\([A-Z-]*\).*/\1/p')
+                   case "$V" in LEAK-SUSPECT|DENY-SCOPE|DENY-OFF) ;; *) continue ;; esac
+                   H=$(printf '%s' "$FIELDS" | sed -n 's/.* host=\([^ ]*\).*/\1/p')
+                   NAMES=$(printf '%s' "$FIELDS" | sed -n 's/.* suspect=\([^ ]*\).*/\1/p')
+                   FROM=$(printf '%s' "$FIELDS" | sed -n 's/.* project=\([^ ]*\).*/\1/p')
+                   notify_user "desolate proxy: $V" "$NAMES toward $H, from ${FROM:--}"
+                 done
+               fi
+               sleep "$EVERY"
+             done ;;
 
   secret)    # Secrets live ONLY in the Colima VM, below the sysbox boundary.
              # Containers carry the placeholder NAME; the proxy substitutes the

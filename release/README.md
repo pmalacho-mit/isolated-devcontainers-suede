@@ -517,6 +517,7 @@ the rules would go stale again each time.
 ./cli.sh push owner/repo [--worktree wip]     # its checked-out branch to GitHub (never git in the editor)
 ./cli.sh pull owner/repo [--worktree wip]     # GitHub's branches in as origin/*, fast-forwarded
 ./cli.sh desolate --status       # each target's status, as its agent last set it
+./cli.sh watch                  # notify you when one asks (orange), is stuck (red), or a secret strays
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
 ./cli.sh reset-inner            # the inner daemon is wedged: report, then recover
@@ -525,6 +526,17 @@ the rules would go stale again each time.
 ./cli.sh dind df                # disk, per daemon; `dind gc` gives build cache back
 ./cli.sh down                   # stop (down -v also deletes volumes; confirms)
 ```
+
+**Being told, with the tab out of sight:** `./cli.sh watch [seconds]` polls
+every target's status and the proxy's journal, and says each of these once,
+as it happens: a target that turns orange (asks) or red (is stuck), with what
+its agent said; and a request the proxy flagged -- `LEAK-SUSPECT` (a
+placeholder toward a host it is not for), `DENY-SCOPE`, `DENY-OFF`. How it says
+it is `DESOLATE_NOTIFY`: unset, a macOS notification (`osascript`), or
+`notify-send` where there is one; `none` for the line in the terminal only;
+or a command of yours, called as `<cmd> "<title>" "<message>"`. The dispatchers
+read the same variable. What an agent wrote reaches it with no control
+character in it.
 
 **Getting code in:** drag a folder into the browser editor's file explorer.
 

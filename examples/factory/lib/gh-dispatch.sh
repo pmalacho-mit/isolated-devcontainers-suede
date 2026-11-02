@@ -101,9 +101,17 @@ log() { printf '%s %s: %s\n' "$(date +%H:%M:%S)" "$DISPATCHER" "$*" | tr -d '\00
 notify() {
   log "$*"
   printf '\a'
-  if command -v osascript >/dev/null; then
-    osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "desolate"' -e 'end run' "$*" >/dev/null 2>&1 || true
-  fi
+  # DESOLATE_NOTIFY, as cli.sh's notify_user reads it: none prints only; a
+  # command is handed "<title>" "<message>"; unset, osascript where there is one.
+  case "${DESOLATE_NOTIFY:-}" in
+    none) ;;
+    "") if command -v osascript >/dev/null; then
+          osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "desolate"' -e 'end run' "$*" >/dev/null 2>&1 || true
+        elif command -v notify-send >/dev/null; then
+          notify-send -- "desolate" "$*" >/dev/null 2>&1 || true
+        fi ;;
+    *) "$DESOLATE_NOTIFY" "desolate" "$*" >/dev/null 2>&1 || true ;;
+  esac
 }
 
 # The marker's field, or the default. An issue body is anyone's text: only a
