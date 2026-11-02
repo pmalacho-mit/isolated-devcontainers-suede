@@ -16,6 +16,7 @@ import ipaddress
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1589,3 +1590,74 @@ def test_L6_a_websocket_scrub_failure_drops_the_frame(tmp_path, monkeypatch):
     monkeypatch.setattr(addon, "_real_secrets", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     addon.websocket_message(f)
     assert f.websocket.messages[-1].dropped
+
+
+# ------------------------------------------------- a secret switched off --
+# "A SECRET SWITCHED OFF, OR ON FOR A WHILE": on unless it says otherwise; off
+# is refused by name toward its own hosts; `until` is read against the clock
+# at each request; a switch that cannot be read holds it off.
+
+def switched_addon(tmp_path, **switch):
+    mod, addon, _ = load_addon(tmp_path, {
+        "default_action": "allow",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"], **switch}},
+        "network": [{"action": "allow", "host": "*"}],
+    })
+    return mod, addon
+
+
+def spend(addon, sni="api.openai.com", dest="104.18.6.1"):
+    f = make_flow(sni=sni, dest=dest, headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    addon.request(f)
+    return f
+
+
+def test_a_stored_secret_is_on(tmp_path):
+    _, addon = switched_addon(tmp_path)
+    f = spend(addon)
+    assert not blocked(f) and carries_value(f, SECRET_VALUE)
+
+
+def test_a_secret_switched_off_is_refused_by_name_toward_its_own_host(tmp_path, caplog):
+    _, addon = switched_addon(tmp_path, off=True)
+    with caplog.at_level(logging.INFO):
+        f = spend(addon)
+    assert blocked(f) and f.response.status_code == 403
+    assert not carries_value(f, SECRET_VALUE)
+    assert b"switched off" in f.response.content and b"secret on" in f.response.content
+    assert [(x["verdict"], x["suspect"]) for x in audit_fields(caplog)] == [("DENY-OFF", SECRET_NAME)]
+
+
+def test_off_toward_any_other_host_is_a_leak_suspect_as_before(tmp_path, caplog):
+    _, addon = switched_addon(tmp_path, off=True)
+    with caplog.at_level(logging.INFO):
+        f = spend(addon, sni="example.com", dest="93.184.216.34")
+    assert not blocked(f) and not carries_value(f, SECRET_VALUE)
+    assert [x["verdict"] for x in audit_fields(caplog)] == ["LEAK-SUSPECT"]
+
+
+def test_on_for_a_while_is_on_until_then_and_off_after(tmp_path, monkeypatch):
+    mod, addon = switched_addon(tmp_path, until=1_000_000)
+    monkeypatch.setattr(mod, "clock", lambda: 999_999.5)
+    assert carries_value(spend(addon), SECRET_VALUE)
+    monkeypatch.setattr(mod, "clock", lambda: 1_000_000)
+    f = spend(addon)
+    assert blocked(f) and f.response.status_code == 403 and not carries_value(f, SECRET_VALUE)
+
+
+@pytest.mark.parametrize("switch", [{"off": "no"}, {"off": 1}, {"until": "soon"}, {"until": True}],
+                         ids=["off a string", "off a number", "until a string", "until a bool"])
+def test_a_switch_that_cannot_be_read_holds_the_secret_off(tmp_path, switch):
+    _, addon = switched_addon(tmp_path, **switch)
+    f = spend(addon)
+    assert blocked(f) and not carries_value(f, SECRET_VALUE)
+
+
+def test_switching_it_back_on_takes_effect_at_the_next_request(tmp_path):
+    mod, addon = switched_addon(tmp_path, off=True)
+    assert blocked(spend(addon))
+    settings = json.loads(Path(mod.SETTINGS_PATH).read_text())
+    del settings["secrets"][SECRET_NAME]["off"]
+    Path(mod.SETTINGS_PATH).write_text(json.dumps(settings))
+    os.utime(mod.SETTINGS_PATH, (time.time() + 5, time.time() + 5))
+    assert carries_value(spend(addon), SECRET_VALUE)

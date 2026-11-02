@@ -44,12 +44,18 @@ assert_contains "it lists every secret" "$OUT" "OTHER-KEY"
 # headers, the hosts -- so each is told apart, and nothing reads as a host.
 SCOPED_FIXTURE='{"secrets":{"DEPLOY-KEY":{"value":"x","hosts":["api.github.com"],"projects":["acme/widgets","solo"]},"OPEN-KEY":{"value":"y","hosts":["b.com"]},"OAUTH":{"value":"z","hosts":["api.anthropic.com"],"headers":["authorization"]}}}'
 SCOPED_OUT=$(printf '%s' "$SCOPED_FIXTURE" | jq -r "$PROG" 2>&1)
-assert_eq "a scoped secret's row: name, counts, projects, hosts" \
-  "$(printf '%s\n' "$SCOPED_OUT" | grep '^DEPLOY-KEY')" "$(printf 'DEPLOY-KEY\t2\t0\tacme/widgets\tsolo\tapi.github.com')"
-assert_eq "an unscoped one's: two zeros, then its hosts" \
-  "$(printf '%s\n' "$SCOPED_OUT" | grep '^OPEN-KEY')" "$(printf 'OPEN-KEY\t0\t0\tb.com')"
+# The VM's time now is the sixth field; it is not this test's to know.
+row() { printf '%s\n' "$SCOPED_OUT" | grep "^$1	" | awk -F'\t' -v OFS='\t' '{ $6 = "NOW"; print }'; }
+assert_eq "a scoped secret's row: name, counts, switch, projects, hosts" \
+  "$(row DEPLOY-KEY)" "$(printf 'DEPLOY-KEY\t2\t0\tfalse\t-1\tNOW\tacme/widgets\tsolo\tapi.github.com')"
+assert_eq "an unscoped one's: two zeros, on, then its hosts" \
+  "$(row OPEN-KEY)" "$(printf 'OPEN-KEY\t0\t0\tfalse\t-1\tNOW\tb.com')"
 assert_eq "a confined one's: its headers before its hosts" \
-  "$(printf '%s\n' "$SCOPED_OUT" | grep '^OAUTH')" "$(printf 'OAUTH\t0\t1\tauthorization\tapi.anthropic.com')"
+  "$(row OAUTH)" "$(printf 'OAUTH\t0\t1\tfalse\t-1\tNOW\tauthorization\tapi.anthropic.com')"
+if printf '%s\n' "$SCOPED_OUT" | grep '^OAUTH' | cut -f6 | grep -Eqx '[0-9]{10}'; then pass "  and the sixth field is the VM's clock, in seconds"; else fail "  and the sixth field is the VM's clock, in seconds"; fi
+SWITCHED=$(printf '%s' '{"secrets":{"OFF":{"value":"x","hosts":["a.com"],"off":true},"WHILE":{"value":"y","hosts":["b.com"],"until":2000000000}}}' | jq -r "$PROG")
+assert_eq "a switched-off one says so" "$(printf '%s\n' "$SWITCHED" | grep '^OFF' | cut -f4,5)" "$(printf 'true\t-1')"
+assert_eq "one on for a while says until when" "$(printf '%s\n' "$SWITCHED" | grep '^WHILE' | cut -f4,5)" "$(printf 'false\t2000000000')"
 
 # The whole point of the TSV shape: nothing for a remote shell to re-parse.
 case "$PROG" in
@@ -379,5 +385,42 @@ assert_not_contains "  and the editor's push never ran" "$(dexecs)" "suede.ts|up
 assert_contains "upstream wants the dependency named" "$(dcli upstream acme/consumer widget)" "usage: cli.sh suede"
 assert_contains "anything else is refused, with the usage" "$(dcli frobnicate)" "usage: cli.sh suede"
 rm -rf "$DSTUB"
+
+group "secret on and off, through cli.sh, against a stand-in VM"
+# `colima ssh` replaced by the VM side run here, over a settings file of the
+# test's own; `install` without the ownership a test cannot give. The rest --
+# the script cli.sh sends, jq, the formatting -- is what ships.
+VMSIM=$(mktemp -d)
+mkdir -p "$VMSIM/bin"
+printf '%s' '{"secrets":{"MY-KEY":{"value":"v","hosts":["api.x.com"],"headers":["authorization"]},"SCOPED":{"value":"w","hosts":["b.com"],"projects":["acme/w"]}},"network":[]}' > "$VMSIM/settings.json"
+cat > "$VMSIM/bin/colima" <<'EOF'
+#!/bin/bash
+shift 3; [ "$1" = -- ] && shift; [ "$1" = sudo ] && shift
+args=(); for a in "$@"; do args+=("${a//\/etc\/desolate-proxy\/settings.json/$SETTINGS}"); done
+exec env PATH="$STUBS:$PATH" "${args[@]}"
+EOF
+cat > "$VMSIM/bin/install" <<'EOF'
+#!/bin/bash
+while [ $# -gt 2 ]; do case "$1" in -m|-o|-g) shift 2 ;; *) shift ;; esac; done; cp "$1" "$2"
+EOF
+chmod +x "$VMSIM/bin/colima" "$VMSIM/bin/install"
+vmcli() { SETTINGS="$VMSIM/settings.json" STUBS="$VMSIM/bin" PATH="$VMSIM/bin:$PATH" bash "$RELEASE/cli.sh" "$@" 2>&1; }
+switch() { jq -c --arg n "$1" '.secrets[$n] | {off, until}' "$VMSIM/settings.json"; }
+assert_eq "a stored secret is listed as it always was" "$(vmcli secret list | grep MY-KEY)" "  MY-KEY  ->  api.x.com   [headers: authorization]"
+vmcli secret off MY-KEY >/dev/null
+assert_eq "off: the switch is stored" "$(switch MY-KEY)" '{"off":true,"until":null}'
+assert_eq "  and listed, before the scope" "$(vmcli secret list | grep MY-KEY)" "  MY-KEY  ->  api.x.com   [headers: authorization]   [off]"
+vmcli secret on MY-KEY --ttl 90m >/dev/null
+assert_contains "on for a while: an end, and no off" "$(switch MY-KEY)" '{"off":null,"until":1'
+assert_contains "  listed with what is left" "$(vmcli secret list | grep MY-KEY)" "[on, 1h"
+vmcli secret on MY-KEY >/dev/null
+assert_eq "on: neither field" "$(switch MY-KEY)" '{"off":null,"until":null}'
+assert_contains "an unknown name is refused" "$(vmcli secret off NOPE)" "no secret named NOPE"
+assert_contains "a while that is not one is refused" "$(vmcli secret on MY-KEY --ttl 5x)" "is not a while"
+vmcli secret on SCOPED --ttl 1s >/dev/null; sleep 2
+ENDED=$(vmcli secret list | grep SCOPED)
+assert_contains "a while that ended reads as off" "$ENDED" "  SCOPED  ->  b.com   [off: its while ended "
+assert_eq "  and the scope stays last (claude-helper reads it there)" "${ENDED##*ago]}" "   (only for: acme/w)"
+rm -rf "$VMSIM"
 
 summary

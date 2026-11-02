@@ -242,6 +242,29 @@ What the map is used for:
     key behaves as it always has.
 
 ---------------------------------------------------------------------------
+A SECRET SWITCHED OFF, OR ON FOR A WHILE
+---------------------------------------------------------------------------
+A secret is substituted while it is ON, and every stored secret is on until
+someone says otherwise (`cli.sh secret add` leaves it on). Two fields say
+otherwise, both written by `cli.sh secret on|off`:
+
+  * "off": true      -- off until switched on again;
+  * "until": <epoch> -- on until then, off after. The VM's clock, read at each
+                        request: nothing has to fire for it to end, and a
+                        timer that never ran cannot leave it on.
+
+A request carrying an off secret's placeholder toward a host it would have
+been substituted for is refused (403, `verdict=DENY-OFF`), naming the command
+that switches it on -- not sent as the bare placeholder, which the upstream
+would answer with a 401 that mentions neither desolate nor the switch. Toward
+any other host it is a LEAK-SUSPECT as before. A switch that cannot be read
+holds the secret OFF: unlike a scope or an allowlist, off is the safe side.
+
+It bounds in time what the scope and allowlist bound in space: a placeholder
+an agent can spend, or a body an LLM host could hand back transformed, is a
+risk only while you have the secret on.
+
+---------------------------------------------------------------------------
 THE SELF-TEST FIXTURE, AND WHY IT IS MATCHED DIFFERENTLY
 ---------------------------------------------------------------------------
 `preflight.sh` proves leak detection is running by tripping it: it sends a
@@ -276,6 +299,7 @@ import logging
 import os
 import re
 import stat
+import time
 
 from mitmproxy import http
 
@@ -402,6 +426,9 @@ def is_selftest_fixture(entry):
     """
     return bool(entry.get("selftest"))
 
+# The clock a secret's `until` is read against (tests replace it).
+clock = time.time
+
 # stdlib logging, not ctx.log: ctx.log is deprecated and its removal would raise
 # inside the request hook -- and mitmproxy answers an addon exception by letting
 # the request through. That fail-open is exactly what this file must not do.
@@ -491,10 +518,17 @@ class DesolateProxy:
                 log.error(f"secret {name!r}: headers {headers!r} is not a list of header names; "
                           f"skipping (a confinement that cannot be read is not widened to everywhere)")
                 continue
+            off, until = entry.get("off", False), entry.get("until")
+            if not isinstance(off, bool) or (until is not None and (
+                    isinstance(until, bool) or not isinstance(until, (int, float)))):
+                log.error(f"secret {name!r}: off {off!r} / until {until!r} cannot be read; "
+                          f"holding it OFF (a switch that cannot be read is not on)")
+                off, until = True, None
             secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts],
                              "selftest": is_selftest_fixture(entry),
                              "projects": None if projects is None else frozenset(projects),
-                             "headers": None if headers is None else frozenset(h.lower() for h in headers)}
+                             "headers": None if headers is None else frozenset(h.lower() for h in headers),
+                             "off": off, "until": until}
 
         for name in self._overlapping(secrets):
             del secrets[name]
@@ -511,6 +545,11 @@ class DesolateProxy:
                  f"allow_private_destinations={self.allow_private_destinations}")
 
     # ---------- helpers ----------
+
+    def is_on(self, name):
+        """Whether this secret is substituted now. See "A SECRET SWITCHED OFF"."""
+        entry = self.secrets[name]
+        return not entry.get("off", False) and (entry.get("until") is None or clock() < entry["until"])
 
     @staticmethod
     def _overlapping(secrets):
@@ -867,6 +906,18 @@ class DesolateProxy:
             self._block(flow, 403,
                         f"secret {out_of_scope} is not available to "
                         f"{project or 'this source, which is no project'}")
+            return
+
+        # A secret switched off -- or past the end of the while it was on for
+        # -- is refused toward its own hosts, by name, rather than sent as a
+        # placeholder the upstream answers with an unexplained 401.
+        switched_off = sorted(name for name in found if not self.is_on(name))
+        if switched_off:
+            log.warning(f"DENY  {method} {proven}{route}: {switched_off} switched off -- blocked")
+            self.audit(flow, "DENY-OFF", proven, route, method, [], switched_off, project=project)
+            self._block(flow, 403,
+                        f"secret {switched_off} is switched off; "
+                        f"on the Mac: ./cli.sh secret on {switched_off[0]} [--ttl 30m]")
             return
 
         # 3) substitution. Order does not matter here, and that is a property

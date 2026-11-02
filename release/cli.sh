@@ -6,7 +6,7 @@
 #   ./isolated-devcontainers-suede/cli.sh desolate <project>       # open a project as an isolated IDE
 #   ./isolated-devcontainers-suede/cli.sh url                       # print + copy the editor URL
 #   ./isolated-devcontainers-suede/cli.sh secret add NAME --hosts a.com,b.com   # secret -> VM only
-#   ./isolated-devcontainers-suede/cli.sh secret list | rm NAME
+#   ./isolated-devcontainers-suede/cli.sh secret list | on NAME [--ttl 30m] | off NAME | rm NAME
 #   ./isolated-devcontainers-suede/cli.sh proxy status | logs | test
 #   ./isolated-devcontainers-suede/cli.sh repo add owner/repo       # per-repo deploy key + clone
 #   ./isolated-devcontainers-suede/cli.sh worktree add owner/repo wip   # a branch in its own devcontainer
@@ -107,11 +107,13 @@ EOF
 # \(...) interpolation -- so `secret list` never worked at all. Emitting TSV and
 # formatting on the Mac leaves the remote side nothing to misparse.
 # Each row: the name, how many projects it is scoped to (0: every source), how
-# many headers it is confined to (0: anywhere in a request), those projects,
-# those headers, then its hosts -- counts rather than joined lists, since
-# joining needs a quoted separator.
+# many headers it is confined to (0: anywhere in a request), whether it is
+# switched off, when its while on ends (-1: it does not) and the VM's time now
+# -- so what is left is the VM's clock, which is the one the proxy reads --
+# then those projects, those headers, its hosts. Counts rather than joined
+# lists, since joining needs a quoted separator.
 # tests/static/05-cli-queries.sh executes this against a fixture.
-SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length),(.value.headers//[]|length)]+(.value.projects//[])+(.value.headers//[])+.value.hosts|@tsv'
+SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length),(.value.headers//[]|length),(.value.off//false|tostring),(.value.until//-1),(now|floor)]+(.value.projects//[])+(.value.headers//[])+.value.hosts|@tsv'
 # The proxy's AUDIT lines, as journald holds them. mitmdump under systemd
 # prefixes each with its time -- `[12:03:33.715] AUDIT verdict=...` -- and
 # every reader here once anchored on `^AUDIT`, so on the VM `proxy audit`
@@ -1197,14 +1199,19 @@ case "$CMD" in
                    echo "  (no secrets stored yet)"
                  else
                    # Formatting happens HERE, on the Mac, where quoting is ours.
-                   # "  NAME  ->  hosts   [headers: h]   (only for: p, q)" -- the
-                   # scope last, which examples/factory/claude reads.
-                   printf '%s\n' "$OUT" | awk -F'\t' '{
-                     n = $2; m = $3; scope = ""; headers = ""; hosts = ""
-                     for (i = 4; i < 4 + n; i++) scope = scope (scope == "" ? "" : ", ") $i
-                     for (i = 4 + n; i < 4 + n + m; i++) headers = headers (headers == "" ? "" : ", ") $i
-                     for (i = 4 + n + m; i <= NF; i++) hosts = hosts (hosts == "" ? "" : ", ") $i
-                     printf "  %s  ->  %s%s%s\n", $1, hosts, (m > 0 ? "   [headers: " headers "]" : ""), (n > 0 ? "   (only for: " scope ")" : "")
+                   # "  NAME  ->  hosts   [headers: h]   [off]   (only for: p, q)"
+                   # -- the scope last, which examples/factory/claude reads; the
+                   # switch only when it is not plainly on.
+                   printf '%s\n' "$OUT" | awk -F'\t' '
+                     function took(s) { return s >= 86400 ? int(s / 86400) "d" : s >= 3600 ? int(s / 3600) "h" int(s % 3600 / 60) "m" : s >= 60 ? int(s / 60) "m" : s "s" }
+                     {
+                     n = $2; m = $3; scope = ""; headers = ""; hosts = ""; state = ""
+                     for (i = 7; i < 7 + n; i++) scope = scope (scope == "" ? "" : ", ") $i
+                     for (i = 7 + n; i < 7 + n + m; i++) headers = headers (headers == "" ? "" : ", ") $i
+                     for (i = 7 + n + m; i <= NF; i++) hosts = hosts (hosts == "" ? "" : ", ") $i
+                     if ($4 == "true") state = "   [off]"
+                     else if ($5 != -1) state = ($5 > $6 ? "   [on, " took($5 - $6) " left]" : "   [off: its while ended " took($6 - $5) " ago]")
+                     printf "  %s  ->  %s%s%s%s\n", $1, hosts, (m > 0 ? "   [headers: " headers "]" : ""), state, (n > 0 ? "   (only for: " scope ")" : "")
                    }'
                  fi
                  ;;
@@ -1223,7 +1230,41 @@ case "$CMD" in
                    jq --arg n "$1" "del(.secrets[\$n])" "$F" > "$T" \
                    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" && echo removed' _ "$NAME"
                  ;;
-               *) echo "usage: cli.sh secret {add NAME --hosts a,b [--projects p,q] [--headers h] | list | rm NAME [--force]}" >&2; exit 1 ;;
+               on|off)
+                 # Switched in the VM, where the proxy reads it (addon.py "A
+                 # SECRET SWITCHED OFF"): off until switched on; on for a while,
+                 # its end the VM's clock now plus the while -- the clock the
+                 # proxy reads at each request, so nothing has to fire for it
+                 # to end. A stored secret is on until switched.
+                 NAME="${1:?usage: cli.sh secret $SUB NAME$( [ "$SUB" = on ] && echo ' [--ttl 30m]')}"; shift
+                 case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
+                 TTL=-1
+                 if [ "$SUB" = on ] && [ "${1:-}" = --ttl ]; then
+                   T="${2:?--ttl takes a while: 90s, 30m, 2h, 1d}"
+                   case "$T" in
+                     [1-9]*s|[1-9]*m|[1-9]*h|[1-9]*d) N=${T%?}
+                       case "$N" in *[!0-9]*) echo "cli.sh: --ttl '$T' is not a while (90s, 30m, 2h, 1d)" >&2; exit 1 ;; esac
+                       case "$T" in *s) TTL=$N ;; *m) TTL=$((N * 60)) ;; *h) TTL=$((N * 3600)) ;; *d) TTL=$((N * 86400)) ;; esac ;;
+                     *) echo "cli.sh: --ttl '$T' is not a while (90s, 30m, 2h, 1d)" >&2; exit 1 ;;
+                   esac
+                 elif [ $# -gt 0 ]; then
+                   echo "usage: cli.sh secret on NAME [--ttl 30m] | secret off NAME" >&2; exit 1
+                 fi
+                 vm sudo sh -c 'umask 077; F=/etc/desolate-proxy/settings.json; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
+                   [ "$(jq -r --arg n "$1" ".secrets[\$n] != null" "$F" 2>/dev/null)" = true ] \
+                     || { echo "cli.sh: no secret named $1 (cli.sh secret list)" >&2; exit 1; }
+                   case "$2" in
+                     off) PROG=".secrets[\$n] |= (del(.until) + {off: true})" ;;
+                     *)   PROG="if \$t < 0 then .secrets[\$n] |= del(.off, .until) else .secrets[\$n] |= (del(.off) + {until: (now + \$t | floor)}) end" ;;
+                   esac
+                   jq --arg n "$1" --argjson t "$3" "$PROG" "$F" > "$T" \
+                     && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F"' _ "$NAME" "$SUB" "$TTL" || exit 1
+                 case "$SUB:$TTL" in
+                   off:*) echo "$NAME is off: the proxy refuses it (403) until: $0 secret on $NAME" ;;
+                   on:-1) echo "$NAME is on" ;;
+                   *)     echo "$NAME is on for ${T}; then off, with nothing to run" ;;
+                 esac ;;
+               *) echo "usage: cli.sh secret {add NAME --hosts a,b [--projects p,q] [--headers h] | on NAME [--ttl 30m] | off NAME | list | rm NAME [--force]}" >&2; exit 1 ;;
              esac ;;
 
   vm)        SUB="${1:-status}"; shift || true

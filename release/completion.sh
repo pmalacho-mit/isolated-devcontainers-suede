@@ -295,7 +295,10 @@ _desolate_cli() {
 
   # Position 3+: whatever the verb+subcommand pair takes.
   case "$verb $sub" in
-    "secret rm")        _desolate_cli_offer secret _desolate_cli_secrets ;;
+    "secret rm"|"secret off") [ "$COMP_CWORD" -eq 3 ] && _desolate_cli_offer secret _desolate_cli_secrets ;;
+    "secret on")
+      if [ "$COMP_CWORD" -eq 3 ]; then _desolate_cli_offer secret _desolate_cli_secrets
+      elif [ "$COMP_CWORD" -eq 4 ]; then COMPREPLY=( $(compgen -W "--ttl" -- "$cur") ); fi ;;
     "secret add")
       # `secret add NAME --hosts a,b [--projects p,q] [--headers authorization]`:
       # the name is new (nothing to offer); --hosts is required, and is the

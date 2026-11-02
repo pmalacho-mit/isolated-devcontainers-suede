@@ -502,7 +502,7 @@ the rules would go stale again each time.
 ./cli.sh desolate --list        # what is running right now, and its URL
 ./cli.sh desolate --stop all    # stop every running project and worktree
 ./cli.sh secret add NAME --hosts a.com   # store a real value in the VM only
-./cli.sh secret list | rm NAME
+./cli.sh secret list | on NAME [--ttl 30m] | off NAME | rm NAME
 ./cli.sh proxy status | logs | test      # egress proxy health + self-test
 ./cli.sh vm status              # sysbox, live vs armed bridge, VM unit state
 ./cli.sh vm install             # re-provision the VM (idempotent; also upgrades)
@@ -1806,6 +1806,32 @@ unattributed: a deny that ignored that traffic would be one it could step
 around. Its cost: a deny scoped to one project also stops every project on
 the shared daemon from reaching that host. A `projects` that is not a list
 makes an allow apply to no one, and a deny apply to everyone.
+
+### Switching a secret off, or on for a while
+
+A stored secret is on: substituted whenever its rules allow. You can bound it
+in time as well as in place:
+
+```bash
+./cli.sh secret off ACME-DEPLOY-KEY             # refused until switched on
+./cli.sh secret on  ACME-DEPLOY-KEY --ttl 30m   # on for 30 minutes, then off
+./cli.sh secret on  ACME-DEPLOY-KEY             # on, with no end
+./cli.sh secret list                            # ... [off] / [on, 22m left]
+```
+
+Off, a request carrying the placeholder toward one of its hosts is refused
+(403, `verdict=DENY-OFF`, naming the command that switches it on) rather than
+sent as the bare placeholder, which the upstream would answer with a 401 that
+mentions neither desolate nor the switch. Toward any other host it is a
+`LEAK-SUSPECT` as before. `--ttl` takes `90s`, `30m`, `2h`, `1d`; the end is
+the VM's clock now plus that, and the proxy reads the VM's clock at each
+request, so nothing has to fire for it to end and a timer that never ran
+cannot leave it on. A switch the proxy cannot read holds the secret off.
+
+What it buys: "any container that can spend a placeholder can spend it" stays
+true, but only while you have it on. Switch on what an agent needs for the
+task, for about as long as the task, and an install script that runs later
+finds the key off.
 
 ### The one entry that is not a secret
 
