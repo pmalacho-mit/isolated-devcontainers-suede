@@ -96,23 +96,64 @@ group "names a project chose are offered only as names, and run nothing (audit C
 # What a hostile devcontainer can make: a directory under its .worktrees, a
 # branch, a spec in a subdirectory of a one-segment project. `compgen -W`
 # would have expanded each -- `$(...)` runs -- on TAB.
+#
+# Each payload is one path segment, `$(touch${IFS}pwned)`, run from $WS: a
+# payload with a `/` in it is not a name but nested directories, and the
+# check that nothing ran would pass because nothing COULD run. The control
+# shows that the planted name does run when handed to compgen -W.
+cd "$WS" || exit 1
+PAYLOAD='$(touch${IFS}pwned)'
 rm -f "$WS/pwned"
-mkdir -p "$WS/acme/app/.worktrees/\$(touch $WS/pwned)" "$WS/acme/app/.worktrees/bad__name" \
+( compgen -W "$PAYLOAD" -- "" >/dev/null ) 2>/dev/null
+assert_eq "control: compgen -W on the payload runs it" "$([ -e "$WS/pwned" ] && echo ran || echo clean)" "ran"
+rm -f "$WS/pwned"
+mkdir -p "$WS/acme/app/.worktrees/$PAYLOAD" "$WS/acme/app/.worktrees/bad__name" \
          "$WS/acme/app/.git/refs/heads/feature" "$WS/solo/evil"
 : > "$WS/acme/app/.git/refs/heads/feature/one"
-: > "$WS/acme/app/.git/refs/heads/\$(touch\${IFS}$WS/pwned)"
+: > "$WS/acme/app/.git/refs/heads/$PAYLOAD"
 : > "$WS/acme/app/.git/refs/heads/-option"
 printf '%s refs/heads/main\n%s refs/heads/release\n^%s\n' "$(printf 'a%.0s' $(seq 40))" "$(printf 'b%.0s' $(seq 40))" "$(printf 'c%.0s' $(seq 40))" > "$WS/acme/app/.git/packed-refs"
 echo '{}' > "$WS/solo/evil/.devcontainer.json"
+assert_contains "  (the fixture: the lister does report the payload)" "$(_desolate_worktrees acme/app)" "$PAYLOAD"
 assert_eq "the editor offers the worktree that is a name, and not the one that is a command" "$(editor acme/app --worktree "")" "wip"
 assert_eq "  nor one no volume namespace could hold" "$(editor --stop acme/app --worktree b)" ""
 assert_eq "branches, from the ref files -- loose and packed, never git: the spelled ones" "$(wt add acme/app wt "")" "feature/one main release"
 assert_eq "a spec inside a project does not make a project" "$(editor --push "")" "acme/app solo"
 assert_eq "the Mac's cli.sh: the same worktrees" "$(mac desolate acme/app --worktree "")" "wip"
 assert_eq "  the same projects" "$(mac desolate "")" "acme/app solo"
-_desolate_cli_secrets() { printf '%s\n' 'GH_TOKEN' '$(touch '"$WS"'/pwned)' 'has space'; }
+_desolate_cli_secrets() { printf '%s\n' 'GH_TOKEN' "$PAYLOAD" 'has space'; }
 assert_eq "  secret names, filtered too" "$(mac secret rm "")" "GH_TOKEN"
 assert_eq "nothing ran" "$([ -e "$WS/pwned" ] && echo ran || echo clean)" "clean"
 assert_eq "what is offered matches the typed prefix, as before" "$(wt add acme/app wt fe)" "feature/one"
+
+group "a one-segment project that drops its own spec lists what is under it (follow-up R1)"
+# A project writes its own root, so `solo` can delete its spec and make
+# solo/<anything>/.devcontainer.json: the lister then reads solo as an owner,
+# and the subdirectory as a project -- named by the project. Every place a
+# project name is offered must filter it, on both sides: the editor's
+# --status/--push/--pull/--review, and the Mac's `dind gc`.
+rm -f "$WS/pwned" "$WS/solo/.devcontainer.json"
+mkdir -p "$WS/solo/$PAYLOAD"
+echo '{}' > "$WS/solo/$PAYLOAD/.devcontainer.json"
+assert_contains "  (the fixture: the lister does report it)" "$(_desolate_projects)" "solo/$PAYLOAD"
+for op in --status --push --pull --review; do
+  assert_eq "the editor's desolate $op: names only" "$(editor $op "")" "acme/app solo/evil"
+done
+assert_eq "the Mac's dind gc: its words, and the names only" "$(mac dind gc "")" "--all --orphans acme/app solo/evil"
+assert_eq "the Mac's dind reset: names only" "$(mac dind reset "")" "acme/app solo/evil"
+assert_eq "nothing ran" "$([ -e "$WS/pwned" ] && echo ran || echo clean)" "clean"
+
+group "compgen -W reads only lists the scripts themselves wrote"
+# compgen -W expands its word list. Every command substitution inside one must
+# be a producer whose words come from this repo (cli.sh's grammar, compose's
+# services, the flags given it) -- never the stack's names. A new one fails
+# here until it is either routed through _desolate_offer/_desolate_cli_offer
+# or added to this list after checking where its words come from.
+TRUSTED="_desolate_unused _desolate_cli_unused _desolate_cli_verbs _desolate_cli_services _desolate_cli_flags"
+untrusted=$(grep -ho 'compgen -W "[^"]*' "$ROOT/release/completion.sh" "$ROOT/release/vscode-image/completion.bash" \
+  | grep -o '\$([A-Za-z_]*' | tr -d '$(' | sort -u | while read -r fn; do
+      case " $TRUSTED " in *" $fn "*) ;; *) printf '%s ' "$fn" ;; esac
+    done)
+assert_eq "every producer inside a compgen -W is one of the trusted" "${untrusted% }" ""
 
 summary

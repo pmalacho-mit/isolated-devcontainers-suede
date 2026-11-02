@@ -332,8 +332,10 @@ _desolate_cli() {
         COMPREPLY=( $(compgen -W "--reset-data-root" -- "$cur") )
       fi ;;
     "dind gc")
-      [ "$COMP_CWORD" -eq 3 ] && \
-        COMPREPLY=( $(compgen -W "--all --orphans $(_desolate_cli_projects)" -- "$cur") ) ;;
+      if [ "$COMP_CWORD" -eq 3 ]; then
+        COMPREPLY=( $(compgen -W "--all --orphans" -- "$cur") )
+        _desolate_cli_offer project _desolate_cli_projects
+      fi ;;
     "repo add")         : ;;   # owner/repo is remote; nothing local to offer
   esac
   return 0

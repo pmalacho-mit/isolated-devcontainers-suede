@@ -1529,7 +1529,13 @@ case "$CMD" in
              # way would not, so `git lfs`, `curl` and `pip` typed here would
              # fail certificate verification while the same command worked in
              # the browser. Same asymmetry that broke `desolate` from the Mac.
-             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" with-ca bash "$@" ;;
+             #
+             # --rcfile /dev/null --noprofile: no rc or profile file from HOME,
+             # which is the vscode-home volume a compromised editor can write
+             # and a restart does not discard -- the browser terminal's profile
+             # does the same (editor-settings.ts). /etc/bash.bashrc, root's,
+             # is still read: the completion and the git guard live there.
+             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" with-ca bash --noprofile --rcfile /dev/null "$@" ;;
 
   help|-h|--help) usage ;;
   *)         ensure_running

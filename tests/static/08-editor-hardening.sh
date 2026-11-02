@@ -104,6 +104,13 @@ assert_contains "the editor's code is root's: a compromised editor cannot rewrit
 assert_not_contains "  not the editor's own" "$DF" 'COPY --chown=1000:1000 *.ts'
 assert_contains "the rc-less bash still reaches completion and the guard: asserted at build" "$DF" \
   "bash --rcfile /dev/null -ic 'complete -p desolate"
+# The other way into the editor's bash: `cli.sh shell`, from the Mac
+# (follow-up R2). Every bash it starts must say so; a bare `with-ca bash` reads
+# ~/.bashrc off the volume, keys in reach.
+SHELL_LINES=$(grep -n 'with-ca bash' "$RELEASE/cli.sh")
+assert_contains "cli.sh shell reads no rc or profile file from the home volume" "$SHELL_LINES" \
+  'with-ca bash --noprofile --rcfile /dev/null "$@"'
+assert_eq "  and starts no bash that does" "$(printf '%s\n' "$SHELL_LINES" | grep -vc -- '--rcfile /dev/null')" "0"
 
 group "the desolate extension is the shell root's only addition, and holds no new power"
 EXT="$RELEASE/vscode-image/extension"

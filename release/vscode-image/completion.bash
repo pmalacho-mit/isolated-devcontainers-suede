@@ -195,7 +195,7 @@ _desolate_complete_desolate() {
     elif [ -z "$(_desolate_line_project)" ]; then
         # One project at most, and none for what acts on every target.
         case "$first $op" in
-            "--status "*|"--push "*|"--pull "*|"--review "*) COMPREPLY=( $(compgen -W "$(_desolate_projects)" -- "$cur") ) ;;
+            "--status "*|"--push "*|"--pull "*|"--review "*) _desolate_offer project _desolate_projects ;;
             *" --list"|*" --dinds") ;;
             *) _desolate_offer project _desolate_project_words ;;
         esac
