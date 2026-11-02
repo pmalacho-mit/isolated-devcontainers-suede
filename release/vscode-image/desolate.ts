@@ -38,6 +38,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as dind from "./dind.ts";
 import { hostOf, originOf } from "./hosts.ts";
+import { runPlainly, wantsPlain } from "./plain-output.ts";
 import { builtBeyondDeclared, daemonOf, enforcePolicy, type Daemon } from "./policy.ts";
 import {
   EVERY_TARGET,
@@ -2218,8 +2219,13 @@ async function main(): Promise<void> {
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }
 
-if (isEntryPoint(import.meta.url))
-  main().catch((err) => {
-    console.error(`desolate: ${err?.message ?? err}`);
-    process.exit(1);
-  });
+if (isEntryPoint(import.meta.url)) {
+  // From the Mac, through plainText: plain-output.ts says why.
+  if (wantsPlain(process.env, process.argv.slice(2)))
+    runPlainly(process.argv[1], process.argv.slice(2)).then((code) => process.exit(code));
+  else
+    main().catch((err) => {
+      console.error(`desolate: ${err?.message ?? err}`);
+      process.exit(1);
+    });
+}
