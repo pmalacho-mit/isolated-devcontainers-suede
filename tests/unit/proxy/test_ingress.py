@@ -80,13 +80,14 @@ class TestHostPort:
 
 class TestTarget:
     def test_accepted(self):
-        assert ingress.parse_target("desolate-dind-acme__widgets:5173\n") == ("desolate-dind-acme__widgets", 5173)
-        assert ingress.parse_target("desolate-dind:8080") == ("desolate-dind", 8080)
+        assert ingress.parse_target("desolate-dind-acme__widgets:5173\n") == ("desolate-dind-acme__widgets", 5173, None)
+        assert ingress.parse_target("desolate-dind:8080") == ("desolate-dind", 8080, None)
 
     def test_an_owner_may_follow(self):
         # desolate.ts names the target that claimed the port, so a withdraw can
-        # tell its own files from another's; the forward ignores it.
-        assert ingress.parse_target("desolate-dind:8080 acme__widgets--wt--wip\n") == ("desolate-dind", 8080)
+        # tell its own files from another's -- and the forward answers that
+        # target's host alone (WHOSE NAME).
+        assert ingress.parse_target("desolate-dind:8080 acme__widgets--wt--wip\n") == ("desolate-dind", 8080, "acme__widgets--wt--wip")
 
     @pytest.mark.parametrize("content", [
         "desolate-dind:8080 ../x", "desolate-dind:8080 a b", "desolate-dind:8080 -x", "desolate-dind:8080 a;b",
@@ -135,7 +136,9 @@ class TestDesired:
 
     def test_a_good_file_becomes_a_listener(self):
         wanted, refused = ingress.desired({"8081": "desolate-dind-acme:5173"}, self.DINDS, SUBNETS)
-        assert wanted == {8081: ("172.21.0.2", 5173)} and refused == []
+        assert wanted == {8081: ("172.21.0.2", 5173, None)} and refused == []
+        wanted, _ = ingress.desired({"8081": "desolate-dind-acme:5173 acme"}, self.DINDS, SUBNETS)
+        assert wanted == {8081: ("172.21.0.2", 5173, ingress.expected_host("acme"))}
 
     def test_an_unknown_dind_is_refused(self):
         wanted, refused = ingress.desired({"8081": "desolate-dind-nobody:5173"}, self.DINDS, SUBNETS)
@@ -343,4 +346,231 @@ def test_a_port_it_cannot_listen_on_is_said_once(root, caplog):
             await forwarder.reconcile()
             assert sum("cannot listen" in r.message for r in caplog.records) == 2, "a rewrite is said again"
         held.close()
+    asyncio.run(scenario())
+
+
+# ----------------------------------------------------- whose name, for real --
+#
+# A cookie is scoped by host, never by port: a forward that served a page under
+# the outer editor's name, or another target's, handed it their cookies --
+# their connection tokens. Each port answers its own target's host alone.
+
+HOSTS = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "hosts.json").read_text())
+
+
+def test_the_expected_host_is_hosts_ts_own():
+    # tests/unit/desolate/hosts.test.ts holds hosts.ts to the same file.
+    assert {name: ingress.expected_host(name) for name in HOSTS} == HOSTS
+    assert ingress.expected_host(None) is None
+
+
+def client_hello(name):
+    """A real ClientHello naming `name`, from the ssl module itself."""
+    import ssl
+    context = ssl.create_default_context()
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = context.wrap_bio(incoming, outgoing, server_hostname=name)
+    try:
+        tls.do_handshake()
+    except ssl.SSLWantReadError:
+        pass
+    return outgoing.read()
+
+
+def test_the_sni_is_read_from_a_real_client_hello():
+    assert ingress.server_name(client_hello("acme-widgets-babf3e111073ee33.localhost")) == \
+        "acme-widgets-babf3e111073ee33.localhost"
+    assert ingress.server_name(b"\x16\x03\x01\x00\x05garbage") is None
+
+
+async def recording_server(greeting=b""):
+    """An upstream that says `greeting` on connect, then echoes; `seen` is
+    every byte it was sent."""
+    seen = bytearray()
+
+    async def serve(reader, writer):
+        if greeting:
+            writer.write(greeting)
+            await writer.drain()
+        while data := await reader.read(65536):
+            seen.extend(data)
+            writer.write(b"echo:" + data)
+            await writer.drain()
+        writer.close()
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    return server, server.sockets[0].getsockname()[1], seen
+
+
+async def forward(root, owner="acme__widgets", greeting=b""):
+    upstream, upstream_port, seen = await recording_server(greeting)
+    host_port = free_port()
+    forwarder = ingress.Ingress(str(root), subnets_source=loopback_as_bridge)
+    write(root / "dinds" / "desolate-dind-acme", "127.0.0.1\n")
+    write(root / "ports" / str(host_port), f"desolate-dind-acme:{upstream_port}{' ' + owner if owner else ''}\n")
+    await forwarder.reconcile()
+    return upstream, host_port, seen, forwarder
+
+
+async def exchange(port, payload, wait=2.0):
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    if payload:
+        writer.write(payload)
+        await writer.drain()
+    try:
+        data = await asyncio.wait_for(reader.read(65536), wait)
+    except asyncio.TimeoutError:
+        data = None
+    writer.close()
+    return data
+
+
+def request(host, extra=b""):
+    return b"GET / HTTP/1.1\r\nHost: " + host.encode() + b"\r\nUser-Agent: t\r\n" + extra + b"\r\n"
+
+
+OWN = HOSTS["acme__widgets"]
+
+
+def test_a_request_for_its_own_host_is_forwarded(root):
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root)
+        data = await exchange(port, request(f"{OWN}:{port}"))
+        assert data.startswith(b"echo:GET / HTTP/1.1"), data
+        assert bytes(seen).startswith(b"GET / HTTP/1.1"), "the bytes read to check it were not passed on"
+        upstream.close()
+        await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("named", [
+    "desolate.localhost:{port}",            # the outer editor's
+    HOSTS["solo"] + ":{port}",              # another target's
+    "127.0.0.1:{port}",                     # the shared jar every editor used to be in
+    OWN,                                    # its own name at another port
+    OWN.upper() + ":{port}0",
+])
+def test_a_request_for_another_name_is_refused_and_reaches_nothing(root, named):
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root)
+        data = await exchange(port, request(named.format(port=port)))
+        assert data.startswith(b"HTTP/1.1 421 "), data
+        assert bytes(seen) == b"", "the upstream saw a request it should not have"
+        upstream.close()
+        await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+def test_the_host_is_matched_without_case(root):
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root)
+        assert (await exchange(port, request(f"{OWN.upper()}:{port}"))).startswith(b"echo:")
+        upstream.close()
+        await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+def test_two_host_headers_are_refused(root):
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root)
+        data = await exchange(port, request(f"{OWN}:{port}", b"Host: desolate.localhost:3000\r\n"))
+        assert data.startswith(b"HTTP/1.1 421 ") and bytes(seen) == b""
+        upstream.close()
+        await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+def test_a_forward_that_names_no_owner_takes_no_http_at_all(root):
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root, owner=None)
+        data = await exchange(port, request(f"{OWN}:{port}"))
+        assert data.startswith(b"HTTP/1.1 421 ") and bytes(seen) == b""
+        upstream.close()
+        await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+def test_tls_is_forwarded_for_its_own_name_only(root):
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root)
+        own = client_hello(OWN)
+        assert (await exchange(port, own)) == b"echo:" + own
+        before = len(seen)
+        assert await exchange(port, client_hello("desolate.localhost")) in (b"", None)
+        assert len(seen) == before, "a ClientHello for another name reached the upstream"
+        upstream.close()
+        await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("payload", [
+    b"\x00\x00\x00\x08\x04\xd2\x16\x2f",   # Postgres SSLRequest
+    b"*1\r\n$4\r\nPING\r\n",                 # Redis
+    b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",     # h2c prior knowledge: no browser sends it
+    b"hi",
+])
+def test_what_no_browser_sends_passes_as_before(root, payload):
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root)
+        assert (await exchange(port, payload)) == b"echo:" + payload
+        upstream.close()
+        await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+def test_a_server_first_protocol_still_works(root, monkeypatch):
+    monkeypatch.setattr(ingress, "FIRST_BYTES_SECONDS", 0.2)
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root, greeting=b"220 smtp.example ESMTP\r\n")
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        assert await asyncio.wait_for(reader.read(1024), 2) == b"220 smtp.example ESMTP\r\n"
+        writer.write(b"EHLO mac\r\n")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(1024), 2) == b"echo:EHLO mac\r\n"
+        writer.close()
+        upstream.close()
+        await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+def test_a_server_that_answers_before_it_is_asked_is_not_passed_on(root, monkeypatch):
+    # Chrome sends a request on a PRECONNECTED socket with bytes already waiting
+    # on it: a status line sent first would be read as the answer, under
+    # whatever name the socket was opened for.
+    monkeypatch.setattr(ingress, "FIRST_BYTES_SECONDS", 0.2)
+    async def scenario():
+        forged = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+        for greeting in (forged, b"\r\n" + forged, forged.lower()):
+            upstream, port, seen, forwarder = await forward(root, greeting=greeting)
+            assert await exchange(port, b"", wait=1.0) in (b"", None)
+            upstream.close()
+            await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+def test_control_without_the_wait_the_forged_answer_does_arrive(root, monkeypatch):
+    # The control for the test above: with the client's bytes sent at once the
+    # forged status line is what comes back -- echoed after the request, here,
+    # because the check passed; the point is the fixture does send it.
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root, greeting=b"HTTP/1.1 200 OK\r\n\r\n")
+        data = await exchange(port, request(f"{OWN}:{port}"))
+        assert data.startswith(b"HTTP/1.1 200 OK"), data
+        upstream.close()
+        await forwarder.listeners[port].close()
+    asyncio.run(scenario())
+
+
+def test_http_on_a_server_first_connection_is_cut_off(root, monkeypatch):
+    monkeypatch.setattr(ingress, "FIRST_BYTES_SECONDS", 0.2)
+    async def scenario():
+        upstream, port, seen, forwarder = await forward(root, greeting=b"220 hello\r\n")
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        assert await asyncio.wait_for(reader.read(1024), 2) == b"220 hello\r\n"
+        writer.write(request(f"{OWN}:{port}"))
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(1024), 2) == b""
+        assert bytes(seen) == b""
+        writer.close()
+        upstream.close()
+        await forwarder.listeners[port].close()
     asyncio.run(scenario())

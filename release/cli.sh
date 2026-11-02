@@ -30,6 +30,8 @@ set -euo pipefail
 
 CONTAINER=desolate-vscode
 ORCHESTRATOR=desolate-orchestrator
+# The outer editor's host: vscode-image/hosts.ts EDITOR_HOST says the same.
+EDITOR_HOST=desolate.localhost
 COLIMA_PROFILE="${COLIMA_PROFILE:-desolate}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -764,7 +766,9 @@ editor_url() {
   tok=$(env_value VSCODE_TOKEN)
   [ -n "$tok" ] || { echo "cli.sh: no VSCODE_TOKEN in .env -- run '$0 up' first" >&2; return 1; }
   port=$(vscode_port)
-  url="http://127.0.0.1:$port/?tkn=$tok&folder=/workspaces"
+  # Its own host, never 127.0.0.1 (vscode-image/hosts.ts): a cookie is
+  # scoped by host and not by port, and the editor's is its connection token.
+  url="http://$EDITOR_HOST:$port/?tkn=$tok&folder=/workspaces"
   echo "$url"
   if command -v pbcopy >/dev/null 2>&1; then
     printf '%s' "$url" | pbcopy && echo "(copied to clipboard)"

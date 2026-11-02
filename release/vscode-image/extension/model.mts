@@ -61,6 +61,9 @@ export interface Running {
   worktree: string | null;
   daemon?: string;
   url: string | null;
+  /** The host its ports are opened at (hosts.ts); a runner from before it
+   *  said none. */
+  host?: string;
   ports: Record<string, number>;
 }
 
@@ -212,11 +215,11 @@ const portNodes = (row: Running, id: string, at: TargetRef, facts?: Facts): Node
       id: `${id}:port:${label}`,
       label: label === "editor" ? "editor" : named ? `${named} (${label})` : `container :${label}`,
       description: `:${port}`,
-      tooltip: `127.0.0.1:${port}`,
+      tooltip: `${row.host ?? "127.0.0.1"}:${port}`,
       icon: label === "editor" ? "window" : "plug",
       actions: "port",
       click: "desolate.openPort",
-      target: { ...at, url: label === "editor" && row.url ? row.url : `http://127.0.0.1:${port}/` },
+      target: { ...at, url: label === "editor" && row.url ? row.url : `http://${row.host ?? "127.0.0.1"}:${port}/` },
     };
   });
 
@@ -283,7 +286,7 @@ export const projectsTree = (input: ProjectsInput): Node[] => {
       ...(fact?.branch || fact?.commit ? [{ label: "Branch", text: `${fact.branch ?? "(detached)"}${fact.commit ? ` at ${fact.commit.slice(0, 12)}` : ""}` }] : []),
       ...(fact?.branch ? [{ label: "GitHub", text: `${GITHUB_SAYS[fact.github]}${sync && !sync.startsWith("≠") && !sync.includes("not on") ? ` (${sync}, as last reviewed)` : ""}` }] : []),
       ...(mem?.used !== undefined ? [{ label: "Memory", text: `${gib(mem.used)}${mem.limit ? ` of ${gib(mem.limit)}` : ""}` }] : []),
-      ...(row?.ports.editor ? [{ label: "Editor", text: `127.0.0.1:${row.ports.editor}` }] : []),
+      ...(row?.ports.editor ? [{ label: "Editor", text: `${row.host ?? "127.0.0.1"}:${row.ports.editor}` }] : []),
     ];
     const issue = issueOf(target.worktree);
     const links = githubLinks(ref);

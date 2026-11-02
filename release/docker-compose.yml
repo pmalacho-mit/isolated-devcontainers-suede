@@ -325,6 +325,8 @@ services:
       # a compromised editor can USE a deploy key while compromised but cannot
       # copy one: the private halves never leave the keyring container.
       SSH_AUTH_SOCK: /run/keyring/agent.sock
+      # <published container port>:<server port>, for shell-entry.sh.
+      DESOLATE_EDITOR_GATE: "3000:3001"
     entrypoint: 
       # Run the editor server with certificate support and exactly the flags
       # specified in `command` and nothing else. The path must match
@@ -340,8 +342,13 @@ services:
       # keep git, where there is no agent socket to reach.
       - /home/.desolate-shell/bin/codium-server
     command:
-      - --host=0.0.0.0                # inside the container; host binding is 127.0.0.1 below
-      - --port=3000
+      # The container's own loopback: what the published port reaches is
+      # editor-gate.ts on 3000 (DESOLATE_EDITOR_GATE, above), which refuses
+      # every request another site's page could make the browser send. With
+      # no gate, nothing listens there, and the editor is unreachable rather
+      # than ungated.
+      - --host=127.0.0.1
+      - --port=3001
       - --connection-token=${VSCODE_TOKEN:?set VSCODE_TOKEN in .env}
       # Extensions this editor installs go to the tmpfs below, and are gone at
       # the next start. It is a launcher: its one extension is built into the

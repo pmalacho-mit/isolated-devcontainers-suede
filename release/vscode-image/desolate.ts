@@ -37,6 +37,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as dind from "./dind.ts";
+import { hostOf, originOf } from "./hosts.ts";
 import { builtBeyondDeclared, daemonOf, enforcePolicy, type Daemon } from "./policy.ts";
 import {
   EVERY_TARGET,
@@ -1329,7 +1330,7 @@ function movePorts(target: Target, move: { label: string; port: number }, reacha
       die(`${move.port} was taken by ${ingressFiles.ownerOf(move.port) || "another target"} just now; pick another`);
     recreateRelays(target, map);
     ingressFiles.publish(world.previous, map, target, dindName);
-    publishExternalPorts(target, dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map)]));
+    publishExternalPorts(target, dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map, hostOf(target.namespace))]));
     console.log(`  login shells see the new DESOLATE_EXTERNAL_* now; the editor's terminals on its
   next start:  ${hint.desolate(invocation(target))}`);
   }
@@ -1348,7 +1349,7 @@ function showPorts(target: Target, json = false): void {
 
   for (const [label, port] of map) {
     const name = label === "editor" ? "editor       " : `container:${label}`;
-    console.log(`  ${name} -> http://127.0.0.1:${port}`);
+    console.log(`  ${name} -> ${originOf(target.namespace, port)}`);
   }
 }
 
@@ -1407,7 +1408,7 @@ const editorUrl = (target: Target): string => {
 
   const id = devcontainerId(target.dir);
   const folder = (id && containerWorkspaceFolder(target.dir, id)) || target.dir;
-  return `http://127.0.0.1:${port}/?tkn=${token}&folder=${encodeURIComponent(folder)}`;
+  return `${originOf(target.namespace, port)}/?tkn=${token}&folder=${encodeURIComponent(folder)}`;
 };
 
 /**
@@ -1425,6 +1426,7 @@ function showRunning(json = false): void {
       return {
         target: target.name, project: target.project, worktree: target.worktree ?? null,
         daemon: daemons.saved(target), url: editorUrl(target) || null,
+        host: hostOf(target.namespace),
         ports: Object.fromEntries(ports.load(target)),
       };
     });
@@ -2056,7 +2058,7 @@ async function runTarget(
   if (willCreate) spec.save(target, fingerprint);
   installProxyCa(dir);
   shadowBaseImages(dir, project.shadowImages);
-  const external = dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map)]);
+  const external = dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map, hostOf(target.namespace))]);
   publishExternalPorts(target, external);
   runLifecycleCommands(target, config);
   // A container recreated for stale mounts is a new one: checked, trusted
@@ -2083,13 +2085,13 @@ async function runTarget(
 
   console.log(`\n  ${name} is ready:\n`);
   console.log(
-    `    http://127.0.0.1:${editorPort}/?tkn=${token}&folder=${encodeURIComponent(folder)}\n`,
+    `    ${originOf(target.namespace, editorPort)}/?tkn=${token}&folder=${encodeURIComponent(folder)}\n`,
   );
 
   for (const [label, port] of map)
     if (label !== "editor")
       console.log(
-        `    dev server on container port ${label} -> http://127.0.0.1:${port}`,
+        `    dev server on container port ${label} -> ${originOf(target.namespace, port)}`,
       );
 
   if (project.appPorts.length) {

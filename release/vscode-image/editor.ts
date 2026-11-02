@@ -202,7 +202,11 @@ export const editorCustomizations = (
  * Both halves are checked as digits before they go anywhere near a shell.
  *
  * @throws EditorScriptError for a label or port that is not a port number. */
-export const externalEnvironment = (map: Iterable<[string, number]>): [string, string][] => {
+export const externalEnvironment = (map: Iterable<[string, number]>, host: string): [string, string][] => {
+  // The target's own host (hosts.ts), which a browser's cookies are scoped to.
+  // It reaches a shell too, so it is held to the shape hostOf makes.
+  if (!/^[a-z0-9-]+\.localhost$/.test(host))
+    throw new EditorScriptError(`refusing to export '${host}' as a host: not a target's`);
   const env: [string, string][] = [];
   for (const [label, hostPort] of map) {
     if (label === "editor") continue;
@@ -210,7 +214,7 @@ export const externalEnvironment = (map: Iterable<[string, number]>): [string, s
       throw new EditorScriptError(`refusing to export '${label}' -> '${hostPort}': not a port pair`);
     env.push(
       [`DESOLATE_EXTERNAL_${label}`, String(hostPort)],
-      [`DESOLATE_EXTERNAL_${label}_URL`, `http://127.0.0.1:${hostPort}`],
+      [`DESOLATE_EXTERNAL_${label}_URL`, `http://${host}:${hostPort}`],
     );
   }
   return env;

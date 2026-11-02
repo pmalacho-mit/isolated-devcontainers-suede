@@ -207,10 +207,30 @@ else
 fi
 if [ -z "$VSPORT" ]; then
   note "editor container not running -- skipping the token-gate check"
-elif curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$VSPORT/" 2>/dev/null | grep -qE '401|403'; then
-  ok "editor rejects tokenless requests"
 else
-  note "editor returned a page without a token -- confirm VSCODE_TOKEN is set in .env"
+  # The editor is reached by its own host (vscode-image/hosts.ts), through
+  # editor-gate.ts. curl's --resolve gives it that host on loopback, as the
+  # browser does for any *.localhost.
+  at_editor() { curl -s -o /dev/null -w '%{http_code}' --max-time 5 --resolve "desolate.localhost:$VSPORT:127.0.0.1" "$@" 2>/dev/null; }
+  if at_editor "http://desolate.localhost:$VSPORT/" | grep -qE '401|403'; then
+    ok "editor rejects tokenless requests"
+  else
+    note "editor returned a page without a token -- confirm VSCODE_TOKEN is set in .env"
+  fi
+  # The gate, both ways: what the user's browser sends gets through, what
+  # another site's page could make it send does not. The token is the one the
+  # server was started with.
+  tkn=$(docker inspect -f '{{range .Args}}{{println .}}{{end}}' desolate-vscode 2>/dev/null | sed -n 's/^--connection-token=//p')
+  plain=$(at_editor "http://desolate.localhost:$VSPORT/?tkn=$tkn")
+  crossed=$(at_editor -H 'Sec-Fetch-Site: cross-site' "http://desolate.localhost:$VSPORT/?tkn=$tkn")
+  by_address=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$VSPORT/" 2>/dev/null)
+  case "$plain/$crossed/$by_address" in
+    302/403/421) ok "the editor's gate passes your browser's requests and refuses another site's (302/403/421)" ;;
+    302/*) bad "the editor's gate is not refusing: a cross-site request got $crossed, 127.0.0.1 got $by_address (403/421 expected)"
+           note "a page any project serves could act as the editor; see vscode-image/editor-gate.ts" ;;
+    *) bad "the editor did not answer its own address as expected: $plain (302 expected; 403/421 for the others)"
+       note "is the gate running? docker logs desolate-vscode | grep editor-gate" ;;
+  esac
 fi
 
 echo
@@ -552,6 +572,10 @@ echo "== 8. ingress (dev-server ports reach the Mac with no published range) =="
 # published there and nowhere else, fetched from THIS machine's 127.0.0.1.
 INGRESS_ROOT=/run/desolate-ingress
 INGRESS_PROBE=desolate-preflight-ingress
+# The host the ingress answers for the probe's forward, owned by
+# `desolate-preflight`: vscode-image/hosts.ts hostOf("desolate-preflight"),
+# held to it by tests/static/19-hosts.sh.
+PREFLIGHT_HOST=desolate-preflight-b1e01e50f2e6b7f7.localhost
 if ! vm_ssh systemctl is-active --quiet desolate-ingress 2>/dev/null; then
   bad "desolate-ingress is not running in the VM"
   note "install it: ./cli.sh vm install --proxy-only"
@@ -608,15 +632,27 @@ else
       fi
       # About 15 s at most: Lima forwarded a new VM listener in 20-215 ms when
       # measured (T1.2), and waiting longer only made a failure slower.
+      # Asked by the probe owner's own host (vscode-image/hosts.ts, of
+      # `desolate-preflight`): the ingress answers no other name.
+      own="$PREFLIGHT_HOST:$probe_port"
       body=""
       for _ in $(seq 1 20); do
-        body=$(curl -s --http0.9 -m 0.5 "http://127.0.0.1:$probe_port/" 2>/dev/null) && [ -n "$body" ] && break
+        body=$(curl -s --http0.9 -m 0.5 -H "Host: $own" "http://127.0.0.1:$probe_port/" 2>/dev/null) && [ -n "$body" ] && break
         sleep 0.25
       done
       # Nothing on the Mac: ask the VM the same question while the forward is
       # still open, so the failure can say which half of the path it is.
       vm_body=""
-      [ -z "$body" ] && vm_body=$(vm_ssh curl -s --http0.9 -m 2 "http://127.0.0.1:$probe_port/" 2>/dev/null)
+      [ -z "$body" ] && vm_body=$(vm_ssh curl -s --http0.9 -m 2 -H "Host: $own" "http://127.0.0.1:$probe_port/" 2>/dev/null)
+      # ... and under any other name it is refused: the editor's, or the
+      # address every forward used to answer to.
+      misnamed=""
+      case "$body" in *desolate-ingress-selftest*)
+        for name in "desolate.localhost:$probe_port" "127.0.0.1:$probe_port"; do
+          curl -s --http0.9 -m 2 -H "Host: $name" "http://127.0.0.1:$probe_port/" 2>/dev/null \
+            | grep -q desolate-ingress-selftest && misnamed="$misnamed $name"
+        done ;;
+      esac
       mac_holder=""
       [ -z "$body" ] && mac_holder=$(lsof -nP -iTCP:"$probe_port" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 {print $1 "(" $2 ")"}' | sort -u | tr '\n' ' ')
       # Checked while the probe's own listener is open, so there is at least
@@ -632,7 +668,14 @@ else
       [ -n "$wrote_dind" ] && vm_ssh sudo rm -f "$INGRESS_ROOT/dinds/desolate-dind"
       inner rm -f "$INGRESS_PROBE" >/dev/null 2>&1
       case "$body" in
-        *desolate-ingress-selftest*) ok "a port opened on demand reached this Mac: 127.0.0.1:$probe_port -> dind $dind_ip:18997" ;;
+        *desolate-ingress-selftest*)
+          ok "a port opened on demand reached this Mac: 127.0.0.1:$probe_port -> dind $dind_ip:18997"
+          if [ -n "$misnamed" ]; then
+            bad "the forward also answered as:$misnamed -- a page under that name reads its cookies"
+            note "the ingress predates the host check: ./cli.sh vm install --proxy-only"
+          else
+            ok "  and it answers its own host only (desolate.localhost and 127.0.0.1 refused)"
+          fi ;;
         *) case "$vm_body" in
              *desolate-ingress-selftest*)
                bad "nothing came back through 127.0.0.1:$probe_port on this Mac -- but the VM's own 127.0.0.1:$probe_port answered, so the ingress works and Lima did not forward it"

@@ -287,7 +287,7 @@ describe("DESOLATE_TARGET: who a container is, to its agent", () => {
   });
 
   test("and it is exported for the editor's terminals with the ports", () => {
-    const env = [...targetEnvironment({ project: "acme/widgets", worktree: "w" }), ...externalEnvironment(new Map([["5173", 8081]]))];
+    const env = [...targetEnvironment({ project: "acme/widgets", worktree: "w" }), ...externalEnvironment(new Map([["5173", 8081]]), "acme-widgets-babf3e111073ee33.localhost")];
     assert.match(externalProfile(env), /^export DESOLATE_TARGET=w$/m);
     assert.match(editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48), env), /export DESOLATE_TARGET=w/);
   });
@@ -295,25 +295,30 @@ describe("DESOLATE_TARGET: who a container is, to its agent", () => {
 
 describe("DESOLATE_EXTERNAL_<port> (#17)", () => {
   test("each dev-server port is exported with its host port and a URL; the editor is not", () => {
-    assert.deepEqual(externalEnvironment(new Map([["editor", 8080], ["5173", 8081]])), [
+    assert.deepEqual(externalEnvironment(new Map([["editor", 8080], ["5173", 8081]]), "acme-widgets-babf3e111073ee33.localhost"), [
       ["DESOLATE_EXTERNAL_5173", "8081"],
-      ["DESOLATE_EXTERNAL_5173_URL", "http://127.0.0.1:8081"],
+      ["DESOLATE_EXTERNAL_5173_URL", "http://acme-widgets-babf3e111073ee33.localhost:8081"],
     ]);
+  });
+
+  test("the URL is at the target's own host, never 127.0.0.1 -- and only a target's host reaches a shell", () => {
+    for (const host of ["127.0.0.1", "desolate.localhost.evil", "$(id).localhost", "a b.localhost", ""])
+      assert.throws(() => externalEnvironment(new Map([["5173", 8081]]), host), EditorScriptError, host);
   });
 
   test("anything that is not a port pair never reaches a shell", () => {
     for (const bad of [[["5173;rm -rf /", 8081]], [["web", 8081]], [["5173", 0]], [["5173", 8081.5]], [["0", 8081]]] as [string, number][][])
-      assert.throws(() => externalEnvironment(new Map(bad)), EditorScriptError, JSON.stringify(bad));
+      assert.throws(() => externalEnvironment(new Map(bad), "acme-widgets-babf3e111073ee33.localhost"), EditorScriptError, JSON.stringify(bad));
   });
 
   test("the profile exports them for login shells", () => {
-    const profile = externalProfile(externalEnvironment(new Map([["5173", 8081]])));
+    const profile = externalProfile(externalEnvironment(new Map([["5173", 8081]]), "acme-widgets-babf3e111073ee33.localhost"));
     assert.match(profile, /^export DESOLATE_EXTERNAL_5173=8081$/m);
-    assert.match(profile, /^export DESOLATE_EXTERNAL_5173_URL=http:\/\/127\.0\.0\.1:8081$/m);
+    assert.match(profile, /^export DESOLATE_EXTERNAL_5173_URL=http:\/\/acme-widgets-babf3e111073ee33\.localhost:8081$/m);
   });
 
   test("the start script exports them BEFORE the server starts, so its terminals inherit them", () => {
-    const external = externalEnvironment(new Map([["5173", 8081]]));
+    const external = externalEnvironment(new Map([["5173", 8081]]), "acme-widgets-babf3e111073ee33.localhost");
     const script = editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48), external);
     const exported = script.indexOf("export DESOLATE_EXTERNAL_5173=8081");
     assert.ok(exported >= 0, "not exported");
@@ -322,8 +327,8 @@ describe("DESOLATE_EXTERNAL_<port> (#17)", () => {
 
   test("a server running with a different map is restarted rather than kept", () => {
     const script = editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48),
-      externalEnvironment(new Map([["5173", 8081]])));
-    assert.match(script, /WANT='DESOLATE_EXTERNAL_5173=8081 DESOLATE_EXTERNAL_5173_URL=http:\/\/127\.0\.0\.1:8081'/);
+      externalEnvironment(new Map([["5173", 8081]]), "acme-widgets-babf3e111073ee33.localhost"));
+    assert.match(script, /WANT='DESOLATE_EXTERNAL_5173=8081 DESOLATE_EXTERNAL_5173_URL=http:\/\/acme-widgets-babf3e111073ee33\.localhost:8081'/);
     assert.match(script, /if listening && \[ "\$HAVE" != "\$WANT" \]; then/);
     assert.match(script, /printf '%s' "\$WANT" > "\$DATA\/desolate-external"/);
   });

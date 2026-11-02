@@ -16,7 +16,7 @@ The name is `desolate` = **de**v + i**solate**.
 
 ```
 +- macOS ------------------------------------------------------------------+
-|  browser --> 127.0.0.1:3000 (?token)      ./cli.sh observe (no port)     |
+|  browser --> desolate.localhost:3000      ./cli.sh observe (no port)     |
 |                                                                          |
 |  +- Colima VM (Ubuntu; sysbox + desolate-proxy) ----------------------+  |
 |  |  SECRETS LIVE HERE ONLY: /etc/desolate-proxy/settings.json (0600)  |  |
@@ -431,7 +431,10 @@ echo "VSCODE_TOKEN=$(openssl rand -hex 24)" >> .env && chmod 600 .env
 > [!WARNING]
 > `>>` **appends** to `.env` if it already exists. The last value will be used, so it's not a big deal, but your `.env` will grow indefinitely.
 
-Open the printed `http://127.0.0.1:3000/?tkn=...` URL. That's your editor.
+Open the printed `http://desolate.localhost:3000/?tkn=...` URL. That's your
+editor. Chrome and Firefox resolve every `*.localhost` name to loopback with
+nothing configured; each project's editor and dev servers get a name of their
+own the same way ([Every surface by its own name](#every-surface-by-its-own-name)).
 
 [`preflight`](./preflight.sh) will tell you whether egress is actually intercepted. To see the
 secrets machinery work end to end:
@@ -1345,8 +1348,9 @@ forwards any VM loopback listener to the Mac's loopback within a fraction of a
 second, so the URL works with nothing published by docker at all.
 
 The forwarder refuses anything outside its bounds and logs it: a port below
-1024 (Lima forwards those onto your LAN), an address that is not a dind's, or a
-bridge's own gateway (the VM itself). Its uid can open connections to dind
+1024 (Lima forwards those onto your LAN), an address that is not a dind's, a
+bridge's own gateway (the VM itself), or a request for any name but its
+target's own (next section). Its uid can open connections to dind
 bridges and nowhere else -- an nftables rule, counted, that does not trust the
 forwarder's own checks. `./cli.sh preflight` proves the whole path from your
 Mac: it opens a port on demand and fetches through it.
@@ -1355,6 +1359,60 @@ Allocation starts at `DESOLATE_PORT_BASE` (8080) and takes the lowest free port,
 keeping a target's previous ports when it can. Set the base in the `.env` next
 to `docker-compose.yml` if 8080 is busy on your Mac; nothing else needs to agree
 with it.
+
+### Every surface by its own name
+
+Every editor and dev server is on your Mac's loopback, on different ports, and
+a browser's cookie jar ignores the port (RFC 6265 s8.5). Measured against the
+editor's VSCodium server: `?tkn=` sets `vscode-tkn=<token>; SameSite=Lax`, not
+HttpOnly (the workbench reads it from `document.cookie`, so it cannot be), and
+that cookie alone authenticates; the WebSocket upgrade takes any `Origin`. When
+everything was `127.0.0.1:<port>`, any page there -- a project's dev server,
+the URL `desolate` tells you to open -- could read the outer editor's token and
+every project editor's, and drive the outer editor with it: its terminals, the
+keyring's agent, every project. With the cookie the editor also serves any file
+in `/workspaces` as a page at its own origin (`vscode-remote-resource`), and a
+Lax cookie goes along with a navigation from any site.
+
+So each surface has a name of its own, which is a site of its own:
+
+- the outer editor is `desolate.localhost`;
+- each target is `<its name>-<16 hex>.localhost` (`vscode-image/hosts.ts`); the
+  hex is of its namespace, so no two targets share one, however they are
+  spelled. `DESOLATE_EXTERNAL_<port>_URL` and every URL `desolate` prints use it.
+
+A name only separates cookies if no page can be served under someone else's,
+and a port answers whatever name a browser used to reach it. So:
+
+- **`desolate-ingress` holds each forward to its target's name.** An HTTP/1.x
+  request must carry exactly one `Host: <its name>:<port>`, a TLS ClientHello
+  must name it as SNI; anything else is answered `421` and reaches nothing.
+  Bytes no browser sends -- Postgres, Redis, h2c -- pass as before. A client
+  that sends nothing is taken for a server-first protocol (MySQL, SMTP, SSH),
+  and the server's greeting is passed only if it is not an HTTP response:
+  Chrome sends a request on a preconnected socket with bytes already waiting on
+  it, so a dev server that answered first could otherwise land a page under a
+  name not its own. `preflight` checks the forward answers its own name and not
+  the editor's or `127.0.0.1`.
+- **The outer editor sits behind `editor-gate.ts`.** The server listens on its
+  container's loopback; the gate takes the published port and refuses a request
+  for any host but `desolate.localhost` (`127.0.0.1` gets `421` and the address
+  to use), any request another site or port started (`Sec-Fetch-Site`
+  `cross-site` or `same-site`, a foreign `Origin` -- WebSocket upgrades
+  included), and answers a `vscode-remote-resource` opened as a page or frame
+  with `Content-Security-Policy: sandbox`, where a script cannot run. With no
+  gate nothing listens on the published port: unreachable, never ungated.
+  `tests/environments/editor-gate/run.sh` runs it in Chromium against the real
+  server: the editor works, and each attack fails, beside a control that shows
+  it would have worked.
+
+After upgrading, clear `127.0.0.1`'s cookies once in your browser (Chrome:
+Settings → Privacy → Third-party cookies → See all site data → `127.0.0.1`):
+the old token cookie lasts a week, and nothing needs it now.
+
+What this does not cover: Safari does not resolve `*.localhost` by itself
+(an `/etc/hosts` line per name would), and a project's own dev server can
+still read its own editor's cookie -- the same project's trust.
 
 ### When your Mac already holds the port
 
@@ -2126,8 +2184,8 @@ machine.
 
 | Variable                     | Default         | What it does                                                                                                                                                            |
 | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
-| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. The port allocator is told it and never hands it to a dev server.                                                      |
+| `VSCODE_TOKEN`               | _(required)_    | Gates the editor at `desolate.localhost:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                         |
+| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1` (reached as `desolate.localhost`). The port allocator is told it and never hands it to a dev server.                    |
 | `DESOLATE_PORT_BASE`         | `8080`          | Where project editor and dev-server host ports are allocated from (>= 1024). No upper bound: each is a listener `desolate-ingress` opens on demand.                      |
 | `DESOLATE_DIND_IDLE`         | `30`            | Minutes a project daemon may sit with no devcontainer running before it is stopped. Its images stay; the next start is warm.                                             |
 | `DESOLATE_MAX_DINDS`         | `16`            | Project daemons running at once. A newcomer past it stops the longest-idle one; a daemon with a devcontainer running is never stopped for it.                            |

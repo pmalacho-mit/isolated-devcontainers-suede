@@ -53,4 +53,11 @@ if ! tsx /usr/local/lib/desolate/editor-settings.ts "$SETTINGS"; then
     exit 1
 fi
 
+# The gate between the browser and the server (editor-gate.ts): compose puts
+# the server on this container's loopback and publishes the gate's port, so
+# the editor is reached through it or not at all.
+if [ -n "${DESOLATE_EDITOR_GATE:-}" ]; then
+    node /usr/local/lib/desolate/editor-gate.ts "${DESOLATE_EDITOR_GATE%%:*}" "${DESOLATE_EDITOR_GATE#*:}" &
+fi
+
 exec "$@"

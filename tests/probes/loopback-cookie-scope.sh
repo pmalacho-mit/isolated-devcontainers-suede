@@ -25,6 +25,11 @@
 # So the question is narrow and answerable: DOES the editor set a cookie, is it
 # HttpOnly, and is the cookie alone sufficient to authenticate?
 #
+# ANSWERED 2026-11-02: not HttpOnly, and sufficient alone -- and fixed
+# (README-cookie-fixes.md, top). With editor-gate.ts in front of the editor,
+# 127.0.0.1 is answered 421, so this probe now reports no cookie; the check is
+# tests/environments/editor-gate/run.sh.
+#
 # WHAT THIS DOES NOT DO
 #
 # It does not attack anything. It reads response headers, and it uses curl's own
