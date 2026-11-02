@@ -1418,7 +1418,10 @@ directory's here, measured before anything began. The daemon resolves the bind
 source on its own, moments after any check, and `/workspaces` is the editor's
 to write; a link swapped in during that moment would otherwise hand the
 container the link's target. A container that got anything else is stopped and
-removed before it is said to be ready.
+removed before it is said to be ready -- and before anything of the project's
+has run in it: `up` holds the lifecycle commands back (`--skip-post-create`),
+and `onCreateCommand` through `postAttachCommand` run only after the check,
+the proxy CA and the published ports, through `devcontainer run-user-commands`.
 
 **Docker names cannot contain `/`.** So a nested project's volumes, relay
 containers and state files use an encoded form: `owner/repo` becomes

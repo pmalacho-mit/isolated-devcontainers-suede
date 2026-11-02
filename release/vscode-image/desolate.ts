@@ -1017,6 +1017,14 @@ function populateWorktree(target: Target): void {
       post-checkout hook failing in the sandbox, most likely (see above)`);
 }
 
+/**
+ * `up`, with every lifecycle command held back: onCreate, updateContent,
+ * postCreate, postStart and postAttach run only once verifyWorkspaceMount has
+ * said the container got the directory that was checked (follow-up R3), by
+ * runLifecycleCommands. Measured against @devcontainers/cli 0.88.0: the two
+ * together run what a plain `up` does -- all five on a new container,
+ * postStart and postAttach on a restarted one.
+ */
 const devcontainerUp = (target: Target, config: string, noCache = false) => {
   const args = [
     "up",
@@ -1029,11 +1037,26 @@ const devcontainerUp = (target: Target, config: string, noCache = false) => {
     // project's -- and an entry there sends even a pinned id to the manifest
     // IT names. So: none.
     "--no-lockfile",
+    "--skip-post-create",
   ];
 
   if (noCache) args.push("--build-no-cache");
   const code = run.status("devcontainer", args, { quiet: true });
   if (code !== 0) die(`devcontainer up failed (exit ${code})`);
+};
+
+/** The project's lifecycle commands, which `up` held back: after the
+ *  workspace is verified, and after the proxy CA is trusted and the external
+ *  ports are published -- so a postCreateCommand's `npm install` finds both.
+ *  A command that fails fails the start, as it did inside `up`. */
+const runLifecycleCommands = (target: Target, config: string) => {
+  const code = run.status("devcontainer", [
+    "run-user-commands",
+    "--workspace-folder",
+    target.dir,
+    ...overrideConfigFlag(config),
+  ]);
+  if (code !== 0) die(`a lifecycle command of ${target.name} failed (exit ${code}; its output is above)`);
 };
 
 const trustMessage = {
@@ -1133,6 +1156,7 @@ function startEditor(
   cfg: ProjectConfig,
   token: string,
   config: string,
+  recreate: () => void,
   external: [string, string][] = [],
 ): void {
   const dir = target.dir;
@@ -1154,7 +1178,7 @@ function startEditor(
     );
     const stale = devcontainerId(dir, true);
     if (stale) docker.container.remove([stale]);
-    devcontainerUp(target, config);
+    recreate();
     const retry = run.status("devcontainer", [
       "exec",
       "--workspace-folder",
@@ -2034,7 +2058,17 @@ async function runTarget(
   shadowBaseImages(dir, project.shadowImages);
   const external = dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map)]);
   publishExternalPorts(target, external);
-  startEditor(target, project, token, config, external);
+  runLifecycleCommands(target, config);
+  // A container recreated for stale mounts is a new one: checked, trusted
+  // and set up the same way before the editor starts in it.
+  const recreate = () => {
+    devcontainerUp(target, config);
+    verifyWorkspaceMount(target, workspaceInode);
+    installProxyCa(dir);
+    publishExternalPorts(target, external);
+    runLifecycleCommands(target, config);
+  };
+  startEditor(target, project, token, config, recreate, external);
   recreateRelays(target, map);
   ingressFiles.publish(previousPorts, map, target, ingressFiles.dindOf(target, daemon));
   if (daemon === "project") joinProjectNetworks(target);
