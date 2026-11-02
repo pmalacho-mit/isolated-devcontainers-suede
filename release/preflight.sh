@@ -53,14 +53,26 @@ fi
 
 echo
 echo "== 2. privilege separation (editor must NOT hold the daemon) =="
-if docker exec desolate-vscode docker info >/dev/null 2>&1; then
+# A negative check needs a positive control: a `docker info` that failed because
+# the editor is down, or has no docker CLI, found nothing. So the question is
+# asked only where it can be, and only a refusal to CONNECT counts.
+if ! docker exec desolate-vscode sh -c 'command -v docker' >/dev/null 2>&1; then
+  skipped "editor daemon access: could not ask (the editor is not running, or has no docker CLI)"
+elif EDINFO=$(docker exec desolate-vscode docker info 2>&1); then
   bad "EDITOR CAN DRIVE THE INNER DAEMON -- privilege separation is broken"
   note "a malicious extension could mount any project's volumes; check that"
   note "docker-compose.yml gives vscode no inner-run mount and no DOCKER_HOST"
 else
-  ok "editor has no daemon access (broker-only)"
+  case "$EDINFO" in
+    *"failed to connect"*|*"Cannot connect"*|*"connect: no such file"*|*"permission denied"*|*"Is the docker daemon running"*)
+      ok "editor has no daemon access (broker-only)" ;;
+    *) skipped "editor daemon access: docker info failed for another reason"
+       note "it said: $(printf '%s\n' "$EDINFO" | grep -m1 . )" ;;
+  esac
 fi
-if docker inspect desolate-vscode --format '{{range .Mounts}}{{.Name}} {{end}}' 2>/dev/null | grep -q inner-run; then
+if ! EDMOUNTS=$(docker inspect desolate-vscode --format '{{range .Mounts}}{{.Name}} {{end}}' 2>/dev/null); then
+  bad "could not read the editor's mounts (is it running?)"
+elif printf '%s' "$EDMOUNTS" | grep -q inner-run; then
   bad "editor mounts inner-run -- the daemon socket is exposed to the editor"
 else
   ok "editor does not mount the daemon socket volume"
@@ -114,16 +126,27 @@ docker exec desolate-vscode test -w /workspaces \
 # can write it can run code in every other project. Assert the live mount, not
 # just the compose intent: `:ro` in config and a read-only mount at runtime are
 # different claims, and only this one matters.
+# Asked of the mount itself: a `touch` that failed because the directory is not
+# there, or the container is down, is not a read-only mount.
 for c in desolate-dind desolate-orchestrator; do
-  if docker exec "$c" sh -c 'touch /server-dist/.desolate-writetest 2>/dev/null' 2>/dev/null; then
-    docker exec "$c" rm -f /server-dist/.desolate-writetest >/dev/null 2>&1
-    bad "$c can WRITE /server-dist -- the shared editor server is poisonable"
-    note "every devcontainer executes /vscode-server/bin/codium-server from here"
-    note "docker-compose.yml must mount server-dist :ro for this service"
-  else
-    ok "$c holds /server-dist read-only"
-  fi
+  rw=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/server-dist"}}{{.RW}}{{end}}{{end}}' "$c" 2>/dev/null)
+  case "$rw" in
+    false) ok "$c holds /server-dist read-only" ;;
+    true)  bad "$c can WRITE /server-dist -- the shared editor server is poisonable"
+           note "every devcontainer executes /vscode-server/bin/codium-server from here"
+           note "docker-compose.yml must mount server-dist :ro for this service" ;;
+    *)     bad "$c has no /server-dist mount to check (is it running?)" ;;
+  esac
 done
+# The keyring's socket volume, likewise: written, it would let a compromised
+# editor rewrite the exported .pub files every IdentityFile line points at.
+krw=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/run/keyring"}}{{.RW}}{{end}}{{end}}' desolate-vscode 2>/dev/null)
+case "$krw" in
+  false) ok "the editor mounts the keyring's sockets read-only" ;;
+  true)  bad "the editor can WRITE /run/keyring -- it could replace the exported public keys"
+         note "docker-compose.yml must mount keyring-run :ro for vscode" ;;
+  *)     bad "the editor has no /run/keyring mount to check (is it running?)" ;;
+esac
 
 echo
 echo "== 4. the inner daemon is not on the network at all =="
@@ -131,14 +154,19 @@ echo "== 4. the inner daemon is not on the network at all =="
 # loopback is reachable from a browser aimed at a hostile page (DNS rebinding),
 # which a unix socket is not -- so re-introducing a socket proxy there should be
 # a deliberate act, and this is where it stops being one.
-if curl -s --max-time 3 -o /dev/null http://127.0.0.1:2375/_ping 2>/dev/null; then
-  bad "something is serving the docker API on 127.0.0.1:2375"
-  note "the socket proxy was removed deliberately -- see docker-compose.yml"
-  note "find it: docker ps --format '{{.Names}} {{.Ports}}' | grep 2375"
-else
-  ok "nothing answers the docker API on 127.0.0.1:2375"
-fi
-if docker ps --format '{{.Ports}}' | grep -q ':2375'; then
+# Only curl's own "nothing there" counts: exit 7 (refused) or 28 (timed out).
+# Any other failure is a probe that did not run.
+curl -s --max-time 3 -o /dev/null http://127.0.0.1:2375/_ping 2>/dev/null; rc=$?
+case "$rc" in
+  0)    bad "something is serving the docker API on 127.0.0.1:2375"
+        note "the socket proxy was removed deliberately -- see docker-compose.yml"
+        note "find it: docker ps --format '{{.Names}} {{.Ports}}' | grep 2375" ;;
+  7|28) ok "nothing answers the docker API on 127.0.0.1:2375" ;;
+  *)    skipped "127.0.0.1:2375: curl could not ask (exit $rc)" ;;
+esac
+if ! PSPORTS=$(docker ps --format '{{.Ports}}' 2>/dev/null); then
+  bad "could not list the stack's containers (docker ps failed)"
+elif printf '%s\n' "$PSPORTS" | grep -q ':2375'; then
   bad "a container publishes 2375 to the host"
 else
   ok "no container publishes the daemon API to the host"
@@ -177,7 +205,10 @@ fi
 # on the old port -- which is exactly the case a check reading .env would miss.
 VSPORT=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}}{{end}}{{end}}' \
          desolate-vscode 2>/dev/null)
-VSIPS=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}} {{end}}{{end}}' \
+# Every binding's address, an empty one -- every interface, which is what
+# docker records for `-p 3000:3000` -- spelled 0.0.0.0. Printed as nothing, it
+# made this check pass on exactly the binding it exists to catch.
+VSIPS=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{if .HostIp}}{{.HostIp}}{{else}}0.0.0.0{{end}} {{end}}{{end}}' \
         desolate-vscode 2>/dev/null)
 if [ -z "$VSPORT" ]; then
   note "editor container not running -- skipping its port checks"
@@ -188,7 +219,9 @@ else
   for ip in $VSIPS; do
     [ "$ip" = "127.0.0.1" ] || BADIP="$BADIP $ip"
   done
-  if [ -n "$BADIP" ]; then
+  if [ -z "$VSIPS" ]; then
+    bad "could not read the editor's published address"
+  elif [ -n "$BADIP" ]; then
     bad "editor published on non-loopback address(es):$BADIP -- should be 127.0.0.1 only"
   else
     ok "editor (port $VSPORT) not exposed beyond loopback"
@@ -198,8 +231,9 @@ fi
 # dev-server port is a listener desolate-ingress opens on demand (section 8).
 # A publish that reappears is a range someone re-added, and it would sit beside
 # the ingress's forwards on the same loopback.
-PUB=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{$p}} {{end}}' desolate-dind 2>/dev/null)
-if [ -z "$PUB" ]; then
+if ! PUB=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{$p}} {{end}}' desolate-dind 2>/dev/null); then
+  bad "could not read what dind publishes (is it running?)"
+elif [ -z "$PUB" ]; then
   ok "dind publishes nothing (dev-server ports go through the ingress)"
 else
   bad "dind publishes ports again: $PUB"
@@ -248,7 +282,9 @@ SHARED=""
 for n in $DINDNET; do
   case " $VSNET " in *" $n "*) SHARED="$SHARED $n" ;; esac
 done
-if [ -n "$SHARED" ]; then
+if [ -z "$VSNET" ] || [ -z "$DINDNET" ]; then
+  bad "could not read the editor's and dind's networks (editor: ${VSNET:-none}; dind: ${DINDNET:-none})"
+elif [ -n "$SHARED" ]; then
   bad "dind shares network(s)$SHARED with the editor"
   note "they must be on separate bridges (devnet / dindnet in docker-compose.yml)"
   note "a shared bridge makes the traffic BRIDGED, and the nftables forward chain"
@@ -265,8 +301,12 @@ if [ -z "$VSIP" ]; then
 elif ! docker exec desolate-dind sh -c 'command -v wget >/dev/null' 2>/dev/null; then
   note "no wget inside dind -- skipping the reachability probe"
 else
-  REACHED=""
+  REACHED="" ANSWERING=""
   for ip in $VSIP; do
+    # The control: the editor itself answers at this address. Without it, a
+    # dind that got no reply proved nothing -- the editor may not be listening.
+    docker exec desolate-vscode curl -s -o /dev/null --max-time 4 "http://$ip:3000/" 2>/dev/null \
+      && ANSWERING="$ANSWERING $ip"
     # -S so the status line lands in the output: the editor answers a tokenless
     # request with 401/403, and either is still REACHED. Only the absence of any
     # HTTP reply means the packet did not arrive.
@@ -274,7 +314,9 @@ else
           "wget -T 4 -q -S -O /dev/null http://$ip:3000/ 2>&1 || true" 2>/dev/null)
     case "$OUT" in *HTTP/*) REACHED="$REACHED $ip" ;; esac
   done
-  if [ -n "$REACHED" ]; then
+  if [ -z "$ANSWERING" ]; then
+    skipped "lateral reachability: the editor does not answer at$VSIP:3000 even from itself, so no reply from dind proves nothing"
+  elif [ -n "$REACHED" ]; then
     bad "the container world CAN reach the editor at$REACHED:3000"
     note "the ssh deploy keys live in that container; this is the escape that matters"
     note "check: colima ssh -p ${COLIMA_PROFILE:-desolate} -- sudo nft list table inet desolate"
@@ -706,6 +748,10 @@ for bridge in $bridges; do
 done
 if [ -z "$IFS_LINE" ]; then
   bad "could not read the interface set the desolate ruleset matches"
+elif ! printf '%s\n' $bridges | grep -qx br-desolate || ! printf '%s\n' $bridges | grep -qx br-desolate-in; then
+  # The stack's own two are always there: a list without them is a list that
+  # was not read, and every bridge in an empty list is "covered".
+  bad "could not list the VM's bridges (br-desolate and br-desolate-in not among: ${bridges:-nothing})"
 elif [ -n "$uncovered" ]; then
   # A br-<hash> that is not ours (docker's default networks on the VM, say) is
   # reported, not failed: it carries no desolate traffic. Ours must all match.
@@ -725,20 +771,32 @@ fi
 # 172.18.0.0/16 from its first start, and a later `up` gave dindnet the same).
 # dind.ts pins inner daemons to 10.234.0.0/16; a dind made before that, or an
 # inner network made before it, can still hold an old subnet.
-shadowed=""
+shadowed="" unread=""
 for dind in desolate-dind $(docker ps --filter label=desolate.dind --format '{{.Names}}'); do
-  dup=$(docker exec "$dind" ip route 2>/dev/null | awk '{print $1}' | grep -v '^default$' | sort | uniq -d | tr '\n' ' ')
+  routes=$(docker exec "$dind" ip route 2>/dev/null)
+  # A dind has a default route at least: no routes is a table not read.
+  [ -n "$routes" ] || { unread="$unread $dind"; continue; }
+  dup=$(printf '%s\n' "$routes" | awk '{print $1}' | grep -v '^default$' | sort | uniq -d | tr '\n' ' ')
   [ -n "$dup" ] && shadowed="$shadowed $dind($dup)"
 done
-[ -z "$shadowed" ] && ok "no dind's own networks shadow its link to the VM" \
-  || { bad "a dind's own network holds the subnet of its link to the VM:$shadowed -- the ingress cannot reach it"
-       note "recreate it so its daemon takes the pinned range: ./cli.sh down && ./cli.sh up (project dinds are recreated from their spec, their images kept)"; }
+if [ -n "$shadowed" ]; then
+  bad "a dind's own network holds the subnet of its link to the VM:$shadowed -- the ingress cannot reach it"
+  note "recreate it so its daemon takes the pinned range: ./cli.sh down && ./cli.sh up (project dinds are recreated from their spec, their images kept)"
+elif [ -n "$unread" ]; then
+  bad "could not read the routes of:$unread -- whether their networks shadow the VM link is unknown"
+else
+  ok "no dind's own networks shadow its link to the VM"
+fi
 published=""
-for dind in $(docker ps --filter label=desolate.dind --format '{{.Names}}'); do
-  [ -n "$(docker port "$dind" 2>/dev/null)" ] && published="$published $dind"
-done
-[ -z "$published" ] && ok "no project dind publishes a port" \
-  || bad "project dinds publish ports:$published -- every port goes through the ingress"
+if ! PROJECT_DINDS=$(docker ps --filter label=desolate.dind --format '{{.Names}}' 2>/dev/null); then
+  bad "could not list the project dinds (docker ps failed)"
+else
+  for dind in $PROJECT_DINDS; do
+    [ -n "$(docker port "$dind" 2>/dev/null)" ] && published="$published $dind"
+  done
+  [ -z "$published" ] && ok "no project dind publishes a port" \
+    || bad "project dinds publish ports:$published -- every port goes through the ingress"
+fi
 # One after the other, stdin closed: a second `colima ssh` expanded inside the
 # first's pipeline ran beside it on the same terminal and could come back
 # empty -- and an empty uid matches no rule, failing a ruleset that was fine.
