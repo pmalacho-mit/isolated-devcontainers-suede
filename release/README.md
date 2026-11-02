@@ -12,6 +12,21 @@ The Red Guild's ["Leveraging VSCode internals to escape containers."](https://bl
 
 The name is `desolate` = **de**v + i**solate**.
 
+**Contents.** [Architecture](#architecture) ·
+[What holds, and what does not](#what-holds-and-what-does-not) ·
+[Requirements](#requirements) · [Setup](#setup) · [Daily use](#daily-use) ·
+[Privilege separation](#privilege-separation-why-the-editor-cant-touch-the-daemon) ·
+[Dev servers](#dev-servers-and-dynamic-ports) ·
+[Editor extensions](#editor-extensions-and-settings) ·
+[Building inside a devcontainer](#building-your-own-containers-inside-a-devcontainer) ·
+[Project layout](#how-projects-are-laid-out) · [Worktrees](#worktrees-several-branches-of-one-repo-at-once) ·
+[Agents](#agents-and-a-factory-on-top) · [Secrets](#secrets-placeholders-in-real-values-never) ·
+[Isolation model](#isolation-model) · [Verifying containment](#verifying-containment) ·
+[Components](#components) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
+
+Elsewhere: [incidents, and what each taught](docs/incidents.md) -- the
+history behind the controls below.
+
 ## Architecture
 
 ```
@@ -1991,13 +2006,17 @@ are not will bite:
   the scrubber should not be read as making that promise -- except for a
   secret [confined to headers](#confining-a-secret-to-headers), which never
   reaches what a host computes on.
-- **Secrets are not scoped per project.** The proxy sees requests from the
-  whole stack and cannot tell which devcontainer sent one. Any project can
-  _use_ any other project's placeholder toward that secret's allowlisted hosts
-  -- and, per the bullet above, recover the value itself if any of those hosts
-  will transform it. "Project A cannot spend project B's API quota", and
-  "project A cannot learn project B's key", are neither of them properties this
-  has. Separate stacks are the boundary for that, not separate projects.
+- **A secret is everyone's unless you scope it, and scoping needs a daemon of
+  the project's own.** The proxy tells projects apart by the dind a request
+  comes from, so a secret added with `--projects` is refused to every other
+  source ([Scoping a secret to projects](#scoping-a-secret-to-projects)). One
+  added without it can be _used_ by any project toward its allowlisted hosts
+  -- and, per the bullet above, recovered if one of those hosts will transform
+  it and it is not confined to headers. Projects on the shared daemon are one
+  source to the proxy: among themselves, "project A cannot spend project B's
+  quota" is not a property this has; give B a daemon of its own and scope the
+  secret to it. A secret switched off ([Switching a secret
+  off](#switching-a-secret-off-or-on-for-a-while)) is no one's.
 - **DNS is an open channel.** dnsmasq forwards to 1.1.1.1/8.8.8.8 without
   restriction, so a compromised container can exfiltrate data inside query
   names: `<base32-of-your-source>.attacker.com` resolves recursively to the
