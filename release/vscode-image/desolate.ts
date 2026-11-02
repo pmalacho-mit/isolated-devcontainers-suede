@@ -356,6 +356,23 @@ const sleep = (ms: number) => execFileSync("sleep", [String(ms / 1000)]);
 const desolog = (...[first, ...rest]: string[]) =>
   console.log(`desolate: ${first}`, ...rest);
 
+/** Where a start's time goes, said once at its end: each phase's share. What
+ *  is slow is measured before anything is cached to make it faster. */
+const stopwatch = () => {
+  const started = Date.now();
+  let last = started;
+  const laps: string[] = [];
+  const took = (ms: number) => (ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s` : `${(ms / 1000).toFixed(1)}s`);
+  return {
+    lap: (label: string) => {
+      const now = Date.now();
+      laps.push(`${label} ${took(now - last)}`);
+      last = now;
+    },
+    say: () => desolog(`the start took ${took(Date.now() - started)}: ${laps.join(", ")}`),
+  };
+};
+
 /** How to name this target back on a command line, so every hint printed below
  *  can be pasted rather than translated. */
 const invocation = ({ project, worktree }: Target) =>
@@ -1963,6 +1980,7 @@ async function runTarget(
   const { name, dir } = target;
   // The path, checked HERE and not only by the broker: it is checked again
   // just before `up`, and what `up` delivered is measured after (audit M4).
+  const watch = stopwatch();
   refuseUnlessItsOwnPath(target);
   const workspaceInode = inodeOfDirectory(target.worktree ? target.projectDir : dir);
   populateWorktree(target);
@@ -2004,6 +2022,7 @@ async function runTarget(
   const fingerprint = spec.fingerprint(dir, config);
 
   config = deriveRunConfig(target, config, project, daemon);
+  watch.lap("its daemon, the CA-trusting base (pulled the first time) and its features pinned");
   let derived = resolveOrDie(target, config);
 
   const judge = () => {
@@ -2025,6 +2044,7 @@ async function runTarget(
     // The policy passed the build's inputs. Now the image it makes
     // (dockerfile-build.ts): built, named by id, and judged with its label.
     config = buildBeforeJudging(target, config, derived, noCache);
+    watch.lap("its Dockerfile built");
     derived = resolveOrDie(target, config);
     judge();
   }
@@ -2072,12 +2092,16 @@ async function runTarget(
   refuseUnlessItsOwnPath(target);
   devcontainerUp(target, config, noCache);
   verifyWorkspaceMount(target, workspaceInode);
+  watch.lap("up (feature layers, the container)");
   if (willCreate) spec.save(target, fingerprint);
   installProxyCa(dir);
+  watch.lap("the proxy CA");
   shadowBaseImages(dir, project.shadowImages);
+  if (project.shadowImages.length) watch.lap("shadowImages");
   const external = dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map, hostOf(target.namespace))]);
   publishExternalPorts(target, external);
   runLifecycleCommands(target, config);
+  watch.lap("lifecycle commands");
   // A container recreated for stale mounts is a new one: checked, trusted
   // and set up the same way before the editor starts in it.
   const recreate = () => {
@@ -2088,6 +2112,7 @@ async function runTarget(
     runLifecycleCommands(target, config);
   };
   startEditor(target, project, token, config, recreate, external);
+  watch.lap("the editor");
   recreateRelays(target, map);
   ingressFiles.publish(previousPorts, map, target, ingressFiles.dindOf(target, daemon));
   if (daemon === "project") joinProjectNetworks(target);
@@ -2100,6 +2125,8 @@ async function runTarget(
   const id = devcontainerId(dir);
   const folder = (id && containerWorkspaceFolder(dir, id)) || dir;
 
+  watch.lap("relays and ports");
+  watch.say();
   console.log(`\n  ${name} is ready:\n`);
   console.log(
     `    ${originOf(target.namespace, editorPort)}/?tkn=${token}&folder=${encodeURIComponent(folder)}\n`,
