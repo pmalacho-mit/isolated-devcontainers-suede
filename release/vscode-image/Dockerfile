@@ -55,8 +55,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # uid 1000, which dockerd's `--group=1000` grants the inner socket to. HOME is
 # set to the same path the passwd entry names: an image where the two disagree
 # is exactly the ambiguity the git-lfs `--system` install below works around.
+#
+# The server's own directory is made here, the user's: compose mounts a tmpfs
+# at its extensions/, and a mountpoint's missing parents are made root's -- so
+# in a fresh home (a first install, `cli.sh reset-editor`) the server could not
+# make its data/ and did not start. A fresh vscode-home volume is seeded from
+# this.
 RUN groupadd -g 1000 desolate \
-  && useradd -u 1000 -g 1000 -m -d /home/workspace -s /bin/bash desolate
+  && useradd -u 1000 -g 1000 -m -d /home/workspace -s /bin/bash desolate \
+  && install -d -o 1000 -g 1000 /home/workspace/.vscodium-server /home/workspace/.vscodium-server/extensions
 ENV HOME=/home/workspace
 
 # The editor server itself. Extracted flat (the tarball has no top-level

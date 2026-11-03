@@ -22,20 +22,29 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 IMAGE=${1:?usage: run.sh <editor-image> [<out-dir>]}
 OUT=${2:-$(mktemp -d)}
 mkdir -p "$OUT"
-NET=desolate-ext-test EDITOR=desolate-ext-editor BROWSER=desolate-ext-browser
+EDITOR=desolate-ext-editor BROWSER=desolate-ext-browser
 TOKEN=ext-test-token
 PLAYWRIGHT=mcr.microsoft.com/playwright:v1.49.1-noble
 CA=${DESOLATE_TEST_CA:-/desolate/ca/ca.pem}
 MAIN=$(printf 'a%.0s' $(seq 40)) ISSUE=$(printf 'b%.0s' $(seq 40))
 
-cleanup() { docker rm -f "$EDITOR" "$BROWSER" >/dev/null 2>&1; docker network rm "$NET" >/dev/null 2>&1; }
+cleanup() { docker rm -f "$EDITOR" "$BROWSER" >/dev/null 2>&1; }
 trap '[ -n "${DESOLATE_TEST_KEEP:-}" ] || cleanup' EXIT
 cleanup
-docker network create "$NET" >/dev/null || { fail "create the test network"; summary; exit 1; }
 
-docker run -d --name "$EDITOR" --network "$NET" -e DESOLATE_EXTENSION_BIN=/stubs \
-  --entrypoint /usr/local/bin/shell-entry "$IMAGE" \
-  /home/.desolate-shell/bin/codium-server --host=0.0.0.0 --port=3000 --connection-token="$TOKEN" >/dev/null \
+# The editor as docker-compose.yml starts it, and not a simpler way: the
+# server on its loopback behind editor-gate.ts, its extensions directory on
+# the tmpfs compose mounts -- with compose's own options, read from it. Started
+# without those, this test passed while the panel was missing in the stack:
+# that tmpfs, root's by default, kept the server from loading any extension.
+EXTENSIONS=/home/workspace/.vscodium-server/extensions
+TMPFS=$(sed -n "s|^ *- \($EXTENSIONS:[^ ]*\)\$|\1|p" "$ROOT/release/docker-compose.yml")
+[ -n "$TMPFS" ] || { fail "found the editor's extensions tmpfs in docker-compose.yml"; summary; exit 1; }
+GATE=$(sed -n 's/^ *DESOLATE_EDITOR_GATE: "\([0-9]*:[0-9]*\)"$/\1/p' "$ROOT/release/docker-compose.yml")
+docker run -d --name "$EDITOR" -e DESOLATE_EXTENSION_BIN=/stubs -e DESOLATE_EDITOR_GATE="$GATE" \
+  --tmpfs "$TMPFS" --entrypoint /usr/local/bin/shell-entry "$IMAGE" \
+  /home/.desolate-shell/bin/codium-server --host=127.0.0.1 --port="${GATE#*:}" --connection-token="$TOKEN" \
+  --extensions-dir="$EXTENSIONS" >/dev/null \
   || { fail "start the editor from $IMAGE"; summary; exit 1; }
 HOME_DIR=$(docker exec "$EDITOR" sh -c 'echo "$HOME"')
 
@@ -97,7 +106,7 @@ EOF
 done
 
 for _ in $(seq 1 60); do
-  docker exec "$EDITOR" sh -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null && break
+  docker exec "$EDITOR" bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000' 2>/dev/null && break
   sleep 1
 done
 
@@ -107,8 +116,10 @@ docker exec -d -u 1000 "$EDITOR" sh -c '
   until grep -q "^desolate solo$" /tmp/calls.log 2>/dev/null; do sleep 0.5; done
   echo "{\"color\":\"red\",\"message\":\"authentication failed\"}" > /workspaces/solo/.git/desolate-status.json'
 
-# The browser: Playwright's own image, with its npm package for the script.
-docker create --name "$BROWSER" --network "$NET" -e NODE_EXTRA_CA_CERTS=/ca.pem \
+# The browser: Playwright's own image, with its npm package for the script --
+# in the editor's network namespace, where desolate.localhost (which Chromium
+# resolves to loopback itself) reaches the gate as it does on the Mac.
+docker create --name "$BROWSER" --network "container:$EDITOR" -e NODE_EXTRA_CA_CERTS=/ca.pem \
   "$PLAYWRIGHT" sh -c 'mkdir -p /run/test && cd /run/test && npm init -y >/dev/null \
     && npm install --silent playwright@1.49.1 >/dev/null && cp /test.js . && node test.js' >/dev/null
 [ -f "$CA" ] && docker cp "$CA" "$BROWSER:/ca.pem" >/dev/null
@@ -121,7 +132,7 @@ const { chromium } = require("playwright");
   const page = await browser.newPage({ viewport: { width: 1400, height: 1100 } });
   const shot = (name) => page.screenshot({ path: "/run/test/" + name + ".png" });
   const wait = (ms) => page.waitForTimeout(ms);
-  await page.goto("http://$EDITOR:3000/?tkn=$TOKEN&folder=/workspaces");
+  await page.goto("http://desolate.localhost:3000/?tkn=$TOKEN&folder=/workspaces");
   await page.waitForSelector(".monaco-workbench", { timeout: 90000 });
   await wait(5000);
   // Workspace Trust asks about /workspaces: say no. The extension must work in

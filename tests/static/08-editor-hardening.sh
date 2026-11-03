@@ -75,6 +75,15 @@ assert_contains "the seeding entrypoint is in the chain" "$CFG" \
 assert_contains "extensions this editor installs land on a tmpfs, gone at the next start" "$CFG" \
   "--extensions-dir=/home/workspace/.vscodium-server/extensions"
 assert_contains "  (the tmpfs)" "$CFG" "- /home/workspace/.vscodium-server/extensions"
+# ... and the editor's user's: mounted root's, the server wrote no
+# extensions.json and loaded no extension -- the desolate panel went missing
+# (tests/environments/extension now starts the editor this way, from here).
+assert_contains "  the editor's user's, and only theirs" "$CFG" \
+  "- /home/workspace/.vscodium-server/extensions:uid=1000,gid=1000,mode=0700"
+# A mountpoint's missing parents are made root's: in a fresh home the server
+# could not make its data/ beside it. The image makes the directory, the user's.
+assert_contains "the image makes the server's directory, the user's, for a fresh home" "$(cat "$RELEASE/vscode-image/Dockerfile")" \
+  "install -d -o 1000 -g 1000 /home/workspace/.vscodium-server /home/workspace/.vscodium-server/extensions"
 
 group "workspace trust is ON, in the direction that matters"
 # The values live in editor-settings.ts (HELD), which shell-entry runs at every

@@ -361,7 +361,12 @@ services:
       # -- and, in the home volume, would run again after every restart.
       - --extensions-dir=/home/workspace/.vscodium-server/extensions
     tmpfs:
-      - /home/workspace/.vscodium-server/extensions
+      # The editor's user's, and only theirs. Mounted with docker's default --
+      # root's, mode 755 -- the server could not write its extensions.json,
+      # and loaded no extension at all: the desolate panel, built in, went
+      # missing with the rest (measured; tests/environments/extension runs it
+      # this way now).
+      - /home/workspace/.vscodium-server/extensions:uid=1000,gid=1000,mode=0700
     volumes:
       # NOTE: inner-run is deliberately ABSENT -- no docker socket here.
       - /var/lib/desolate-proxy/public:/desolate:ro   # proxy CA (public cert only) and helpers
