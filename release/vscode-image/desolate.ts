@@ -37,6 +37,9 @@ import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as dind from "./dind.ts";
+import { hostOf, originOf } from "./hosts.ts";
+import { runPlainly, wantsPlain } from "./plain-output.ts";
+import { readPolicies, restrictionOf } from "./restrictions.ts";
 import { builtBeyondDeclared, daemonOf, enforcePolicy, type Daemon } from "./policy.ts";
 import {
   EVERY_TARGET,
@@ -57,6 +60,8 @@ import { parse as parseJsonc } from "./jsonc.ts";
 import { isEntryPoint, isWithin, run, sha16, type JSONValue } from "./utils.ts";
 import { parseArgs, USAGE, type Args, type Command } from "./args.ts";
 import { BUSY_EXIT, hold, holderOf } from "./locks.ts";
+import { pinFeatures, unpinned, type Lockfile } from "./feature-pins.ts";
+import { buildsFromDockerfile, buildSpec, imageSpec } from "./dockerfile-build.ts";
 import { hint } from "./hints.ts";
 import {
   createDocker,
@@ -130,7 +135,8 @@ process.stdout.on("error", (err: NodeJS.ErrnoException) => {
   throw err;
 });
 
-const HELPER_IMAGE = "alpine:3"; // tiny, for volume setup + verification
+// By digest: a tag can be moved. The index of alpine:3 when pinned.
+const HELPER_IMAGE = "alpine:3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"; // tiny, for volume setup + verification
 
 const die = (msg: string): never => {
   console.error(`desolate: ${msg}`);
@@ -349,6 +355,23 @@ const sleep = (ms: number) => execFileSync("sleep", [String(ms / 1000)]);
 
 const desolog = (...[first, ...rest]: string[]) =>
   console.log(`desolate: ${first}`, ...rest);
+
+/** Where a start's time goes, said once at its end: each phase's share. What
+ *  is slow is measured before anything is cached to make it faster. */
+const stopwatch = () => {
+  const started = Date.now();
+  let last = started;
+  const laps: string[] = [];
+  const took = (ms: number) => (ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s` : `${(ms / 1000).toFixed(1)}s`);
+  return {
+    lap: (label: string) => {
+      const now = Date.now();
+      laps.push(`${label} ${took(now - last)}`);
+      last = now;
+    },
+    say: () => desolog(`the start took ${took(Date.now() - started)}: ${laps.join(", ")}`),
+  };
+};
 
 /** How to name this target back on a command line, so every hint printed below
  *  can be pasted rather than translated. */
@@ -771,6 +794,46 @@ const mustMirrorItsOwnPath = (
 };
 
 /**
+ * The CLI's own resolution of `features`, as the lockfile `devcontainer
+ * upgrade` writes (feature-pins.ts). `upgrade` takes a workspace folder and no
+ * --config, so it is run over a scratch workspace holding only the spec.
+ */
+const resolveFeatures = (features: Record<string, unknown>): Lockfile => {
+  fs.mkdirSync(RUN_CONFIG_DIR, { recursive: true, mode: 0o700 });
+  const ws = fs.mkdtempSync(`${RUN_CONFIG_DIR}/resolve-`);
+  try {
+    fs.mkdirSync(`${ws}/.devcontainer`, { mode: 0o700 });
+    fs.writeFileSync(`${ws}/.devcontainer/devcontainer.json`, JSON.stringify({ image: HELPER_IMAGE, features }));
+    desolog(`resolving the features to digests ...`);
+    const code = run.status("devcontainer", ["upgrade", "--workspace-folder", ws], { quiet: true, timeoutMs: 180000 });
+    if (code !== 0) die(`could not resolve the features to digests ('devcontainer upgrade' exited ${code}; is the registry reachable?)`);
+    let text: string;
+    try {
+      text = fs.readFileSync(`${ws}/.devcontainer/devcontainer-lock.json`, "utf8");
+    } catch {
+      return die(`the resolver wrote no lockfile for the features`);
+    }
+    const lock = parseJsonc(text);
+    if (typeof lock !== "object" || lock === null) return die(`the resolver's lockfile is not an object`);
+    return lock as Lockfile;
+  } finally {
+    fs.rmSync(ws, { recursive: true, force: true });
+  }
+};
+
+/** The project's own lockfile beside its snapshotted spec, if it ships one:
+ *  a `.devcontainer/` layout's comes along with the directory. */
+const projectLockfile = (config: string): Lockfile | undefined => {
+  const file = path.join(path.dirname(config), path.basename(config).startsWith(".") ? ".devcontainer-lock.json" : "devcontainer-lock.json");
+  try {
+    const lock = parseJsonc(fs.readFileSync(file, "utf8"));
+    return typeof lock === "object" && lock !== null ? (lock as Lockfile) : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
  * Narrow, derived rewrites of a validated spec. Returns the --config path to
  * use from here on (unchanged when nothing applies).
  */
@@ -829,6 +892,17 @@ function deriveRunConfig(
   if (tag) {
     spec.image = tag;
     applied.push(`base image ${tag} (trusts the proxy CA)`);
+  }
+
+  // Features by digest, so the policy and `up` read one content (feature-pins.ts).
+  if (spec.features !== undefined) {
+    if (typeof spec.features !== "object" || spec.features === null || Array.isArray(spec.features))
+      return die(`"features" in ${name}'s devcontainer config is not an object`);
+    const pinned = dieOnError(() => pinFeatures(spec.features as Record<string, unknown>, resolveFeatures, projectLockfile(src)));
+    if (pinned.notes.length) {
+      spec.features = pinned.features as JSONValue;
+      applied.push(`features pinned to the digests checked: ${pinned.notes.join("; ")}`);
+    }
   }
 
   if (applied.length === 0) return src; // nothing changed, config = runConfig
@@ -936,8 +1010,12 @@ const worktreeSandbox = (target: Target, mounts: string[]) => {
   };
 };
 
+/** A worktree's first checkout -- or a project root's, which `repo add` cloned
+ *  without one (transfer.ts cloneThroughCache) -- in its sandbox, never git
+ *  in the editor. */
 function populateWorktree(target: Target): void {
   if (!worktrees.awaitsCheckout(target)) return;
+  refuseUnlessItsOwnPath(target);
   const ca = SHARED_DIRECTORIES.find((mount) => mount.target === DESOLATE_DIR)!;
 
   desolog(`checking out ${target.name} in a sandbox (first start) ...`);
@@ -953,12 +1031,20 @@ function populateWorktree(target: Target): void {
   // there is a checkout to start from.
   if (!worktrees.isPopulated(target))
     die(`the checkout of ${target.name} failed in its sandbox (exit ${code}; its output is above).
-      The worktree is left empty, and the next start tries again.`);
+      It is left empty, and the next start tries again.`);
   if (code !== 0)
     desolog(`the checkout of ${target.name} landed, but git exited ${code} -- a
       post-checkout hook failing in the sandbox, most likely (see above)`);
 }
 
+/**
+ * `up`, with every lifecycle command held back: onCreate, updateContent,
+ * postCreate, postStart and postAttach run only once verifyWorkspaceMount has
+ * said the container got the directory that was checked (follow-up R3), by
+ * runLifecycleCommands. Measured against @devcontainers/cli 0.88.0: the two
+ * together run what a plain `up` does -- all five on a new container,
+ * postStart and postAttach on a restarted one.
+ */
 const devcontainerUp = (target: Target, config: string, noCache = false) => {
   const args = [
     "up",
@@ -966,11 +1052,31 @@ const devcontainerUp = (target: Target, config: string, noCache = false) => {
     target.dir,
     ...overrideConfigFlag(config),
     ...injectedMounts(target).flatMap((mount) => ["--mount", mount]),
+    // The features are pinned in their ids (feature-pins.ts). The lockfile
+    // `up` would read is the one beside the WORKSPACE's config -- the
+    // project's -- and an entry there sends even a pinned id to the manifest
+    // IT names. So: none.
+    "--no-lockfile",
+    "--skip-post-create",
   ];
 
   if (noCache) args.push("--build-no-cache");
   const code = run.status("devcontainer", args, { quiet: true });
   if (code !== 0) die(`devcontainer up failed (exit ${code})`);
+};
+
+/** The project's lifecycle commands, which `up` held back: after the
+ *  workspace is verified, and after the proxy CA is trusted and the external
+ *  ports are published -- so a postCreateCommand's `npm install` finds both.
+ *  A command that fails fails the start, as it did inside `up`. */
+const runLifecycleCommands = (target: Target, config: string) => {
+  const code = run.status("devcontainer", [
+    "run-user-commands",
+    "--workspace-folder",
+    target.dir,
+    ...overrideConfigFlag(config),
+  ]);
+  if (code !== 0) die(`a lifecycle command of ${target.name} failed (exit ${code}; its output is above)`);
 };
 
 const trustMessage = {
@@ -1070,6 +1176,7 @@ function startEditor(
   cfg: ProjectConfig,
   token: string,
   config: string,
+  recreate: () => void,
   external: [string, string][] = [],
 ): void {
   const dir = target.dir;
@@ -1091,7 +1198,7 @@ function startEditor(
     );
     const stale = devcontainerId(dir, true);
     if (stale) docker.container.remove([stale]);
-    devcontainerUp(target, config);
+    recreate();
     const retry = run.status("devcontainer", [
       "exec",
       "--workspace-folder",
@@ -1242,7 +1349,7 @@ function movePorts(target: Target, move: { label: string; port: number }, reacha
       die(`${move.port} was taken by ${ingressFiles.ownerOf(move.port) || "another target"} just now; pick another`);
     recreateRelays(target, map);
     ingressFiles.publish(world.previous, map, target, dindName);
-    publishExternalPorts(target, dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map)]));
+    publishExternalPorts(target, dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map, hostOf(target.namespace))]));
     console.log(`  login shells see the new DESOLATE_EXTERNAL_* now; the editor's terminals on its
   next start:  ${hint.desolate(invocation(target))}`);
   }
@@ -1261,7 +1368,7 @@ function showPorts(target: Target, json = false): void {
 
   for (const [label, port] of map) {
     const name = label === "editor" ? "editor       " : `container:${label}`;
-    console.log(`  ${name} -> http://127.0.0.1:${port}`);
+    console.log(`  ${name} -> ${originOf(target.namespace, port)}`);
   }
 }
 
@@ -1320,7 +1427,7 @@ const editorUrl = (target: Target): string => {
 
   const id = devcontainerId(target.dir);
   const folder = (id && containerWorkspaceFolder(target.dir, id)) || target.dir;
-  return `http://127.0.0.1:${port}/?tkn=${token}&folder=${folder}`;
+  return `${originOf(target.namespace, port)}/?tkn=${token}&folder=${encodeURIComponent(folder)}`;
 };
 
 /**
@@ -1338,6 +1445,7 @@ function showRunning(json = false): void {
       return {
         target: target.name, project: target.project, worktree: target.worktree ?? null,
         daemon: daemons.saved(target), url: editorUrl(target) || null,
+        host: hostOf(target.namespace),
         ports: Object.fromEntries(ports.load(target)),
       };
     });
@@ -1505,6 +1613,89 @@ const forcedRemoval = (target: Target) => {
   const args = `${target.project} ${target.worktree} --force`;
   return hint.anywhere(`worktree remove ${args}`, `./cli.sh worktree remove ${args}`);
 };
+
+/**
+ * Build a Dockerfile project's image before the policy judges it, and return
+ * the --config path of a spec that names the image by id (dockerfile-build.ts).
+ */
+function buildBeforeJudging(target: Target, config: string, resolved: ResolvedSpec, noCache: boolean): string {
+  const spec = resolved.configuration as Record<string, unknown>;
+  const configFile = (spec.configFilePath as { fsPath?: string } | undefined)?.fsPath;
+  if (typeof configFile !== "string") return die(`the CLI did not say which file it read for ${target.name}; refusing to build`);
+  const scratch = `${RUN_CONFIG_DIR}/${target.namespace}-build`;
+  fs.rmSync(scratch, { recursive: true, force: true });
+  fs.mkdirSync(`${scratch}/.devcontainer`, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(`${scratch}/.devcontainer/devcontainer.json`,
+    JSON.stringify(buildSpec(spec, path.dirname(config), path.dirname(configFile)), null, 2));
+  const tag = `desolate-built/${target.namespace}:${Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => b.toString(16).padStart(2, "0")).join("")}`;
+  desolog(`building ${target.name}'s image from its Dockerfile first: the image is judged before anything starts ...`);
+  try {
+    const code = run.status("devcontainer", [
+      "build", "--workspace-folder", scratch, "--image-name", tag, "--no-lockfile", ...(noCache ? ["--no-cache"] : []),
+    ], { quiet: true });
+    if (code !== 0) die(`the build of ${target.name}'s Dockerfile failed (devcontainer build exited ${code})`);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+  const id = docker.image.id(tag);
+  if (!/^sha256:[0-9a-f]{64}$/.test(id)) return die(`the build of ${target.name} left no image behind as ${tag}`);
+  desolog(`built ${id.slice(0, 19)}; the spec now names it by id, label and all, for the policy and for 'up'`);
+
+  const out = `${RUN_CONFIG_DIR}/${target.namespace}`;
+  fs.mkdirSync(out, { recursive: true, mode: 0o700 });
+  const file = `${out}/devcontainer.json`;
+  fs.writeFileSync(file, JSON.stringify(imageSpec(spec, id), null, 2));
+  return file;
+}
+
+/** The inode of `dir`, which must be a directory itself -- not a link to
+ *  one -- at this moment: what verifyWorkspaceMount measures against. */
+function inodeOfDirectory(dir: string): string {
+  const stat = fs.lstatSync(dir, { throwIfNoEntry: false });
+  if (!stat?.isDirectory()) return die(`${dir} is not a directory`);
+  return String(stat.ino);
+}
+
+/**
+ * The directory the container got as its workspace is the one that was
+ * checked (audit M4). The broker compared realpaths when it took the request
+ * and this runner again just before `up`, but the daemon resolves the bind
+ * source on its own, moments later, and /workspaces is the editor's to write:
+ * a symlink swapped in meanwhile -- at /run/inner, say, where the shared
+ * daemon's socket is -- would hand the container the link's target. So the
+ * container is asked what it got, from the far side: the inode of its
+ * workspace folder against the directory's, measured before anything began.
+ * One filesystem, so one inode means one directory. A container that got
+ * something else is stopped and removed before anything is said to be ready.
+ */
+function verifyWorkspaceMount(target: Target, expectedInode: string): void {
+  const source = target.worktree ? target.projectDir : target.dir;
+  const id = devcontainerId(target.dir);
+  if (!id) return die(`no container for ${target.name} after 'devcontainer up'`);
+  const inside = docker.container.mounts(id).find((mount) => mount.source === source)?.destination;
+  const got = inside ? docker.container.inodeOf(id, inside) : "";
+  if (got === expectedInode) return;
+  docker.container.stop(id);
+  docker.container.remove([id]);
+  die(`${target.name}'s container did not get ${source} as its workspace${
+    inside ? ` (inode ${got || "unreadable"} inside, ${expectedInode} here)` : " (no bind of it)"
+  }: something replaced the path between the check and the start. The container was removed;
+    look at ${source} and its parents for a link before starting it again.`);
+}
+
+/** A project the proxy holds to what is allowed by name runs on a daemon of
+ *  its own, where its requests are its own (restrictions.ts). */
+function refuseRestrictedOnTheSharedDaemon(target: Target, daemon: Daemon): void {
+  if (daemon !== "shared") return;
+  const restriction = restrictionOf(readPolicies(), target.project, Date.now() / 1000);
+  if (!restriction) return;
+  die(`${target.project} is ${restriction === "learn" ? "learning" : "held"} to what the proxy allows it by name
+    (${hint.mac(`proxy enforce`)}), and on the shared daemon its requests would be no
+    project's -- so it would have neither. Give it a daemon of its own: add
+      "features": { "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {} }
+    to its devcontainer.json -- or lift the restriction:
+      ${hint.mac(`proxy enforce allow --project ${target.project}`)}`);
+}
 
 /**
  * A target must be the directory its names denote -- not a link that a
@@ -1787,12 +1978,18 @@ async function runTarget(
   noCache = false,
 ): Promise<void> {
   const { name, dir } = target;
+  // The path, checked HERE and not only by the broker: it is checked again
+  // just before `up`, and what `up` delivered is measured after (audit M4).
+  const watch = stopwatch();
+  refuseUnlessItsOwnPath(target);
+  const workspaceInode = inodeOfDirectory(target.worktree ? target.projectDir : dir);
   populateWorktree(target);
   config ??= dieOnError(() => snapshot(target, { specs: DIRECT_SPEC_DIR }));
 
   const resolved = resolveOrDie(target, config);
   const project = readProjectConfig(resolved);
   const daemon = daemonOf(resolved);
+  refuseRestrictedOnTheSharedDaemon(target, daemon);
   if (project.hadLegacyAppPort)
     return die(`devcontainer.json still contains "appPort".
       desolate allocates host ports itself, and an appPort publish occupies the
@@ -1825,20 +2022,37 @@ async function runTarget(
   const fingerprint = spec.fingerprint(dir, config);
 
   config = deriveRunConfig(target, config, project, daemon);
-  const derived = resolveOrDie(target, config);
+  watch.lap("its daemon, the CA-trusting base (pulled the first time) and its features pinned");
+  let derived = resolveOrDie(target, config);
 
-  try {
-    enforcePolicy(
-      target,
-      derived,
-      listTargets(WORKSPACES),
-      daemon,
-    );
-  } catch (err: any) {
-    die(`the spec desolate derived for ${name} does not pass the policy
-      (refusing to start -- this is a desolate bug, not a problem with
-      your devcontainer.json): ${err?.message ?? err}`);
+  const judge = () => {
+    try {
+      enforcePolicy(
+        target,
+        derived,
+        listTargets(WORKSPACES),
+        daemon,
+      );
+    } catch (err: any) {
+      die(`the spec desolate derived for ${name} does not pass the policy
+        (refusing to start -- this is a desolate bug, not a problem with
+        your devcontainer.json): ${err?.message ?? err}`);
+    }
+  };
+  judge();
+  if (buildsFromDockerfile(derived.configuration as Record<string, unknown>)) {
+    // The policy passed the build's inputs. Now the image it makes
+    // (dockerfile-build.ts): built, named by id, and judged with its label.
+    config = buildBeforeJudging(target, config, derived, noCache);
+    watch.lap("its Dockerfile built");
+    derived = resolveOrDie(target, config);
+    judge();
   }
+  // What `up` reads for each feature is what the policy read, or nothing
+  // runs: the ids say digests (feature-pins.ts), or deriveRunConfig has a bug.
+  const loose = unpinned(derived.configuration.features);
+  if (loose.length)
+    die(`features would reach 'devcontainer up' unpinned (${loose.join(", ")}) -- a desolate bug, not a problem with your devcontainer.json`);
   // Only once it will run: a refused start must not change which daemon
   // --stop and --purge drive.
   daemons.save(target, daemon);
@@ -1875,13 +2089,30 @@ async function runTarget(
   const token = connectionToken(target);
 
   desolog(`starting devcontainer for ${name} ...`);
+  refuseUnlessItsOwnPath(target);
   devcontainerUp(target, config, noCache);
+  verifyWorkspaceMount(target, workspaceInode);
+  watch.lap("up (feature layers, the container)");
   if (willCreate) spec.save(target, fingerprint);
   installProxyCa(dir);
+  watch.lap("the proxy CA");
   shadowBaseImages(dir, project.shadowImages);
-  const external = dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map)]);
+  if (project.shadowImages.length) watch.lap("shadowImages");
+  const external = dieOnError(() => [...targetEnvironment(target), ...externalEnvironment(map, hostOf(target.namespace))]);
   publishExternalPorts(target, external);
-  startEditor(target, project, token, config, external);
+  runLifecycleCommands(target, config);
+  watch.lap("lifecycle commands");
+  // A container recreated for stale mounts is a new one: checked, trusted
+  // and set up the same way before the editor starts in it.
+  const recreate = () => {
+    devcontainerUp(target, config);
+    verifyWorkspaceMount(target, workspaceInode);
+    installProxyCa(dir);
+    publishExternalPorts(target, external);
+    runLifecycleCommands(target, config);
+  };
+  startEditor(target, project, token, config, recreate, external);
+  watch.lap("the editor");
   recreateRelays(target, map);
   ingressFiles.publish(previousPorts, map, target, ingressFiles.dindOf(target, daemon));
   if (daemon === "project") joinProjectNetworks(target);
@@ -1894,15 +2125,17 @@ async function runTarget(
   const id = devcontainerId(dir);
   const folder = (id && containerWorkspaceFolder(dir, id)) || dir;
 
+  watch.lap("relays and ports");
+  watch.say();
   console.log(`\n  ${name} is ready:\n`);
   console.log(
-    `    http://127.0.0.1:${editorPort}/?tkn=${token}&folder=${folder}\n`,
+    `    ${originOf(target.namespace, editorPort)}/?tkn=${token}&folder=${encodeURIComponent(folder)}\n`,
   );
 
   for (const [label, port] of map)
     if (label !== "editor")
       console.log(
-        `    dev server on container port ${label} -> http://127.0.0.1:${port}`,
+        `    dev server on container port ${label} -> ${originOf(target.namespace, port)}`,
       );
 
   if (project.appPorts.length) {
@@ -2029,8 +2262,13 @@ async function main(): Promise<void> {
   else await runTarget(target, args.config, args.rebuild, args.noCache);
 }
 
-if (isEntryPoint(import.meta.url))
-  main().catch((err) => {
-    console.error(`desolate: ${err?.message ?? err}`);
-    process.exit(1);
-  });
+if (isEntryPoint(import.meta.url)) {
+  // From the Mac, through plainText: plain-output.ts says why.
+  if (wantsPlain(process.env, process.argv.slice(2)))
+    runPlainly(process.argv[1], process.argv.slice(2)).then((code) => process.exit(code));
+  else
+    main().catch((err) => {
+      console.error(`desolate: ${err?.message ?? err}`);
+      process.exit(1);
+    });
+}

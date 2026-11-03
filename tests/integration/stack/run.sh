@@ -126,7 +126,7 @@ assert_not_contains "no stack container publishes the daemon API port" "$BINDING
 assert_not_contains "no stack container publishes the TLS daemon API port" "$BINDINGS" "2376"
 
 group "the editor's token actually gates the editor"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$EDITOR_PORT/")
+CODE=$(curl -s -o /dev/null -w '%{http_code}' --resolve "desolate.localhost:$EDITOR_PORT:127.0.0.1" "http://desolate.localhost:$EDITOR_PORT/")
 case "$CODE" in 401|403) pass "tokenless editor request -> $CODE" ;;
   *) fail "tokenless editor request is refused" "got $CODE (expected 401/403)" ;; esac
 
@@ -213,12 +213,14 @@ ed sh -c 'chown -R 1000:1000 /workspaces/example-project 2>/dev/null; true'
 OUT=$(ed desolate example-project 2>&1)
 if printf '%s' "$OUT" | grep -q "is ready:"; then
   pass "desolate example-project succeeded from inside the editor"
-  URL=$(printf '%s' "$OUT" | grep -oE 'http://127\.0\.0\.1:[0-9]+/\?tkn=[a-f0-9]+' | head -1)
+  URL=$(printf '%s' "$OUT" | grep -oE 'http://[a-z0-9-]+\.localhost:[0-9]+/\?tkn=[a-f0-9]+' | head -1)
   INNER_PORT=$(printf '%s' "$URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
+  # Its own host (hosts.ts), which the ingress holds the port to.
+  URL_HOST=$(printf '%s' "$URL" | sed -E 's|http://([^:]+):.*|\1|')
   # The Mac-side hop is desolate-ingress: the port desolate printed is the
   # one Lima carries to this Mac, with nothing remapped in between.
   MAC_PORT=$INNER_PORT
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1:$MAC_PORT/" || echo none)
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 --resolve "$URL_HOST:$MAC_PORT:127.0.0.1" "http://$URL_HOST:$MAC_PORT/" || echo none)
   case "$CODE" in 200|302|401|403) pass "the project editor answers through the relay (HTTP $CODE)" ;;
     *) fail "the project editor answers through the relay" "got '$CODE' on 127.0.0.1:$MAC_PORT" ;; esac
   assert_ok "desolate --ports reports the map" ed desolate --ports example-project

@@ -296,7 +296,7 @@ assert_contains "a file opens its two sides" "$(field tabs)" "answer.ts (origin/
 assert_contains "  side by side" "$(field diff)" "answer = 42"
 assert_contains "Push asks, with what it sends" "$(field pushAsked)" "Push 2 commits of issue/42"
 assert_contains "  and what it leaves" "$(field pushAsked)" "1 uncommitted change is not sent"
-assert_contains "confirmed, it ran desolate --push for the worktree" "$CALLS" "desolate --push --worktree issue-42 acme/widgets"
+assert_contains "confirmed, it ran desolate --push for the worktree, of the commit reviewed" "$CALLS" "desolate --push --expect $ISSUE --worktree issue-42 acme/widgets"
 assert_contains "Pull on a worktree ran desolate --pull for it" "$CALLS" "desolate --pull --worktree issue-42 acme/widgets"
 
 group "the default branch: refused, asked about, then pushed"

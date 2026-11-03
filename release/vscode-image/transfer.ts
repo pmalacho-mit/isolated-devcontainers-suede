@@ -48,7 +48,44 @@ import { BUSY_EXIT } from "./locks.ts";
 
 const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 /** newrepo.ts's: the per-repository host aliases live there. */
-const SSH_CONFIG = `${homedir()}/.ssh/config`;
+/** GitHub's host keys, in the image (Dockerfile): the only known_hosts the
+ *  ssh below consults. */
+const GITHUB_KNOWN_HOSTS = process.env.DESOLATE_GITHUB_KNOWN_HOSTS ?? "/etc/desolate/github_known_hosts";
+
+/**
+ * The ssh command for one registration, written fresh for this process:
+ * `~/.ssh/config` is in the home volume, which a compromised editor writes and
+ * a restart keeps, and a `ProxyCommand` planted there would run at the next
+ * push, with the keys -- so it is not read. The config says the one thing
+ * that matters, from the keyring's own exports: THIS host alias offers THIS
+ * public key and no other, so with several deploy keys in the agent, pushing
+ * to one repository cannot authenticate as another. Host keys come from the
+ * image, strictly: no trust-on-first-use, no ~/.ssh/known_hosts.
+ *
+ * `write` puts the file somewhere this process owns and removes afterwards
+ * (a scratch directory), since /tmp is the container's and outlives a restart.
+ */
+export const sshFor = (registration: Registration, write: (name: string, text: string) => string): string => {
+  const config = [
+    `Host github.com-${registration.tag}`,
+    `  HostName github.com`,
+    `  User git`,
+    `  IdentityFile ${KEYRING_RUN}/pub/${registration.tag}.pub`,
+    `  IdentitiesOnly yes`,
+    `  UserKnownHostsFile ${GITHUB_KNOWN_HOSTS}`,
+    `  GlobalKnownHostsFile /dev/null`,
+    `  StrictHostKeyChecking yes`,
+    ``,
+  ].join("\n");
+  return `ssh -F ${write("ssh_config", config)}`;
+};
+
+/** The scratch directory's writer for sshFor: a file of its own, 0600. */
+const writerIn = (scratch: string) => (name: string, text: string) => {
+  const file = join(scratch, name);
+  writeFileSync(file, text, { mode: 0o600 });
+  return file;
+};
 const KEYRING_RUN = process.env.DESOLATE_KEYRING_RUN ?? "/run/keyring";
 /** The editor's own: a project never mounts it. */
 const CACHE_ROOT = remoteCacheRoot();
@@ -113,7 +150,14 @@ export const cleanGit = (args: string[], options: { capture?: boolean; ssh?: str
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
-    GIT_SSH_COMMAND: options.ssh ?? `ssh -F ${SSH_CONFIG}`,
+    // The cache is a full clone; nothing here should fetch on its own account.
+    GIT_NO_LAZY_FETCH: "1",
+    // No system config means no git-lfs filter; and should one ever be
+    // configured, it is not to read content's `.lfsconfig` here.
+    GIT_LFS_SKIP_SMUDGE: "1",
+    // Every call that reaches a remote names its ssh (sshFor); one that does
+    // not fails here rather than reach for a config in the home volume.
+    GIT_SSH_COMMAND: options.ssh ?? "/bin/false",
   });
   const result = spawnSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
     env,
@@ -153,6 +197,17 @@ const writeAll = (fd: number, bytes: Buffer) => {
 };
 
 const transferName = () => `desolate-transfer-${randomBytes(8).toString("hex")}.bundle`;
+
+/** A name git takes as a branch and nothing else: no option, no refspec
+ *  syntax, no reaching past refs/heads/ -- `check-ref-format` has the last
+ *  word, after the shapes it is lenient about. */
+export const isBranchName = (name: string) =>
+  name.length > 0 && name.length <= 255 &&
+  !name.startsWith("-") &&
+  !/[\s\x00-\x1f\x7f:*?\[\\^~]/.test(name) &&
+  !name.includes("..") && !name.includes("@{") &&
+  !name.endsWith("/") && !name.endsWith(".lock") &&
+  cleanGit(["check-ref-format", `refs/heads/${name}`], { capture: true }).ok;
 
 /** `git ls-remote --symref <url> HEAD`'s answer: the remote's default branch. */
 export const defaultBranchOf = (lsRemote: string) =>
@@ -260,21 +315,37 @@ const refresh = (cache: Cache, registration: Registration, ssh?: string) => {
  * `--no-hardlinks`, not a local clone's default: a hardlinked object file is
  * the same file in both, and the project can write its own .git. `origin` is
  * then the registered remote, as a clone from it would have it. The cache's
- * HEAD names the remote's default branch, so the clone checks that out.
+ * HEAD names the remote's default branch, so that is the clone's HEAD.
+ *
+ * `--no-checkout`, and through cleanGit: the editor writes the objects and
+ * refs and not one file of the content. A checkout runs over the content --
+ * its `.gitattributes` names filters, and the system git-lfs filter, run
+ * here, read the remote's own `.lfsconfig` (audit M1) -- so the files are
+ * written by the orchestrator, in the sandbox a worktree is checked out in
+ * (worktrees.awaitsCheckout): `repo add` asks for it next, and a start finds
+ * it still owed.
  */
-export function cloneThroughCache(registration: Registration, dest: string, options: { ssh?: string; env?: NodeJS.ProcessEnv } = {}) {
+export function cloneThroughCache(registration: Registration, dest: string, options: { ssh?: string } = {}) {
+  const sshScratch = mkdtempSync(join(tmpdir(), "desolate-ssh-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(sshScratch)) };
+  try {
+    return cloneThroughCacheWith(registration, dest, options);
+  } finally {
+    rmSync(sshScratch, { recursive: true, force: true });
+  }
+}
+
+function cloneThroughCacheWith(registration: Registration, dest: string, options: { ssh?: string }) {
   const cache = openCache(registration);
   try {
     refresh(cache, registration, options.ssh);
     const head = cleanGit(["-C", cache.dir, "ls-remote", "--symref", registration.url, "HEAD"], { capture: true, ssh: options.ssh });
     const main = defaultBranchOf(head.stdout);
     if (main) cleanGit(["-C", cache.dir, "symbolic-ref", "HEAD", `refs/heads/${main}`]);
-    const cloned = spawnSync("git", ["clone", "--quiet", "--no-hardlinks", "--origin", "origin", cache.dir, dest], {
-      stdio: ["ignore", "inherit", "inherit"],
-      env: options.env ?? process.env,
-    });
-    if (cloned.status !== 0) fail(`could not clone ${registration.ownerRepo} from its cache`);
-    spawnSync("git", ["-C", dest, "remote", "set-url", "origin", registration.url], { env: options.env ?? process.env });
+    if (!cleanGit(["clone", "--quiet", "--no-hardlinks", "--no-checkout", "--origin", "origin", cache.dir, dest]).ok)
+      fail(`could not clone ${registration.ownerRepo} from its cache`);
+    if (!cleanGit(["-C", dest, "remote", "set-url", "origin", registration.url]).ok)
+      fail(`could not point ${dest}'s origin at ${registration.ownerRepo}`);
     cache.remember(branchesOf(cache).map(([commit]) => commit));
   } finally {
     cache.release();
@@ -296,6 +367,8 @@ export interface Options {
   worktree?: string;
   /** Push to the remote's default branch, which is refused otherwise. */
   allowDefault?: boolean;
+  /** Push only if the branch is still at this commit -- the one reviewed. */
+  expect?: string;
   /** Pull: set origin/* only; nothing checked out moves. */
   fetchOnly?: boolean;
   /** For tests: the registration, and how git reaches it. */
@@ -316,6 +389,7 @@ export async function push(project: string, options: Options = {}): Promise<stri
   const name = transferName();
   const files = transferFiles(projectDir, name);
   const scratch = mkdtempSync(join(tmpdir(), "desolate-push-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(scratch)) };
   try {
     refresh(cache, registration, options.ssh);
     // What the sandbox may leave out: the cache's newest branch tips, and what
@@ -336,6 +410,14 @@ export async function push(project: string, options: Options = {}): Promise<stri
     if (code === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); push again once that is done", { busy: true });
     if (code !== 0 || !bundled) return fail(`its sandbox did not bundle the branch (exit ${code})`);
     const { branch, commit } = bundled;
+    // The branch is the sandbox's word -- the project's git over its own refs
+    // -- and it goes into refspecs. A name git would not take as a branch, or
+    // one that would reach past refs/heads/, is refused before it does.
+    if (!isBranchName(branch)) return fail(`its sandbox named '${branch}' as the branch checked out, which is no branch name`);
+    // What was reviewed is what is sent: a branch that moved since -- an
+    // agent committed again -- is reviewed again, not pushed as it was.
+    if (options.expect && commit !== options.expect)
+      return fail(`${branch} is at ${commit.slice(0, 12)}, not the ${options.expect.slice(0, 12)} that was reviewed: it moved since. Review it again, then push`);
 
     const outgoing = `refs/desolate/outgoing/${branch}`;
     if (bundled.bundled) {
@@ -393,6 +475,7 @@ export async function pull(project: string, options: Options = {}): Promise<stri
 
   const cache = openCache(registration);
   const scratch = mkdtempSync(join(tmpdir(), "desolate-pull-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(scratch)) };
   const created: string[] = [];
   try {
     refresh(cache, registration, options.ssh);
@@ -476,6 +559,7 @@ export function deliver(project: string, ownerRepo: string, options: DependencyO
   const registration = registrationFor(ownerRepo, options);
   const cache = openCache(registration);
   const scratch = mkdtempSync(join(tmpdir(), "desolate-deliver-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(scratch)) };
   try {
     refresh(cache, registration, options.ssh);
     const release = branchesOf(cache).find(([, name]) => name === "release")?.[0];
@@ -519,6 +603,7 @@ export function pushUpstream(project: string, ownerRepo: string, built: Built, o
     fail("a proposal names commits, in full");
   const cache = openCache(registration);
   const scratch = mkdtempSync(join(tmpdir(), "desolate-upstream-"));
+  options = { ...options, ssh: options.ssh ?? sshFor(registration, writerIn(scratch)) };
   const inside = join(".git", built.name);
   try {
     refresh(cache, registration, options.ssh);
@@ -535,6 +620,14 @@ export function pushUpstream(project: string, ownerRepo: string, built: Built, o
     const parent = cleanGit(["-C", cache.dir, "rev-parse", `${outgoing}^`], { capture: true }).stdout.trim();
     if (fetched !== built.commit || parent !== built.pin)
       fail(`the proposal is ${fetched || "nothing"} on ${parent || "nothing"}, not the ${built.commit} on ${built.pin} its sandbox said`);
+    // Never the dependency's .github/: GitHub runs a pushed branch's OWN
+    // workflow files on the push, with that repository's secrets, and the
+    // tree is the consumer's to write. A proposal is a change to what the
+    // consumer vendors, which its CI is not.
+    const changed = cleanGit(["-C", cache.dir, "diff", "--name-only", "-z", built.pin, outgoing], { capture: true }).stdout.split("\0").filter(Boolean);
+    const ci = changed.filter((file) => file === ".github" || file.startsWith(".github/"));
+    if (ci.length)
+      fail(`the proposal changes ${ownerRepo}'s ${ci.slice(0, 3).join(", ")}${ci.length > 3 ? ` and ${ci.length - 3} more` : ""}: a pushed branch's own .github/ runs there, with ${ownerRepo}'s secrets, on the push itself. Proposals leave .github/ alone; make that change in ${ownerRepo} yourself`);
     if (!cleanGit(["-C", cache.dir, "push", "--quiet", registration.url, `${built.commit}:refs/heads/${branch}`], { ssh: options.ssh }).ok)
       fail(`${ownerRepo} refused ${branch}`);
     cleanGit(["-C", cache.dir, "update-ref", "-d", outgoing]);

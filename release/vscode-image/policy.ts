@@ -13,6 +13,7 @@ import {
   nonNullObject,
   readonlySet,
 } from "./utils.ts";
+import { parseRef } from "./feature-pins.ts";
 
 const allowlist = (() => {
   /** Flags that take a value (either "--flag v" or "--flag=v"). */
@@ -712,7 +713,28 @@ const checks = {
           provides the project a daemon of its own, and docker, compose and
           builds work against it unchanged. Then: desolate --rebuild <project>`;
       const origin = feature.origin(id);
-      if (origin === "registry" || origin === "tarball") continue;
+      if (origin === "registry") {
+        // The runner pins each of these to a digest before `up`
+        // (feature-pins.ts), which needs a reference it can pin: a registry
+        // host, not a GitHub owner the CLI would resolve through releases.
+        if (!parseRef(id))
+          return fail`
+            feature '${id}' is not a registry reference that can be pinned to a
+            digest (expected "<registry>/<namespace>/<name>[:<version>]", with a
+            dot in the registry). A GitHub-releases id ("owner/repo/feature") is
+            resolved through the GitHub API, outside any digest, so what
+            'devcontainer up' fetches need not be what this check read.
+            Reference the feature from its registry instead.`;
+        continue;
+      }
+      if (origin === "tarball")
+        return fail`
+          feature '${id}' is an https:// tarball, which cannot be pinned: a URL
+          names whatever the server answers, and the CLI asks it twice -- once
+          for this check, once in 'devcontainer up' -- so the metadata that
+          passed here need not be what runs. Publish the feature to a registry
+          (ghcr.io/<owner>/<repo>/<feature>) and reference it there; registry
+          features are pinned to a digest before anything starts.`;
 
       if (origin === "local")
         return fail`

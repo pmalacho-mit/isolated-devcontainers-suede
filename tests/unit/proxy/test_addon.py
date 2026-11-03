@@ -16,6 +16,7 @@ import ipaddress
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1497,3 +1498,259 @@ def test_a_confinement_that_cannot_be_read_drops_the_secret(tmp_path, caplog, he
     assert CONFINED not in addon.secrets, "never widened to everywhere"
     assert SECRET_NAME in addon.secrets
     assert "not a list of header names" in caplog.text
+
+
+# ===========================================================================
+# every name a request claims (audit M5)
+# ===========================================================================
+
+def test_M5_a_second_host_header_naming_another_host_is_refused(tmp_path):
+    """mitmproxy's host_header is the first Host; a front end serving many
+    names behind one certificate may route by the second."""
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    f.request.headers.add("Host", "evil.example.com")
+    addon.request(f)
+    assert blocked(f), "a second Host header was NOT blocked"
+    assert not carries_value(f)
+
+
+def test_M5_an_authority_disagreeing_with_the_sni_is_refused(tmp_path):
+    """HTTP/2's :authority, or an HTTP/1 request written in absolute form,
+    names a destination too -- and it need not be the Host header's."""
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    f.request.authority = "evil.example.com"
+    addon.request(f)
+    assert blocked(f), "an :authority naming another host was NOT blocked"
+    assert not carries_value(f)
+
+
+def test_M5_an_authority_agreeing_with_the_sni_is_fine_port_and_all(tmp_path):
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com",
+                  headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    f.request.authority = "api.openai.com:443"
+    addon.request(f)
+    assert not blocked(f)
+    assert f.request.headers["Authorization"] == f"Bearer {SECRET_VALUE}"
+
+
+def test_M5_without_a_placeholder_nothing_is_refused_for_its_names(tmp_path):
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    f.request.headers.add("Host", "evil.example.com")
+    addon.request(f)
+    assert not blocked(f)
+
+
+# ===========================================================================
+# trailers and websocket frames are responses too (audit L6)
+# ===========================================================================
+
+def test_L6_a_secret_echoed_in_a_response_trailer_is_scrubbed(tmp_path):
+    from mitmproxy.http import Headers
+    _, addon, _ = load_addon(tmp_path)
+    f = make_flow(sni="api.openai.com", host_header="api.openai.com")
+    addon.request(f)  # loads the settings, as every response's request does
+    f.response = tutils.tresp(content=b"ok")
+    f.response.trailers = Headers([(b"X-Debug", f"key={SECRET_VALUE}".encode())])
+    addon.response(f)
+    assert f.response.trailers["X-Debug"] == f"key={SECRET_NAME}"
+
+
+def test_L6_a_secret_echoed_in_a_server_websocket_frame_is_scrubbed(tmp_path):
+    from mitmproxy.websocket import WebSocketMessage
+    from wsproto.frame_protocol import Opcode
+    _, addon, _ = load_addon(tmp_path)
+    f = tflow.twebsocketflow()
+    f.websocket.messages.append(WebSocketMessage(Opcode.TEXT, False, f"token {SECRET_VALUE} here".encode()))
+    addon.websocket_message(f)
+    assert f.websocket.messages[-1].content == f"token {SECRET_NAME} here".encode()
+
+
+def test_L6_a_client_websocket_frame_is_left_alone(tmp_path):
+    from mitmproxy.websocket import WebSocketMessage
+    from wsproto.frame_protocol import Opcode
+    _, addon, _ = load_addon(tmp_path)
+    f = tflow.twebsocketflow()
+    f.websocket.messages.append(WebSocketMessage(Opcode.TEXT, True, f"{SECRET_NAME}".encode()))
+    addon.websocket_message(f)
+    assert f.websocket.messages[-1].content == SECRET_NAME.encode(), "a placeholder stays a placeholder"
+
+
+def test_L6_a_websocket_scrub_failure_drops_the_frame(tmp_path, monkeypatch):
+    from mitmproxy.websocket import WebSocketMessage
+    from wsproto.frame_protocol import Opcode
+    _, addon, _ = load_addon(tmp_path)
+    f = tflow.twebsocketflow()
+    f.websocket.messages.append(WebSocketMessage(Opcode.TEXT, False, SECRET_VALUE.encode()))
+    monkeypatch.setattr(addon, "_real_secrets", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    addon.websocket_message(f)
+    assert f.websocket.messages[-1].dropped
+
+
+# ------------------------------------------------- a secret switched off --
+# "A SECRET SWITCHED OFF, OR ON FOR A WHILE": on unless it says otherwise; off
+# is refused by name toward its own hosts; `until` is read against the clock
+# at each request; a switch that cannot be read holds it off.
+
+def switched_addon(tmp_path, **switch):
+    mod, addon, _ = load_addon(tmp_path, {
+        "default_action": "allow",
+        "secrets": {SECRET_NAME: {"value": SECRET_VALUE, "hosts": ["api.openai.com"], **switch}},
+        "network": [{"action": "allow", "host": "*"}],
+    })
+    return mod, addon
+
+
+def spend(addon, sni="api.openai.com", dest="104.18.6.1"):
+    f = make_flow(sni=sni, dest=dest, headers={"Authorization": f"Bearer {SECRET_NAME}"})
+    addon.request(f)
+    return f
+
+
+def test_a_stored_secret_is_on(tmp_path):
+    _, addon = switched_addon(tmp_path)
+    f = spend(addon)
+    assert not blocked(f) and carries_value(f, SECRET_VALUE)
+
+
+def test_a_secret_switched_off_is_refused_by_name_toward_its_own_host(tmp_path, caplog):
+    _, addon = switched_addon(tmp_path, off=True)
+    with caplog.at_level(logging.INFO):
+        f = spend(addon)
+    assert blocked(f) and f.response.status_code == 403
+    assert not carries_value(f, SECRET_VALUE)
+    assert b"switched off" in f.response.content and b"secret on" in f.response.content
+    assert [(x["verdict"], x["suspect"]) for x in audit_fields(caplog)] == [("DENY-OFF", SECRET_NAME)]
+
+
+def test_off_toward_any_other_host_is_a_leak_suspect_as_before(tmp_path, caplog):
+    _, addon = switched_addon(tmp_path, off=True)
+    with caplog.at_level(logging.INFO):
+        f = spend(addon, sni="example.com", dest="93.184.216.34")
+    assert not blocked(f) and not carries_value(f, SECRET_VALUE)
+    assert [x["verdict"] for x in audit_fields(caplog)] == ["LEAK-SUSPECT"]
+
+
+def test_on_for_a_while_is_on_until_then_and_off_after(tmp_path, monkeypatch):
+    mod, addon = switched_addon(tmp_path, until=1_000_000)
+    monkeypatch.setattr(mod, "clock", lambda: 999_999.5)
+    assert carries_value(spend(addon), SECRET_VALUE)
+    monkeypatch.setattr(mod, "clock", lambda: 1_000_000)
+    f = spend(addon)
+    assert blocked(f) and f.response.status_code == 403 and not carries_value(f, SECRET_VALUE)
+
+
+@pytest.mark.parametrize("switch", [{"off": "no"}, {"off": 1}, {"until": "soon"}, {"until": True}],
+                         ids=["off a string", "off a number", "until a string", "until a bool"])
+def test_a_switch_that_cannot_be_read_holds_the_secret_off(tmp_path, switch):
+    _, addon = switched_addon(tmp_path, **switch)
+    f = spend(addon)
+    assert blocked(f) and not carries_value(f, SECRET_VALUE)
+
+
+def test_switching_it_back_on_takes_effect_at_the_next_request(tmp_path):
+    mod, addon = switched_addon(tmp_path, off=True)
+    assert blocked(spend(addon))
+    settings = json.loads(Path(mod.SETTINGS_PATH).read_text())
+    del settings["secrets"][SECRET_NAME]["off"]
+    Path(mod.SETTINGS_PATH).write_text(json.dumps(settings))
+    os.utime(mod.SETTINGS_PATH, (time.time() + 5, time.time() + 5))
+    assert carries_value(spend(addon), SECRET_VALUE)
+
+
+# --------------------------------------------- a project restricted --------
+# "A PROJECT RESTRICTED: LEARN, THEN ENFORCE": the default stays allow; a
+# project held to deny or learn gets what is allowed by name; learning lets
+# through and audits what would have been refused, with who asked.
+
+def restricted_addon(tmp_path, policies, network=None):
+    mod, addon = scoped_addon(tmp_path, network=network or [
+        {"action": "allow", "host": "registry.npmjs.org"},
+        {"action": "allow", "host": "pypi.org", "projects": ["acme/widgets"]},
+        {"action": "deny", "host": "evil.example"},
+        {"action": "allow", "host": "*"},
+    ])
+    policy = tmp_path / "projects.json"
+    policy.write_text(json.dumps(policies))
+    mod.POLICY_PATH = str(policy)
+    return mod, addon
+
+
+def ask(addon, address, host, ua="npm/10.8.2 node/v22.11.0 linux x64"):
+    f = from_(address, sni=host, dest="104.16.0.1", headers={"User-Agent": ua})
+    addon.request(f)
+    return f
+
+
+def test_an_unlisted_project_has_the_default_as_before(tmp_path):
+    _, addon = restricted_addon(tmp_path, {"solo": {"action": "deny"}})
+    assert not blocked(ask(addon, A_ADDRESS, "anything.example.org"))
+
+
+def test_a_denied_project_gets_what_is_allowed_by_name_and_nothing_else(tmp_path, caplog):
+    _, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "deny"}})
+    with caplog.at_level(logging.INFO):
+        refused = ask(addon, A_ADDRESS, "anything.example.org")
+    assert blocked(refused) and refused.response.status_code == 403
+    assert b"proxy recommend --project acme/widgets" in refused.response.content
+    fields = audit_fields(caplog)[-1]
+    assert (fields["verdict"], fields["project"]) == ("DENY-POLICY", "acme/widgets")
+    assert fields["agent"] == "npm/10.8.2+node/v22.11.0+linux+x64"
+    assert not blocked(ask(addon, A_ADDRESS, "registry.npmjs.org")), "a rule naming the host"
+    assert not blocked(ask(addon, A_ADDRESS, "pypi.org")), "a rule naming the project"
+    assert blocked(ask(addon, A_ADDRESS, "evil.example")), "a deny is a deny"
+
+
+def test_a_project_restricted_restricts_no_one_else(tmp_path):
+    _, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "deny"}})
+    for source in (B_ADDRESS, SHARED_ADDRESS):
+        assert not blocked(ask(addon, source, "anything.example.org"))
+    assert not blocked(ask(addon, B_ADDRESS, "pypi.org")), "unrestricted, it has the default"
+
+
+def test_learning_lets_through_and_says_what_would_have_been_refused(tmp_path, caplog, monkeypatch):
+    mod, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "learn", "until": 2_000, "then": "deny"}})
+    monkeypatch.setattr(mod, "clock", lambda: 1_000)
+    with caplog.at_level(logging.INFO):
+        learned = ask(addon, A_ADDRESS, "objects.githubusercontent.com", ua="git/2.45 (curl)")
+        named = ask(addon, A_ADDRESS, "registry.npmjs.org")
+    assert not blocked(learned) and not blocked(named)
+    verdicts = [(x["verdict"], x["host"], x.get("agent")) for x in audit_fields(caplog)]
+    assert verdicts == [("LEARN", "objects.githubusercontent.com", "git/2.45+(curl)"), ("ALLOW", "registry.npmjs.org", None)]
+
+
+@pytest.mark.parametrize("then,refused", [("deny", True), ("allow", False)])
+def test_a_learn_window_ends_into_its_then(tmp_path, monkeypatch, then, refused):
+    mod, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "learn", "until": 2_000, "then": then}})
+    monkeypatch.setattr(mod, "clock", lambda: 2_000)
+    assert blocked(ask(addon, A_ADDRESS, "anything.example.org")) is refused
+
+
+@pytest.mark.parametrize("entry", [{"action": "learn"}, {"action": "learn", "until": 5, "then": "maybe"},
+                                   {"action": "learn", "until": True, "then": "allow"}, {"action": "sometimes"}, "deny"],
+                         ids=["no window", "no then", "until a bool", "an unknown action", "not an object"])
+def test_a_policy_that_cannot_be_read_holds_the_project_to_deny(tmp_path, entry):
+    _, addon = restricted_addon(tmp_path, {"acme/widgets": entry})
+    assert blocked(ask(addon, A_ADDRESS, "anything.example.org"))
+
+
+def test_learning_never_reaches_an_internal_destination(tmp_path, monkeypatch):
+    mod, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "learn", "until": 2_000, "then": "deny"}})
+    monkeypatch.setattr(mod, "clock", lambda: 1_000)
+    f = from_(A_ADDRESS, sni="router.example", dest="192.168.1.1")
+    addon.request(f)
+    assert blocked(f) and f.response.status_code == 403
+
+
+def test_a_user_agent_reaches_the_audit_line_as_one_safe_field(tmp_path, caplog):
+    _, addon = restricted_addon(tmp_path, {"acme/widgets": {"action": "deny"}})
+    with caplog.at_level(logging.INFO):
+        ask(addon, A_ADDRESS, "anything.example.org", ua="x verdict=ALLOW \x1b]0;t\x07 " + "y" * 200)
+    agent = audit_fields(caplog)[-1]["agent"]
+    assert agent.startswith("x+verdict_ALLOW+__0;t_+") and len(agent) == 80
+    assert " " not in agent and "=" not in agent and "\x1b" not in agent

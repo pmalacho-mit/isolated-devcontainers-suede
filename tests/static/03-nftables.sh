@@ -87,10 +87,22 @@ assert_not_contains "the 8080-8090 dev-server range is left alone" "$PRE" "dport
 
 group "the input chain protects the rest of the VM"
 IN=$(printf '%s' "$RULES" | awk '/chain input/,/^    }/')
-for port in 18080 5353 18081; do
+for port in 5353 18081; do
   # the file pads columns, so normalise whitespace before matching
   assert_contains "input allows :$port" "$(printf '%s' "$IN" | tr -s ' ')" "dport $port accept"
 done
+# The proxy only as REDIRECT delivers it: a direct connection to :18080 would
+# have the proxy dial itself (audit I1).
+assert_contains "input allows :18080 only with DNAT on the connection" "$(printf '%s' "$IN" | tr -s ' ')" 'tcp dport 18080 ct status dnat accept'
+assert_not_contains "  never plainly" "$(printf '%s' "$IN" | tr -s ' ')" 'tcp dport 18080 accept'
+# The services listen on every address; the firewall is what keeps the Mac's
+# network off them (audit L7). Loopback is the VM's own.
+assert_contains "the proxy ports are dropped from every other interface" "$IN" 'iifname != "lo" tcp dport { 18080, 18081, 5353 } counter drop'
+assert_contains "  the resolver's udp too" "$IN" 'iifname != "lo" udp dport 5353 counter drop'
+DESOLATE_ACCEPT=$(printf '%s' "$IN" | grep -n 'dport 18081 accept' | head -1 | cut -d: -f1)
+OTHER_DROP=$(printf '%s' "$IN" | grep -n 'iifname != "lo" tcp dport' | head -1 | cut -d: -f1)
+assert_eq "  after the bridges' accepts, so the bridges still reach them" \
+  "$([ -n "$DESOLATE_ACCEPT" ] && [ -n "$OTHER_DROP" ] && [ "$DESOLATE_ACCEPT" -lt "$OTHER_DROP" ] && echo yes || echo no)" "yes"
 assert_contains "input has a catch-all drop" "$IN" 'iifname $DESOLATE_IFS drop'
 LAST_IN=$(printf '%s' "$IN" | grep -vE '^\s*(#.*)?$' | grep -v '^    }' | tail -1 | sed 's/^ *//')
 assert_eq "the catch-all drop is the LAST input rule" "$LAST_IN" 'iifname $DESOLATE_IFS drop'
@@ -158,7 +170,13 @@ assert_eq "replies are accepted BEFORE the drops" \
   "$([ -n "$CT_ACCEPT" ] && [ -n "$DROP_LINE" ] && [ "$CT_ACCEPT" -lt "$DROP_LINE" ] && echo yes || echo no)" "yes"
 assert_eq "the proxy's DNS is accepted BEFORE the drops" \
   "$([ -n "$DNS_ACCEPT" ] && [ -n "$DROP_LINE" ] && [ "$DNS_ACCEPT" -lt "$DROP_LINE" ] && echo yes || echo no)" "yes"
-assert_contains "loopback is accepted too (the local resolver and CA server)" "$OUT" \
+# Loopback for the proxy's uid is DNS only (audit L2): an accept of every
+# loopback destination let an eager or passthrough connection reach whatever
+# the VM serves on 127.0.0.1 -- a backstop the addon's internal-address check
+# is supposed to have.
+assert_contains "loopback is accepted for the local resolver" "$OUT" \
+  'meta skuid desolate-proxy oifname "lo" udp dport 53 accept'
+assert_not_contains "  and for nothing else" "$OUT" \
   'meta skuid desolate-proxy oifname "lo" accept'
 
 # The ranges themselves. addon.py's is_internal() is the authority; these are

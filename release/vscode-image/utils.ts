@@ -77,6 +77,11 @@ export type ToReadonlySet<T extends Set<any>> = ReturnType<
   typeof readonlySet<T>
 >;
 
+/** `text` with every control character but newline and tab replaced -- what
+ *  may reach a terminal from a project's output, a file name, a message: an
+ *  escape sequence there is the project writing the terminal. */
+export const plainText = (text: string) => text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "?");
+
 export const nonNullObject = <T extends {}>(
   item: T | null,
 ): item is Exclude<

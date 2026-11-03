@@ -12,7 +12,16 @@ set -euo pipefail
 
 # Bump deliberately, then re-run. Check the releases page for newer builds:
 #   https://github.com/nestybox/sysbox/releases
-SYSBOX_VERSION="${SYSBOX_VERSION:-0.7.0}"
+SYSBOX_VERSION="${SYSBOX_VERSION:-0.7.1}"
+# The deb's sha256, per architecture, for the version above (taken of the
+# release's assets when pinned). Another version has to bring its own, or
+# the install refuses: sysbox is what keeps a project's daemon from being the
+# VM's, so it is the one download here that must be what was reviewed.
+case "$SYSBOX_VERSION" in
+    0.7.1) SYSBOX_SHA256_AMD64=9d6d5484f980d0a17f86c492c1262015c2afb66280bdb97215b79fde6a0261c5
+           SYSBOX_SHA256_ARM64=04ca894ae0b53f0fa54eaacc173ce40363c9a95ea5450f773716a84ef650a69b ;;
+    *)     SYSBOX_SHA256_AMD64="${SYSBOX_SHA256_AMD64:-}"; SYSBOX_SHA256_ARM64="${SYSBOX_SHA256_ARM64:-}" ;;
+esac
 
 echo "==> preconditions"
 # sysbox needs cgroup v2 and id-mapped mounts. Colima's 6.x kernel has both;
@@ -118,6 +127,12 @@ EOF
     trap 'rm -rf "$TMP"' EXIT INT TERM
     echo "    downloading $DEB"
     curl -fSL --retry 3 -o "$TMP/$DEB" "$URL"
+    case "$ARCH" in amd64) WANT=$SYSBOX_SHA256_AMD64 ;; arm64) WANT=$SYSBOX_SHA256_ARM64 ;; *) WANT="" ;; esac
+    if [ -z "$WANT" ]; then
+        echo "    ERROR: no sha256 known for sysbox $SYSBOX_VERSION on $ARCH; set SYSBOX_SHA256_$(echo "$ARCH" | tr a-z A-Z)" >&2
+        exit 1
+    fi
+    echo "$WANT  $TMP/$DEB" | sha256sum -c - >/dev/null || { echo "    ERROR: $DEB does not match its pinned sha256" >&2; exit 1; }
     apt-get install -y -qq "$TMP/$DEB"
 fi
 

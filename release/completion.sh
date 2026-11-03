@@ -44,7 +44,9 @@ _desolate_cli_grammar() {
       sub(/\)$/, "", label)
       indent = match(label, /[^ ]/) - 1
       name = substr(label, indent + 1)
-      if (name ~ /\*/) next
+      # A pattern, or a flag a branch parses for itself (`--project)`): not a
+      # subcommand.
+      if (name ~ /\*/ || name ~ /^-/) next
       # `shell|bash)` and `list|add)` are several names for one branch. Split
       # here rather than downstream, or the alternates lose their CMD/SUB tag.
       n = split(name, part, "|")
@@ -63,7 +65,7 @@ _desolate_cli_verbs() {
 }
 
 _desolate_cli_subs() {
-  _desolate_cli_grammar | awk -F'\t' -v v="$1" '$1=="SUB" && $2==v {print $3}'
+  _desolate_cli_grammar | awk -F'\t' -v v="$1" '$1=="SUB" && $2==v && !seen[$3]++ {print $3}'
 }
 
 # ---------------------------------------------------------------------------
@@ -83,17 +85,42 @@ _desolate_cli_up() {
 # dot-prefixed names for free, which is the rule projects.ts spells out.
 # tests/static should diff this against list.startable() on a fixture tree --
 # it is a second copy of that rule, and the only one here worth having.
+# As projects.ts lists them: a top-level directory with a spec is a project and
+# its subdirectories are its source, never projects; one without is an owner,
+# whose children with a spec are projects.
 _desolate_cli_projects() {
   _desolate_cli_up || return 0
   docker exec desolate-vscode sh -c '
     cd /workspaces 2>/dev/null || exit 0
-    for c in */.devcontainer/devcontainer.json */.devcontainer.json \
-             */*/.devcontainer/devcontainer.json */*/.devcontainer.json; do
-      [ -e "$c" ] || continue
-      d=${c%/.devcontainer/devcontainer.json}
-      d=${d%/.devcontainer.json}
-      printf "%s\n" "$d"
+    spec() { [ -e "$1/.devcontainer/devcontainer.json" ] || [ -e "$1/.devcontainer.json" ]; }
+    for top in */; do
+      top=${top%/}
+      if spec "$top"; then printf "%s\n" "$top"; continue; fi
+      for sub in "$top"/*/; do sub=${sub%/}; spec "$sub" && printf "%s\n" "$sub"; done
     done' 2>/dev/null | sort -u
+}
+
+# Offer each line of stdin that begins with the word being completed -- never
+# through `compgen -W`, which in bash EXPANDS its word list: a directory a
+# project made under its .worktrees, `$(...)` and all, would run on this Mac.
+# (zsh's bashcompinit splits and globs the list but runs nothing; bash runs
+# it.) <kind> says how the words must be spelled, as the parsers in the stack
+# will insist; anything else is left unoffered, since an offered word is
+# inserted into the line as it is. Every word that comes from the stack --
+# projects, worktrees, secret names -- passes through here.
+_desolate_cli_offer() {   # <kind> <producer...>
+  local kind=$1 w; shift
+  while IFS= read -r w; do
+    case "$kind" in
+      project)  [[ $w =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,63})?$ ]] || continue ;;
+      worktree) [[ $w =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || continue ;;
+      secret)   [[ $w =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || continue ;;
+      *) return 1 ;;
+    esac
+    case "$w" in *__*|*--wt--*) continue ;; esac   # names no namespace can hold
+    [[ $w == "$cur"* ]] && COMPREPLY+=("$w")
+  done < <("$@")   # not a pipeline: that would fill COMPREPLY in a subshell
+  return 0
 }
 
 # Worktrees of one project: directories under <project>/.worktrees.
@@ -146,7 +173,7 @@ _desolate_cli_line_project() {
     elif [ "$i" -eq "$COMP_CWORD" ]; then :
     else
       case "$w" in
-        --worktree|--branch|--config|--ref|--hosts|--projects|--headers) skip=1 ;;
+        --worktree|--branch|--config|--ref|--hosts|--projects|--headers|--expect) skip=1 ;;
         --move) skip=2 ;;
         -*) ;;
         *) printf '%s' "$w"; return 0 ;;
@@ -199,7 +226,7 @@ _desolate_cli_flags() {
         *)       [ "$COMP_CWORD" -eq 2 ] && printf '%s ' --status
                  echo "--list --dinds --stop --ports --purge --all --json --rebuild --no-cache --worktree --config" ;;
       esac ;;
-    push) echo "--worktree --allow-default" ;;
+    push) echo "--worktree --allow-default --expect" ;;
     pull) echo "--worktree --fetch-only" ;;
     exec) echo "--worktree" ;;
   esac
@@ -236,7 +263,7 @@ _desolate_cli() {
         while [ "$i" -lt "$COMP_CWORD" ]; do [ "${COMP_WORDS[i]}" = -- ] && return 0; i=$((i + 1)); done
       fi
       case "$prev" in
-        --worktree) COMPREPLY=( $(compgen -W "$(_desolate_cli_worktrees "$(_desolate_cli_line_project 2)")" -- "$cur") ); return 0 ;;
+        --worktree) _desolate_cli_offer worktree _desolate_cli_worktrees "$(_desolate_cli_line_project 2)"; return 0 ;;
         --config)   COMPREPLY=( $(compgen -f -- "$cur") ); return 0 ;;
         --move)     COMPREPLY=( $(compgen -W "editor" -- "$cur") ); return 0 ;;
       esac
@@ -246,7 +273,7 @@ _desolate_cli() {
         *)  [ -z "$(_desolate_cli_line_project 2)" ] || return 0
             case "$verb $(_desolate_cli_line_op --list --dinds)" in
               "desolate --list"|"desolate --dinds") ;;
-              *) COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
+              *) _desolate_cli_offer project _desolate_cli_projects ;;
             esac ;;
       esac
       return 0 ;;
@@ -270,45 +297,64 @@ _desolate_cli() {
 
   # Position 3+: whatever the verb+subcommand pair takes.
   case "$verb $sub" in
-    "secret rm")        COMPREPLY=( $(compgen -W "$(_desolate_cli_secrets)" -- "$cur") ) ;;
+    "proxy learn"|"proxy enforce"|"proxy recommend"|"proxy allow")
+      case "${COMP_WORDS[COMP_CWORD-1]}" in
+        --project) _desolate_cli_offer project _desolate_cli_projects ;;
+        --then)    COMPREPLY=( $(compgen -W "deny allow" -- "$cur") ) ;;
+        --for)     ;;
+        --method)  COMPREPLY=( $(compgen -W "GET HEAD POST PUT PATCH DELETE OPTIONS" -- "$cur") ) ;;
+        *) case "$sub" in
+             learn)     COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --project --for --then)" -- "$cur") ) ;;
+             enforce)   COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --project)" -- "$cur") )
+                        [ "$COMP_CWORD" -eq 3 ] && COMPREPLY+=( $(compgen -W "deny allow" -- "$cur") ) ;;
+             recommend) COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --project)" -- "$cur") ) ;;
+             allow)     [ "$COMP_CWORD" -ge 4 ] && COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --project --method)" -- "$cur") ) ;;
+           esac ;;
+      esac ;;
+    "secret rm"|"secret off") [ "$COMP_CWORD" -eq 3 ] && _desolate_cli_offer secret _desolate_cli_secrets ;;
+    "secret on")
+      if [ "$COMP_CWORD" -eq 3 ]; then _desolate_cli_offer secret _desolate_cli_secrets
+      elif [ "$COMP_CWORD" -eq 4 ]; then COMPREPLY=( $(compgen -W "--ttl" -- "$cur") ); fi ;;
     "secret add")
       # `secret add NAME --hosts a,b [--projects p,q] [--headers authorization]`:
       # the name is new (nothing to offer); --hosts is required, and is the
       # flag people forget, so it is offered whatever has been typed.
       case "${COMP_WORDS[COMP_CWORD-1]}" in
-        --projects) COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
+        --projects) _desolate_cli_offer project _desolate_cli_projects ;;
         --headers)  COMPREPLY=( $(compgen -W "authorization" -- "$cur") ) ;;
         --hosts)    ;;
         *) [ "$COMP_CWORD" -ge 4 ] && COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --hosts --projects --headers)" -- "$cur") ) ;;
       esac ;;
     "suede deliver")
       # `suede deliver <project> <owner/repo>`: the dependency is a project too.
-      [ "$COMP_CWORD" -le 4 ] && COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") ) ;;
+      [ "$COMP_CWORD" -le 4 ] && _desolate_cli_offer project _desolate_cli_projects ;;
     "suede report"|"suede upstream")
       # `report <project> [--ref <ref>]`, `upstream <project> <dir> [--ref <ref>]`.
       if [ "$COMP_CWORD" -eq 3 ]; then
-        COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") )
+        _desolate_cli_offer project _desolate_cli_projects
       elif [ "${COMP_WORDS[COMP_CWORD-1]}" != --ref ]; then
         case "$cur" in -*) COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --ref)" -- "$cur") ) ;; esac
       fi ;;
     "worktree list"|"worktree add"|"worktree remove")
       if [ "$COMP_CWORD" -eq 3 ]; then
-        COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") )
+        _desolate_cli_offer project _desolate_cli_projects
       elif [ "$COMP_CWORD" -eq 4 ] && [ "$sub" = remove ]; then
-        COMPREPLY=( $(compgen -W "$(_desolate_cli_worktrees "${COMP_WORDS[3]}")" -- "$cur") )
+        _desolate_cli_offer worktree _desolate_cli_worktrees "${COMP_WORDS[3]}"
       elif [ "$COMP_CWORD" -eq 5 ] && [ "$sub" = remove ]; then
         COMPREPLY=( $(compgen -W "--force" -- "$cur") )
       fi ;;
     "vm install")       COMPREPLY=( $(compgen -W "--proxy-only" -- "$cur") ) ;;
     "dind reset")
       if [ "$COMP_CWORD" -eq 3 ]; then
-        COMPREPLY=( $(compgen -W "$(_desolate_cli_projects)" -- "$cur") )
+        _desolate_cli_offer project _desolate_cli_projects
       elif [ "$COMP_CWORD" -eq 4 ]; then
         COMPREPLY=( $(compgen -W "--reset-data-root" -- "$cur") )
       fi ;;
     "dind gc")
-      [ "$COMP_CWORD" -eq 3 ] && \
-        COMPREPLY=( $(compgen -W "--all --orphans $(_desolate_cli_projects)" -- "$cur") ) ;;
+      if [ "$COMP_CWORD" -eq 3 ]; then
+        COMPREPLY=( $(compgen -W "--all --orphans" -- "$cur") )
+        _desolate_cli_offer project _desolate_cli_projects
+      fi ;;
     "repo add")         : ;;   # owner/repo is remote; nothing local to offer
   esac
   return 0

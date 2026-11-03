@@ -17,7 +17,7 @@ const workspaces = join(root, "workspaces");
 const cacheRoot = join(root, "cache");
 process.env.DESOLATE_WORKSPACES = workspaces;
 process.env.DESOLATE_REMOTE_CACHE = cacheRoot;
-const { push, pull, registrationOf, defaultBranchOf, cloneThroughCache, TransferError } = await import("../../../release/vscode-image/transfer.ts");
+const { push, pull, registrationOf, defaultBranchOf, cloneThroughCache, TransferError, sshFor, isBranchName } = await import("../../../release/vscode-image/transfer.ts");
 const { bundleScript, pullScript } = await import("../../../release/vscode-image/docker.ts");
 
 const git = (cwd: string, ...args: string[]) =>
@@ -110,6 +110,26 @@ describe("push", () => {
     assert.equal(git(root, "--git-dir", elsewhere, "for-each-ref").length, 0, "the project's url rewrite sent it elsewhere");
     for (const name of ["pre-push", "ssh-command"]) assert.ok(!existsSync(marker(name)), `the project's ${name} ran`);
     assert.deepEqual(leftovers(), [], "a transfer file is left behind");
+  });
+
+  test("a branch name the sandbox reports that git would not take is refused before any refspec (audit M2)", async () => {
+    for (const bad of ["-option", "a:b", "a*", "a..b", "x/", "a@{1}", "a.lock", "a?b", "a[b", "a\\b", "~a", "a^"]) {
+      const lying = async (_request: Record<string, unknown>, onLog: (line: string) => boolean) => {
+        onLog(`BUNDLED ${bad} ${"a".repeat(40)} none`);
+        return 0;
+      };
+      await assert.rejects(push("acme/widgets", { registration, ask: lying }), (err: Error) =>
+        err instanceof TransferError && /no branch name/.test(err.message), bad);
+    }
+    for (const good of ["feature", "issue/42", "a.b-c_d", "v1.2.3", "UPPER"]) assert.ok(isBranchName(good), good);
+  });
+
+  test("--expect: the commit reviewed is the one pushed, or nothing is (audit L1)", async () => {
+    const head = git(project, "rev-parse", "HEAD");
+    await assert.rejects(push("acme/widgets", { registration, ask: bundler, expect: "f".repeat(40) }), (err: Error) =>
+      err instanceof TransferError && /moved since\. Review it again/.test(err.message) && err.message.includes(head.slice(0, 12)));
+    assert.deepEqual(leftovers(), [], "a transfer file is left behind");
+    assert.match(await push("acme/widgets", { registration, ask: bundler, expect: head }), /^pushed feature/);
   });
 
   test("again, with nothing new: no bundle at all, and nothing refused", async () => {
@@ -233,11 +253,17 @@ describe("a project cloned through its cache (`repo add`)", () => {
   const cloned = join(workspaces, "acme", "gadgets");
   const gadgets = { tag: "acme__gadgets", ownerRepo: "acme/gadgets", url: remote };
 
-  test("the clone is the remote's, with origin pointing there and the default branch checked out", () => {
+  test("the clone is the remote's, with origin pointing there and HEAD the default branch -- and no files yet", () => {
     cloneThroughCache(gadgets, cloned);
     assert.equal(git(cloned, "remote", "get-url", "origin"), remote);
     assert.equal(git(cloned, "symbolic-ref", "--short", "HEAD"), "main");
     assert.equal(git(cloned, "rev-parse", "refs/remotes/origin/feature"), git(root, "--git-dir", remote, "rev-parse", "feature"));
+    // The orchestrator checks it out, in a sandbox (worktrees.awaitsCheckout).
+    assert.deepEqual(readdirSync(cloned), [".git"]);
+    assert.equal(existsSync(join(cloned, ".git", "index")), false);
+    // ... as it does here, so the pull below has a checkout to work in.
+    git(cloned, "checkout", "--quiet", "--force");
+    assert.equal(readFileSync(join(cloned, "a.txt"), "utf8").trim(), git(root, "--git-dir", remote, "show", "main:a.txt"));
   });
 
   test("its objects are copies: no file is shared with the cache", () => {
@@ -259,6 +285,53 @@ describe("a project cloned through its cache (`repo add`)", () => {
   });
 });
 
+describe("a clone runs no filter the remote's content names (audit M1)", () => {
+  // The remote names a filter for every file, and the editor's git has one by
+  // that name configured -- as `git lfs install --system` configured `lfs`,
+  // which then read the remote's own .lfsconfig. Here, through
+  // GIT_CONFIG_SYSTEM: the system config, without writing /etc.
+  const filtered = join(root, "filtered.git");
+  const system = join(root, "system-gitconfig");
+  const smudged = marker("smudge");
+  const registration = { tag: "acme__filtered", ownerRepo: "acme/filtered", url: filtered };
+  before(() => {
+    const work = join(root, "filtered-work");
+    mkdirSync(work);
+    git(work, "init", "--quiet");
+    writeFileSync(join(work, ".gitattributes"), "* filter=evil\n");
+    writeFileSync(join(work, ".lfsconfig"), "[lfs]\n\turl = ssh://git@github.com-acme__widgets/acme/widgets\n");
+    commitIn(work, "payload.txt", "content\n");
+    git(work, "add", ".gitattributes", ".lfsconfig");
+    git(work, "commit", "--quiet", "-m", "attributes");
+    git(root, "init", "--quiet", "--bare", filtered);
+    git(work, "push", "--quiet", filtered, "main");
+    git(filtered, "symbolic-ref", "HEAD", "refs/heads/main");
+    writeFileSync(system, `[filter "evil"]\n\tsmudge = touch ${smudged}; cat\n`);
+  });
+
+  test("control: a plain clone with that system config runs it", () => {
+    const plain = join(root, "plain-clone");
+    rmSync(smudged, { force: true });
+    execFileSync("git", ["clone", "--quiet", filtered, plain], { env: { ...process.env, GIT_CONFIG_SYSTEM: system } });
+    assert.equal(existsSync(smudged), true, "the fixture does not exercise a filter");
+    rmSync(smudged, { force: true });
+  });
+
+  test("the editor's clone does not, and writes no file of the content", () => {
+    const dest = join(workspaces, "acme", "filtered");
+    const saved = process.env.GIT_CONFIG_SYSTEM;
+    process.env.GIT_CONFIG_SYSTEM = system;
+    try {
+      cloneThroughCache(registration, dest);
+    } finally {
+      if (saved === undefined) delete process.env.GIT_CONFIG_SYSTEM;
+      else process.env.GIT_CONFIG_SYSTEM = saved;
+    }
+    assert.equal(existsSync(smudged), false, "a filter ran in the editor");
+    assert.deepEqual(readdirSync(dest), [".git"]);
+  });
+});
+
 describe("the cache's lock", () => {
   test("one push or pull of a project at a time; a lock its process left behind is taken over", async () => {
     const lock = join(cacheRoot, "acme__widgets.lock");
@@ -271,5 +344,29 @@ describe("the cache's lock", () => {
     writeFileSync(lock, "999999999");   // no such process
     await pull("acme/widgets", { registration, ask: puller });
     assert.ok(!existsSync(lock), "the lock outlived the pull");
+  });
+});
+
+describe("the ssh config a push goes out with (audit M3)", () => {
+  test("written per use from the keyring's exports, never read from ~/.ssh: one alias, one public key, GitHub's host keys from the image, strictly", () => {
+    const written: Record<string, string> = {};
+    const command = sshFor({ tag: "acme__widgets", ownerRepo: "acme/widgets", url: "git@github.com-acme__widgets:acme/widgets.git" },
+      (name, text) => { written[name] = text; return `/scratch/${name}`; });
+    assert.equal(command, "ssh -F /scratch/ssh_config");
+    const config = written.ssh_config;
+    assert.match(config, /^Host github\.com-acme__widgets$/m);
+    assert.match(config, /^  IdentityFile \/run\/keyring\/pub\/acme__widgets\.pub$/m);
+    assert.match(config, /^  IdentitiesOnly yes$/m);
+    assert.match(config, /^  UserKnownHostsFile \/etc\/desolate\/github_known_hosts$/m);
+    assert.match(config, /^  StrictHostKeyChecking yes$/m);
+    assert.doesNotMatch(config, /ProxyCommand|\.ssh\//, "nothing from the home volume");
+  });
+
+  test("the host keys shipped are GitHub's three, as api.github.com/meta lists them", () => {
+    const file = new URL("../../../release/vscode-image/github_known_hosts", import.meta.url).pathname;
+    const keys = readFileSync(file, "utf8").split("\n").filter((line) => line && !line.startsWith("#"));
+    assert.deepEqual(keys.map((line) => line.split(" ").slice(0, 2).join(" ")).sort(),
+      ["github.com ecdsa-sha2-nistp256", "github.com ssh-ed25519", "github.com ssh-rsa"]);
+    assert.ok(keys.every((line) => /^github\.com \S+ [A-Za-z0-9+/=]+$/.test(line)));
   });
 });

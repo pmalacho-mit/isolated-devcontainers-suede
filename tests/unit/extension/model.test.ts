@@ -109,6 +109,13 @@ describe("the Projects view", () => {
     assert.equal(find(tree, "target:acme/widgets@:port:5173")!.target?.url, "http://127.0.0.1:8093/");
   });
 
+  test("a container port opens at its target's own host, when the runner names one (hosts.ts)", () => {
+    const host = "acme-widgets-babf3e111073ee33.localhost";
+    const named = projectsTree({ known, running: running.map((row) => ({ ...row, host })), facts, memory, now: NOW });
+    assert.equal(find(named, "target:acme/widgets@:port:5173")!.target?.url, `http://${host}:8093/`);
+    assert.equal(find(named, "target:acme/widgets@:port:5173")!.tooltip, `${host}:8093`);
+  });
+
   test("the note: its first line beside it, all of it in its tooltip, opened on a click", () => {
     const note = find(tree, "target:acme/widgets@:note")!;
     assert.equal(note.description, "working on the parser");

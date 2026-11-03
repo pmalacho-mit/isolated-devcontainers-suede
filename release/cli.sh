@@ -6,8 +6,10 @@
 #   ./isolated-devcontainers-suede/cli.sh desolate <project>       # open a project as an isolated IDE
 #   ./isolated-devcontainers-suede/cli.sh url                       # print + copy the editor URL
 #   ./isolated-devcontainers-suede/cli.sh secret add NAME --hosts a.com,b.com   # secret -> VM only
-#   ./isolated-devcontainers-suede/cli.sh secret list | rm NAME
-#   ./isolated-devcontainers-suede/cli.sh proxy status | logs | test
+#   ./isolated-devcontainers-suede/cli.sh secret list | on NAME [--ttl 30m] | off NAME | rm NAME
+#   ./isolated-devcontainers-suede/cli.sh proxy status | logs | audit | test
+#   ./isolated-devcontainers-suede/cli.sh proxy learn --project P --for 1h --then deny | enforce | recommend | allow
+#   ./isolated-devcontainers-suede/cli.sh watch [seconds]           # notify when an agent asks, or a secret strays
 #   ./isolated-devcontainers-suede/cli.sh repo add owner/repo       # per-repo deploy key + clone
 #   ./isolated-devcontainers-suede/cli.sh worktree add owner/repo wip   # a branch in its own devcontainer
 #   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
@@ -20,6 +22,7 @@
 #   ./isolated-devcontainers-suede/cli.sh shell                     # bash in the editor container
 #   ./isolated-devcontainers-suede/cli.sh down | logs | ps | preflight | observe
 #   ./isolated-devcontainers-suede/cli.sh reset-inner               # recover a wedged inner daemon
+#   ./isolated-devcontainers-suede/cli.sh reset-editor              # discard the outer editor's home (after an incident)
 #   ./isolated-devcontainers-suede/cli.sh dind list | reset <project> | df | gc   # project daemons
 #   ./isolated-devcontainers-suede/cli.sh <any command...>          # runs in the editor container
 #
@@ -29,6 +32,8 @@ set -euo pipefail
 
 CONTAINER=desolate-vscode
 ORCHESTRATOR=desolate-orchestrator
+# The outer editor's host: vscode-image/hosts.ts EDITOR_HOST says the same.
+EDITOR_HOST=desolate.localhost
 COLIMA_PROFILE="${COLIMA_PROFILE:-desolate}"
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -104,11 +109,13 @@ EOF
 # \(...) interpolation -- so `secret list` never worked at all. Emitting TSV and
 # formatting on the Mac leaves the remote side nothing to misparse.
 # Each row: the name, how many projects it is scoped to (0: every source), how
-# many headers it is confined to (0: anywhere in a request), those projects,
-# those headers, then its hosts -- counts rather than joined lists, since
-# joining needs a quoted separator.
+# many headers it is confined to (0: anywhere in a request), whether it is
+# switched off, when its while on ends (-1: it does not) and the VM's time now
+# -- so what is left is the VM's clock, which is the one the proxy reads --
+# then those projects, those headers, its hosts. Counts rather than joined
+# lists, since joining needs a quoted separator.
 # tests/static/05-cli-queries.sh executes this against a fixture.
-SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length),(.value.headers//[]|length)]+(.value.projects//[])+(.value.headers//[])+.value.hosts|@tsv'
+SECRET_LIST_JQ='.secrets|to_entries[]|[.key,(.value.projects//[]|length),(.value.headers//[]|length),(.value.off//false|tostring),(.value.until//-1),(now|floor)]+(.value.projects//[])+(.value.headers//[])+.value.hosts|@tsv'
 # The proxy's AUDIT lines, as journald holds them. mitmdump under systemd
 # prefixes each with its time -- `[12:03:33.715] AUDIT verdict=...` -- and
 # every reader here once anchored on `^AUDIT`, so on the VM `proxy audit`
@@ -125,6 +132,47 @@ PROJECT_AUDIT_AWK='{ line = $0; sub(/^\[[0-9:.]*\] /, "", line) } index(line, "A
 # eight (connect, the line itself, the response, disconnects), so `-n <n>` alone
 # read <n> journal lines and usually held no AUDIT line at all.
 audit_window() { echo $(( $1 * 50 )); }
+
+# How a notification reaches you -- pluggable, so nothing here assumes a Mac:
+#   DESOLATE_NOTIFY unset   osascript on macOS, notify-send where there is one,
+#                           and otherwise the line and the terminal's bell
+#   DESOLATE_NOTIFY=none    the line only
+#   DESOLATE_NOTIFY=<cmd>   <cmd> "<title>" "<message>"
+# The message is text an agent or a request chose: it arrives as an argument,
+# never in a script, and with no control character in it.
+notify_user() {
+  local title=$1 message
+  message=$(printf '%s' "$2" | LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed $'s/\xc2[\x80-\x9f]//g' | cut -c1-240)
+  printf '%s %s: %s\a\n' "$(date +%H:%M:%S)" "$title" "$message"
+  case "${DESOLATE_NOTIFY:-}" in
+    none) ;;
+    "")
+      if command -v osascript >/dev/null 2>&1; then
+        osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' \
+          "$title" "$message" >/dev/null 2>&1 || true
+      elif command -v notify-send >/dev/null 2>&1; then
+        notify-send -- "$title" "$message" >/dev/null 2>&1 || true
+      fi ;;
+    *) "$DESOLATE_NOTIFY" "$title" "$message" >/dev/null 2>&1 || true ;;
+  esac
+}
+# The per-project policies the proxy reads (addon.py "A PROJECT RESTRICTED"),
+# in the VM; the orchestrator mounts their directory read-only. Not secret.
+POLICY_DIR=/var/lib/desolate-proxy/policy
+POLICY_JSON=$POLICY_DIR/projects.json
+# `proxy recommend`: LEARN and DENY-POLICY lines of one project, aggregated by
+# host: "<host>\t<count>\t<method> <path>\t<agent>", most asked first. The
+# fields are the requester's text; what prints them sanitizes them.
+RECOMMEND_AWK='{
+  line = $0; sub(/^\[[0-9:.]*\] /, "", line)
+  if (index(line, "AUDIT ") != 1) next
+  n = split(substr(line, 7), f, " "); delete v
+  for (i = 1; i <= n; i++) { k = f[i]; sub(/=.*/, "", k); x = f[i]; sub(/^[^=]*=/, "", x); v[k] = x }
+  if (v["project"] != want || (v["verdict"] != "LEARN" && v["verdict"] != "DENY-POLICY")) next
+  h = v["host"]; count[h]++
+  if (!(h in sample)) { sample[h] = v["method"] " " v["path"]; agent[h] = v["agent"] }
+}
+END { for (h in count) printf "%s\t%d\t%s\t%s\n", h, count[h], sample[h], agent[h] }'
 leak_suspect_line() { grep -aE "^(\[[0-9:.]*\] )?AUDIT verdict=LEAK-SUSPECT .* path=/$1 " | tail -n 1; }
 
 # `export`, run INSIDE the editor where the files are:
@@ -763,7 +811,9 @@ editor_url() {
   tok=$(env_value VSCODE_TOKEN)
   [ -n "$tok" ] || { echo "cli.sh: no VSCODE_TOKEN in .env -- run '$0 up' first" >&2; return 1; }
   port=$(vscode_port)
-  url="http://127.0.0.1:$port/?tkn=$tok&folder=/workspaces"
+  # Its own host, never 127.0.0.1 (vscode-image/hosts.ts): a cookie is
+  # scoped by host and not by port, and the editor's is its connection token.
+  url="http://$EDITOR_HOST:$port/?tkn=$tok&folder=/workspaces"
   echo "$url"
   if command -v pbcopy >/dev/null 2>&1; then
     printf '%s' "$url" | pbcopy && echo "(copied to clipboard)"
@@ -974,6 +1024,28 @@ case "$CMD" in
              fi
              reset_inner "$FLAG" ;;
 
+  reset-editor)
+             # The outer editor's home volume, discarded: its settings,
+             # ~/.ssh/config, ~/.gitconfig, shell rc files, server state. For
+             # after an incident in that editor -- a restart already puts back
+             # its code (root's), its security settings and the ssh config
+             # desolate pushes with (release/README.md); this is the rest.
+             # Nothing of yours but that editor's preferences: projects are
+             # another volume, deploy keys are the keyring's, and `repo add`
+             # of a registered repository writes its config again.
+             ensure_running
+             echo "This discards the outer editor's home: its settings, ~/.ssh/config, ~/.gitconfig and"
+             echo "shell rc files. Projects, deploy keys and devcontainers are not touched."
+             read -r -p "Type 'yes' to continue: " a; [ "$a" = yes ] || exit 1
+             compose stop vscode
+             compose rm -f vscode
+             VOL=$(docker volume ls -q --filter label=com.docker.compose.volume=vscode-home)
+             [ -n "$VOL" ] || { echo "cli.sh: no vscode-home volume found" >&2; exit 1; }
+             docker volume rm $VOL
+             compose up -d vscode
+             echo "cli.sh: the editor starts again with a fresh home. Registered repositories:"
+             echo "        ./cli.sh repo add <owner/repo>  writes each one's ssh and git config again (its key is kept)." ;;
+
   dind)      # Project dinds (supervisor.ts drives them; this asks it). The
              # shared daemon keeps its own commands: reset-inner, and --all.
              SUB="${1:-list}"; shift || true
@@ -1020,6 +1092,47 @@ case "$CMD" in
   preflight) exec "$SCRIPT_DIR/preflight.sh" ;;
   observe)   exec "$SCRIPT_DIR/observe.sh" "$@" ;;
   url)       editor_url ;;
+
+  watch)     # What needs you, said where you will see it when the browser is
+             # not: a target that turns orange (asks) or red (is stuck), and a
+             # request the proxy flagged -- a placeholder toward a host it is
+             # not for, or one scoped or switched away from its sender. Each
+             # once, as it happens. notify_user says how; DESOLATE_NOTIFY=none
+             # prints only. Ctrl-C ends it.
+             EVERY="${1:-30}"
+             case "$EVERY" in *[!0-9]*|""|0) echo "usage: cli.sh watch [seconds]" >&2; exit 1 ;; esac
+             ensure_running
+             echo "watching every ${EVERY}s: targets that ask or are stuck, and secrets that stray (Ctrl-C to stop)"
+             declare -A SEEN=()
+             CURSOR=$(vm sudo journalctl -u desolate-proxy -n 0 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p')
+             while :; do
+               # Status: one line per target in orange or red, its message
+               # stripped of control characters by jq before anything prints it.
+               STATES=$(docker exec "$CONTAINER" desolate --status --json </dev/null 2>/dev/null \
+                 | jq -r '.[] | select(.status.color == "orange" or .status.color == "red")
+                          | [.target, .status.color, (.status.updated // ""), ((.status.message // "") | gsub("[\u0000-\u001f\u007f-\u009f]"; "?"))] | @tsv' 2>/dev/null || true)
+               while IFS=$'\t' read -r WHO COLOR WHEN WHAT; do
+                 [ -n "$WHO" ] || continue
+                 [ "${SEEN[$WHO]:-}" = "$COLOR $WHEN" ] && continue
+                 SEEN[$WHO]="$COLOR $WHEN"
+                 notify_user "desolate: $WHO $([ "$COLOR" = orange ] && echo asks || echo 'is stuck')" "$WHAT"
+               done <<< "$STATES"
+               # The proxy: what it flagged since the last look, by journal cursor.
+               if [ -n "$CURSOR" ]; then
+                 LINES=$(vm sudo journalctl -u desolate-proxy --after-cursor="$CURSOR" --show-cursor --no-pager -o cat 2>/dev/null || true)
+                 NEXT=$(printf '%s\n' "$LINES" | sed -n 's/^-- cursor: //p' | tail -1)
+                 [ -n "$NEXT" ] && CURSOR=$NEXT
+                 printf '%s\n' "$LINES" | sed -nE "$AUDIT_FIELDS_SED" | while read -r FIELDS; do
+                   V=$(printf '%s' "$FIELDS" | sed -n 's/^verdict=\([A-Z-]*\).*/\1/p')
+                   case "$V" in LEAK-SUSPECT|DENY-SCOPE|DENY-OFF) ;; *) continue ;; esac
+                   H=$(printf '%s' "$FIELDS" | sed -n 's/.* host=\([^ ]*\).*/\1/p')
+                   NAMES=$(printf '%s' "$FIELDS" | sed -n 's/.* suspect=\([^ ]*\).*/\1/p')
+                   FROM=$(printf '%s' "$FIELDS" | sed -n 's/.* project=\([^ ]*\).*/\1/p')
+                   notify_user "desolate proxy: $V" "$NAMES toward $H, from ${FROM:--}"
+                 done
+               fi
+               sleep "$EVERY"
+             done ;;
 
   secret)    # Secrets live ONLY in the Colima VM, below the sysbox boundary.
              # Containers carry the placeholder NAME; the proxy substitutes the
@@ -1170,14 +1283,19 @@ case "$CMD" in
                    echo "  (no secrets stored yet)"
                  else
                    # Formatting happens HERE, on the Mac, where quoting is ours.
-                   # "  NAME  ->  hosts   [headers: h]   (only for: p, q)" -- the
-                   # scope last, which examples/factory/claude reads.
-                   printf '%s\n' "$OUT" | awk -F'\t' '{
-                     n = $2; m = $3; scope = ""; headers = ""; hosts = ""
-                     for (i = 4; i < 4 + n; i++) scope = scope (scope == "" ? "" : ", ") $i
-                     for (i = 4 + n; i < 4 + n + m; i++) headers = headers (headers == "" ? "" : ", ") $i
-                     for (i = 4 + n + m; i <= NF; i++) hosts = hosts (hosts == "" ? "" : ", ") $i
-                     printf "  %s  ->  %s%s%s\n", $1, hosts, (m > 0 ? "   [headers: " headers "]" : ""), (n > 0 ? "   (only for: " scope ")" : "")
+                   # "  NAME  ->  hosts   [headers: h]   [off]   (only for: p, q)"
+                   # -- the scope last, which examples/factory/claude reads; the
+                   # switch only when it is not plainly on.
+                   printf '%s\n' "$OUT" | awk -F'\t' '
+                     function took(s) { return s >= 86400 ? int(s / 86400) "d" : s >= 3600 ? int(s / 3600) "h" int(s % 3600 / 60) "m" : s >= 60 ? int(s / 60) "m" : s "s" }
+                     {
+                     n = $2; m = $3; scope = ""; headers = ""; hosts = ""; state = ""
+                     for (i = 7; i < 7 + n; i++) scope = scope (scope == "" ? "" : ", ") $i
+                     for (i = 7 + n; i < 7 + n + m; i++) headers = headers (headers == "" ? "" : ", ") $i
+                     for (i = 7 + n + m; i <= NF; i++) hosts = hosts (hosts == "" ? "" : ", ") $i
+                     if ($4 == "true") state = "   [off]"
+                     else if ($5 != -1) state = ($5 > $6 ? "   [on, " took($5 - $6) " left]" : "   [off: its while ended " took($6 - $5) " ago]")
+                     printf "  %s  ->  %s%s%s%s\n", $1, hosts, (m > 0 ? "   [headers: " headers "]" : ""), state, (n > 0 ? "   (only for: " scope ")" : "")
                    }'
                  fi
                  ;;
@@ -1196,7 +1314,41 @@ case "$CMD" in
                    jq --arg n "$1" "del(.secrets[\$n])" "$F" > "$T" \
                    && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F" && echo removed' _ "$NAME"
                  ;;
-               *) echo "usage: cli.sh secret {add NAME --hosts a,b [--projects p,q] [--headers h] | list | rm NAME [--force]}" >&2; exit 1 ;;
+               on|off)
+                 # Switched in the VM, where the proxy reads it (addon.py "A
+                 # SECRET SWITCHED OFF"): off until switched on; on for a while,
+                 # its end the VM's clock now plus the while -- the clock the
+                 # proxy reads at each request, so nothing has to fire for it
+                 # to end. A stored secret is on until switched.
+                 NAME="${1:?usage: cli.sh secret $SUB NAME$( [ "$SUB" = on ] && echo ' [--ttl 30m]')}"; shift
+                 case "$NAME" in *[!A-Za-z0-9._-]*) echo "cli.sh: placeholder must be [A-Za-z0-9._-]" >&2; exit 1 ;; esac
+                 TTL=-1
+                 if [ "$SUB" = on ] && [ "${1:-}" = --ttl ]; then
+                   T="${2:?--ttl takes a while: 90s, 30m, 2h, 1d}"
+                   case "$T" in
+                     [1-9]*s|[1-9]*m|[1-9]*h|[1-9]*d) N=${T%?}
+                       case "$N" in *[!0-9]*) echo "cli.sh: --ttl '$T' is not a while (90s, 30m, 2h, 1d)" >&2; exit 1 ;; esac
+                       case "$T" in *s) TTL=$N ;; *m) TTL=$((N * 60)) ;; *h) TTL=$((N * 3600)) ;; *d) TTL=$((N * 86400)) ;; esac ;;
+                     *) echo "cli.sh: --ttl '$T' is not a while (90s, 30m, 2h, 1d)" >&2; exit 1 ;;
+                   esac
+                 elif [ $# -gt 0 ]; then
+                   echo "usage: cli.sh secret on NAME [--ttl 30m] | secret off NAME" >&2; exit 1
+                 fi
+                 vm sudo sh -c 'umask 077; F=/etc/desolate-proxy/settings.json; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
+                   [ "$(jq -r --arg n "$1" ".secrets[\$n] != null" "$F" 2>/dev/null)" = true ] \
+                     || { echo "cli.sh: no secret named $1 (cli.sh secret list)" >&2; exit 1; }
+                   case "$2" in
+                     off) PROG=".secrets[\$n] |= (del(.until) + {off: true})" ;;
+                     *)   PROG="if \$t < 0 then .secrets[\$n] |= del(.off, .until) else .secrets[\$n] |= (del(.off) + {until: (now + \$t | floor)}) end" ;;
+                   esac
+                   jq --arg n "$1" --argjson t "$3" "$PROG" "$F" > "$T" \
+                     && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F"' _ "$NAME" "$SUB" "$TTL" || exit 1
+                 case "$SUB:$TTL" in
+                   off:*) echo "$NAME is off: the proxy refuses it (403) until: $0 secret on $NAME" ;;
+                   on:-1) echo "$NAME is on" ;;
+                   *)     echo "$NAME is on for ${T}; then off, with nothing to run" ;;
+                 esac ;;
+               *) echo "usage: cli.sh secret {add NAME --hosts a,b [--projects p,q] [--headers h] | on NAME [--ttl 30m] | off NAME | list | rm NAME [--force]}" >&2; exit 1 ;;
              esac ;;
 
   vm)        SUB="${1:-status}"; shift || true
@@ -1313,7 +1465,104 @@ case "$CMD" in
                          sudo journalctl -u desolate-proxy --since -2min --no-pager -o cat \
                        | leak_suspect_line "$MARK" \
                        | sed 's/^/   /' | grep . || echo "   (no LEAK-SUSPECT line -- leak detection is NOT live)" ;;
-               *) echo "usage: cli.sh proxy {status|logs [--project <p>] [n]|audit [--project <p>] [n]|test}" >&2; exit 1 ;;
+               learn|enforce)
+                 # One project held to what it is allowed by name; the default
+                 # stays what it is (addon.py "A PROJECT RESTRICTED").
+                 #   proxy learn   --project P --for 1h --then deny|allow
+                 #   proxy enforce deny|allow --project P
+                 #   proxy enforce                    every project's, and how long
+                 ACTION="" P="" FOR="" THEN=""
+                 [ "$SUB" = enforce ] && case "${1:-}" in deny|allow) ACTION=$1; shift ;; esac
+                 while [ $# -gt 0 ]; do
+                   case "$1" in
+                     --project) P="${2:?--project takes a project}"; shift 2 ;;
+                     --for)     FOR="${2:?--for takes a while: 30m, 1h, 1d}"; shift 2 ;;
+                     --then)    THEN="${2:?--then takes deny or allow}"; shift 2 ;;
+                     *) echo "usage: cli.sh proxy learn --project P --for 1h --then deny|allow | proxy enforce [deny|allow --project P]" >&2; exit 1 ;;
+                   esac
+                 done
+                 if [ "$SUB" = enforce ] && [ -z "$ACTION" ] && [ -z "$P" ]; then
+                   # Every project's policy, the VM's clock for what is left.
+                   vm sudo sh -c '[ -f "$1" ] || { echo "  (no project is restricted: every project has the default)"; exit 0; }
+                     jq -r "to_entries[]|[.key,.value.action,(.value.until//-1),(.value.then//\"-\"),(now|floor)]|@tsv" "$1"' _ "$POLICY_JSON" \
+                   | awk -F'\t' 'NF == 1 { print; next } {
+                       if ($2 == "learn" && $3 > $5) printf "  %s  learning, %dm left, then %s\n", $1, ($3 - $5 + 59) / 60, $4
+                       else if ($2 == "learn") printf "  %s  %s (its learning ended)\n", $1, $4
+                       else printf "  %s  %s\n", $1, $2 }'
+                   exit 0
+                 fi
+                 valid_project "$P" || { echo "cli.sh: --project takes a project name (name or owner/name)" >&2; exit 1; }
+                 if [ "$SUB" = learn ]; then
+                   case "$THEN" in deny|allow) ;; *)
+                     echo "cli.sh: say what follows the window: --then deny (enforce what it learned) or --then allow (back to the default)" >&2; exit 1 ;; esac
+                   case "$FOR" in [1-9]*m|[1-9]*h|[1-9]*d) N=${FOR%?} ;; *) N=x ;; esac
+                   case "$N" in ''|*[!0-9]*) echo "cli.sh: --for '${FOR}' is not a while (30m, 1h, 1d)" >&2; exit 1 ;; esac
+                   case "$FOR" in *m) SECS=$((N * 60)) ;; *h) SECS=$((N * 3600)) ;; *d) SECS=$((N * 86400)) ;; esac
+                   ENTRY="{\"action\":\"learn\",\"then\":\"$THEN\",\"for\":$SECS}"
+                 else
+                   [ -n "$ACTION" ] || { echo "usage: cli.sh proxy enforce deny|allow --project P" >&2; exit 1; }
+                   ENTRY="{\"action\":\"$ACTION\"}"
+                 fi
+                 # `allow` takes the project out: listed or not, it is the default.
+                 vm sudo sh -c 'umask 022; install -d -m 0755 "$1"; F="$1/projects.json"; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
+                   [ -f "$F" ] || echo "{}" > "$F"
+                   jq --arg p "$2" --argjson e "$3" "if \$e.action == \"allow\" then del(.[\$p]) elif \$e.for then .[\$p] = {action: \"learn\", then: \$e.then, until: (now + \$e.for | floor)} else .[\$p] = \$e end" "$F" > "$T" \
+                     && install -m 0644 "$T" "$F"' _ "$POLICY_DIR" "$P" "$ENTRY" || exit 1
+                 case "$SUB:$ACTION" in
+                   learn:*)
+                     echo "$P is learning for $FOR: what nothing allows it by name goes through, audited LEARN; then $THEN."
+                     echo "  What it asked for:  $0 proxy recommend --project $P" ;;
+                   enforce:deny)
+                     echo "$P is held to what it is allowed by name; the rest is refused (403)."
+                     echo "  What it was refused:  $0 proxy recommend --project $P" ;;
+                   *) echo "$P has the default again." ;;
+                 esac
+                 [ "$SUB:$ACTION" = enforce:allow ] || echo "  It must run on a daemon of its own: on the shared one its requests are no project's, and desolate refuses to start it there." ;;
+               recommend)
+                 # The rules that would have allowed what a project was refused,
+                 # or let through while learning: `proxy allow` lines to run.
+                 P="" N=2000
+                 while [ $# -gt 0 ]; do
+                   case "$1" in --project) P="${2:-}"; shift 2 ;; *) N=$1; shift ;; esac
+                 done
+                 valid_project "$P" || { echo "usage: cli.sh proxy recommend --project P [n]" >&2; exit 1; }
+                 case "$N" in *[!0-9]*|"") echo "cli.sh: proxy recommend takes a line count" >&2; exit 1 ;; esac
+                 ROWS=$(colima ssh -p "$COLIMA_PROFILE" -- sudo journalctl -u desolate-proxy -n "$(audit_window "$N")" --no-pager -o cat \
+                          | awk -v want="$P" "$RECOMMEND_AWK" | sort -t "$(printf '\t')" -k2,2nr)
+                 if [ -z "$ROWS" ]; then
+                   echo "  nothing $P asked for was refused or learned (in the last $N requests)"; exit 0
+                 fi
+                 echo "# $P asked for these, and no rule allows them by name:"
+                 printf '%s\n' "$ROWS" | while IFS=$(printf '\t') read -r H C WHAT WHO; do
+                   # The requester's text: a host is printed as a command only
+                   # if it is a host name, and the rest only as plain text.
+                   WHAT=$(printf '%s' "$WHAT" | LC_ALL=C tr -cd '[:print:]' | cut -c1-60)
+                   WHO=$(printf '%s' "${WHO:--}" | LC_ALL=C tr -cd 'A-Za-z0-9./()+:;_,-' | cut -c1-60)
+                   if printf '%s' "$H" | grep -Eqx '([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-9-]*[a-z0-9])?'; then
+                     printf '%s proxy allow %s --project %s   # %s request(s): %s (%s)\n' "$0" "$H" "$P" "$C" "$WHAT" "$WHO"
+                   else
+                     printf '# not a host name, so not offered: %s (%s request(s))\n' "$(printf '%s' "$H" | LC_ALL=C tr -cd '[:print:]' | cut -c1-60)" "$C"
+                   fi
+                 done ;;
+               allow)
+                 # proxy allow <host> --project P [--method M]: what a
+                 # restricted project may reach by name. Appended: a deny before
+                 # it still wins.
+                 H="${1:?usage: cli.sh proxy allow <host> --project P [--method M]}"; shift
+                 P="" M=""
+                 while [ $# -gt 0 ]; do
+                   case "$1" in --project) P="${2:-}"; shift 2 ;; --method) M="${2:-}"; shift 2 ;; *) shift ;; esac
+                 done
+                 valid_project "$P" || { echo "cli.sh: --project takes a project name" >&2; exit 1; }
+                 case "$H" in *[!A-Za-z0-9.*-]*|"") echo "cli.sh: '$H' is not a host name" >&2; exit 1 ;; esac
+                 host_pattern_pins_a_destination "$H" || { echo "cli.sh: '$H' does not name a destination ('*.example.com' does; '*' does not)" >&2; exit 1; }
+                 case "$M" in ""|GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS) ;; *) echo "cli.sh: --method takes an HTTP method" >&2; exit 1 ;; esac
+                 RULE="{\"action\":\"allow\",\"host\":\"$(printf '%s' "$H" | tr 'A-Z' 'a-z')\",\"projects\":[\"$P\"]${M:+,\"method\":\"$M\"}}"
+                 vm sudo sh -c 'umask 077; F=/etc/desolate-proxy/settings.json; T=$(mktemp); trap "rm -f \"$T\"" EXIT INT TERM
+                   jq --argjson r "$1" "if (.network // []) | index([\$r]) then . else .network = ((.network // []) + [\$r]) end" "$F" > "$T" \
+                     && install -m 0600 -o desolate-proxy -g desolate-proxy "$T" "$F"' _ "$RULE" || exit 1
+                 echo "$P may reach $H${M:+ ($M)}" ;;
+               *) echo "usage: cli.sh proxy {status|logs [--project <p>] [n]|audit [--project <p>] [n]|test|learn|enforce|recommend|allow}" >&2; exit 1 ;;
              esac ;;
 
   repo)      ensure_running
@@ -1396,11 +1645,14 @@ case "$CMD" in
   suede)     ensure_running
              # A project's suede dependencies (docs/suede-factory.md). The
              # Mac's: the editor's desolate and its panel do not offer these,
-             # and the dependency is always named here, never read from the
-             # project. The project's git runs in its sandbox (orchestrator);
-             # keys and caches are the editor's.
+             # and the dependency is always named HERE, never read from the
+             # project: its .gitrepo says which repository a folder is a copy
+             # of, and that is the project's own word -- a push with that
+             # repository's key on the project's say-so would let any project
+             # push to any repository in the stack. The project's git runs in
+             # its sandbox (orchestrator); keys and caches are the editor's.
              SUB="${1:-}"; shift || true
-             SUEDE_USAGE="usage: cli.sh suede {deliver <project> <owner/repo> | report <project> [--ref <ref>] | upstream <project> <dir> [--ref <ref>]}"
+             SUEDE_USAGE="usage: cli.sh suede {deliver <project> <owner/repo> | report <project> [--ref <ref>] | upstream <project> <dir> <owner/repo> [--ref <ref>]}"
              case "$SUB" in
                deliver)
                  [ $# -eq 2 ] || { echo "$SUEDE_USAGE" >&2; exit 1; }
@@ -1409,7 +1661,8 @@ case "$CMD" in
                  PROJ="${1:?$SUEDE_USAGE}"; shift
                  exec docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --suede-report "$@" "$PROJ" ;;
                upstream)
-                 PROJ="${1:?$SUEDE_USAGE}"; DIR="${2:?$SUEDE_USAGE}"; shift 2
+                 PROJ="${1:?$SUEDE_USAGE}"; DIR="${2:?$SUEDE_USAGE}"; DEP="${3:?$SUEDE_USAGE}"; shift 3
+                 [[ "$DEP" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "cli.sh: '$DEP' is not an owner/repo" >&2; exit 1; }
                  NAME="desolate-transfer-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n').bundle"
                  OUT=$(docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --suede-build "$DIR" --transfer "$NAME" "$@" "$PROJ") \
                    || { printf '%s\n' "$OUT" >&2; exit 1; }
@@ -1417,7 +1670,10 @@ case "$CMD" in
                  [ -n "$LINE" ] || { printf '%s\n' "$OUT" >&2; echo "cli.sh: the sandbox said nothing of a proposal" >&2; exit 1; }
                  if [ "$LINE" = "BUILT none" ]; then echo "UPSTREAMED none"; exit 0; fi
                  read -r _ COMMIT PIN TAG CONSUMER PATCH _ <<< "$LINE"
-                 case "$TAG" in *__*) DEP="${TAG%%__*}/${TAG#*__}" ;; *) echo "cli.sh: $DIR's remote names no owner/repo" >&2; exit 1 ;; esac
+                 # The sandbox says what the folder's .gitrepo names; it must be
+                 # the repository named here, or the proposal goes nowhere.
+                 case "$TAG" in *__*) SAID="${TAG%%__*}/${TAG#*__}" ;; *) SAID="" ;; esac
+                 [ "$SAID" = "$DEP" ] || { echo "cli.sh: $DIR in $PROJ is a copy of ${SAID:-no owner/repo}, not of $DEP; nothing is pushed" >&2; exit 1; }
                  SAID=$(docker exec -e DESOLATE_PLANE=mac "$CONTAINER" with-ca tsx /usr/local/lib/desolate/suede.ts upstream \
                           "$PROJ" "$DEP" "$NAME" "$COMMIT" "$PIN" "$CONSUMER") || { printf '%s\n' "$SAID" >&2; exit 1; }
                  BRANCH=$(printf '%s\n' "$SAID" | sed -n 's/^UPSTREAMED //p')
@@ -1499,7 +1755,13 @@ case "$CMD" in
              # way would not, so `git lfs`, `curl` and `pip` typed here would
              # fail certificate verification while the same command worked in
              # the browser. Same asymmetry that broke `desolate` from the Mac.
-             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" with-ca bash "$@" ;;
+             #
+             # --rcfile /dev/null --noprofile: no rc or profile file from HOME,
+             # which is the vscode-home volume a compromised editor can write
+             # and a restart does not discard -- the browser terminal's profile
+             # does the same (editor-settings.ts). /etc/bash.bashrc, root's,
+             # is still read: the completion and the git guard live there.
+             exec docker exec "${TTY[@]}" -w /workspaces "$CONTAINER" with-ca bash --noprofile --rcfile /dev/null "$@" ;;
 
   help|-h|--help) usage ;;
   *)         ensure_running

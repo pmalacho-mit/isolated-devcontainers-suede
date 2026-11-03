@@ -169,11 +169,12 @@ try 'orchestrator'        '$ORCH_IP'   3000
 # ---------------------------------------------------------------------------
 head2 "2. can it reach the VM itself, beyond the two allowed ports?"
 # ---------------------------------------------------------------------------
-# The input chain allows 18080 (proxy), 5353 (dns), 18081 (CA) and drops the
-# rest. sshd on 22 is the one worth checking: reachable would mean a project can
-# at least knock on the VM's front door.
+# The input chain allows 5353 (dns) and 18081 (CA), 18080 (proxy) only for a
+# connection REDIRECT sent there -- a direct one would have the proxy dial
+# itself -- and drops the rest. sshd on 22 is the one worth checking: reachable
+# would mean a project can at least knock on the VM's front door.
 run_probes "
-try 'proxy (expected reachable)'     '$GW' 18080
+try 'proxy, directly (expected blocked: only via REDIRECT)' '$GW' 18080
 try 'CA server (expected reachable)' '$GW' 18081
 try 'VM sshd (expected blocked)'     '$GW' 22
 "

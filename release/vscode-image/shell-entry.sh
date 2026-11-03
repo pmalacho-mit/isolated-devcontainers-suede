@@ -1,5 +1,5 @@
 #!/bin/sh
-# Seed the OUTER editor's security defaults, then exec the server.
+# Hold the OUTER editor's security defaults, then exec the server.
 #
 # WHY THIS IS A START-TIME STEP AND NOT A DOCKERFILE LINE
 #
@@ -43,45 +43,21 @@ set -eu
 SETTINGS_DIR="${HOME}/.vscodium-server/data/User"
 SETTINGS="${SETTINGS_DIR}/settings.json"
 
-if [ ! -f "$SETTINGS" ]; then
-    mkdir -p "$SETTINGS_DIR"
-    cat > "$SETTINGS" <<'JSON'
-{
-  // Seeded once by shell-entry.sh. Yours to edit -- it is not rewritten.
-  // See tests/static/08-editor-hardening.sh for the two values that are
-  // asserted, and release/README.md for why.
+# Every start, not once: $HOME is a volume a compromised editor can write, and
+# a restart is what the README says ends an incident. editor-settings.ts seeds
+# the file when absent, and otherwise puts back only the settings it holds --
+# the rest of the file is yours. tests/static/08-editor-hardening.sh holds the
+# values; release/README.md says why.
+if ! tsx /usr/local/lib/desolate/editor-settings.ts "$SETTINGS"; then
+    echo "shell-entry: could not hold the editor's security settings; not starting" >&2
+    exit 1
+fi
 
-  // ON, and true means the protection EXISTS. Setting it false would mean
-  // "trust everything", which is the opposite of what it sounds like.
-  "security.workspace.trust.enabled": true,
-
-  // Never offer the prompt at startup. A folder stays in Restricted Mode until
-  // you deliberately trust it (Workspaces: Manage Workspace Trust). Removes the
-  // reflexive click that would trust /workspaces -- and so every repository you
-  // later clone into it -- permanently.
-  "security.workspace.trust.startupPrompt": "never",
-  "security.workspace.trust.emptyWindow": false,
-  "security.workspace.trust.banner": "always",
-
-  // Terminals are BLOCKED in Restricted Mode by default, because a shell can
-  // execute workspace content on startup (sourcing .env, direnv, rc scripts
-  // that reference the cwd). This image's shell does none of that, and running
-  // `desolate` from a terminal is the entire job of this editor -- so the
-  // precondition upstream names for re-enabling it is met here.
-  "terminal.integrated.allowInUntrustedWorkspace": true,
-
-  // A trusted workspace can still declare tasks that run on folderOpen. Nothing
-  // in this editor needs them; real work happens in the project's own editor,
-  // inside its devcontainer, where there is no agent socket to reach.
-  "task.allowAutomaticTasks": "off",
-
-  // This editor is a launcher, not an IDE. Extensions here run beside the agent
-  // socket; install them in the project editor instead.
-  "extensions.autoCheckUpdates": false,
-  "extensions.autoUpdate": false
-}
-JSON
-    echo "shell-entry: seeded editor security defaults at $SETTINGS" >&2
+# The gate between the browser and the server (editor-gate.ts): compose puts
+# the server on this container's loopback and publishes the gate's port, so
+# the editor is reached through it or not at all.
+if [ -n "${DESOLATE_EDITOR_GATE:-}" ]; then
+    node /usr/local/lib/desolate/editor-gate.ts "${DESOLATE_EDITOR_GATE%%:*}" "${DESOLATE_EDITOR_GATE#*:}" &
 fi
 
 exec "$@"

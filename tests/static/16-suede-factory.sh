@@ -63,7 +63,7 @@ case "$*" in
   "suede report acme/app --ref origin/main") echo "desolate: driving its daemon"; printf 'DEPS %s\n' "$(cat "$STUB_DIR/report")" ;;
   "suede report acme/lib --ref origin/main") printf 'DEPS %s\n' "$(cat "$STUB_DIR/report-lib")" ;;
   "suede report acme/rel --ref origin/main") printf 'DEPS %s\n' "$(cat "$STUB_DIR/report-rel")" ;;
-  "suede upstream acme/app widget --ref origin/main")
+  "suede upstream acme/app widget acme/widget --ref origin/main")
     echo "UPSTREAMED acme/widget downstream/acme/app-$(cat "$STUB_DIR/app-head") $(printf 'c%.0s' $(seq 40)) $(cat "$STUB_DIR/patch")" ;;
 esac
 exit 0
@@ -84,6 +84,7 @@ tick() {
     bash "$ROOT/examples/factory/suede/suede-factory.sh" run --once "$@" </dev/null > "$STUB/out" 2>&1
 }
 calls() { cat "$STUB/calls"; }
+approve() { PATH="$STUB/bin:$PATH" SUEDE_FACTORY_STATE="$STUB/state" bash "$ROOT/examples/factory/suede/suede-factory.sh" approve "$@" >/dev/null; }
 pr_appears() { # <head> <number> [<created, default now> [<state>]]
   jq -cn --argjson n "$2" --arg at "${3:-$(date -u +%FT%TZ)}" --arg s "${4:-OPEN}" \
     '[{number: $n, state: $s, url: "u", title: "t", body: "suede rebuilt it.\nFrom acme/app.", createdAt: $at}]' \
@@ -96,12 +97,19 @@ closed_issue() { # <issue file> <number> <reason>: as gh lists it, closed
     --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{number: $n, closedAt: $at, stateReason: $r, body: ("x\n" + $m)}'
 }
 
-group "a consumer's main moved: its changes are proposed, once"
+group "a dependency the project names is not one you approved for it: asked, and nothing pushed (audit H1)"
 stack "acme/app acme/widget"; echo "$H1" > "$STUB/app-head"; echo "$PIN" > "$STUB/widget-release"; report patch1
+tick
+assert_not_contains "in the stack is not enough: the project chose the name" "$(calls)" "suede upstream"
+assert_contains "  you are asked for the pair, with the command" "$(cat "$STUB/out")" "acme/app names acme/widget as a suede dependency"
+assert_contains "  " "$(cat "$STUB/out")" "suede-factory.sh approve acme/app acme/widget"
+approve acme/app acme/widget
+
+group "a consumer's main moved: its changes are proposed, once"
 tick
 assert_contains "origin/* is refreshed, fetch only" "$(calls)" "cli pull acme/app --fetch-only"
 assert_contains "the report is of origin/main" "$(calls)" "cli suede report acme/app --ref origin/main"
-assert_contains "the change is pushed as suede's branch" "$(calls)" "cli suede upstream acme/app widget --ref origin/main"
+assert_contains "the change is pushed as suede's branch, to the dependency the approval names" "$(calls)" "cli suede upstream acme/app widget acme/widget --ref origin/main"
 assert_contains "and waits for suede's PR" "$(PATH="$STUB/bin:$PATH" SUEDE_FACTORY_STATE="$STUB/state" bash "$ROOT/examples/factory/suede/suede-factory.sh" status)" \
   "acme/widget: downstream/acme/app-$H1 (acme/app/widget)"
 tick
@@ -153,6 +161,7 @@ dep_report() { # <file> <kind> <state>
 }
 dep_report report-lib development same; dep_report report-rel release diff
 stack "acme/app acme/widget acme/lib acme/rel"
+approve acme/lib acme/widget; approve acme/rel acme/widget   # each pair, yours to say
 tick
 assert_contains "the new consumers are looked at" "$(calls)" "suede report acme/lib"
 # #32 (PR #15, acme/app's) was merged, and closed its issue; #31 was replaced.
@@ -233,19 +242,20 @@ group "a dependency outside the stack: asked once, added once approved"
 stack "acme/app acme/widget"; echo "$(printf '4%.0s' $(seq 40))" > "$STUB/app-head"
 report patch2 '{"dir": "other", "repo": "acme/other", "remote": "r", "pin": "p", "kind": "app", "state": "nopin", "files": []}'
 tick
-assert_contains "you are asked, with the command" "$(cat "$STUB/out")" "suede-factory.sh approve acme/other"
+assert_contains "you are asked, with the command" "$(cat "$STUB/out")" "suede-factory.sh approve acme/app acme/other"
+assert_contains "  saying it will be cloned with a key" "$(cat "$STUB/out")" "cloned into the stack with a write deploy key"
 assert_not_contains "nothing is added without you" "$(calls)" "repo add"
 tick
-assert_not_contains "and you are not asked again" "$(cat "$STUB/out")" "approve acme/other"
+assert_not_contains "and you are not asked again" "$(cat "$STUB/out")" "approve acme/app acme/other"
 assert_not_contains "  nor is the consumer looked at again while it waits on you" "$(calls)" "suede report acme/app"
-PATH="$STUB/bin:$PATH" SUEDE_FACTORY_STATE="$STUB/state" bash "$ROOT/examples/factory/suede/suede-factory.sh" approve acme/other >/dev/null
+approve acme/app acme/other
 tick
 assert_contains "once approved, the consumer is looked at again" "$(calls)" "suede report acme/app"
 assert_contains "  and the dependency is added to the stack" "$(calls)" "cli repo add acme/other"
 
 group "--dry-run: everything read, nothing pushed, filed or changed"
 rm -rf "$STUB/state" "$STUB"/issue-* "$STUB/next-issue" "$STUB"/pr-for-*; rm -f "$STUB/widget-open-issues"
-stack "acme/app acme/widget"; echo "$H1" > "$STUB/app-head"; report patch1
+stack "acme/app acme/widget"; echo "$H1" > "$STUB/app-head"; report patch1; approve acme/app acme/widget
 tick --dry-run
 assert_contains "it reads" "$(calls)" "suede report acme/app"
 assert_not_contains "it does not push" "$(calls)" "suede upstream"

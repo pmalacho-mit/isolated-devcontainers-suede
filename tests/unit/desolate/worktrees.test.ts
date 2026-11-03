@@ -249,8 +249,14 @@ describe("whether a worktree has been checked out", () => {
     assert.equal(isPopulated(feature), true);
   });
 
-  test("a root target always is", () => {
-    assert.equal(isPopulated(sandbox().project("acme/widgets")), true);
+  test("a root target is, unless it is a clone still waiting for its files", () => {
+    const box = sandbox();
+    const root = box.project("acme/widgets");
+    assert.equal(isPopulated(root), true, "a .git with no HEAD is no clone `repo add` made");
+    fs.writeFileSync(join(box.workspaces, "acme/widgets/.git/HEAD"), "ref: refs/heads/main\n");
+    assert.equal(isPopulated(root), false);
+    fs.writeFileSync(join(box.workspaces, "acme/widgets/.git/index"), "");
+    assert.equal(isPopulated(root), true);
   });
 });
 
@@ -307,8 +313,29 @@ describe("which worktrees a sandbox should check out", () => {
     assert.equal(awaitsCheckout(orphan), false);
   });
 
-  test("never a root target", () => {
-    assert.equal(awaitsCheckout(sandbox().project("acme/widgets")), false);
+  test("a project root only as `repo add` leaves it: a .git with a HEAD, no index, and nothing beside it (audit M1)", () => {
+    const box = sandbox();
+    const root = box.project("acme/widgets");
+    const at = (path: string) => join(box.workspaces, "acme/widgets", path);
+    assert.equal(awaitsCheckout(root), false, "no HEAD: not a clone");
+    fs.writeFileSync(at(".git/HEAD"), "ref: refs/heads/main\n");
+    assert.equal(awaitsCheckout(root), true);
+    // Files beside .git are someone's work, and `checkout --force` would
+    // overwrite them: a root that lost its index is not a fresh clone.
+    fs.writeFileSync(at("notes.txt"), "mine\n");
+    assert.equal(awaitsCheckout(root), false, "a root holding files");
+    fs.rmSync(at("notes.txt"));
+    fs.writeFileSync(at(".git/index"), "");
+    assert.equal(awaitsCheckout(root), false, "checked out already");
+  });
+
+  test("not a root whose .git is a link -- to another project's, say", () => {
+    const box = sandbox();
+    box.project("acme/other");
+    fs.writeFileSync(join(box.workspaces, "acme/other/.git/HEAD"), "ref: refs/heads/main\n");
+    fs.mkdirSync(join(box.workspaces, "acme/widgets"), { recursive: true });
+    fs.symlinkSync(join(box.workspaces, "acme/other/.git"), join(box.workspaces, "acme/widgets/.git"));
+    assert.equal(awaitsCheckout(target(box.workspaces, "acme/widgets")), false);
   });
 });
 

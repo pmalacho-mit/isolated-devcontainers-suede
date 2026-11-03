@@ -1,5 +1,19 @@
 # Fixes for the loopback cookie jar
 
+> **Answered 2026-11-02, and fixed.** Measured against the editor image's
+> VSCodium server: the cookie is *not* HttpOnly (the workbench reads it from
+> `document.cookie`), it authenticates alone, and the WebSocket upgrade takes
+> any `Origin` -- the worst row below. Option B was applied, with the two
+> things B alone leaves open: a port answers any name a browser uses, so a dev
+> server could be opened as `desolate.localhost:<its port>`; and the editor
+> serves any `/workspaces` file as a page at its own origin, reachable by a
+> cross-site navigation. `vscode-image/hosts.ts` names every surface,
+> `proxy/vm/ingress.py` holds each forward to its own name, and
+> `vscode-image/editor-gate.ts` refuses cross-site requests to the outer
+> editor -- release/README.md, "Every surface by its own name". The check is
+> now `tests/environments/editor-gate/run.sh` (Chromium, the real server); the
+> probe's `127.0.0.1` requests get the gate's `421`.
+
 Run `./tests/probes/loopback-cookie-scope.sh` first. It answers two questions,
 and only one combination of answers needs a fix at all:
 

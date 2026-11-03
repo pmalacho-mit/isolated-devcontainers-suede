@@ -12,11 +12,26 @@ The Red Guild's ["Leveraging VSCode internals to escape containers."](https://bl
 
 The name is `desolate` = **de**v + i**solate**.
 
+**Contents.** [Architecture](#architecture) ·
+[What holds, and what does not](#what-holds-and-what-does-not) ·
+[Requirements](#requirements) · [Setup](#setup) · [Daily use](#daily-use) ·
+[Privilege separation](#privilege-separation-why-the-editor-cant-touch-the-daemon) ·
+[Dev servers](#dev-servers-and-dynamic-ports) ·
+[Editor extensions](#editor-extensions-and-settings) ·
+[Building inside a devcontainer](#building-your-own-containers-inside-a-devcontainer) ·
+[Project layout](#how-projects-are-laid-out) · [Worktrees](#worktrees-several-branches-of-one-repo-at-once) ·
+[Agents](#agents-and-a-factory-on-top) · [Secrets](#secrets-placeholders-in-real-values-never) ·
+[Isolation model](#isolation-model) · [Verifying containment](#verifying-containment) ·
+[Components](#components) · [Configuration](#configuration) · [Troubleshooting](#troubleshooting)
+
+Elsewhere: [incidents, and what each taught](docs/incidents.md) -- the
+history behind the controls below.
+
 ## Architecture
 
 ```
 +- macOS ------------------------------------------------------------------+
-|  browser --> 127.0.0.1:3000 (?token)      ./cli.sh observe (no port)     |
+|  browser --> desolate.localhost:3000      ./cli.sh observe (no port)     |
 |                                                                          |
 |  +- Colima VM (Ubuntu; sysbox + desolate-proxy) ----------------------+  |
 |  |  SECRETS LIVE HERE ONLY: /etc/desolate-proxy/settings.json (0600)  |  |
@@ -143,11 +158,37 @@ without the editor holding any of them.
 
 **What this buys, precisely.** A compromised editor can *use* your deploy keys
 for as long as it is compromised — it can push to repositories you have
-configured. It cannot *copy* one. The incident therefore ends when you restart a
-container, rather than when you have rotated every deploy key on every
+configured. It cannot *copy* one. The incident therefore ends when you restart
+the editor, rather than when you have rotated every deploy key on every
 repository and audited what was done with them in the meantime. That is the
 whole claim, and it is worth being exact about, because "the keys are safe" is
 not what is being said.
+
+**What a restart puts back, and what it does not.** The editor's `$HOME` is a
+volume, and a compromised editor runs as the user who owns it, so "restart"
+only ends an incident if what runs at the next start does not come from that
+volume. Held at every start, or kept out of the volume altogether:
+
+- the editor's own code is root's in the image, so it cannot be rewritten in
+  place; `./cli.sh down` / `up` recreates the container besides;
+- the security settings (workspace trust, automatic tasks, extension updates)
+  are put back by `editor-settings.ts` before the server starts; the rest of
+  `settings.json` is yours;
+- the terminal profile is held to a bash that reads no rc file from `$HOME`
+  (`--rcfile /dev/null`), so a planted `~/.bashrc` runs nothing;
+- extensions installed in this editor live on a tmpfs, gone at the next start;
+- the ssh config `desolate` pushes and pulls with is written per use from the
+  keyring's exports — host alias, public key, `IdentitiesOnly`, GitHub's host
+  keys from the image — so `~/.ssh/config` and `~/.ssh/known_hosts` in the
+  volume are not consulted. (`newrepo` still writes `~/.ssh/config`, for a
+  `git` you type yourself.)
+
+What a restart does *not* undo is anything else in the volume: `~/.gitconfig`,
+the rest of your settings, the server's own state. After an incident, discard
+the volume: `./cli.sh reset-editor` stops the editor, removes `vscode-home`,
+and starts it again; `./cli.sh repo add <owner/repo>` then writes each
+registered repository's ssh and git config again (its key is the keyring's, and
+kept). Projects and devcontainers are other volumes, and are not touched.
 
 Proxy secrets work the same way, and want the same exactness. Placeholders go
 into the container, real values are substituted at the proxy toward proven
@@ -340,7 +381,7 @@ To pin a different sysbox release, check the
 through:
 
 ```bash
-SYSBOX_VERSION=0.7.0 ./cli.sh vm install
+SYSBOX_VERSION=0.7.1 ./cli.sh vm install
 ```
 
 #### 2. The egress proxy
@@ -371,6 +412,12 @@ Four pieces get installed:
 | CA publisher   | `:18081` | Hands out the proxy's certificate, so containers can trust it for HTTPS             |
 | nftables rules | kernel   | Force all container traffic through the above, rather than trusting them to opt in  |
 
+The three listeners bind every address, because the bridges they serve come
+and go with `cli.sh up`; the rules are what decide who reaches them: the
+desolate bridges (the proxy only for a connection the REDIRECT sent, never one
+made to `:18080` itself) and the VM's own loopback, and no other interface --
+not the one the Mac's network is on.
+
 The certificate matters more than it sounds: HTTPS traffic is encrypted, so the
 proxy can only do its job if containers trust its certificate. That's what the
 publisher is for, and it's why a devcontainer that skips installing the CA gets
@@ -399,7 +446,10 @@ echo "VSCODE_TOKEN=$(openssl rand -hex 24)" >> .env && chmod 600 .env
 > [!WARNING]
 > `>>` **appends** to `.env` if it already exists. The last value will be used, so it's not a big deal, but your `.env` will grow indefinitely.
 
-Open the printed `http://127.0.0.1:3000/?tkn=...` URL. That's your editor.
+Open the printed `http://desolate.localhost:3000/?tkn=...` URL. That's your
+editor. Chrome and Firefox resolve every `*.localhost` name to loopback with
+nothing configured; each project's editor and dev servers get a name of their
+own the same way ([Every surface by its own name](#every-surface-by-its-own-name)).
 
 [`preflight`](./preflight.sh) will tell you whether egress is actually intercepted. To see the
 secrets machinery work end to end:
@@ -467,7 +517,7 @@ the rules would go stale again each time.
 ./cli.sh desolate --list        # what is running right now, and its URL
 ./cli.sh desolate --stop all    # stop every running project and worktree
 ./cli.sh secret add NAME --hosts a.com   # store a real value in the VM only
-./cli.sh secret list | rm NAME
+./cli.sh secret list | on NAME [--ttl 30m] | off NAME | rm NAME
 ./cli.sh proxy status | logs | test      # egress proxy health + self-test
 ./cli.sh vm status              # sysbox, live vs armed bridge, VM unit state
 ./cli.sh vm install             # re-provision the VM (idempotent; also upgrades)
@@ -482,6 +532,7 @@ the rules would go stale again each time.
 ./cli.sh push owner/repo [--worktree wip]     # its checked-out branch to GitHub (never git in the editor)
 ./cli.sh pull owner/repo [--worktree wip]     # GitHub's branches in as origin/*, fast-forwarded
 ./cli.sh desolate --status       # each target's status, as its agent last set it
+./cli.sh watch                  # notify you when one asks (orange), is stuck (red), or a secret strays
 ./cli.sh shell                  # bash in the editor container
 ./cli.sh ps | logs | preflight | observe
 ./cli.sh reset-inner            # the inner daemon is wedged: report, then recover
@@ -490,6 +541,17 @@ the rules would go stale again each time.
 ./cli.sh dind df                # disk, per daemon; `dind gc` gives build cache back
 ./cli.sh down                   # stop (down -v also deletes volumes; confirms)
 ```
+
+**Being told, with the tab out of sight:** `./cli.sh watch [seconds]` polls
+every target's status and the proxy's journal, and says each of these once,
+as it happens: a target that turns orange (asks) or red (is stuck), with what
+its agent said; and a request the proxy flagged -- `LEAK-SUSPECT` (a
+placeholder toward a host it is not for), `DENY-SCOPE`, `DENY-OFF`. How it says
+it is `DESOLATE_NOTIFY`: unset, a macOS notification (`osascript`), or
+`notify-send` where there is one; `none` for the line in the terminal only;
+or a command of yours, called as `<cmd> "<title>" "<message>"`. The dispatchers
+read the same variable. What an agent wrote reaches it with no control
+character in it.
 
 **Getting code in:** drag a folder into the browser editor's file explorer.
 
@@ -720,13 +782,26 @@ while the approved snapshot still said `harmless`. The window is the whole
 resolve → enforce → spawn → build sequence, and a lost attempt costs the
 attacker nothing.
 
-Refusing local features closes the reachable form of this. What remains is a
-_published_ feature whose registry content changes between the two reads, which
-needs a registry the attacker controls; pin features by digest
-(`...@sha256:...`) if that is in your threat model. The complete fix is to make
-the CLI read the snapshot rather than the project -- e.g. by bind-mounting the
-frozen copy over `.devcontainer/` in the orchestrator's own mount namespace for
-the duration of the build -- which is not implemented.
+Refusing local features closes the project-side form of this. The registry-side
+form -- a _published_ feature whose content differs between the two reads, which
+any author of a hostile `devcontainer.json` can arrange by serving the feature
+from a host they run -- is closed by **pinning every feature to a digest before
+the check**. `desolate` resolves each tag with the CLI's own resolver
+(`devcontainer upgrade`, run over a scratch copy of the spec), rewrites the id
+to `<registry>/<path>@sha256:...` in the derived spec, and both the policy's
+read and `devcontainer up` fetch by that digest -- the CLI hashes the manifest
+and the layer it receives and refuses a mismatch, so both reads see the same
+bytes or nothing starts. `up` runs with `--no-lockfile`: the lockfile it would
+read sits beside the project's own config, where an entry can send even a
+pinned id to another manifest. A project's own `devcontainer-lock.json` is still
+honoured as a statement of which digest it wants for a tag.
+
+What cannot be pinned is refused, with the way out in the message: an
+`https://` tarball feature (a URL carries no digest), a GitHub-releases id
+(`owner/repo/feature`, resolved outside any digest), and a feature that
+`dependsOn` others (its own manifest is pinned, but its dependencies are
+fetched by their ids, by tag, at both reads). Publish the feature to a
+registry, or use one without dependencies.
 
 ### A project may only reach its own folder
 
@@ -939,6 +1014,19 @@ a tag that moves upstream cannot change what a cached derivative stands for.
 is yours, so `desolate` cannot derive it; build-time HTTPS in such a project
 still fails certificate verification, and `desolate` says so explicitly when it
 sees one rather than letting you discover it mid-build.
+
+What such a project *is* covered for is its base image's say in the container.
+The CLI merges a base image's `devcontainer.metadata` label -- `privileged`,
+`capAdd`, `mounts`, `entrypoint` -- into the container it creates, and for a
+Dockerfile project that image does not exist when the policy reads the spec:
+measured, `FROM` a base carrying `[{"privileged":true}]` started privileged
+behind a spec that passed. So a Dockerfile project is **built first**, by
+`devcontainer build` over the snapshot's spec (its Dockerfile from the
+snapshot, its context from the project, never the live spec, which could say
+`build.options`), and the spec `up` starts from is rewritten to name the image
+that came out **by id**. The policy reads that spec with the label merged, and
+`up` starts that image and no other. The policy runs twice for such a project:
+on the build's inputs, then on its output.
 
 The supported path is `"image"` plus Features, which covers most of what a
 Dockerfile is usually doing anyway. If you genuinely need a custom Dockerfile,
@@ -1287,8 +1375,9 @@ forwards any VM loopback listener to the Mac's loopback within a fraction of a
 second, so the URL works with nothing published by docker at all.
 
 The forwarder refuses anything outside its bounds and logs it: a port below
-1024 (Lima forwards those onto your LAN), an address that is not a dind's, or a
-bridge's own gateway (the VM itself). Its uid can open connections to dind
+1024 (Lima forwards those onto your LAN), an address that is not a dind's, a
+bridge's own gateway (the VM itself), or a request for any name but its
+target's own (next section). Its uid can open connections to dind
 bridges and nowhere else -- an nftables rule, counted, that does not trust the
 forwarder's own checks. `./cli.sh preflight` proves the whole path from your
 Mac: it opens a port on demand and fetches through it.
@@ -1297,6 +1386,60 @@ Allocation starts at `DESOLATE_PORT_BASE` (8080) and takes the lowest free port,
 keeping a target's previous ports when it can. Set the base in the `.env` next
 to `docker-compose.yml` if 8080 is busy on your Mac; nothing else needs to agree
 with it.
+
+### Every surface by its own name
+
+Every editor and dev server is on your Mac's loopback, on different ports, and
+a browser's cookie jar ignores the port (RFC 6265 s8.5). Measured against the
+editor's VSCodium server: `?tkn=` sets `vscode-tkn=<token>; SameSite=Lax`, not
+HttpOnly (the workbench reads it from `document.cookie`, so it cannot be), and
+that cookie alone authenticates; the WebSocket upgrade takes any `Origin`. When
+everything was `127.0.0.1:<port>`, any page there -- a project's dev server,
+the URL `desolate` tells you to open -- could read the outer editor's token and
+every project editor's, and drive the outer editor with it: its terminals, the
+keyring's agent, every project. With the cookie the editor also serves any file
+in `/workspaces` as a page at its own origin (`vscode-remote-resource`), and a
+Lax cookie goes along with a navigation from any site.
+
+So each surface has a name of its own, which is a site of its own:
+
+- the outer editor is `desolate.localhost`;
+- each target is `<its name>-<16 hex>.localhost` (`vscode-image/hosts.ts`); the
+  hex is of its namespace, so no two targets share one, however they are
+  spelled. `DESOLATE_EXTERNAL_<port>_URL` and every URL `desolate` prints use it.
+
+A name only separates cookies if no page can be served under someone else's,
+and a port answers whatever name a browser used to reach it. So:
+
+- **`desolate-ingress` holds each forward to its target's name.** An HTTP/1.x
+  request must carry exactly one `Host: <its name>:<port>`, a TLS ClientHello
+  must name it as SNI; anything else is answered `421` and reaches nothing.
+  Bytes no browser sends -- Postgres, Redis, h2c -- pass as before. A client
+  that sends nothing is taken for a server-first protocol (MySQL, SMTP, SSH),
+  and the server's greeting is passed only if it is not an HTTP response:
+  Chrome sends a request on a preconnected socket with bytes already waiting on
+  it, so a dev server that answered first could otherwise land a page under a
+  name not its own. `preflight` checks the forward answers its own name and not
+  the editor's or `127.0.0.1`.
+- **The outer editor sits behind `editor-gate.ts`.** The server listens on its
+  container's loopback; the gate takes the published port and refuses a request
+  for any host but `desolate.localhost` (`127.0.0.1` gets `421` and the address
+  to use), any request another site or port started (`Sec-Fetch-Site`
+  `cross-site` or `same-site`, a foreign `Origin` -- WebSocket upgrades
+  included), and answers a `vscode-remote-resource` opened as a page or frame
+  with `Content-Security-Policy: sandbox`, where a script cannot run. With no
+  gate nothing listens on the published port: unreachable, never ungated.
+  `tests/environments/editor-gate/run.sh` runs it in Chromium against the real
+  server: the editor works, and each attack fails, beside a control that shows
+  it would have worked.
+
+After upgrading, clear `127.0.0.1`'s cookies once in your browser (Chrome:
+Settings → Privacy → Third-party cookies → See all site data → `127.0.0.1`):
+the old token cookie lasts a week, and nothing needs it now.
+
+What this does not cover: Safari does not resolve `*.localhost` by itself
+(an `/etc/hosts` line per name would), and a project's own dev server can
+still read its own editor's cookie -- the same project's trust.
 
 ### When your Mac already holds the port
 
@@ -1354,6 +1497,16 @@ gets is an ssh-agent socket and the public half.
 Exactly one level of nesting is allowed. `a/b/c` is refused, and so is anything
 resolving outside `/workspaces` -- the broker compares the _resolved_ path
 against the workspaces root, so a symlink named legally still cannot escape.
+The runner compares it again just before `devcontainer up`, and after `up` asks
+the new container what it got: the inode of its workspace folder, against the
+directory's here, measured before anything began. The daemon resolves the bind
+source on its own, moments after any check, and `/workspaces` is the editor's
+to write; a link swapped in during that moment would otherwise hand the
+container the link's target. A container that got anything else is stopped and
+removed before it is said to be ready -- and before anything of the project's
+has run in it: `up` holds the lifecycle commands back (`--skip-post-create`),
+and `onCreateCommand` through `postAttachCommand` run only after the check,
+the proxy CA and the published ports, through `devcontainer run-user-commands`.
 
 **Docker names cannot contain `/`.** So a nested project's volumes, relay
 containers and state files use an encoded form: `owner/repo` becomes
@@ -1681,6 +1834,73 @@ around. Its cost: a deny scoped to one project also stops every project on
 the shared daemon from reaching that host. A `projects` that is not a list
 makes an allow apply to no one, and a deny apply to everyone.
 
+### Switching a secret off, or on for a while
+
+A stored secret is on: substituted whenever its rules allow. You can bound it
+in time as well as in place:
+
+```bash
+./cli.sh secret off ACME-DEPLOY-KEY             # refused until switched on
+./cli.sh secret on  ACME-DEPLOY-KEY --ttl 30m   # on for 30 minutes, then off
+./cli.sh secret on  ACME-DEPLOY-KEY             # on, with no end
+./cli.sh secret list                            # ... [off] / [on, 22m left]
+```
+
+Off, a request carrying the placeholder toward one of its hosts is refused
+(403, `verdict=DENY-OFF`, naming the command that switches it on) rather than
+sent as the bare placeholder, which the upstream would answer with a 401 that
+mentions neither desolate nor the switch. Toward any other host it is a
+`LEAK-SUSPECT` as before. `--ttl` takes `90s`, `30m`, `2h`, `1d`; the end is
+the VM's clock now plus that, and the proxy reads the VM's clock at each
+request, so nothing has to fire for it to end and a timer that never ran
+cannot leave it on. A switch the proxy cannot read holds the secret off.
+
+What it buys: "any container that can spend a placeholder can spend it" stays
+true, but only while you have it on. Switch on what an agent needs for the
+task, for about as long as the task, and an install script that runs later
+finds the key off.
+
+### Holding one project to less: learn, then enforce
+
+The default stays `allow`. One project you trust less can be held to what it
+is allowed by name -- without first having to know every host its tools touch:
+
+```bash
+./cli.sh proxy learn --project acme/widgets --for 1h --then deny
+#   ... use it: start it, build it, run its tests ...
+./cli.sh proxy recommend --project acme/widgets
+#   ./cli.sh proxy allow registry.npmjs.org --project acme/widgets   # 41 request(s): GET /react (npm/10.8.2+node/v22)
+#   ./cli.sh proxy allow objects.githubusercontent.com --project acme/widgets   # 2 request(s): ...
+./cli.sh proxy allow registry.npmjs.org --project acme/widgets     # the ones you agree with
+./cli.sh proxy enforce                                             # every project's, and what is left
+./cli.sh proxy enforce deny  --project acme/widgets                # now, without a window
+./cli.sh proxy enforce allow --project acme/widgets                # the default again
+```
+
+Held to deny, a project gets what a `network` rule allows by name -- a rule
+naming the host, or a rule naming the project -- and every `deny` as always.
+The shipped `{"action": "allow", "host": "*"}` is the default this replaces,
+so it is not consulted for it. Anything else is refused (403,
+`verdict=DENY-POLICY`, naming `proxy recommend`). While it learns, the same
+requests go through and are audited `verdict=LEARN` with the User-Agent that
+asked; `recommend` turns both into `proxy allow` lines, with what was asked
+and by what. `--then` is required: whether the window ends into `deny` or
+back into the default is yours to say. The end is read on the VM's clock at
+each request, as a secret's `--ttl` is.
+
+The restrictions are in `/var/lib/desolate-proxy/policy/projects.json` in
+the VM (not secret, not `settings.json`), which the orchestrator also reads,
+read-only: **a restricted project must run on a daemon of its own**. The
+proxy tells projects apart by the dind their requests come from, and on the
+shared daemon every project's requests are no project's -- a project picks its
+daemon in its own spec, so it could otherwise step around its restriction by
+declaring the shared one. desolate refuses to start it there and says what to
+add. An entry that cannot be read holds its project to deny.
+
+What it does not cover: DNS still answers every name, so a restricted project
+can still put data in a lookup; and the image pulls its own dind makes are its
+requests too, so they are among what it learns.
+
 ### The one entry that is not a secret
 
 `./cli.sh secret list` shows `DESOLATE-SELFTEST-PLACEHOLDER -> httpbin.org`.
@@ -1727,6 +1947,14 @@ travels unnoticed in a body or a URL.
 Be precise about the boundary, because the parts that look like guarantees and
 are not will bite:
 
+- **A project's own daemon is one runtime bug from the VM.** Each project
+  dind runs under sysbox, and sysbox is what makes "root inside the dind" mean
+  nothing outside it; the project has that root (its own daemon). The
+  supervisor, which holds the VM's socket, never runs a binary from inside a
+  dind -- it asks each daemon over its socket -- so what remains is sysbox's
+  own container boundary, and a flaw in it is a flaw in this design. Keep
+  `SYSBOX_VERSION` (`vm/install-sysbox.sh`, pinned by sha256) at the current
+  release; `./cli.sh vm install` moves it.
 - **Hosts are not restricted by default.** `default_action` ships as `allow`,
   so the path is default-deny but the _destination set_ is not. Set
   `default_action: "deny"` and an explicit `network` allowlist in
@@ -1778,13 +2006,17 @@ are not will bite:
   the scrubber should not be read as making that promise -- except for a
   secret [confined to headers](#confining-a-secret-to-headers), which never
   reaches what a host computes on.
-- **Secrets are not scoped per project.** The proxy sees requests from the
-  whole stack and cannot tell which devcontainer sent one. Any project can
-  _use_ any other project's placeholder toward that secret's allowlisted hosts
-  -- and, per the bullet above, recover the value itself if any of those hosts
-  will transform it. "Project A cannot spend project B's API quota", and
-  "project A cannot learn project B's key", are neither of them properties this
-  has. Separate stacks are the boundary for that, not separate projects.
+- **A secret is everyone's unless you scope it, and scoping needs a daemon of
+  the project's own.** The proxy tells projects apart by the dind a request
+  comes from, so a secret added with `--projects` is refused to every other
+  source ([Scoping a secret to projects](#scoping-a-secret-to-projects)). One
+  added without it can be _used_ by any project toward its allowlisted hosts
+  -- and, per the bullet above, recovered if one of those hosts will transform
+  it and it is not confined to headers. Projects on the shared daemon are one
+  source to the proxy: among themselves, "project A cannot spend project B's
+  quota" is not a property this has; give B a daemon of its own and scope the
+  secret to it. A secret switched off ([Switching a secret
+  off](#switching-a-secret-off-or-on-for-a-while)) is no one's.
 - **DNS is an open channel.** dnsmasq forwards to 1.1.1.1/8.8.8.8 without
   restriction, so a compromised container can exfiltrate data inside query
   names: `<base32-of-your-source>.attacker.com` resolves recursively to the
@@ -2050,8 +2282,8 @@ machine.
 
 | Variable                     | Default         | What it does                                                                                                                                                            |
 | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VSCODE_TOKEN`               | _(required)_    | Gates the editor on `127.0.0.1:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                                  |
-| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1`. The port allocator is told it and never hands it to a dev server.                                                      |
+| `VSCODE_TOKEN`               | _(required)_    | Gates the editor at `desolate.localhost:$VSCODE_PORT`. `cli.sh up` refuses to start without it.                                                                         |
+| `VSCODE_PORT`                | `3000`          | Host port for the editor, always on `127.0.0.1` (reached as `desolate.localhost`). The port allocator is told it and never hands it to a dev server.                    |
 | `DESOLATE_PORT_BASE`         | `8080`          | Where project editor and dev-server host ports are allocated from (>= 1024). No upper bound: each is a listener `desolate-ingress` opens on demand.                      |
 | `DESOLATE_DIND_IDLE`         | `30`            | Minutes a project daemon may sit with no devcontainer running before it is stopped. Its images stay; the next start is warm.                                             |
 | `DESOLATE_MAX_DINDS`         | `16`            | Project daemons running at once. A newcomer past it stops the longest-idle one; a daemon with a devcontainer running is never stopped for it.                            |
