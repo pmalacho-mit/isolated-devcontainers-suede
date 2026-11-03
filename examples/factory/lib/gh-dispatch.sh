@@ -73,6 +73,7 @@
 #   agent_blocked <color> <message>            0 when a status means the agent's OWN access is broken
 #   agent_renew   <project>                    fix that; may ask
 #   agent_resume  <project> <worktree>         carry on after agent_renew
+#   agent_events  <project> <worktree>         print the agent's own timed events as JSON lines (optional; telemetry)
 #   agent_hint    <project> <worktree...>      how to fix it by hand, for when no one is here to ask
 #
 # Environment:
@@ -80,17 +81,22 @@
 #   DESOLATE_STATUS_HELPER  desolate-status's path inside a target
 #   FACTORY_STATE           where it remembers what it did
 #                           (default: ~/.local/state/desolate-factory)
+#   FACTORY_TELEMETRY       the timing log, JSON lines (default: $FACTORY_STATE/telemetry.jsonl;
+#                           "off" for none). docs/factory-telemetry.md; summary: ../telemetry.sh report
 
 FACTORY_LIB=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CLI=${DESOLATE_CLI:-$FACTORY_LIB/../../../release/cli.sh}
 STATUS_HELPER=${DESOLATE_STATUS_HELPER:-/desolate/status}
 DISPATCHER=$(basename "$0" .sh)
+# shellcheck source=telemetry.sh
+. "$FACTORY_LIB/telemetry.sh"
 
 declare -F agent_ready   >/dev/null || agent_ready()   { :; }
 declare -F agent_start   >/dev/null || agent_start()   { echo "dispatch: no agent_start defined" >&2; return 1; }
 declare -F agent_blocked >/dev/null || agent_blocked() { return 1; }
 declare -F agent_renew   >/dev/null || agent_renew()   { return 1; }
 declare -F agent_resume  >/dev/null || agent_resume()  { :; }
+declare -F agent_events  >/dev/null || agent_events()  { :; }
 declare -F agent_hint    >/dev/null || agent_hint()    { echo "fix the agent's access, then restart it"; }
 
 # Printed to a terminal: control characters -- an agent's or a project's
@@ -156,7 +162,7 @@ EOF
 # has the branch.
 dispatch_pull_request() { # <n> <name> <title> <message> <updated> <branch> <base>
   local n=$1 name=$2 title=$3 message=$4 updated=$5 branch=$6 base=$7
-  if ! gh api "repos/$REPO/git/ref/heads/$branch" --silent 2>/dev/null; then
+  if ! tele_timed gh_ref gh api "repos/$REPO/git/ref/heads/$branch" --silent 2>/dev/null; then
     [ "$(cat "$STATE/$name.push" 2>/dev/null)" = "$updated" ] && return
     notify "#$n is ready ($message) -- review it, then push: the panel's Review & Push on $name, or desolate --push --worktree $name $PROJECT"
     echo "$updated" > "$STATE/$name.push"
@@ -165,7 +171,7 @@ dispatch_pull_request() { # <n> <name> <title> <message> <updated> <branch> <bas
   # One already open for the branch (opened by hand, say) is taken -- and made
   # to close the issue, which is what ends the worktree.
   local open
-  open=$(gh pr list -R "$REPO" --head "$branch" --state open --json number,url,body 2>/dev/null | jq -c '.[0] // empty' 2>/dev/null || true)
+  open=$(tele_timed gh_pr_list gh pr list -R "$REPO" --head "$branch" --state open --json number,url,body 2>/dev/null | jq -c '.[0] // empty' 2>/dev/null || true)
   if [ -n "$open" ]; then
     jq -r .url <<< "$open" > "$STATE/$name.pr"
     log "#$n: $branch already has a PR: $(cat "$STATE/$name.pr")"
@@ -178,15 +184,35 @@ Closes #$n" >/dev/null 2>&1 && log "#$n: that PR now closes it" || log "#$n: cou
   fi
   # The issue's title, and the issue it closes: never the agent's own words,
   # which this would post as you (gh is your login).
-  if gh pr create -R "$REPO" --draft --head "$branch" --base "$base" \
+  if tele_timed gh_pr_create gh pr create -R "$REPO" --draft --head "$branch" --base "$base" \
     --title "$title" --body "Closes #$n" > "$STATE/$name.pr" 2> "$STATE/$name.pr-error"; then
     log "#$n: draft PR $(cat "$STATE/$name.pr")"
+    tele_event pr project="$PROJECT" issue="$n" since_agent_ms="$(tele_since "$STATE/$name.t1")" since_issue_ms="$(tele_since "$STATE/$name.t0")"
   else
     rm -f "$STATE/$name.pr"
     [ "$(cat "$STATE/$name.pr-tried" 2>/dev/null)" = "$updated" ] \
       || log "#$n: no draft PR: $(tail -n 1 "$STATE/$name.pr-error") -- tried again each tick"
     echo "$updated" > "$STATE/$name.pr-tried"
   fi
+}
+
+# Milliseconds since the file at $1 was stamped by tele_stamp, or empty.
+tele_since() { local t0; t0=$(cat "$1" 2>/dev/null) || return 0; case "$t0" in ""|*[!0-9]*) return 0 ;; esac; echo $(( $(now_ms) - t0 )); }
+tele_stamp() { [ -e "$1" ] || now_ms > "$1"; }
+
+# The agent's own events (tool calls, stops), the ones not yet recorded, into
+# the telemetry log tagged with project and issue. Only lines past the last pull.
+dispatch_pull_events() { # <n> <name>
+  [ "$TELEMETRY_FILE" != off ] || return 0
+  local done_lines=0 all total
+  done_lines=$(cat "$STATE/$2.events-lines" 2>/dev/null || echo 0)
+  all=$(agent_events "$PROJECT" "$2" </dev/null 2>/dev/null) || return 0
+  [ -n "$all" ] || return 0
+  total=$(printf '%s\n' "$all" | wc -l | tr -d ' ')
+  printf '%s\n' "$all" | tail -n +$((done_lines + 1)) | jq -c --arg r "$TELE_RUN" --arg p "$PROJECT" --argjson n "$1" \
+    '{ts: (.t / 1000 | strftime("%Y-%m-%dT%H:%M:%SZ")), run: $r, event: "agent_event", project: $p, issue: $n} + (del(.t) + {t_ms: .t})' \
+    >> "$TELEMETRY_FILE" 2>/dev/null || true
+  echo "$total" > "$STATE/$2.events-lines"
 }
 
 # Agents whose own access broke: say so once per status, fix it if a person is
@@ -218,7 +244,7 @@ dispatch_tick() {
   local issues statuses running
   # What is not read is not closed: worktrees are removed below for the issues
   # missing from this, so a failed read ends the tick.
-  if ! issues=$(gh issue list -R "$REPO" --label "$LABEL" --state open --limit 100 --json number,title,body,author 2> "$STATE/.issues-error"); then
+  if ! issues=$(tele_timed gh_issue_list gh issue list -R "$REPO" --label "$LABEL" --state open --limit 100 --json number,title,body,author 2> "$STATE/.issues-error"); then
     if grep -q "has disabled issues" "$STATE/.issues-error"; then
       [ -e "$STATE/.issues-off" ] || log "$REPO has issues turned off; skipped while it does"
       : > "$STATE/.issues-off"
@@ -230,16 +256,18 @@ dispatch_tick() {
     return 0
   fi
   rm -f "$STATE/.issues-off"
-  statuses=$("$CLI" desolate --status --json "$PROJECT" </dev/null) && jq -e 'type == "array"' <<< "$statuses" >/dev/null 2>&1 \
+  statuses=$(tele_timed cli_status "$CLI" desolate --status --json "$PROJECT" </dev/null) && jq -e 'type == "array"' <<< "$statuses" >/dev/null 2>&1 \
     || { log "$PROJECT: its worktrees not read; trying again next tick"; return 0; }
-  running=$("$CLI" desolate --list --json | sed -n '/^\[/p' | tail -n 1)
+  running=$(tele_timed cli_list "$CLI" desolate --list --json | sed -n '/^\[/p' | tail -n 1)
   local can_start=1
   dispatch_unblock "$statuses" || can_start=""
 
   local issue n title body name row color message updated branch start fetch pr base
   while IFS= read -r issue; do
     n=$(jq -r .number <<< "$issue"); title=$(jq -r .title <<< "$issue"); body=$(jq -r '.body // ""' <<< "$issue")
-    name=issue-$n
+    name=issue-$n TELE_ISSUE=$n
+    [ -e "$STATE/$name.t0" ] || tele_event issue_seen project="$PROJECT" issue="$n" title="$title"
+    tele_stamp "$STATE/$name.t0"
     # A marker counts only in an issue you filed; in another's it is text.
     if [ "$(jq -r '.author.login // ""' <<< "$issue")" != "$(my_login)" ] && [ -n "$(marker_field "$body" branch "")$(marker_field "$body" pr "")$(marker_field "$body" start "")" ]; then
       [ -e "$STATE/$name.marker-ignored" ] || { log "#$n: its desolate-dispatch marker is ignored: the issue is not yours"; mkdir -p "$STATE"; : > "$STATE/$name.marker-ignored"; }
@@ -257,28 +285,30 @@ dispatch_tick() {
       fi
       if ! jq -e --arg w "$name" 'any(.[]; .worktree == $w)' <<< "$statuses" >/dev/null; then
         if [ "$fetch" = true ]; then
-          "$CLI" pull "$PROJECT" --fetch-only </dev/null >/dev/null || { log "#$n: could not refresh $PROJECT's origin/*"; continue; }
+          tele_timed cli_fetch "$CLI" pull "$PROJECT" --fetch-only </dev/null >/dev/null || { log "#$n: could not refresh $PROJECT's origin/*"; continue; }
         fi
         log "#$n: a worktree on $branch"
-        "$CLI" worktree add "$PROJECT" "$name" "$branch" ${start:+"$start"} || { log "#$n: worktree add failed"; continue; }
+        tele_timed cli_worktree_add "$CLI" worktree add "$PROJECT" "$name" "$branch" ${start:+"$start"} || { log "#$n: worktree add failed"; continue; }
       fi
       # This project's: what runs is every project's, and issue numbers repeat.
       if ! jq -e --arg p "$PROJECT" --arg w "$name" 'any(.[]?; .project == $p and .worktree == $w)' <<< "${running:-[]}" >/dev/null; then
         log "#$n: starting it"
         local code=0
-        "$CLI" desolate "$PROJECT" --worktree "$name" </dev/null || code=$?
+        tele_timed cli_start "$CLI" desolate "$PROJECT" --worktree "$name" </dev/null || code=$?
         if [ "$code" -eq 75 ]; then log "#$n: it is being started or changed already; waiting for that"; continue; fi
         [ "$code" -eq 0 ] || { log "#$n: start failed"; continue; }
       fi
       # Up as far as an agent needs: a command runs in it. A start still under
       # way -- one a ^C left running in the stack, say -- answers 75.
-      if ! "$CLI" exec "$PROJECT" --worktree "$name" -- true </dev/null >/dev/null 2>&1; then
+      if ! tele_timed cli_exec_probe "$CLI" exec "$PROJECT" --worktree "$name" -- true </dev/null >/dev/null 2>&1; then
         log "#$n: not answering yet; the agent waits a tick"
         continue
       fi
       log "#$n: an agent"
-      if agent_start "$PROJECT" "$name" "$(dispatch_task "$n" "$title" "$body" "$branch" "$pr")" </dev/null > "$STATE/$name.log" 2>&1; then
+      if tele_timed agent_start agent_start "$PROJECT" "$name" "$(dispatch_task "$n" "$title" "$body" "$branch" "$pr")" </dev/null > "$STATE/$name.log" 2>&1; then
         date -u +%FT%TZ > "$STATE/$name.agent"
+        tele_event agent_started project="$PROJECT" issue="$n" since_issue_ms="$(tele_since "$STATE/$name.t0")"
+        rm -f "$STATE/$name.t1"; tele_stamp "$STATE/$name.t1"
       else
         log "#$n: the agent did not start: $(tail -n 1 "$STATE/$name.log")"
       fi
@@ -288,6 +318,11 @@ dispatch_tick() {
     row=$(jq -c --arg w "$name" '.[] | select(.worktree == $w) | .status // empty' <<< "$statuses")
     [ -n "$row" ] || continue
     color=$(jq -r .color <<< "$row"); message=$(jq -r .message <<< "$row"); updated=$(jq -r .updated <<< "$row")
+    if [ "$(cat "$STATE/$name.status-seen" 2>/dev/null)" != "$updated" ]; then
+      echo "$updated" > "$STATE/$name.status-seen"
+      tele_event status project="$PROJECT" issue="$n" color="$color" message="$message" since_agent_ms="$(tele_since "$STATE/$name.t1")" since_issue_ms="$(tele_since "$STATE/$name.t0")"
+      dispatch_pull_events "$n" "$name"
+    fi
     agent_blocked "$color" "$message" && continue    # the agent's own access: ours to fix, not the issue's
     case "$color" in
       orange|red)
@@ -324,8 +359,10 @@ dispatch_tick() {
       continue
     fi
     log "#$n: no longer open; stopping and removing $name"
-    "$CLI" desolate "$PROJECT" --worktree "$name" --stop </dev/null >/dev/null || true
-    if out=$("$CLI" worktree remove "$PROJECT" "$name" </dev/null 2>&1); then
+    TELE_ISSUE=$n; dispatch_pull_events "$n" "$name"
+    tele_event worktree_gone project="$PROJECT" issue="$n" since_issue_ms="$(tele_since "$STATE/$name.t0")"
+    tele_timed cli_stop "$CLI" desolate "$PROJECT" --worktree "$name" --stop </dev/null >/dev/null || true
+    if out=$(tele_timed cli_worktree_remove "$CLI" worktree remove "$PROJECT" "$name" </dev/null 2>&1); then
       mv "$started" "$started.done"
     else
       # Why, as desolate said it -- its first line of reason, not the hint it
@@ -356,7 +393,10 @@ dispatch_project() { # <project> <repo>
     agent_ready "$PROJECT" || { log "$PROJECT: the agent is not ready; skipped"; return 0; }
     : > "$STATE/.ready"
   fi
+  local tick_start; tick_start=$(now_ms)
   dispatch_tick || log "$PROJECT: tick failed; trying again next time"
+  TELE_ISSUE=""
+  tele_event tick project="$PROJECT" ms=$(( $(now_ms) - tick_start ))
 }
 
 # Agents this has started that are working: an .agent file -- moved aside once
@@ -418,6 +458,7 @@ dispatch_main() {
   # start already under way goes on in the stack, and the next run finds it.
   trap 'echo >&2; log "stopped. A start under way goes on in the stack; the next run of this picks it up." >&2; exit 130' INT TERM
   local tool project
+  tele_event run_start dispatcher="$DISPATCHER" all="${ALL:-}" project="${PROJECT:-}" interval="$INTERVAL" max_agents="$MAX_AGENTS"
   for tool in gh jq; do
     command -v "$tool" >/dev/null || { echo "$DISPATCHER: needs $tool" >&2; exit 1; }
   done

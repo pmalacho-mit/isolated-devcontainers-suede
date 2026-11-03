@@ -22,6 +22,7 @@ agent_start()   { "$HELPER" start "$1" --worktree "$2" --task "$3"; }
 agent_blocked() { [ "$1" = red ] && [ "$2" = "claude: authentication failed" ]; }
 agent_renew()   { "$HELPER" auth "$1" --renew; }
 agent_resume()  { "$HELPER" resume "$1" --worktree "$2"; }
+agent_events()  { "$HELPER" events "$1" --worktree "$2"; }
 agent_hint()    { local p=$1 w; shift; printf '%s auth %s --renew' "$HELPER" "$p"; for w; do printf '; %s resume %s --worktree %s' "$HELPER" "$p" "$w"; done; }
 
 # shellcheck source=../lib/gh-dispatch.sh

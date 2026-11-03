@@ -13,6 +13,8 @@ desolate itself only provides isolated development environments, plus a few prim
 | **`suede/suede-factory.sh`** (the suede connector) | watches the stack's projects for changes to suede dependencies, proposes them upstream, files the review and sync issues, links and replaces PRs | start agents (it files issues, the dispatcher starts the agents), push agent work, or merge |
 | **you** | review and push (the panel's Review & Push), merge; approve a new dependency joining the stack | |
 
+Every call into the stack or GitHub, and what the agent does, is timed into a JSON-lines log: see `docs/factory-telemetry.md` (`telemetry.sh report`).
+
 The two scripts you run, `claude/claude-dispatcher.sh --all` and `suede/suede-factory.sh run`, never call each other. **GitHub issues are the contract between them**: the factory files an issue, and the dispatcher picks it up.
 
 ## How they connect

@@ -7,6 +7,7 @@
 #   claude-helper.sh attach <project> [--worktree w] [--session s]
 #   claude-helper.sh stop   <project> [--worktree w] [--session s]
 #   claude-helper.sh verify <project> [n]
+#   claude-helper.sh events <project> [--worktree w] [--session s]
 #
 # Runs on your Mac. Built on desolate's primitives (docs/agents.md): a secret,
 # `cli.sh exec`, the status through `.git`, and the proxy's audit. Used by
@@ -64,6 +65,13 @@
 #        api.anthropic.com carried, from the proxy's audit. Every one should be
 #        the subscription placeholder.
 #
+# events Prints, as JSON lines {"t": epoch ms, "kind": ..., "tool": ...}, what
+#        Claude did in the session: its start, each prompt, each tool call's
+#        start and end, each stop. Written by the hooks below into the user's
+#        state dir in the target; the dispatcher pulls them into the factory's
+#        telemetry log (docs/factory-telemetry.md). start and resume are also
+#        timed there ("op" events), phase by phase.
+#
 # Environment: DESOLATE_CLI (path to cli.sh; default: this checkout's),
 # DESOLATE_STATUS_HELPER (the helper's path inside the target),
 # CLAUDE_VERSION (what the native installer installs; default: its latest).
@@ -73,6 +81,8 @@ usage() { sed -n '4,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CLI=${DESOLATE_CLI:-$HERE/../../../release/cli.sh}
 STATUS_HELPER=${DESOLATE_STATUS_HELPER:-/desolate/status}   # where it is inside the target
+# shellcheck source=../lib/telemetry.sh
+. "$HERE/../lib/telemetry.sh"
 die() { echo "claude-helper: $*" >&2; exit 1; }
 say() { echo "claude-helper: $*"; }
 
@@ -260,6 +270,9 @@ case "\$1" in
           case "\$error" in authentication_failed) what="authentication failed" ;; *) what="stopped: \${error:-an error}" ;; esac
           $status set red "claude: \$what" ;;
   permission) $status set orange "claude: \$(printf '%s' "\$input" | field message)" ;;
+  event)  # one line per Claude event, for the factory's telemetry (the time is the target's clock)
+          ms=\$(date +%s%3N 2>/dev/null); case "\$ms" in ""|*[!0-9]*) ms=\$((\$(date +%s) * 1000)) ;; esac
+          printf '{"t":%s,"kind":"%s","tool":"%s"}\\n' "\$ms" "\$2" "\$(printf '%s' "\$input" | field tool_name)" >> "$dir/events.jsonl" ;;
   idle)   case "\$current" in green|orange|red) ;; *) $status set orange "claude is waiting for you" ;; esac ;;
 esac
 exit 0
@@ -278,7 +291,11 @@ cat > "$dir/settings.json" <<JSON
   "env": { "ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "", "CLAUDE_CODE_USE_BEDROCK": "",
            "CLAUDE_CODE_USE_VERTEX": "", "CLAUDE_CODE_USE_FOUNDRY": "" },
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "$dir/hook start" }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "$dir/hook start" }, { "type": "command", "command": "$dir/hook event session_start" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "$dir/hook event prompt" }] }],
+    "PreToolUse":   [{ "hooks": [{ "type": "command", "command": "$dir/hook event tool_start" }] }],
+    "PostToolUse":  [{ "hooks": [{ "type": "command", "command": "$dir/hook event tool_end" }] }],
+    "Stop":         [{ "hooks": [{ "type": "command", "command": "$dir/hook event stop" }] }],
     "StopFailure":  [{ "hooks": [{ "type": "command", "command": "$dir/hook failed" }] }],
     "Notification": [{ "matcher": "permission_prompt", "hooks": [{ "type": "command", "command": "$dir/hook permission" }] },
                      { "matcher": "idle_prompt", "hooks": [{ "type": "command", "command": "$dir/hook idle" }] }]
@@ -334,7 +351,7 @@ start() {
   row=$(running_row)
   if [ -z "$row" ]; then
     say "starting $PROJECT${WT[1]:+@${WT[1]}}"
-    "$CLI" desolate "$PROJECT" ${WT[@]+"${WT[@]}"} </dev/null >/dev/null || die "could not start it"
+    tele_timed helper_target_start "$CLI" desolate "$PROJECT" ${WT[@]+"${WT[@]}"} </dev/null >/dev/null || die "could not start it"
     row=$(running_row)
   fi
   # A scoped secret is substituted only for requests from the project's own
@@ -353,11 +370,12 @@ start() {
   # desolate's own directory -- AGENTS.md, the status helper -- read without
   # the first-read prompt a path outside the project otherwise gets.
   CLAUDE_ARGS=(--add-dir /desolate "${CLAUDE_ARGS[@]}")
+  TELE_ISSUE=${WT[1]#issue-}
   local remote=(bash -c "$REMOTE" claude-helper "$SESSION" "$name" "$STATUS_HELPER" "${HAS_TASK:-0}" "${RESUME:-0}" "${CLAUDE_VERSION:-}" ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"})
   if [ -n "$HAS_TASK" ]; then
-    printf '%s' "$TASK" | "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- "${remote[@]}"
+    printf '%s' "$TASK" | tele_timed helper_remote "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- "${remote[@]}"
   else
-    "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- "${remote[@]}" </dev/null
+    tele_timed helper_remote "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- "${remote[@]}" </dev/null
   fi
   echo "  watch it:  $0 attach $PROJECT ${WT[1]:+--worktree ${WT[1]} }--session $SESSION    (detach: ctrl-b d)"
 }
@@ -383,5 +401,6 @@ case "$CMD" in
   attach) exec "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- tmux attach -t "=$SESSION" ;;
   stop) "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- tmux kill-session -t "=$SESSION" </dev/null && say "stopped '$SESSION'" ;;
   verify) verify ;;
+  events) "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- sh -c 'cat "${XDG_STATE_HOME:-$HOME/.local/state}/desolate-claude/$1/events.jsonl" 2>/dev/null || true' _ "$SESSION" </dev/null ;;
   *) usage ;;
 esac
