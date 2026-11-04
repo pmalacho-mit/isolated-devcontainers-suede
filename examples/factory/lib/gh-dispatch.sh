@@ -458,6 +458,7 @@ dispatch_main() {
   # start already under way goes on in the stack, and the next run finds it.
   trap 'echo >&2; log "stopped. A start under way goes on in the stack; the next run of this picks it up." >&2; exit 130' INT TERM
   local tool project
+  if [ "$TELEMETRY_FILE" = off ]; then log "telemetry: off"; else log "telemetry: $TELEMETRY_FILE (summary: $FACTORY_LIB/../telemetry.sh report)"; fi
   tele_event run_start dispatcher="$DISPATCHER" all="${ALL:-}" project="${PROJECT:-}" interval="$INTERVAL" max_agents="$MAX_AGENTS"
   for tool in gh jq; do
     command -v "$tool" >/dev/null || { echo "$DISPATCHER: needs $tool" >&2; exit 1; }

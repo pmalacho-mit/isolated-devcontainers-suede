@@ -371,6 +371,7 @@ start() {
   # the first-read prompt a path outside the project otherwise gets.
   CLAUDE_ARGS=(--add-dir /desolate "${CLAUDE_ARGS[@]}")
   TELE_ISSUE=${WT[1]#issue-}
+  [ "$TELEMETRY_FILE" = off ] || say "telemetry: $TELEMETRY_FILE"
   local remote=(bash -c "$REMOTE" claude-helper "$SESSION" "$name" "$STATUS_HELPER" "${HAS_TASK:-0}" "${RESUME:-0}" "${CLAUDE_VERSION:-}" ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"})
   if [ -n "$HAS_TASK" ]; then
     printf '%s' "$TASK" | tele_timed helper_remote "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- "${remote[@]}"
