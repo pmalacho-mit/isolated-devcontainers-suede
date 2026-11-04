@@ -58,7 +58,9 @@
 #        (`claude -c`), told to carry on -- after `auth --renew`, say.
 #
 # attach Opens the session here (detach again: ctrl-b d). From the target's
-#        own editor terminal it is `tmux attach -t claude`.
+#        own editor terminal it is `tmux attach -t claude`. The mouse is left
+#        to your terminal, so select and paste as usual; if a client still
+#        grabs it, hold shift (option on a Mac) while dragging.
 #
 # verify Which secret each recent request from this project to
 #        api.anthropic.com carried, from the proxy's audit. Every one should be
@@ -311,6 +313,9 @@ fi
   echo 'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_PROFILE ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_IDENTITY_TOKEN_FILE'
   echo 'unset CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY'
   printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\n' "$placeholder"
+  # Claude asks the terminal to report the mouse, which takes drag-to-select and
+  # right-click paste away from whoever attaches. Not asking leaves them to the terminal.
+  echo 'export CLAUDE_CODE_DISABLE_MOUSE=1'
   printf 'args=(--settings %q' "$dir/settings.json"; [ $# -eq 0 ] || printf ' %q' "$@"; echo ')'
   printf 'task=$(cat %q)\n' "$dir/task"
   echo 'if [ -n "$task" ]; then claude "${args[@]}" "$task"; else claude "${args[@]}"; fi'
@@ -321,6 +326,8 @@ chmod +x "$dir/run"
 
 if [ "$resume" = 1 ]; then $status set blue "claude: carrying on" || true; else $status set blue "claude: starting" || true; fi
 tmux new-session -d -s "$session" -c "$folder" "$dir/run"
+# tmux must not take the mouse either, and should hand copies to the attaching terminal's clipboard.
+tmux set-option -t "=$session" mouse off \; set-option -t "=$session" set-clipboard on || true
 echo "claude-helper: claude is running in tmux session '$session'"
 REMOTE
 
