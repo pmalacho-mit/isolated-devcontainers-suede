@@ -664,7 +664,10 @@ else
 
   # --- stopping, and removal ---------------------------------------------
   OUT=$(ed desolate --stop "$WT" 2>&1)
-  assert_contains "stopping the project refuses while worktrees are running" \
+  assert_contains "stopping the project says its worktrees keep running (#43)" \
+    "$OUT" "keep running"
+  OUT=$(ed desolate --purge "$WT" 2>&1)
+  assert_contains "purging the project refuses while worktrees are running" \
     "$OUT" "still running"
   for name in alpha beta; do
     assert_ok "desolate --stop tears down $WT@$name" \

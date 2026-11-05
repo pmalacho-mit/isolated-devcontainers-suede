@@ -1507,11 +1507,9 @@ const isRunningOnItsDaemon = (target: Target) => {
 };
 
 /**
- * Refuse to stop a project while its worktrees are running.
- *
- * They are separate containers with separate relays, so stopping the project
- * leaves them up -- and "I stopped it, why is the port still answering?" is a
- * question with no visible answer. Naming each one is the whole refusal.
+ * Refuse to purge a project while its worktrees are running: their checkouts
+ * live under the project, and they would be left running on nothing.
+ * (Stopping is different -- see noteRunningWorktrees.)
  */
 function refuseIfWorktreesAreRunning(target: Target): void {
   if (target.worktree) return;
@@ -1519,9 +1517,23 @@ function refuseIfWorktreesAreRunning(target: Target): void {
   if (running.length === 0) return;
 
   die(`${target.name} has ${running.length} worktree(s) still running.
-      They are containers of their own, so stopping the project would leave
-      them up. Stop them first:
+      Stop them first:
 ${running.map((w) => `        ${hint.desolate(`--stop ${invocation(w)}`)}`).join("\n")}`);
+}
+
+/**
+ * Stopping the project does not stop its worktrees: they are containers of
+ * their own, with their own relays, and nothing in them needs the project's
+ * container. So that is allowed -- a rebuild of the default devcontainer should
+ * not wait for every worktree to finish (#43) -- but said, because "I stopped
+ * it, why is the port still answering?" has no visible answer.
+ */
+function noteRunningWorktrees(target: Target): void {
+  if (target.worktree) return;
+  const running = runningWorktrees(target);
+  if (running.length === 0) return;
+  console.log(`${running.length} worktree(s) of ${target.name} keep running (they are containers of their own):`);
+  for (const w of running) console.log(`  ${hint.desolate(`--stop ${invocation(w)}`)}`);
 }
 
 function stopTarget(target: Target): void {
@@ -1529,7 +1541,7 @@ function stopTarget(target: Target): void {
     ingressFiles.withdraw(ports.load(target), target);
     return console.log(`not running (${target.name}'s own daemon is stopped)`);
   }
-  refuseIfWorktreesAreRunning(target);
+  noteRunningWorktrees(target);
 
   const relays = ownRelayNames(target);
   if (relays.length) {
