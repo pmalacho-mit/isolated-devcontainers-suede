@@ -491,10 +491,11 @@ case "$ARCH_INNER" in
       else
         bad "docker run --platform $plat failed (rc=$RC): $GOT"
         case "$EOUT" in
-          *"exec format error"*) note "qemu-user is not registered, or not usable from inside sysbox" ;;
+          *"exec format error"*) note "qemu-user is not registered in dind's own binfmt_misc (sysbox gives it one; the VM's does not count)" ;;
         esac
-        note "register it (human, from the Mac): ./cli.sh vm install"
-        note "read back: colima ssh -p \${COLIMA_PROFILE:-desolate} -- grep -H '' /proc/sys/fs/binfmt_misc/qemu-x86_64"
+        note "publish it (human, from the Mac): ./cli.sh vm install, then recreate dind: ./cli.sh down && ./cli.sh up"
+        note "read back from dind: docker exec desolate-dind sh -c 'ls /desolate/binfmt; cat /proc/sys/fs/binfmt_misc/qemu-x86_64'"
+        note "its entrypoint's log: docker logs desolate-dind 2>&1 | grep -i -A3 binfmt"
       fi
     done ;;
   "") skipped "could not ask the inner daemon its architecture" ;;

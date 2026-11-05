@@ -234,11 +234,14 @@ export interface DindSpec {
 }
 
 /** Inside a project dind, written by its entrypoint before dockerd starts:
- *  the CA (as the shared dind installs it), daemon.json, and the
- *  /var/run/docker.sock ALIAS -- what docker-outside-of-docker's own mount
- *  binds from (sibling-feature.sh F1/F3). */
+ *  the CA (as the shared dind installs it), qemu-user in this dind's OWN
+ *  binfmt_misc table (as the shared dind does; sysbox gives each container
+ *  one, so the VM's registration does not reach it -- vm/binfmt-register.sh),
+ *  daemon.json, and the /var/run/docker.sock ALIAS -- what
+ *  docker-outside-of-docker's own mount binds from (sibling-feature.sh F1/F3). */
 const DIND_ENTRYPOINT =
   '[ -x /desolate/ca/install-ca.sh ] && /desolate/ca/install-ca.sh >/dev/null 2>&1 || true; ' +
+  '[ -x /desolate/binfmt/register.sh ] && /desolate/binfmt/register.sh >/dev/null || true; ' +
   'mkdir -p /etc/docker && printf "%s" "$DESOLATE_DAEMON_JSON" > /etc/docker/daemon.json; ' +
   'ln -sf /run/dind-sock/docker.sock /var/run/docker.sock; ' +
   'exec dockerd-entrypoint.sh "$@"';

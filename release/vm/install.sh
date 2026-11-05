@@ -79,8 +79,11 @@ if [ "$PROXY_ONLY" = 0 ]; then
     ./install-sysbox.sh
     echo
 
-    # x86 emulation (aarch64 VMs only; a no-op elsewhere). Registered here, by
-    # the human-run CLI, so no container ever needs privilege to get it.
+    # x86 emulation (aarch64 VMs only; a no-op elsewhere). qemu-user is
+    # published under the public dir here, by the human-run CLI, and each dind
+    # registers it in its own binfmt_misc at start -- no container needs
+    # privilege for it. Runs before the proxy step, which lays out the rest of
+    # that dir and only adds to it.
     echo "### 1b/2  x86 emulation (qemu-user binfmt)"
     ./install-binfmt.sh
     echo
