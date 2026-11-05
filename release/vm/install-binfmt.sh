@@ -28,6 +28,11 @@ BINFMT_ROOT="${BINFMT_ROOT:-/proc/sys/fs/binfmt_misc}"
 INTERP_X86_64="${INTERP_X86_64:-/usr/bin/qemu-x86_64-static}"
 INTERP_I386="${INTERP_I386:-/usr/bin/qemu-i386-static}"
 BINFMT_D="${BINFMT_D:-/etc/binfmt.d}"
+# Any native binary; it must keep exec'ing after each registration. /bin/true on
+# the VM (Ubuntu); /usr/bin/true is where macOS keeps it, for running the tests.
+if [ -z "${NATIVE_PROBE:-}" ]; then
+    for NATIVE_PROBE in /bin/true /usr/bin/true; do [ -x "$NATIVE_PROBE" ] && break; done
+fi
 
 # name | e_machine, ELF class bytes (from qemu's scripts/qemu-binfmt-conf.sh)
 ELF64='\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00'
@@ -77,16 +82,36 @@ if [ ! -e "$BINFMT_ROOT/register" ]; then
 fi
 
 # Is name registered the way we want? enabled, F flag, right interpreter.
+# Bash builtins only: a bad registration can make every native binary on the
+# VM un-exec-able (see below), and this check is what has to catch that.
 good() {
-    local f="$BINFMT_ROOT/$1"
+    local f="$BINFMT_ROOT/$1" line en= ip= fl=
     [ -e "$f" ] || return 1
-    grep -qx 'enabled' "$f" || return 1
-    grep -qx "interpreter $2" "$f" || return 1
-    grep -q '^flags: .*F' "$f" || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            enabled)          en=1 ;;
+            "interpreter $2") ip=1 ;;
+            flags:\ *F*)       fl=1 ;;
+        esac
+    done < "$f"
+    [ -n "$en" ] && [ -n "$ip" ] && [ -n "$fl" ]
 }
 
+# Undo this run's registrations and leave the VM as it was. The kernel removes
+# an entry on "-1" and `echo` is a builtin, so this works even when no binary
+# can be exec'd any more.
+OURS=
+cleanup() {
+    local n
+    for n in $OURS; do
+        [ -e "$BINFMT_ROOT/$n" ] && echo -1 > "$BINFMT_ROOT/$n"
+        rm -f "$BINFMT_D/$n.conf" 2>/dev/null || true
+    done
+}
+trap 'rc=$?; if [ "$rc" != 0 ]; then cleanup; fi' EXIT
+
 mkdir -p "$BINFMT_D" 2>/dev/null || true
-printf '%s\n' "$ENTRIES" | while IFS='|' read -r name magic interp; do
+while IFS='|' read -r name magic interp; do
     [ -n "$name" ] || continue
     if good "$name" "$interp"; then
         echo "    $name: already registered (fix-binary)"
@@ -98,14 +123,28 @@ printf '%s\n' "$ENTRIES" | while IFS='|' read -r name magic interp; do
             echo "    $name: registered differently -- replacing"
             echo -1 > "$BINFMT_ROOT/$name"
         fi
+        OURS="$OURS $name"
+        # The magic and mask go to the kernel as the LITERAL "\xHH" text: the
+        # kernel unquotes them itself (fs/binfmt_misc.c, unquote()) and that
+        # unquoting stops at the first NUL byte. Pre-decoding them here
+        # (printf %b) hands it raw bytes, the magic is cut to "\x7fELF\x02\x01\x01"
+        # and every 64-bit ELF on the VM, grep and sudo included, is then run
+        # through qemu -- which is itself a 64-bit ELF, so exec loops (ELOOP,
+        # "Too many levels of symbolic links") and the VM is dead until reboot.
         line=":$name:M::$magic:$MASK:$interp:F"
-        printf '%b' "$line" > "$BINFMT_ROOT/register" 2>/dev/null \
+        printf '%s' "$line" > "$BINFMT_ROOT/register" 2>/dev/null \
           || { echo "    ERROR: kernel refused the $name registration" >&2; exit 1; }
         echo "    $name: registered"
+        # A native binary must still exec: a self-matching entry is caught here,
+        # before the next one is written, and undone by the EXIT trap.
+        if ! "$NATIVE_PROBE" 2>/dev/null; then
+            echo "    ERROR: after registering $name a native binary ($NATIVE_PROBE) no longer runs -- the entry matches the VM's own ELFs; undoing it" >&2
+            exit 1
+        fi
     fi
     # Survive a reboot (systemd-binfmt reads this; /etc beats the package's /usr/lib).
     [ -d "$BINFMT_D" ] && printf '%s\n' ":$name:M::$magic:$MASK:$interp:F" > "$BINFMT_D/$name.conf" || true
-done
+done <<< "$ENTRIES"
 
 echo "==> verify (read back from the kernel, not from the package)"
 for pair in "qemu-x86_64 $INTERP_X86_64" "qemu-i386 $INTERP_I386" "qemu-i486 $INTERP_I386"; do
@@ -113,7 +152,11 @@ for pair in "qemu-x86_64 $INTERP_X86_64" "qemu-i386 $INTERP_I386" "qemu-i486 $IN
     set -- $pair
     if ! good "$1" "$2"; then
         echo "    ERROR: $1 is not enabled with fix-binary and interpreter $2:" >&2
-        sed 's/^/           /' "$BINFMT_ROOT/$1" 2>/dev/null >&2 || echo "           (absent)" >&2
+        if [ -e "$BINFMT_ROOT/$1" ]; then
+            while IFS= read -r l; do echo "           $l"; done < "$BINFMT_ROOT/$1" >&2
+        else
+            echo "           (absent)" >&2
+        fi
         exit 1
     fi
     echo "    $1 OK"

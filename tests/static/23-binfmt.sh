@@ -38,9 +38,27 @@ fresh; entry qemu-x86_64 "/elsewhere" "OCF"; entry qemu-i386 "$T/i386" "OCF"; en
 OUT=$(run); RC=$?
 assert_eq "wrong interpreter is not accepted" "$RC" "1"
 
+# The kernel unquotes "\xHH" itself and stops at the first NUL byte, so the
+# magic must reach it as literal backslash text, never as pre-decoded bytes
+# (a raw NUL truncates the x86_64 magic to the ELF64 prefix, every native
+# binary on the VM then matches, and exec loops with ELOOP).
+fresh
+run >/dev/null   # the scratch register keeps only the last write (qemu-i486)
+assert_ok "magic is written to register as literal \\xHH text" grep -q ':qemu-i486:M::\\x7fELF\\x01\\x01\\x01\\x00' "$T/bm/register"
+assert_ok "  and carries no raw NUL byte" bash -c "! tr -d '\\000' < '$T/bm/register' | cmp -s - '$T/bm/register' || true; ! grep -qaP '\\x00' '$T/bm/register'"
+assert_ok "  and no raw ELF header byte" bash -c "! grep -qaP '\\x7fELF' '$T/bm/register'"
+
+# A registration that catches the VM's own binaries is undone, not left behind.
+fresh
+OUT=$(NATIVE_PROBE=/bin/false run); RC=$?
+assert_eq "native binary fails to exec after registering => exit 1" "$RC" "1"
+assert_contains "  and says so" "$OUT" "no longer runs"
+assert_ok "  and the entry's reboot config was removed" bash -c "! [ -e '$T/d/qemu-x86_64.conf' ]"
+
 group "install.sh / preflight wiring"
 assert_ok "install.sh runs install-binfmt.sh" grep -q 'install-binfmt.sh' "$RELEASE/vm/install.sh"
 assert_ok "preflight checks linux/amd64 and linux/386" bash -c "grep -q 'linux/amd64:x86_64' '$RELEASE/preflight.sh' && grep -q 'linux/386:i686' '$RELEASE/preflight.sh'"
 assert_ok "installer registers with the F flag" grep -q ':F"' "$S"
+assert_ok "installer never pre-decodes the magic (printf %b)" bash -c "! grep -q \"printf '%b'\" '$S'"
 
 summary
