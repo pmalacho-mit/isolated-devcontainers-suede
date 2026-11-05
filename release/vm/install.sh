@@ -8,6 +8,7 @@
 #
 # Installs the two VM-side layers, in order:
 #   1. sysbox      -- the containment boundary (install-sysbox.sh)
+#      (+ qemu-user binfmt for linux/amd64 and linux/386 on an aarch64 VM)
 #   2. egress proxy -- mitmproxy + dnsmasq + nftables (../proxy/vm/install.sh)
 #
 # Both layers are idempotent, so re-running is safe and is how you upgrade.
@@ -76,6 +77,12 @@ if [ "$PROXY_ONLY" = 0 ]; then
 
     echo "### 1/2  sysbox"
     ./install-sysbox.sh
+    echo
+
+    # x86 emulation (aarch64 VMs only; a no-op elsewhere). Registered here, by
+    # the human-run CLI, so no container ever needs privilege to get it.
+    echo "### 1b/2  x86 emulation (qemu-user binfmt)"
+    ./install-binfmt.sh
     echo
 else
     echo "### sysbox: skipped (--proxy-only)"

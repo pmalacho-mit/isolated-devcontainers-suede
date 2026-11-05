@@ -1,0 +1,18 @@
+# Real-hardware reference for the x86-emulation equivalence check (issue #37).
+# Manual: give the v86_64 commit to compare against. Download the artifact and
+# diff it against a run on the aarch64 VM (release/emulation-equivalence.sh).
+name: x86-reference
+on:
+  workflow_dispatch:
+    inputs:
+      v86_commit: { description: "portlandhodl/v86_64 full commit sha", required: true }
+permissions: { contents: read }
+jobs:
+  reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./release/emulation-equivalence.sh gen ref
+        env: { V86_COMMIT: "${{ inputs.v86_commit }}" }
+      - uses: actions/upload-artifact@v4
+        with: { name: x86-reference, path: ref }

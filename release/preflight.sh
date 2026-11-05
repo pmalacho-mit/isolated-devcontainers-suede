@@ -474,6 +474,33 @@ skip_fixture_dependent_probes() {
 }
 
 echo
+echo "== 6b. x86 emulation (linux/amd64 and linux/386 on an aarch64 VM) =="
+# Only an aarch64 VM needs it. Asked of the daemon the agents use (the project's
+# inner one, under sysbox), not of the VM: the VM having qemu registered says
+# nothing about whether a container under sysbox can use it.
+ARCH_INNER=$(docker exec desolate-orchestrator docker info --format '{{.Architecture}}' 2>/dev/null)
+case "$ARCH_INNER" in
+  aarch64|arm64)
+    for plat_want in "linux/amd64:x86_64" "linux/386:i686"; do
+      plat=${plat_want%%:*}; want=${plat_want##*:}
+      EOUT=$(docker exec desolate-orchestrator docker run --rm --platform "$plat" alpine uname -m 2>&1); RC=$?
+      GOT=$(printf '%s\n' "$EOUT" | tail -n1)
+      # linux/386 alpine on a 64-bit kernel reports i686 (qemu-i386) or x86_64.
+      if [ "$RC" = 0 ] && { [ "$GOT" = "$want" ] || { [ "$plat" = linux/386 ] && [ "$GOT" = x86_64 ]; }; }; then
+        ok "docker run --platform $plat prints $GOT"
+      else
+        bad "docker run --platform $plat failed (rc=$RC): $GOT"
+        case "$EOUT" in
+          *"exec format error"*) note "qemu-user is not registered, or not usable from inside sysbox" ;;
+        esac
+        note "register it (human, from the Mac): ./cli.sh vm install"
+        note "read back: colima ssh -p \${COLIMA_PROFILE:-desolate} -- grep -H '' /proc/sys/fs/binfmt_misc/qemu-x86_64"
+      fi
+    done ;;
+  "") skipped "could not ask the inner daemon its architecture" ;;
+  *)  skipped "inner daemon is $ARCH_INNER; x86 runs natively" ;;
+esac
+echo
 echo "== 7. egress proxy (secrets live in the VM, not in containers) =="
 if vm_ssh systemctl is-active --quiet desolate-proxy 2>/dev/null; then
   ok "desolate-proxy is running in the VM"
