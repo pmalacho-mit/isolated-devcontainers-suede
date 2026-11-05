@@ -300,4 +300,19 @@ else
   assert_eq "cli.sh names the rendered volume" "$DIND_DATA_VOLUME" "$RENDERED"
 fi
 
+group "dind gc says what each step freed"
+# docker's own last lines, as each prune prints them.
+daemon_docker() {
+  case "$3 $4" in
+    "builder prune") printf 'ID  RECLAIMABLE  SIZE\nabc true 1GB\nTotal:\t5.941GB\n' ;;
+    "image prune")   printf 'Total reclaimed space: 0B\n' ;;
+    "volume prune")  printf 'Deleted Volumes:\nx\n\nTotal reclaimed space: 1.191GB\n' ;;
+  esac
+}
+define_from_cli gc_daemon
+GC=$(gc_daemon desolate-dind-acme /run/x.sock)
+assert_contains "the build cache freed, labelled" "$GC" "  build cache freed:      5.941GB"
+assert_contains "the images freed, labelled" "$GC" "  untagged images freed:  0B"
+assert_contains "the volumes freed, labelled" "$GC" "  unused volumes freed:   1.191GB"
+
 summary
