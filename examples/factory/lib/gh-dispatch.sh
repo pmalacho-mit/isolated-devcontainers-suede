@@ -153,6 +153,15 @@ Other agents may be working in this repository too: read \`$STATUS_HELPER board\
 and leave a \`$STATUS_HELPER note\` when they should know something.
 Commit your work on $4; do not push. $after
 How this environment works -- the proxy, secrets, what you cannot reach: /desolate/AGENTS.md.
+
+Be thorough rather than quick. Before you set green:
+  - read the code around what you change, and look for callers and other places the change could reach;
+  - run the project's existing tests, typecheck and linters, and add or update tests for what you changed;
+  - exercise the change for real where you can (run the code or command, not only the tests), and say what you ran;
+  - review your own diff (\`git diff\`) for unintended changes, leftovers and missed edge cases.
+If you could not verify something, or a requirement is ambiguous, or a decision is the human's to make, do not guess:
+set orange with the specific question or the input you need, then stop. A green with caveats is fine -- put them
+in the green line and the commit message (what you ran, what you did not, what to check) so review is easy.
 EOF
 }
 
