@@ -1683,6 +1683,28 @@ function verifyWorkspaceMount(target: Target, expectedInode: string): void {
     look at ${source} and its parents for a link before starting it again.`);
 }
 
+/** Why the project's OWN spec is refused, said as the project's -- naming the
+ *  file it was read from, which for a worktree is its branch's copy, not the
+ *  main tree's -- or undefined when it passes. */
+function projectRefusal(target: Target, resolved: ReturnType<typeof resolveOrDie>, daemon: Daemon): string | undefined {
+  try {
+    enforcePolicy(target, resolved, listTargets(WORKSPACES), daemon);
+    return undefined;
+  } catch (err: any) {
+    const nested = path.join(target.dir, ".devcontainer", "devcontainer.json");
+    const file = fs.existsSync(nested) ? nested : path.join(target.dir, ".devcontainer.json");
+    return `${target.name}'s devcontainer.json is refused: ${err?.message ?? err}
+      (read from ${file}${target.worktree
+        ? ` -- a worktree's own copy, as its branch has it: the branch starts
+      from the project's HEAD when it is made, so a .devcontainer/ changed in the
+      main tree and not committed there, or committed after, is not in it.
+      Commit it on the branch, or remove the worktree and its branch
+      (${hint.mac(`worktree remove ${target.project} ${target.worktree}`)}, then
+      \`git branch -D <its branch>\` in the project) for one made from HEAD again`
+        : ""})`;
+  }
+}
+
 /** A project the proxy holds to what is allowed by name runs on a daemon of
  *  its own, where its requests are its own (restrictions.ts). */
 function refuseRestrictedOnTheSharedDaemon(target: Target, daemon: Daemon): void {
@@ -2034,6 +2056,13 @@ async function runTarget(
         daemon,
       );
     } catch (err: any) {
+      // What desolate derived carries the project's own fields, so a refusal
+      // here is the project's when its own spec -- the snapshot read above --
+      // is refused too. From the Mac nothing judged that first (the broker
+      // does, for the editor), and blaming desolate for a project's
+      // `build.options` sent people looking in the wrong file.
+      const own = projectRefusal(target, resolved, daemon);
+      if (own !== undefined) return die(own);
       die(`the spec desolate derived for ${name} does not pass the policy
         (refusing to start -- this is a desolate bug, not a problem with
         your devcontainer.json): ${err?.message ?? err}`);

@@ -49,4 +49,17 @@ group "a project the proxy restricts is refused the shared daemon before anythin
 FIRST=$(body_of runTarget | grep -oE '(refuseRestrictedOnTheSharedDaemon|daemons\.use|useProjectDaemon|devcontainerUp)\(' | head -1)
 assert_eq "it is asked first, once the daemon is known" "$FIRST" "refuseRestrictedOnTheSharedDaemon("
 
+group "a refused derived spec is the project's when its own spec is refused too"
+# From the Mac nothing else judges the project's own spec, and a worktree's is
+# its branch's copy: a fork's `build.options` was once reported as a desolate
+# bug, sending its owner to the main tree's devcontainer.json, which was fine.
+JUDGE=$(body_of runTarget | awk '/const judge = \(\) => \{/,/^  \};/')
+assert_contains "  (found the judge)" "$JUDGE" "enforcePolicy("
+OWN_AT=$(printf '%s\n' "$JUDGE" | grep -n 'projectRefusal(' | cut -d: -f1 | head -1)
+BUG_AT=$(printf '%s\n' "$JUDGE" | grep -n 'this is a desolate bug' | cut -d: -f1 | head -1)
+[ -n "$OWN_AT" ] && [ -n "$BUG_AT" ] && [ "$OWN_AT" -lt "$BUG_AT" ] \
+  && pass "the project's own spec is judged before a refusal is called desolate's" \
+  || fail "the project's own spec is judged before a refusal is called desolate's" "projectRefusal at '${OWN_AT:-none}', the bug message at '${BUG_AT:-none}'"
+assert_contains "a worktree's refusal says whose copy of the spec it was" "$(body_of projectRefusal)" "a worktree's own copy, as its branch has it"
+
 summary
