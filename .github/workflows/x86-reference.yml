@@ -1,18 +1,33 @@
 # Real-hardware reference for the x86-emulation equivalence check (issue #37).
-# Manual: give the v86_64 commit to compare against. Download the artifact and
-# diff it against a run on the aarch64 VM (release/emulation-equivalence.sh).
+# Runs v86_64's nasm fixture generation on the runner's real x86 CPU and uploads
+# it; compare it with the emulated run from the aarch64 VM:
+#   release/emulation-equivalence.sh compare <emu-dir> <this artifact> [<other ref> ...]
+# The v86_64 commit is pinned in release/emulation-equivalence.sh (V86_COMMIT).
 name: x86-reference
 on:
+  push:
+    branches: [issue/37]
+    paths:
+      - release/emulation-equivalence.sh
+      - release/emulation-equivalence/**
+      - .github/workflows/x86-reference.yml
   workflow_dispatch:
     inputs:
-      v86_commit: { description: "portlandhodl/v86_64 full commit sha", required: true }
+      v86_commit: { description: "portlandhodl/v86_64 full commit sha (blank: the pinned one)", required: false }
 permissions: { contents: read }
 jobs:
   reference:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
-      - run: ./release/emulation-equivalence.sh gen ref
-        env: { V86_COMMIT: "${{ inputs.v86_commit }}" }
+      - name: CPU
+        run: lscpu | tee lscpu.txt
+      - name: Generate fixtures on real x86
+        env: { V86_INPUT: "${{ inputs.v86_commit }}" }
+        run: |
+          if [ -n "$V86_INPUT" ]; then export V86_COMMIT="$V86_INPUT"; fi
+          ./release/emulation-equivalence.sh gen ref ref
+          cp lscpu.txt ref/LSCPU
       - uses: actions/upload-artifact@v4
         with: { name: x86-reference, path: ref }
