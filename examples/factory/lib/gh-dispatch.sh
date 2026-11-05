@@ -41,7 +41,16 @@
 #                       closes -- or the one already open for that branch is
 #                       taken, and made to close the issue;
 #        gray        -- withdrawn: the agent recommends this not be merged;
-#                       told here and by a notification, once per status.
+#                       told here and by a notification, once per status;
+#        blue        -- working: when B (its base: the marker's, --base, or the
+#                       default branch) has moved on GitHub since it last looked
+#                       (a PR was merged), origin/* is refreshed
+#                       (`cli.sh pull --fetch-only`, here, with YOUR credentials)
+#                       and, if the agent can be told (agent_nudge), it is, once
+#                       per move, to bring its branch up to date with origin/B.
+#                       Only while blue: an agent at a question or a permission
+#                       prompt is never typed at. The words are fixed here; no
+#                       text from GitHub, an issue or a PR reaches the agent.
 #
 # Nothing an agent writes reaches GitHub through this: not its question, not
 # its reason for withdrawing, not its line on being done. gh is YOUR login,
@@ -73,6 +82,7 @@
 #   agent_blocked <color> <message>            0 when a status means the agent's OWN access is broken
 #   agent_renew   <project>                    fix that; may ask
 #   agent_resume  <project> <worktree>         carry on after agent_renew
+#   agent_nudge   <project> <worktree> <ref>   tell a working agent <ref> (origin/<branch>) moved; 0 once delivered (optional)
 #   agent_events  <project> <worktree>         print the agent's own timed events as JSON lines (optional; telemetry)
 #   agent_hint    <project> <worktree...>      how to fix it by hand, for when no one is here to ask
 #
@@ -91,6 +101,7 @@ DISPATCHER=$(basename "$0" .sh)
 # shellcheck source=telemetry.sh
 . "$FACTORY_LIB/telemetry.sh"
 
+declare -F agent_nudge   >/dev/null && CAN_NUDGE=1 || CAN_NUDGE=""
 declare -F agent_ready   >/dev/null || agent_ready()   { :; }
 declare -F agent_start   >/dev/null || agent_start()   { echo "dispatch: no agent_start defined" >&2; return 1; }
 declare -F agent_blocked >/dev/null || agent_blocked() { return 1; }
@@ -240,6 +251,52 @@ dispatch_unblock() { # <statuses json>
   return 1
 }
 
+# A branch name this will hand to a command or an agent: plain characters only
+# (a marker's base is the issue's text; it was checked as yours, and is again).
+safe_branch() { case "$1" in ""|-*|*..*|*//*|*/|*[!A-Za-z0-9._/-]*) return 1 ;; esac; }
+
+# <base>'s tip on GitHub, once a tick (a cache of "branch sha" lines), or nothing.
+BASE_CACHE=""
+base_tip() { # <base>
+  local line sha
+  line=$(printf '%s' "$BASE_CACHE" | awk -v b="$1" '$1 == b { print $2; exit }')
+  if [ -z "$line" ]; then
+    sha=$(tele_timed gh_base_ref gh api "repos/$REPO/git/ref/heads/$1" --jq .object.sha 2>/dev/null || true)
+    case "$sha" in *[!0-9a-f]*|"") sha="-" ;; esac
+    [ "${#sha}" -eq 40 ] || sha="-"
+    BASE_CACHE="$BASE_CACHE$1 $sha"$'\n'
+  else
+    sha=$line
+  fi
+  [ "$sha" = "-" ] || printf '%s' "$sha"
+}
+
+# A working agent, told when its base has moved: fetched here (once per move),
+# then nudged (once per move). The first sight only records where it is.
+dispatch_catch_up() { # <n> <name> <base>
+  local n=$1 name=$2 base=$3 sha seen safe
+  [ -n "$CAN_NUDGE" ] || return 0
+  safe_branch "$base" || return 0
+  sha=$(base_tip "$base"); [ -n "$sha" ] || return 0
+  seen=$(cat "$STATE/$name.base-sha" 2>/dev/null || true)
+  if [ -z "$seen" ]; then echo "$sha" > "$STATE/$name.base-sha"; return 0; fi
+  [ "$seen" != "$sha" ] || return 0
+  safe=${base//\//__}
+  if [ "$(cat "$STATE/.fetched-$safe" 2>/dev/null)" != "$sha" ]; then
+    if tele_timed cli_fetch "$CLI" pull "$PROJECT" --fetch-only </dev/null >/dev/null; then
+      echo "$sha" > "$STATE/.fetched-$safe"
+    else
+      log "#$n: $base moved, but could not refresh $PROJECT's origin/*; trying again next tick"; return 0
+    fi
+  fi
+  if agent_nudge "$PROJECT" "$name" "origin/$base" </dev/null >> "$STATE/$name.log" 2>&1; then
+    echo "$sha" > "$STATE/$name.base-sha"
+    log "#$n: origin/$base moved; the agent was told to catch up"
+  else
+    log "#$n: origin/$base moved; the agent could not be told (tried again next tick)"
+  fi
+}
+
 dispatch_tick() {
   local issues statuses running
   # What is not read is not closed: worktrees are removed below for the issues
@@ -260,6 +317,7 @@ dispatch_tick() {
     || { log "$PROJECT: its worktrees not read; trying again next tick"; return 0; }
   running=$(tele_timed cli_list "$CLI" desolate --list --json | sed -n '/^\[/p' | tail -n 1)
   local can_start=1
+  BASE_CACHE=""
   dispatch_unblock "$statuses" || can_start=""
 
   local issue n title body name row color message updated branch start fetch pr base
@@ -325,6 +383,7 @@ dispatch_tick() {
     fi
     agent_blocked "$color" "$message" && continue    # the agent's own access: ours to fix, not the issue's
     case "$color" in
+      blue) dispatch_catch_up "$n" "$name" "$base" ;;
       orange|red)
         # Here and by a notification -- never on the issue, as you.
         [ "$(cat "$STATE/$name.told" 2>/dev/null)" = "$updated" ] && continue
