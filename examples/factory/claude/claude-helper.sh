@@ -6,6 +6,7 @@
 #   claude-helper.sh resume <project> [--worktree w] [--session s] [--task text]
 #   claude-helper.sh attach <project> [--worktree w] [--session s]
 #   claude-helper.sh stop   <project> [--worktree w] [--session s]
+#   claude-helper.sh nudge  <project> [--worktree w] [--session s] --ref origin/<branch>
 #   claude-helper.sh verify <project> [n]
 #   claude-helper.sh events <project> [--worktree w] [--session s]
 #
@@ -63,6 +64,12 @@
 #        to your terminal, so select and paste as usual; if a client still
 #        grabs it, hold shift (option on a Mac) while dragging.
 #
+# nudge  Types one fixed sentence into the session's prompt, telling the agent
+#        that origin/<branch> moved and to bring its branch up to date with it.
+#        Only <branch>, checked to be plain characters, varies; nothing else
+#        from outside is typed. Refused unless the agent's status is blue
+#        (working): at a permission prompt a typed line could answer it.
+#
 # verify Which secret each recent request from this project to
 #        api.anthropic.com carried, from the proxy's audit. Every one should be
 #        the subscription placeholder.
@@ -79,7 +86,7 @@
 # CLAUDE_VERSION (what the native installer installs; default: its latest).
 set -euo pipefail
 
-usage() { sed -n '4,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '4,10p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CLI=${DESOLATE_CLI:-$HERE/../../../release/cli.sh}
 STATUS_HELPER=${DESOLATE_STATUS_HELPER:-/desolate/status}   # where it is inside the target
@@ -90,7 +97,7 @@ say() { echo "claude-helper: $*"; }
 
 [ $# -ge 2 ] || usage
 CMD=$1 PROJECT=$2; shift 2
-WT=() SESSION=claude TASK="" HAS_TASK="" SCOPED="" RENEW="" RESUME="" N=200 CLAUDE_ARGS=()
+WT=() SESSION=claude TASK="" HAS_TASK="" SCOPED="" REF="" RENEW="" RESUME="" N=200 CLAUDE_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --worktree) WT=(--worktree "${2:?--worktree takes a name}"); shift 2 ;;
@@ -99,6 +106,7 @@ while [ $# -gt 0 ]; do
     --task-file) TASK=$(cat "${2:?}"); HAS_TASK=1; shift 2 ;;
     --scoped) SCOPED=1; shift ;;
     --renew) RENEW=1; shift ;;
+    --ref) REF=${2:?--ref takes origin/<branch>}; shift 2 ;;
     --) shift; CLAUDE_ARGS=("$@"); break ;;
     [0-9]*) N=$1; shift ;;
     *) usage ;;
@@ -400,6 +408,17 @@ verify() {
         END { if (!any) print "  no requests to api.anthropic.com from this project in the window"; exit bad }'
 }
 
+nudge() {
+  case "$REF" in origin/*) ;; *) die "--ref is origin/<branch>" ;; esac
+  case "${REF#origin/}" in ""|-*|*..*|*//*|*/|*[!A-Za-z0-9._/-]*) die "not a plain branch name: --ref" ;; esac
+  local text="origin/${REF#origin/} has moved (a PR was merged) and was fetched for you; you cannot fetch yourself. When you reach a good stopping point, commit your work, then bring this branch up to date with $REF (rebase, or merge if a rebase is unsuitable), resolve any conflicts, and rerun your tests. Do not push."
+  "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- bash -c '
+    session=$1 text=$2 status=$3
+    tmux has-session -t "=$session" 2>/dev/null || { echo "no session $session" >&2; exit 1; }
+    case "$($status show 2>/dev/null)" in *"\"color\":\"blue\""*) ;; *) echo "agent is not working (not blue); not typing at it" >&2; exit 1 ;; esac
+    tmux send-keys -t "=$session:" -l -- "$text" && tmux send-keys -t "=$session:" Enter' claude-helper "$SESSION" "$text" "$STATUS_HELPER" </dev/null
+}
+
 case "$CMD" in
   auth|start|resume|verify) load_secrets ;;
 esac
@@ -410,6 +429,7 @@ case "$CMD" in
   attach) exec "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- tmux attach -t "=$SESSION" ;;
   stop) "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- tmux kill-session -t "=$SESSION" </dev/null && say "stopped '$SESSION'" ;;
   verify) verify ;;
+  nudge) nudge ;;
   events) "$CLI" exec "$PROJECT" ${WT[@]+"${WT[@]}"} -- sh -c 'cat "${XDG_STATE_HOME:-$HOME/.local/state}/desolate-claude/$1/events.jsonl" 2>/dev/null || true' _ "$SESSION" </dev/null ;;
   *) usage ;;
 esac
