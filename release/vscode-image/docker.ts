@@ -441,9 +441,10 @@ g -c diff.renameLimit=1000 diff --raw --no-abbrev -M "$left" HEAD | {
       else
         for blob in "$a" "$b"; do
           [ "$blob" = "$zero" ] && continue
-          head8k=$(g cat-file blob "$blob" | head -c 8000 | wc -c)
+          if [ "$blob" = "$a" ]; then size=$sa; else size=$sb; fi
+          [ "$size" -gt 8000 ] && size=8000
           kept=$(g cat-file blob "$blob" | head -c 8000 | tr -d '\000' | wc -c)
-          [ "$head8k" -eq "$kept" ] || kind=binary
+          [ "$size" -eq "$kept" ] || kind=binary
         done
       fi
     fi
