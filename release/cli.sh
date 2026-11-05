@@ -705,12 +705,20 @@ dind_df() {
 # `volume prune` without -a has left named volumes alone since docker 23, and
 # the dinds run 29: a project's declared volumes survive this, and /workspaces
 # is not a volume on any of these daemons at all.
+#
+# Each line says what it freed: docker's own last lines are "Total: 5.9GB"
+# for the build cache and "Total reclaimed space: 0B" for the other two, and
+# read unlabelled, a run that freed 24GB looked like one that freed nothing.
 gc_daemon() {
-  local name=$1 socket=$2
+  local name=$1 socket=$2 freed
   echo "-- $name --"
-  daemon_docker "$name" "$socket" builder prune -af | tail -n 1
-  daemon_docker "$name" "$socket" image prune -f | tail -n 1
-  daemon_docker "$name" "$socket" volume prune -f | tail -n 1
+  freed() { sed -n 's/^Total[^:]*:[[:space:]]*//p' | tail -n 1; }
+  freed=$(daemon_docker "$name" "$socket" builder prune -af | freed)
+  echo "  build cache freed:      ${freed:-0B}"
+  freed=$(daemon_docker "$name" "$socket" image prune -f | freed)
+  echo "  untagged images freed:  ${freed:-0B}"
+  freed=$(daemon_docker "$name" "$socket" volume prune -f | freed)
+  echo "  unused volumes freed:   ${freed:-0B}"
 }
 
 # The nested daemons docker-in-docker used to start kept their state in these,
