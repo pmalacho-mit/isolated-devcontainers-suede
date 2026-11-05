@@ -286,6 +286,7 @@ chmod +x "$dir/hook"
 cat > "$dir/settings.json" <<JSON
 {
   "apiKeyHelper": "",
+  "effortLevel": "high",
   "permissions": {
     "additionalDirectories": ["/desolate"],
     "allow": ["Read(//desolate/**)", "Bash(git add *)", "Bash(git commit *)", "Bash(/desolate/status *)"]
