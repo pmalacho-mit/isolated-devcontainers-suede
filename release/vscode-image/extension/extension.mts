@@ -345,7 +345,9 @@ export function activate(context: vscode.ExtensionContext) {
       });
     } finally {
       if (key) busy.delete(key);
-      await refreshAll();
+      // Not awaited: the caller (a review, say) shows its result without
+      // waiting for the broker to be asked about everything again.
+      refreshAll().catch((err) => log.appendLine(`desolate: refresh failed: ${err}`));
     }
   };
 
