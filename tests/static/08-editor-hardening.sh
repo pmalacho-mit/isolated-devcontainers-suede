@@ -171,4 +171,20 @@ fi
 rm -rf "$G_TMP"
 assert_contains "the image sources it in interactive shells" "$(cat "$RELEASE/vscode-image/Dockerfile")" "/etc/desolate/git-guard.bash; do"
 
+group "\`code\` in an editor's terminal is the editor's CLI (tests/environments/code-cli runs it)"
+assert_contains "the server tree's CLI has \`code\` beside \`codium\`" "$DF" \
+  'ln -s codium "${DESOLATE_SERVER_ROOT}/bin/remote-cli/code"'
+# The stamp volume-init reseeds by is written after everything the image adds
+# to the tree, and covers it: a link added with VSCodium's version unchanged
+# would otherwise never reach a stack that had seeded it once.
+LINK_AT=$(printf '%s\n' "$DF" | grep -n 'ln -s codium' | cut -d: -f1 | head -1)
+STAMP_AT=$(printf '%s\n' "$DF" | grep -n "printf '%s+%s' \"\${VSCODIUM_VERSION}\" \"\$tree\"" | cut -d: -f1 | head -1)
+SHELL_AT=$(printf '%s\n' "$DF" | grep -n 'cp -al "${DESOLATE_SERVER_ROOT}" "${DESOLATE_SHELL_ROOT}"' | cut -d: -f1 | head -1)
+[ -n "$LINK_AT" ] && [ -n "$STAMP_AT" ] && [ "$LINK_AT" -lt "$STAMP_AT" ] \
+  && pass "the server's stamp is written after the link, from the tree's contents" \
+  || fail "the server's stamp is written after the link, from the tree's contents" "link at '${LINK_AT:-none}', stamp at '${STAMP_AT:-none}'"
+[ -n "$SHELL_AT" ] && [ -n "$LINK_AT" ] && [ "$LINK_AT" -lt "$SHELL_AT" ] \
+  && pass "  and the outer editor's tree, copied after, has it too" \
+  || fail "  and the outer editor's tree, copied after, has it too" "link at '${LINK_AT:-none}', copy at '${SHELL_AT:-none}'"
+
 summary

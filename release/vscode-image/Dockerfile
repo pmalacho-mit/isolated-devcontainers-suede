@@ -83,14 +83,30 @@ RUN set -eux; \
   mkdir -p "${DESOLATE_SERVER_ROOT}"; \
   tar xz -C "${DESOLATE_SERVER_ROOT}" -f /tmp/reh.tar.gz; \
   rm /tmp/reh.tar.gz; \
-  printf '%s' "${VSCODIUM_VERSION}" > "${DESOLATE_SERVER_ROOT}/.version"; \
   test -x "${DESOLATE_SERVER_ROOT}/bin/codium-server"; \
   # The reason VSCODIUM_VERSION is held back, in a form that fails the build.
   # Needs no network: the workbench states what it requires, and a release whose
   # requirement has moved past the pin in its own product.json is one where
   # every webview pane renders blank with nothing in any log.
   grep -q "_expectedServiceWorkerVersion=${VSCODE_WEBVIEW_SW_VERSION}" \
-  "${DESOLATE_SERVER_ROOT}/out/vs/code/browser/workbench/workbench.js"
+  "${DESOLATE_SERVER_ROOT}/out/vs/code/browser/workbench/workbench.js"; \
+  # `code` beside `codium` in the CLI the editor's terminals put first on PATH:
+  # git configured `core.editor "code --wait"` (VS Code's own advice, and some
+  # base images' default), `code <file>`, and the base images' /usr/local/bin/code
+  # shim, which looks for a real `code`, all reach this editor instead of
+  # failing "code or code-insiders is not installed". `codium` resolves its
+  # own path to find the server, so a link is all it takes.
+  # Outside an editor terminal it says it needs one and exits 0: what is
+  # checked is that, through the link, it runs at all.
+  ln -s codium "${DESOLATE_SERVER_ROOT}/bin/remote-cli/code"; \
+  "${DESOLATE_SERVER_ROOT}/bin/remote-cli/code" --version >/dev/null; \
+  # The tree's stamp, which volume-init compares to decide whether the shared
+  # server-dist volume needs reseeding, and every project's copy-on-write view
+  # of it rebuilding: VSCodium's version AND what this file added to it. A
+  # change here with VSCodium's version unchanged would otherwise never reach
+  # a stack that had seeded it once.
+  tree=$(cd "${DESOLATE_SERVER_ROOT}" && find . -printf '%P\t%m\t%s\t%l\n' | LC_ALL=C sort | sha256sum | cut -c1-12); \
+  printf '%s+%s' "${VSCODIUM_VERSION}" "$tree" > "${DESOLATE_SERVER_ROOT}/.version"
 
 # A SECOND tree for the OUTER editor, with the git extensions removed.
 #
