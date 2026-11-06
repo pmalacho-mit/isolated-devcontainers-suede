@@ -7,7 +7,7 @@
 - `release/vm/install-binfmt.sh` (called from `vm/install.sh`, aarch64 only): installs `qemu-user-static`, **publishes** the two static interpreters and the registrar under `/var/lib/desolate-proxy/public/binfmt` (mounted read-only at `/desolate/binfmt` in every dind), and registers in the VM too (persisted in `/etc/binfmt.d`).
 - Both dind entrypoints (`docker-compose.yml`, `vscode-image/docker.ts`) run `/desolate/binfmt/register.sh` before `dockerd`, so each dind has the entries in its own table. No container is privileged: a sysbox container is root in its own user namespace, which owns that table. Tests: `tests/static/23-binfmt.sh`.
 - Preflight 6b runs `alpine uname -m` for `linux/amd64` and `linux/386` on the *inner* (sysbox) daemon, the daemon agents use.
-- `release/emulation-equivalence.sh` (+ `release/emulation-equivalence/`, `.github/workflows/x86-reference.yml`): `gen ref` on real x86, `gen emu` on the aarch64 VM, `compare`. Both sides build v86_64's nasm tests at a pinned commit in `ubuntu:24.04` and record its `gen_fixtures.js` fixtures, plus the raw register bits and gdb single-step traces of the x87-transcendental tests. `compare` gives two verdicts per test: what v86_64's `run.js` would see (its 1e-7 x87 tolerance and EFLAGS / status-word masks), and byte-for-byte on the raw bits. References are compared with each other too; see "Equivalence evidence".
+- `release/emulation-equivalence.sh` (+ `release/emulation-equivalence/`): `gen ref` on real x86, `gen emu` on the aarch64 VM, `compare`. Both sides build v86_64's nasm tests at a pinned commit in `ubuntu:24.04` and record its `gen_fixtures.js` fixtures, plus the raw register bits and gdb single-step traces of the x87-transcendental tests. `compare` gives two verdicts per test: what v86_64's `run.js` would see (its 1e-7 x87 tolerance and EFLAGS / status-word masks), and byte-for-byte on the raw bits. References are compared with each other too; see "Equivalence evidence".
 
 ## Finding 1: a VM-level registration does not reach sysbox containers (measured)
 The first version registered in the VM only, reasoning that from Linux 6.7 lookups fall back to the parent namespace's table. That fallback exists, but only for a user namespace that has **not** mounted binfmt_misc itself: a mount creates an own, empty table for that namespace, which then shadows every ancestor's. sysbox mounts binfmt_misc in every container it starts (since 0.6.7, "binfmt_misc namespacing inside Sysbox containers (kernel 6.7+)"). Measured on the VM with the VM's `qemu-x86_64` entry correct:
@@ -39,13 +39,13 @@ Inputs: v86_64 `c394574477b57eadfc859f593b4aecb08fa37cb6`, 16529 tests. Emulator
 
 ```sh
 release/emulation-equivalence.sh gen emu emu        # on the VM (a devcontainer)
-release/emulation-equivalence.sh gen ref ref-intel  # on real x86 (and the x86-reference workflow)
+release/emulation-equivalence.sh gen ref ref-intel  # on real x86 (any machine with Docker; the AMD reference came from a GitHub runner)
 release/emulation-equivalence.sh compare emu ref-amd ref-intel
 ```
 
 Results ([x86-equivalence-evidence.md](x86-equivalence-evidence.md)), against an Intel Xeon Gold 6140 and an AMD EPYC 9V74:
 - **The two real CPUs are bit-identical on all 16,529 fixtures**, so no difference is hardware-dependent.
-- **Emulated:** 15,491 pass and 1,038 fail under v86_64's `run.js` rules. 920 of the failures are x87 stack faults, which qemu never reports. 56 are `FCOMI`-family flags. 58 are instruction decoding (`F6`/`F7 /1`, the register forms of memory-only SSE moves, `0F 18` hints), plus 16-bit `ENTER`, `FSAVE` reserved bits, `fprem` C3 and the `fyl2xp1` domain.
+- **Emulated:** 15,491 pass and 1,038 fail under v86_64's `run.js` rules. 920 of the failures are x87 stack faults, which qemu never reports. 56 are `FCOMI`-family flags. 53 are instruction decoding (`F6`/`F7 /1`, the register forms of memory-only SSE moves, `0F 18` hints). The last 9 are 16-bit `ENTER`, `FSAVE` reserved bits, `fprem` C3 and the `fyl2xp1` domain.
 - **Raw-only differences:**
   - MMX writes don't set the x87 exponent field.
   - Fault frames are missing RF.

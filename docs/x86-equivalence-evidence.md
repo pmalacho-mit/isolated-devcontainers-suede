@@ -154,4 +154,4 @@ qemu 8.2.2's gdb server reports `ftag`, `fiseg`, `fioff`, `foseg`, `fooff` and `
 
 - **Usable as is:** building and running x86/i386 test programs, integer and SSE behaviour, ordinary x87 arithmetic, `gdb` stepping via qemu's gdb server.
 - **Not usable as hardware truth:** fixtures involving x87 stack overflow/underflow, `FCOMI`-family flags, `fsin`/`fcos`/`fptan`/`fsincos` beyond ~16 significant digits, the instruction encodings above, `FSAVE` images, `MXCSR`/x87 exception flags, or RF.
-- **For v86_64:** emulated fixtures fail 1,038 of 16,529 tests under its own runner. They must not replace real-x86 fixtures. Generate fixtures on real x86 (its CI, or the `x86-reference` workflow here), and use the VM to build and run.
+- **For v86_64:** emulated fixtures fail 1,038 of 16,529 tests under its own runner. They must not replace real-x86 fixtures. Generate fixtures on real x86 (its CI on GitHub's x86 runners, or `release/emulation-equivalence.sh gen ref` on any x86 machine), and use the VM to build and run.

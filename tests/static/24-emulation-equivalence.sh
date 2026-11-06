@@ -73,8 +73,6 @@ assert_fails "different test binaries are refused" python3 "$EQ/compare.py" "$T/
 group "wiring"
 assert_ok "gen-inner.sh parses" bash -n "$EQ/gen-inner.sh"
 assert_ok "emulation-equivalence.sh parses" bash -n "$RELEASE/emulation-equivalence.sh"
-assert_ok "workflow passes the dispatch input through env, not into the script" \
-  bash -c "! grep -q 'run:.*inputs\.' '$ROOT/.github/workflows/x86-reference.yml' && ! grep -qE '^\s+if .*\\\$\{\{' '$ROOT/.github/workflows/x86-reference.yml'"
 assert_ok "emu and ref pin the same v86_64 commit (one place)" grep -qE '^V86_COMMIT=\$\{V86_COMMIT:-[0-9a-f]{40}\}' "$RELEASE/emulation-equivalence.sh"
 
 summary
