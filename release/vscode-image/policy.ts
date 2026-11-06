@@ -234,8 +234,9 @@ export const mount = {
 };
 
 /** Where docker-outside-of-docker binds the daemon's socket; its entrypoint
- *  proxies it on to /var/run/docker.sock for the remote user. */
-const DOCKER_HOST_SOCKET_TARGET = "/var/run/docker-host.sock";
+ *  proxies it on to /var/run/docker.sock for the remote user (dind.directSocket
+ *  says why desolate points the user past that proxy). */
+const DOCKER_HOST_SOCKET_TARGET = dind.directSocket.path;
 
 /**
  * Which daemon a target runs on -- decided by the caller from the same rule

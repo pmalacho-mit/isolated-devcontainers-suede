@@ -17,6 +17,8 @@ import {
   RECLAIMED,
   STATUS_RAN,
   createDocker,
+  execArgv,
+  LOGIN_EXEC,
   reclaimArgv,
   parseMounts,
   parseWorktreeChanges,
@@ -111,6 +113,45 @@ describe("container queries", () => {
   test("the first id wins when several match and no config is known", () => {
     const { docker } = recorder(["one\t/a.json\ntwo\t/b.json\n"]);
     assert.equal(docker.container.forWorkspace("/w/a"), "one");
+  });
+});
+
+describe("what `desolate exec` hands docker", () => {
+  const base = { id: "abc", folder: "/workspaces/p", tty: false, env: [], argv: ["git", "status"] };
+
+  test("as the remote user, in the workspace, through the login shell, words intact", () => {
+    assert.deepEqual(execArgv({ ...base, user: "vscode" }), [
+      "exec", "-i", "-u", "vscode", "-w", "/workspaces/p", "abc",
+      "sh", "-c", LOGIN_EXEC, "desolate-exec", "git", "status",
+    ]);
+  });
+
+  test("a terminal asks for -t; no user means the image's own", () => {
+    assert.deepEqual(execArgv({ ...base, tty: true }).slice(0, 3), ["exec", "-i", "-t"]);
+    assert.equal(execArgv(base).includes("-u"), false);
+  });
+
+  test("an added variable is an -e BEFORE the container id, so it reaches the command", () => {
+    const argv = execArgv({ ...base, user: "vscode", env: ["DOCKER_HOST=unix:///var/run/docker-host.sock"] });
+    const e = argv.indexOf("-e");
+    assert.deepEqual(argv.slice(e, e + 2), ["-e", "DOCKER_HOST=unix:///var/run/docker-host.sock"]);
+    assert.ok(e < argv.indexOf("abc"));
+  });
+
+  test("a command word that looks like a flag or an assignment stays the command's", () => {
+    const argv = execArgv({ ...base, env: ["A=1"], argv: ["-e", "B=2", "--rm"] });
+    assert.deepEqual(argv.slice(-3), ["-e", "B=2", "--rm"]);
+    assert.equal(argv.filter((word) => word === "-e").length, 2); // ours, and the command's
+    assert.ok(argv.indexOf("desolate-exec") < argv.lastIndexOf("-e"));
+  });
+});
+
+describe("a container's own environment", () => {
+  test("is read from its config, one NAME=value per line", () => {
+    const { docker, calls } = recorder(["PATH=/bin\nDOCKER_HOST=tcp://x:1\n"]);
+    assert.deepEqual(docker.container.environment("abc"), ["PATH=/bin", "DOCKER_HOST=tcp://x:1"]);
+    assert.deepEqual(calls[0].slice(0, 2), ["inspect", "-f"]);
+    assert.equal(calls[0].at(-1), "abc");
   });
 });
 

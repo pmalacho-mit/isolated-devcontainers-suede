@@ -27,6 +27,7 @@ import {
   type Target,
 } from "../../../release/vscode-image/projects.ts";
 import { parse as parseJsonc, strip as stripJsonc } from "../../../release/vscode-image/jsonc.ts";
+import * as dind from "../../../release/vscode-image/dind.ts";
 
 const PROJECT = "myapp";
 
@@ -1519,6 +1520,34 @@ describe("E18: the socket bind is granted to the feature, on a project daemon, a
         /bind/,
       );
     });
+});
+
+describe("E18b: the DOCKER_HOST desolate adds to a project daemon's spec passes (#50)", () => {
+  // deriveRunConfig adds it BEFORE the derived spec is judged, so the policy is
+  // what would refuse it if remoteEnv were ever restricted -- at every start.
+  const derived = (configuration: any) => {
+    dind.addDirectSocket(configuration);
+    return spec(configuration, OUTSIDE_MERGED);
+  };
+
+  test("the spec with it passes on the project's own daemon", () => {
+    const configuration: any = { image: "x", features: OUTSIDE };
+    assert.equal(dind.addDirectSocket(configuration), true);
+    enforcePolicy(named(PROJECT), spec(configuration, OUTSIDE_MERGED), ...onItsOwnDaemon(PROJECT));
+  });
+
+  test("so does one beside the project's own remoteEnv", () => {
+    enforcePolicy(
+      named(PROJECT),
+      derived({ image: "x", features: OUTSIDE, remoteEnv: { SSH_AUTH_SOCK: "" } }),
+      ...onItsOwnDaemon(PROJECT),
+    );
+  });
+
+  test("it opens no door: the bind the policy grants is still only the feature's, to this path", () => {
+    const written = derived({ image: "x", mounts: ["type=bind,source=/var/run/docker.sock,target=/var/run/docker-host.sock"] });
+    assert.throws(() => enforcePolicy(named(PROJECT), written, ...onItsOwnDaemon(PROJECT)), /bind/);
+  });
 });
 
 describe("E19: capabilities and securityOpt branch on the daemon", () => {

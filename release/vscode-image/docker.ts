@@ -234,11 +234,14 @@ export interface DindSpec {
 }
 
 /** Inside a project dind, written by its entrypoint before dockerd starts:
- *  the CA (as the shared dind installs it), daemon.json, and the
- *  /var/run/docker.sock ALIAS -- what docker-outside-of-docker's own mount
- *  binds from (sibling-feature.sh F1/F3). */
+ *  the CA (as the shared dind installs it), qemu-user in this dind's OWN
+ *  binfmt_misc table (as the shared dind does; sysbox gives each container
+ *  one, so the VM's registration does not reach it -- vm/binfmt-register.sh),
+ *  daemon.json, and the /var/run/docker.sock ALIAS -- what
+ *  docker-outside-of-docker's own mount binds from (sibling-feature.sh F1/F3). */
 const DIND_ENTRYPOINT =
   '[ -x /desolate/ca/install-ca.sh ] && /desolate/ca/install-ca.sh >/dev/null 2>&1 || true; ' +
+  '[ -x /desolate/binfmt/register.sh ] && /desolate/binfmt/register.sh >/dev/null || true; ' +
   'mkdir -p /etc/docker && printf "%s" "$DESOLATE_DAEMON_JSON" > /etc/docker/daemon.json; ' +
   'ln -sf /run/dind-sock/docker.sock /var/run/docker.sock; ' +
   'exec dockerd-entrypoint.sh "$@"';
@@ -290,6 +293,11 @@ const dindRunArgv = (spec: DindSpec) => [
   "--",
   "dockerd",
   "--host=unix:///run/dind-sock/docker.sock",
+  // Group 1000 is the devcontainers base image's `vscode` user's own group, so
+  // that user opens the socket DIRECTLY. desolate relies on it: it points
+  // DOCKER_HOST at /var/run/docker-host.sock to bypass docker-outside-of-docker's
+  // socat relay, which truncates attached output (dind.directSocket says why;
+  // tests/static/23-docker-socket.sh pins the pair).
   "--group=1000",
   "--default-ulimit=nofile=65536:524288",
 ];
@@ -456,6 +464,22 @@ export const lfsPushScript = [
  * command is "$@", never spliced into the script.
  */
 export const LOGIN_EXEC = String.raw`if command -v bash >/dev/null 2>&1; then exec bash -lc 'exec "$@"' bash "$@"; fi; exec sh -lc 'exec "$@"' sh "$@"`;
+
+/** The argv of `docker` for `desolate exec`: as the remote user, in the
+ *  workspace, through a login shell, with `env` (`NAME=value`) added to what
+ *  the container already has. */
+export const execArgv = (o: {
+  id: string;
+  user?: string;
+  folder: string;
+  tty: boolean;
+  env: readonly string[];
+  argv: readonly string[];
+}) => [
+  "exec", "-i", ...(o.tty ? ["-t"] : []), ...(o.user ? ["-u", o.user] : []),
+  ...o.env.flatMap((assignment) => ["-e", assignment]),
+  "-w", o.folder, o.id, "sh", "-c", LOGIN_EXEC, "desolate-exec", ...o.argv,
+];
 
 /**
  * What `desolate --push` would send, for a person to read first (`desolate
@@ -852,6 +876,10 @@ export const createDocker = (run: Runner) => {
     /** The NAMES of the volumes it mounts. */
     volumeNames: (cid: string) =>
       nonEmptyLines(query("inspect", "-f", '{{range .Mounts}}{{if .Name}}{{.Name}}{{"\\n"}}{{end}}{{end}}', cid)),
+    /** The container's own environment, `NAME=value` per line: the image's
+     *  ENV and the spec's containerEnv, and none of remoteEnv. */
+    environment: (cid: string) =>
+      nonEmptyLines(query("inspect", "-f", '{{range .Config.Env}}{{println .}}{{end}}', cid)),
     mounts: (cid: string) =>
       parseMounts(query("inspect", "-f", MOUNTS_TEMPLATE, cid)),
     remove: (names: string[]) =>
