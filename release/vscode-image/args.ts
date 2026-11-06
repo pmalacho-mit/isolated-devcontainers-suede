@@ -5,6 +5,8 @@
  * subprocess. Turning a UsageError into an exit code is the entry point's job.
  */
 
+import { readAppearance, type Appearance } from "./editor.ts";
+
 /** A bundle handed between the editor and a target's sandbox (transfer.ts):
  *  the editor picks the name, and everything that takes one holds it to this,
  *  so no side can be asked for any other file. */
@@ -120,6 +122,10 @@ export type Args = {
   /** `--reclaim --path <relative>`: where under the target to reclaim. Relative
    *  to the target's directory, and refused if it leaves it. */
   path?: string;
+  /** `--appearance <json>`: the outer editor's colour theme, for a start's
+   *  editor to open with (editor.ts readAppearance). Absent: it opens with its
+   *  own defaults. */
+  appearance?: Appearance;
   /** `--json`: `list` and `ports` print one JSON document instead of prose,
    *  for programs -- the editor's extension, a harness. */
   json: boolean;
@@ -149,6 +155,7 @@ export type Flags =
   | ["--config", string]
   | ["--worktree", string]
   | ["--move", string, string]
+  | ["--appearance", string]
   | ["--bundle", string]
   | ["--pull", string]
   | "--review"
@@ -224,6 +231,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let move: Args["move"];
   let reclaimPath: string | undefined;
   let json = false;
+  let appearance: Appearance | undefined;
   const positional: string[] = [];
   const queue = [...argv];
   let execArgv: string[] | undefined;
@@ -329,6 +337,17 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
       case "--json":
         json = true;
         break;
+      case "--appearance": {
+        const given = queue.shift() ?? "";
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(given);
+        } catch {
+          throw new UsageError(`--appearance takes a JSON object of the outer editor's colour theme settings`);
+        }
+        appearance = readAppearance(parsed);
+        break;
+      }
       case "--move": {
         const label = queue.shift() ?? "";
         const port = queue.shift() ?? "";
@@ -362,6 +381,8 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     throw new UsageError(`--${command} acts on a worktree; name it with --worktree`);
   if (move && command !== "ports")
     throw new UsageError("--move only means something with --ports");
+  if (appearance !== undefined && command !== "run")
+    throw new UsageError("--appearance only means something with a start");
   if (json && command !== "list" && command !== "ports")
     throw new UsageError("--json only means something with --list or --ports");
   if (execArgv !== undefined && command !== "exec")
@@ -402,6 +423,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     force,
     json,
     ...(move ? { move } : {}),
+    ...(appearance && Object.keys(appearance).length ? { appearance } : {}),
     ...(reclaimPath !== undefined ? { path: reclaimPath } : {}),
     ...(execArgv !== undefined ? { execArgv } : {}),
     ...(transfer !== undefined ? { transfer } : {}),

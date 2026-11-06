@@ -720,6 +720,38 @@ describe("a legitimate project starts, from a frozen copy", () => {
     assert.ok(calls[0].includes("ok-project"));
   });
 
+  test("#59: the outer editor's colour theme reaches the runner as a flag -- the theme only", async () => {
+    project("themed", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
+    const msgs = await ask({
+      op: "start",
+      project: "themed",
+      appearance: {
+        "workbench.colorTheme": "Default Dark Modern",
+        "window.autoDetectColorScheme": false,
+        "terminal.integrated.profiles.linux": { x: { path: "/tmp/evil" } },
+        "workbench.preferredDarkColorTheme": 7,
+      },
+    });
+    assert.equal(result(msgs).ok, true, errorOf(msgs));
+    const [call] = runnerInvocations();
+    const at = call.indexOf("--appearance");
+    assert.ok(at >= 0, "the theme did not reach the runner");
+    assert.deepEqual(JSON.parse(call[at + 1]), { "workbench.colorTheme": "Default Dark Modern", "window.autoDetectColorScheme": false });
+  });
+
+  test("#59: no theme, no flag; a theme on an op that starts nothing is refused", async () => {
+    project("unthemed", JSON.stringify({ image: "alpine:3" }));
+    resetRunner();
+    assert.equal(result(await ask({ op: "start", project: "unthemed", appearance: {} })).ok, true);
+    assert.equal(result(await ask({ op: "start", project: "unthemed" })).ok, true);
+    assert.ok(runnerInvocations().every((call) => !call.includes("--appearance")));
+    for (const bad of [{ op: "stop", project: "unthemed", appearance: {} }, { op: "start", project: "unthemed", appearance: "dark" }, { op: "start", project: "unthemed", appearance: null }]) {
+      const msgs = await ask(bad);
+      assert.equal(result(msgs).ok, false, JSON.stringify(bad));
+    }
+  });
+
   test("TOCTOU: the runner gets the validated copy, not the live file", async () => {
     // The attack this closes: the editor writes a benign devcontainer.json, asks
     // the broker to start it, and swaps in a hostile one while the policy check

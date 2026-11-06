@@ -24,6 +24,7 @@
 // (worktrees.ts).
 
 import { ask } from "./broker-client.ts";
+import { savedAppearance } from "./appearance.ts";
 import { ensure as ensureWorktree } from "./worktrees.ts";
 import { EVERY_TARGET, meansEveryTarget } from "./projects.ts";
 import { statusRows } from "./status.ts";
@@ -257,7 +258,15 @@ if (op === "dinds") {
       : `desolate: '${op}' takes ONE project, got ${rest.length}: ${rest.join(" ")}`);
     usage(1);
   }
-  request = { op, project: rest[0], worktree, ...(move ? { move } : {}), ...(modifier.has("--json") ? { json: true } : {}) };
+  // A start's editor opens in the outer editor's colour theme (appearance.ts);
+  // what the extension last kept, or nothing before it has.
+  const appearance = op === "start" || op === "rebuild" ? savedAppearance() : {};
+  request = {
+    op, project: rest[0], worktree,
+    ...(move ? { move } : {}),
+    ...(modifier.has("--json") ? { json: true } : {}),
+    ...(Object.keys(appearance).length ? { appearance } : {}),
+  };
 }
 
 // Created before the broker is asked to start it -- by the broker as well, in

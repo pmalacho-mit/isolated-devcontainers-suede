@@ -95,6 +95,60 @@ export const EDITOR_DEFAULT_SETTINGS: Record<string, JSONValue> = {
   "terminal.integrated.macOptionClickForcesSelection": true,
 };
 
+/**
+ * The settings the OUTER editor's colour theme is made of -- all of them, so a
+ * person who follows their operating system's light/dark (auto-detect plus a
+ * preferred theme for each) gets that in a devcontainer's editor as well as one
+ * who picked a single theme.
+ *
+ * A closed list, and typed: this is the one thing a project's editor receives
+ * from the outer editor, which is the lower-trust side. Nothing else of the
+ * outer editor's settings is ever carried across.
+ */
+export const APPEARANCE_SETTINGS = {
+  "workbench.colorTheme": "string",
+  "workbench.preferredDarkColorTheme": "string",
+  "workbench.preferredLightColorTheme": "string",
+  "workbench.preferredHighContrastColorTheme": "string",
+  "workbench.preferredHighContrastLightColorTheme": "string",
+  "window.autoDetectColorScheme": "boolean",
+  "window.autoDetectHighContrast": "boolean",
+} as const;
+
+export type Appearance = Partial<Record<keyof typeof APPEARANCE_SETTINGS, string | boolean>>;
+
+/** A theme's name is its label, which may be nearly anything printable. Bounded,
+ *  and no control characters: it lands in a settings file and a log line. */
+const THEME_NAME = /^[^\x00-\x1f\x7f]{1,100}$/;
+
+/**
+ * Whatever `raw` holds that is an appearance setting of the right type; the rest
+ * is dropped, not repaired. Total: it takes anything, from a file or a socket.
+ */
+export const readAppearance = (raw: unknown): Appearance => {
+  const appearance: Record<string, string | boolean> = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return appearance;
+  for (const [key, type] of Object.entries(APPEARANCE_SETTINGS)) {
+    const value = (raw as Record<string, unknown>)[key];
+    if (type === "boolean" ? typeof value === "boolean" : typeof value === "string" && THEME_NAME.test(value))
+      appearance[key] = value as string | boolean;
+  }
+  return appearance;
+};
+
+/**
+ * The server's flag that turns Workspace Trust off for its web client
+ * (`enableWorkspaceTrust` in the page's configuration). A flag, not a setting:
+ * `security.workspace.trust.enabled` is Application-scoped, which Machine
+ * settings cannot carry.
+ *
+ * Off is right HERE: the editor runs inside the project's own sandbox, whose
+ * contents are what Restricted Mode would guard against, and the prompt comes
+ * back on every new origin -- each target is its own host, so the browser has
+ * never trusted any of them. The OUTER editor keeps trust on (editor-settings.ts).
+ */
+export const NO_WORKSPACE_TRUST = "--disable-workspace-trust";
+
 /** Quoted, so the shell expands NOTHING between the markers: a project's
  *  settings are data, and no value in them can become code. Safe only while no
  *  line of the JSON can be mistaken for this, which is checked, not assumed. */
@@ -137,6 +191,9 @@ export interface EditorCustomizations {
   extensions: string[];
   /** Applied at Machine scope; see MACHINE_SETTINGS. */
   settings: Record<string, JSONValue>;
+  /** The outer editor's colour theme, if it said. Beneath `settings`, so a
+   *  project that sets a theme of its own keeps it. */
+  appearance?: Appearance;
 }
 
 /**
@@ -246,7 +303,7 @@ export const externalProfile = (env: [string, string][]) =>
 
 export const editorStartScript = (
   serverDir: string,
-  { extensions, settings }: EditorCustomizations,
+  { extensions, settings, appearance }: EditorCustomizations,
   token: string,
   external: [string, string][] = [],
 ) => {
@@ -265,7 +322,10 @@ export const editorStartScript = (
   // exported before it starts -- and a server already running with a
   // DIFFERENT map is restarted, or its terminals would keep the old one.
   const exports = external.map(([name, value]) => `export ${name}=${value}`).join("\n");
-  const fingerprint = external.map(([name, value]) => `${name}=${value}`).join(" ");
+  // The flags are part of what a running server was started with, so they are
+  // part of the fingerprint: a server from before one was added is restarted
+  // once, not kept with the behaviour it had.
+  const fingerprint = [...external.map(([name, value]) => `${name}=${value}`), `flags=${NO_WORKSPACE_TRUST}`].join(" ");
   return `
 set -e
 SRV=${serverDir}/bin/${SERVER_BIN}
@@ -278,7 +338,7 @@ if [ ! -x "$SRV" ]; then
   echo 'desolate: server not found in container -- is the base image glibc (Debian/Ubuntu)?' >&2
   exit 1
 fi
-${settingsScript({ ...EDITOR_DEFAULT_SETTINGS, ...settings })}
+${settingsScript({ ...EDITOR_DEFAULT_SETTINGS, ...readAppearance(appearance), ...settings })}
 for e in ${extensions.map((e) => `'${e}'`).join(" ")}; do
   "$SRV" --install-extension "$e" \\
       --extensions-dir "$DATA/extensions" --server-data-dir "$DATA" \\
@@ -286,7 +346,7 @@ for e in ${extensions.map((e) => `'${e}'`).join(" ")}; do
 done
 listening() { (exec 3<>/dev/tcp/127.0.0.1/${EDITOR_INTERNAL_PORT}) 2>/dev/null; }
 if listening && [ "$HAVE" != "$WANT" ]; then
-  echo 'desolate: the port map changed -- restarting the editor so its terminals see it'
+  echo 'desolate: the port map or the editor flags changed -- restarting the editor so it takes them'
   # The PROCESS GROUP, not the pid: codium-server is a launcher script whose
   # node child holds the port, and killing the launcher alone leaves that
   # child listening with the old environment. setsid made the launcher the
@@ -298,7 +358,7 @@ if listening && [ "$HAVE" != "$WANT" ]; then
     pkill -f "server-main.js --host 0.0.0.0 --port ${EDITOR_INTERNAL_PORT}" 2>/dev/null || true
     for _ in $(seq 1 40); do listening || break; sleep 0.25; done
   fi
-  listening && { echo 'desolate: the old editor would not stop; its terminals keep the old ports' >&2; }
+  listening && { echo 'desolate: the old editor would not stop; it keeps the settings it started with' >&2; }
 fi
 if listening; then
   echo 'desolate: editor already listening'
@@ -306,6 +366,7 @@ else
   setsid nohup "$SRV" \\
     --host 0.0.0.0 --port ${EDITOR_INTERNAL_PORT} \\
     --connection-token '${token}' \\
+    ${NO_WORKSPACE_TRUST} \\
     --extensions-dir "$DATA/extensions" --server-data-dir "$DATA" \\
     >${EDITOR_LOG} 2>&1 < /dev/null &
   echo $! > "$DATA/server.pid"
