@@ -201,6 +201,58 @@ export const parseWorktreeChanges = (text: string): string[] | null => {
   return lines.slice(ran + 1).filter((line) => line.trim() !== "");
 };
 
+/** Printed by `lossesScript` once every question in it has been answered, so
+ *  a check cut short is never read as a clean one (removal.ts parseLosses). */
+export const LOSSES_DONE = "desolate-losses-done";
+
+/**
+ * What removing a project would lose, asked of its ROOT in its sandbox ($1 the
+ * seconds each question may take): `git status`, exactly as worktreeChanges
+ * asks it -- any warning fails the check -- and then what is in the
+ * repository and nowhere else. Lines:
+ *
+ *   <git's warnings>   STATUS_RAN
+ *   CHANGE <porcelain line>        uncommitted or untracked
+ *   BRANCH <name> <n>              a local branch, and its commits on no remote-tracking branch
+ *   STASH <n>                      stash entries
+ *   DETACHED <n>                   a detached HEAD's commits on no branch
+ *   LOSSES_DONE
+ *
+ * The refs are the repository's, so this one run covers every worktree's
+ * branches; each worktree's uncommitted files are its own check. Remote
+ * branches are GitHub's as the last `desolate --pull` left them -- a push
+ * does not move them -- so a branch pushed since reads as unpushed until a
+ * pull (`--fetch-only` is enough). Always exits 0: whether it ran is the
+ * markers' to say, and its output is kept either way so a refusal can quote it.
+ */
+export const lossesScript = String.raw`set -u
+g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+seconds=$1
+timeout "$seconds" git status --porcelain --ignore-submodules=none > /tmp/changes 2> /tmp/warnings; ran=$?
+cat /tmp/warnings
+{ [ "$ran" = 0 ] && [ ! -s /tmp/warnings ]; } || { echo "git status exited $ran"; exit 0; }
+echo ${STATUS_RAN}
+sed 's/^/CHANGE /' /tmp/changes
+g for-each-ref --format='%(refname:strip=2)' refs/heads/ > /tmp/branches || { echo "could not list the branches"; exit 0; }
+while IFS= read -r branch; do
+  n=$(timeout "$seconds" git -c core.hooksPath=/dev/null -c core.fsmonitor=false rev-list --count "refs/heads/$branch" --not --remotes) || { echo "could not count $branch"; exit 0; }
+  echo "BRANCH $branch $n"
+done < /tmp/branches
+g stash list > /tmp/stashes 2>/dev/null || { echo "could not list the stash"; exit 0; }
+echo "STASH $(wc -l < /tmp/stashes | tr -d ' ')"
+if ! g symbolic-ref -q HEAD > /dev/null && g rev-parse -q --verify 'HEAD^{commit}' > /dev/null; then
+  n=$(g rev-list --count HEAD --not --branches --remotes) || { echo "could not count HEAD"; exit 0; }
+  echo "DETACHED $n"
+fi
+echo ${LOSSES_DONE}
+`;
+
+/** Every container that names a workspace folder, stopped ones too: its id,
+ *  then the two identity labels (removal.ts parseWorkspaceContainers). Only
+ *  constant label names are interpolated. */
+const WORKSPACE_CONTAINERS_TEMPLATE =
+  `{{.ID}}\t{{.Label "${IDENTITY_LABELS.workspace}"}}\t{{.Label "${IDENTITY_LABELS.config}"}}`;
+
 /**
  * Everything a project dind is created with (supervisor.ts builds this from
  * dind.ts names and its environment). Volume names are the daemon's own --
@@ -745,6 +797,14 @@ export const createDocker = (run: Runner) => {
      *  what it was BUILT from, which `up` will start it as. "" when absent. */
     metadata: (id: string) =>
       query("inspect", "-f", '{{index .Config.Labels "devcontainer.metadata"}}', id).trim().replace(/^<no value>$/, ""),
+    /** Every container that names a workspace folder, stopped ones too, as
+     *  `WORKSPACE_CONTAINERS_TEMPLATE` rows: what a removal finds a target's
+     *  containers by when its directory is gone (removal.ts containersOf). */
+    workspaceContainers: () =>
+      query("ps", "-a", "--filter", `label=${IDENTITY_LABELS.workspace}`, "--format", WORKSPACE_CONTAINERS_TEMPLATE),
+    /** Every container on the daemon, stopped ones too. Only for a daemon
+     *  that is one project's alone (dind.ts), whose every container is its. */
+    everyId: () => nonEmptyLines(query("ps", "-aq")),
     namesWithLabel: (label: string) =>
       nonEmptyLines(
         query(
@@ -871,6 +931,8 @@ export const createDocker = (run: Runner) => {
       ),
     remove: (names: string[]) =>
       names.length ? effect("volume", "rm", "-f", ...names) : 0,
+    /** Every volume on the daemon, by name. */
+    names: () => nonEmptyLines(query("volume", "ls", "--format", "{{.Name}}")),
   };
 
   const image = {
@@ -896,6 +958,12 @@ export const createDocker = (run: Runner) => {
     /** Build from a Dockerfile fed on stdin, so nothing is written to disk. */
     build: (tag: string, dockerfile: string, context: string) =>
       run.build(["build", "-t", tag, "-f", "-", context], dockerfile),
+    /** Every local image's `repository:tag`; an untagged one has none. */
+    references: () =>
+      nonEmptyLines(query("image", "ls", "--format", "{{.Repository}}:{{.Tag}}")).filter((reference) => !reference.includes("<none>")),
+    /** Untag each, which deletes an image once nothing else names it. Never
+     *  forced: one a container still runs, or another tag names, stays. */
+    remove: (references: string[]) => (references.length ? effect("image", "rm", ...references) : 0),
   };
 
   return {
@@ -995,6 +1063,10 @@ export const createDocker = (run: Runner) => {
           `> /tmp/changes 2> /tmp/warnings; ran=$?; cat /tmp/warnings; ` +
           `[ "$ran" = 0 ] && [ ! -s /tmp/warnings ] && echo ${STATUS_RAN} && cat /tmp/changes`,
       ]),
+    /** What removing the project would lose, asked of its root: `lossesScript`,
+     *  read by removal.ts parseLosses. "" when the sandbox did not run. */
+    projectLosses: (spec: WorktreeSandbox) =>
+      run.output([...worktreeSandbox(spec, "sh"), "-c", lossesScript, "desolate-losses", String(spec.seconds)]),
     /** How many CPUs the daemon's machine has; 0 when it will not say. */
     cpus: () => Number(query("info", "--format", "{{.NCPU}}")) || 0,
     /** Networks someone made on this daemon (compose's, a project's own), as

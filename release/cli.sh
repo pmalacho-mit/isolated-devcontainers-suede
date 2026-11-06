@@ -11,6 +11,7 @@
 #   ./isolated-devcontainers-suede/cli.sh proxy learn --project P --for 1h --then deny | enforce | recommend | allow
 #   ./isolated-devcontainers-suede/cli.sh watch [seconds]           # notify when an agent asks, or a secret strays
 #   ./isolated-devcontainers-suede/cli.sh repo add owner/repo       # per-repo deploy key + clone
+#   ./isolated-devcontainers-suede/cli.sh repo rm owner/repo [--force]  # the clone and everything of it, for good
 #   ./isolated-devcontainers-suede/cli.sh worktree add owner/repo wip   # a branch in its own devcontainer
 #   ./isolated-devcontainers-suede/cli.sh worktree list | remove owner/repo wip
 #   ./isolated-devcontainers-suede/cli.sh export owner/repo [path]  # copy files out (tar when piped)
@@ -839,7 +840,7 @@ warn_if_the_mac_holds_saved_ports() {
   while [ $# -gt 0 ]; do
     arg=$1; shift
     case "$arg" in
-      --stop|--ports|--purge|--list|--uncommitted|--populate|-h|--help) return 0 ;;
+      --stop|--ports|--purge|--remove-project|--list|--uncommitted|--populate|-h|--help) return 0 ;;
       --worktree) worktree=${1:-}; shift ;;
       --config|--branch) shift ;;
       -*) ;;
@@ -1601,8 +1602,105 @@ case "$CMD" in
                  docker exec -e GIT_NAME="$GN" -e GIT_EMAIL="$GE" "$CONTAINER" newrepo clone "$OR" "$AL"
                  # Clones land under the owner, so the project is owner/alias.
                  echo "Next: ./cli.sh desolate ${OR%%/*}/$AL" ;;
+               rm)
+                 # Everything of a project, for good (#63): what `add` made, and
+                 # everything desolate made for it since. The project first, in
+                 # the orchestrator, which finds what is left of it whether or
+                 # not its directory still is (deleting that by hand strands
+                 # the rest); then what the editor holds; then GitHub's deploy
+                 # key. Each step is idempotent: a run that stops part-way is
+                 # finished by running it again.
+                 RM_USAGE="usage: cli.sh repo rm owner/repo [alias] [--force] [--yes]"
+                 FORCE=() YES="" WORDS=()
+                 while [ $# -gt 0 ]; do
+                   case "$1" in
+                     --force) FORCE=(--force) ;;
+                     --yes) YES=1 ;;
+                     -*) echo "$RM_USAGE" >&2; exit 1 ;;
+                     *) WORDS+=("$1") ;;
+                   esac
+                   shift
+                 done
+                 { [ "${#WORDS[@]}" -ge 1 ] && [ "${#WORDS[@]}" -le 2 ]; } || { echo "$RM_USAGE" >&2; exit 1; }
+                 OR="${WORDS[0]}"; AL="${WORDS[1]:-${OR##*/}}"
+                 [[ "$OR" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "cli.sh: '$OR' is not an owner/repo" >&2; exit 1; }
+                 [[ "$AL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "cli.sh: '$AL' is not an alias" >&2; exit 1; }
+                 # As `add` names it: the project is owner/alias.
+                 PROJ="${OR%%/*}/$AL"
+                 # What would go, and -- unless --force -- whether anything in it
+                 # is nowhere else (asked in its sandbox): before anything is
+                 # removed or asked of you. Exit 3 is "it would lose work".
+                 docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --remove-project --dry-run ${FORCE[@]+"${FORCE[@]}"} "$PROJ" \
+                   || exit $?
+                 echo "  and in the editor: its deploy key, its ssh and git config, its push/pull cache"
+                 echo "  and on GitHub: its deploy key (with gh; otherwise you are told where it is)"
+                 if [ -z "$YES" ]; then
+                   read -r -p "Type '$PROJ' to remove it for good: " a
+                   [ "$a" = "$PROJ" ] || { echo "cli.sh: nothing removed"; exit 1; }
+                 fi
+                 # Checked a moment ago, and confirmed: --force, not a second check.
+                 docker exec -e DESOLATE_PLANE=mac "$ORCHESTRATOR" desolate-run --remove-project --force "$PROJ" \
+                   || { echo "cli.sh: $PROJ is not fully removed (above); nothing of it was taken from the editor or GitHub yet" >&2; exit 1; }
+                 OUT=$(docker exec "$CONTAINER" newrepo rm "$OR" "$AL") \
+                   || { printf '%s\n' "$OUT"; echo "cli.sh: the editor could not forget $PROJ (above); run this again to finish" >&2; exit 1; }
+                 printf '%s\n' "$OUT" | grep -Ev '^(REPOSITORY|PUBKEY|FORGOTTEN) ' || true
+                 # The repository the editor had registered, so a project added
+                 # under an alias finds its own; the argument when none was.
+                 REPO=$(printf '%s\n' "$OUT" | sed -n 's/^REPOSITORY //p' | tail -n 1)
+                 [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || REPO=$OR
+                 # Matched by the key itself, never by its title: a title is
+                 # anyone's to reuse -- another desolate that added this
+                 # repository gave its own key the same one. So once the keyring
+                 # has let go of the key (a second run), the keys titled as `add`
+                 # titles them are shown, and deleting one is yours.
+                 KEY=$(printf '%s\n' "$OUT" | sed -n 's/^PUBKEY //p' | tail -n 1 | awk '{print $1" "$2}')
+                 [[ "$KEY" =~ ^ssh-[a-z0-9-]+\ [A-Za-z0-9+/=]+$ ]] || KEY=""
+                 TITLE="desolate-$AL"
+                 KEYS="https://github.com/$REPO/settings/keys"
+                 if ! { command -v gh >/dev/null && gh auth status >/dev/null 2>&1; }; then
+                   echo "cli.sh: remove its deploy key on GitHub by hand (no gh here, or not logged in):"
+                   if [ -n "$KEY" ]; then echo "  $KEYS   (the key $KEY)"; else echo "  $KEYS   (the one titled $TITLE, if gh added it)"; fi
+                   command -v open >/dev/null && open "$KEYS"
+                 elif [ -z "$KEY" ]; then
+                   if TITLED=$(gh api "repos/$REPO/keys" --jq ".[] | select(.title == \"$TITLE\") | \"\\(.id) \\(.key[0:40])... added \\(.created_at)\"" 2>/dev/null); then
+                     if [ -n "$TITLED" ]; then
+                       echo "cli.sh: the keyring no longer has its key, so which of $REPO's keys was it is not known; titled $TITLE there:"
+                       printf '%s\n' "$TITLED" | LC_ALL=C tr -cd '[:print:]\n' | sed 's/^/  /'
+                       echo "  delete the one that was this desolate's at $KEYS"
+                     else
+                       echo "cli.sh: $REPO has no deploy key titled $TITLE"
+                     fi
+                   else
+                     echo "cli.sh: could not list $REPO's deploy keys with gh (need admin?): $KEYS"
+                   fi
+                 elif ! IDS=$(gh api "repos/$REPO/keys" --jq ".[] | select(.key == \"$KEY\") | .id" 2>/dev/null); then
+                   echo "cli.sh: could not list $REPO's deploy keys with gh (need admin?) -- remove it by hand:"
+                   echo "  $KEYS   (the key $KEY)"
+                 elif [ -z "$IDS" ]; then
+                   echo "cli.sh: $REPO has no deploy key of it (already removed, or never added)"
+                 else
+                   for kid in $IDS; do
+                     [[ "$kid" =~ ^[0-9]+$ ]] || continue
+                     gh api -X DELETE "repos/$REPO/keys/$kid" >/dev/null \
+                       && echo "cli.sh: deleted its deploy key from $REPO (id $kid)" \
+                       || echo "cli.sh: could not delete deploy key $kid from $REPO -- by hand: $KEYS"
+                   done
+                 fi
+                 # Yours, not the project's: proxy policy that names it stays,
+                 # so a clone under the same name gets it again. Said, so it is
+                 # not a surprise either way. Best effort: it is only a listing.
+                 NAMED=$(vm sudo jq -r --arg p "$PROJ" \
+                   '((.secrets // {}) | to_entries[] | select((.value.projects // []) | index($p)) | "secret \(.key)"), ((.network // [])[] | select((.projects // []) | index($p)) | "network rule: \(.action) \(.host)")' \
+                   /etc/desolate-proxy/settings.json 2>/dev/null || true)
+                 POLICY=$(vm sudo jq -r --arg p "$PROJ" 'if has($p) then "proxy policy: \(.[$p].action // "?")" else empty end' "$POLICY_JSON" 2>/dev/null || true)
+                 if [ -n "$NAMED$POLICY" ]; then
+                   echo "cli.sh: left as they are -- the proxy's settings, which still name $PROJ:"
+                   printf '%s\n' "$NAMED" "$POLICY" | LC_ALL=C tr -cd '[:print:]\n' | sed '/^$/d; s/^/  /'
+                 fi
+                 AGAIN="$REPO"; [ "${REPO##*/}" = "$AL" ] || AGAIN="$REPO $AL"
+                 echo "cli.sh: removed $PROJ. To clone it again: $0 repo add $AGAIN" ;;
                status) docker exec "$CONTAINER" newrepo status ;;
-               *) echo "usage: cli.sh repo {add owner/repo [alias] | status}" >&2; exit 1 ;;
+               *) echo "usage: cli.sh repo {add owner/repo [alias] | rm owner/repo [alias] [--force] [--yes] | status}" >&2; exit 1 ;;
              esac ;;
 
   worktree)  ensure_running

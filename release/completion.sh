@@ -123,6 +123,9 @@ _desolate_cli_offer() {   # <kind> <producer...>
   return 0
 }
 
+# The projects `repo add` could have made: owner/repo, never a flat one.
+_desolate_cli_repos() { _desolate_cli_projects | grep /; }
+
 # Worktrees of one project: directories under <project>/.worktrees.
 _desolate_cli_worktrees() {
   local project="$1"
@@ -356,6 +359,14 @@ _desolate_cli() {
         _desolate_cli_offer project _desolate_cli_projects
       fi ;;
     "repo add")         : ;;   # owner/repo is remote; nothing local to offer
+    "repo rm")
+      # `repo rm <owner/repo> [alias] [--force] [--yes]`: what it removes is
+      # here, so the clones are offered, by the name `rm` takes as well.
+      if [ "$COMP_CWORD" -eq 3 ]; then
+        _desolate_cli_offer project _desolate_cli_repos
+      else
+        case "$cur" in -*) COMPREPLY=( $(compgen -W "$(_desolate_cli_unused --force --yes)" -- "$cur") ) ;; esac
+      fi ;;
   esac
   return 0
 }

@@ -68,6 +68,10 @@ assert_eq "  --headers: authorization" "$(mac secret add NAME --hosts x --header
 assert_eq "cli.sh suede report: --ref" "$(mac suede report acme/app --)" "--ref"
 assert_eq "cli.sh suede deliver: the dependency is a project" "$(mac suede deliver acme/app "")" "acme/app solo"
 assert_eq "cli.sh worktree remove: --force" "$(mac worktree remove acme/app wip --)" "--force"
+assert_eq "cli.sh repo: its subcommands, each once" "$(mac repo "")" "add rm status"
+assert_eq "cli.sh repo rm: a clone, never a flat project" "$(mac repo rm "")" "acme/app"
+assert_eq "cli.sh repo rm: then its two flags" "$(mac repo rm acme/app --)" "--force --yes"
+assert_eq "  each once" "$(mac repo rm acme/app --yes --)" "--force"
 assert_eq "cli.sh secret: its subcommands, each once" "$(mac secret "")" "add list off on rm"
 assert_eq "cli.sh secret on: --ttl" "$(mac secret on NAME --)" "--ttl"
 assert_eq "cli.sh proxy: its subcommands, and no flag among them" "$(mac proxy "")" "allow audit enforce learn logs recommend status test"
@@ -88,7 +92,7 @@ done
 assert_eq "desolate-client.ts's flags, by the editor's completion" "${missing# }" ""
 # The runner's: every `case "--flag":` in args.ts, offered by `cli.sh desolate`
 # -- or the broker's and cli.sh's own wire form, typed by no one.
-WIRE="--populate --uncommitted --create-worktree --remove-worktree --branch --from --force --reclaim --path
+WIRE="--populate --uncommitted --create-worktree --remove-worktree --remove-project --dry-run --branch --from --force --reclaim --path
       --exec --bundle --pull --fetch-only --suede-report --suede-build --transfer --ref --review"
 offered=" $(mac desolate --) $(mac desolate acme/app --) $(mac desolate --stop --) $(mac desolate --ports --) $(mac desolate --list --) "
 missing=""

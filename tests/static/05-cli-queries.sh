@@ -475,4 +475,77 @@ pcli proxy enforce allow --project solo >/dev/null
 assert_eq "enforce allow takes a project out" "$(jq -c 'keys' "$PSIM/policy/projects.json")" '["acme/widgets"]'
 rm -rf "$PSIM"
 
+group "repo rm: what reaches docker and GitHub, in what order (#63)"
+# Stand-ins: docker logs each call and answers as the stack would -- the
+# orchestrator's dry run with STUB_DRY's exit, its removal with STUB_REMOVE's,
+# the editor's `newrepo rm` with the registered repository and the key it
+# held; gh lists two keys titled alike, only one of them ours; colima has no
+# VM, so the proxy's listing is skipped, as it is best effort.
+RSTUB=$(mktemp -d)
+cat > "$RSTUB/docker" <<EOF
+#!/bin/bash
+printf '%s|' "\$@" >> "$RSTUB/calls"; echo >> "$RSTUB/calls"
+case "\$*" in
+  inspect*) echo running ;;
+  *--remove-project\ --dry-run*) echo "would remove \${@: -1}:"; exit "\${STUB_DRY:-0}" ;;
+  *--remove-project\ --force*) echo "removed \${@: -1}"; exit "\${STUB_REMOVE:-0}" ;;
+  *newrepo\ rm*) echo "REPOSITORY acme/widgets"; echo "PUBKEY ssh-ed25519 AAAAOURS desolate-acme__widgets"
+                 echo "newrepo: removed its deploy key in the keyring"; echo "FORGOTTEN acme/\${@: -1}" ;;
+esac
+EOF
+cat > "$RSTUB/gh" <<EOF
+#!/bin/bash
+printf '%s|' "\$@" >> "$RSTUB/gh-calls"; echo >> "$RSTUB/gh-calls"
+[ "\$1 \$2" = "auth status" ] && exit 0
+[ "\$1" = api ] && [ "\$3" = --jq ] && exec jq -r "\$4" <<<'[{"id":7,"title":"desolate-widgets","key":"ssh-ed25519 AAAAOURS"},{"id":8,"title":"desolate-widgets","key":"ssh-ed25519 AAAATHEIRS"}]'
+[ "\$2" = -X ] && exit 0
+exit 1
+EOF
+printf '#!/bin/sh\nexit 1\n' > "$RSTUB/colima"
+chmod +x "$RSTUB/"*
+rcli() { : > "$RSTUB/calls"; : > "$RSTUB/gh-calls"; PATH="$RSTUB:$PATH" DESOLATE_NO_COMPLETION_INSTALL=1 "$RELEASE/cli.sh" repo rm "$@" 2>&1; }
+rexecs() { grep '^exec|' "$RSTUB/calls" | tr '\n' ' '; }
+DRY="exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--remove-project|--dry-run|acme/widgets|"
+REMOVE="exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--remove-project|--force|acme/widgets|"
+
+OUT=$(rcli acme/widgets --yes </dev/null); CODE=$?
+assert_eq "--yes: the dry run, the removal, then the editor's half" "$(rexecs)" \
+  "$DRY $REMOVE exec|desolate-vscode|newrepo|rm|acme/widgets|widgets| "
+assert_eq "  and it succeeds" "$CODE" "0"
+assert_eq "GitHub: the key that was ours, matched by the key, and not its namesake" \
+  "$(grep -c '^api|-X|DELETE|' "$RSTUB/gh-calls") $(grep '^api|-X|DELETE|' "$RSTUB/gh-calls")" "1 api|-X|DELETE|repos/acme/widgets/keys/7|"
+assert_not_contains "  the editor's machine lines are not shown" "$OUT" "PUBKEY"
+assert_contains "  and it says how to clone it again" "$OUT" "repo add acme/widgets"
+
+OUT=$(printf 'acme/widgets\n' | rcli acme/widgets)
+assert_eq "the project's name at the prompt goes on" "$(rexecs | grep -c newrepo)" "1"
+OUT=$(printf 'yes\n' | rcli acme/widgets); CODE=$?
+assert_eq "anything else stops after the dry run" "$(rexecs)" "$DRY "
+assert_contains "  saying so" "$OUT" "nothing removed"
+assert_eq "  and fails" "$CODE" "1"
+
+OUT=$(STUB_DRY=3 rcli acme/widgets --yes); CODE=$?
+assert_eq "work that would be lost (the dry run's 3): nothing past it runs" "$(rexecs)" "$DRY "
+assert_eq "  and its status is the dry run's" "$CODE" "3"
+OUT=$(STUB_REMOVE=1 rcli acme/widgets --yes); CODE=$?
+assert_eq "a removal that fails: the editor keeps the key" "$(rexecs)" "$DRY $REMOVE "
+assert_eq "  and GitHub is not asked" "$(cat "$RSTUB/gh-calls")" ""
+assert_contains "  saying so" "$OUT" "nothing of it was taken from the editor or GitHub yet"
+assert_eq "  and fails" "$CODE" "1"
+
+rcli acme/widgets --force --yes >/dev/null
+assert_eq "--force: not checked in the dry run either" "$(rexecs | cut -d' ' -f1)" \
+  "exec|-e|DESOLATE_PLANE=mac|desolate-orchestrator|desolate-run|--remove-project|--dry-run|--force|acme/widgets|"
+rcli acme/widgets w2 --yes >/dev/null
+assert_contains "an alias: the project is owner/alias, as add made it" "$(rexecs)" "--remove-project|--force|acme/w2|"
+assert_contains "  and the editor is told both" "$(rexecs)" "newrepo|rm|acme/widgets|w2|"
+
+for bad in "acme" "acme/widgets x y" "--bogus acme/widgets" "acme/../x" "acme/widgets ../x"; do
+  # shellcheck disable=SC2086
+  OUT=$(rcli $bad --yes); CODE=$?
+  assert_eq "refused before anything runs: repo rm $bad" "$CODE $(rexecs)" "1 "
+done
+assert_contains "  with the usage" "$(rcli)" "usage: cli.sh repo rm owner/repo [alias] [--force] [--yes]"
+rm -rf "$RSTUB"
+
 summary

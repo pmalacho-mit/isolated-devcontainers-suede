@@ -52,6 +52,14 @@ export type Command =
    *  sandbox, after purging what desolate made for it. What `worktree remove`
    *  asks for, from the editor or the Mac. */
   | "remove-worktree"
+  /** Remove a whole project, worktrees and all, for good: every target's
+   *  container, relays, volumes and saved state, the volumes the project
+   *  declared, the images built for it, its own daemon, and its directory
+   *  (`cli.sh repo rm`). Refused if anything in it would be lost, unless
+   *  `--force`; `--dry-run` says what it would remove, and checks, and stops
+   *  there. The Mac's alone, like `exec`: the broker does not speak it. Works
+   *  with the directory already gone, which is when it is most needed. */
+  | "remove-project"
   /** Give the editor's uid back everything under the target -- or under
    *  `path` inside it -- that a container left owned by someone else (#15).
    *  What `cli.sh reclaim` and `cli.sh worktree remove` run. */
@@ -112,8 +120,11 @@ export type Args = {
   /** Where `create-worktree` starts a branch it makes: a commit, or a ref to
    *  one. Absent is the project's HEAD. */
   from?: string;
-  /** `remove-worktree` without asking whether anything would be lost. */
+  /** `remove-worktree` and `remove-project` without asking whether anything
+   *  would be lost. */
   force: boolean;
+  /** `remove-project`: say what would go, and check, and remove nothing. */
+  dryRun?: boolean;
   /** `--ports <p> --move <label> <port>`: give one label a different host
    *  port -- for when the Mac already holds it, which Lima never forwards. */
   move?: { label: string; port: number };
@@ -231,6 +242,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
   let ref: string | undefined;
   let subrepo: string | undefined;
   let fetchOnly = false;
+  let dryRun = false;
 
   while (queue.length) {
     const arg = queue.shift()!;
@@ -266,6 +278,12 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--remove-worktree":
         command = "remove-worktree";
+        break;
+      case "--remove-project":
+        command = "remove-project";
+        break;
+      case "--dry-run":
+        dryRun = true;
         break;
       case "--branch":
         branch = queue.shift() ?? "";
@@ -356,8 +374,12 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     throw new UsageError("--branch only means something with --create-worktree");
   if (from !== undefined && command !== "create-worktree")
     throw new UsageError("--from only means something with --create-worktree");
-  if (force && command !== "remove-worktree")
-    throw new UsageError("--force only means something with --remove-worktree");
+  if (force && command !== "remove-worktree" && command !== "remove-project")
+    throw new UsageError("--force only means something with --remove-worktree or --remove-project");
+  if (dryRun && command !== "remove-project")
+    throw new UsageError("--dry-run only means something with --remove-project");
+  if (command === "remove-project" && worktree !== undefined)
+    throw new UsageError("--remove-project removes a whole project, worktrees and all; it takes no --worktree");
   if ((command === "create-worktree" || command === "remove-worktree") && worktree === undefined)
     throw new UsageError(`--${command} acts on a worktree; name it with --worktree`);
   if (move && command !== "ports")
@@ -408,5 +430,6 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     ...(ref !== undefined ? { ref } : {}),
     ...(fetchOnly ? { fetchOnly } : {}),
     ...(subrepo !== undefined ? { subrepo } : {}),
+    ...(dryRun ? { dryRun } : {}),
   };
 };

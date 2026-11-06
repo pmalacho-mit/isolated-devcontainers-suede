@@ -564,6 +564,7 @@ the rules would go stale again each time.
 ./cli.sh repo add owner/repo    # per-repo deploy key (in-container) + clone
                                 # -> /workspaces/owner/repo
 ./cli.sh desolate owner/repo    # open it
+./cli.sh repo rm owner/repo     # the clone and everything of it, for good (checks first)
 ./cli.sh worktree add owner/repo wip     # a second branch, in its own devcontainer
 ./cli.sh worktree list owner/repo
 ./cli.sh worktree remove owner/repo wip
@@ -1590,6 +1591,64 @@ otherwise share one volume. Name it explicitly instead:
 
 The error message says this, including the exact name to use.
 
+### Removing a project
+
+```bash
+./cli.sh repo rm owner/repo            # what `repo add owner/repo` made, and all of it since
+./cli.sh repo rm owner/repo alias      # one added under an alias (or name it: owner/alias)
+./cli.sh repo rm owner/repo --force    # whatever is in it
+./cli.sh repo rm owner/repo --yes      # without the prompt, for a harness
+```
+
+**Do not delete a project's folder by hand.** A container's root-owned files
+stop a plain `rm -rf` part-way, and what it leaves -- a `.git` holding only
+`objects/`, say -- is what `repo add` used to read as "already cloned", so
+adding it again did nothing (#63). It now refuses that, and says to run
+`repo rm`. And everything else of the project stays behind with no folder to
+find it by: `desolate --purge`, like every other command, starts from the
+directory. `repo rm` does not: it finds what is left of a project whether its
+folder is there or not, so it is also the way out once one has been deleted
+by hand.
+
+It removes, in this order:
+
+1. **Nothing yet: it checks.** What would go is listed, and each target is
+   asked, in its own sandbox as `worktree remove` asks, whether it holds work
+   that is nowhere else -- uncommitted or untracked files, a local branch with
+   commits on no remote branch, a stash, a detached HEAD's commits. Any of it
+   refuses the removal, naming it; a check that cannot run refuses too.
+   `--force` skips the check. Remote branches are GitHub's as the last pull
+   left them, and a push does not move them, so a branch pushed since reads as
+   unpushed: `./cli.sh pull owner/repo --fetch-only` tells the clone. Then you
+   type the project's name.
+2. **The project, in the orchestrator**: every target's devcontainer, relays
+   and forwards -- the root's, and every worktree's, including one whose
+   directory or state is all that is left -- then the files containers left as
+   root, given back (as `reclaim` does), then the directory, worktrees and all
+   (and its owner directory, once that is empty); its own daemon, if it has
+   one, with every image, container and volume in it; on the shared daemon,
+   every volume in its namespace (by the policy's longest-claim rule, so
+   `acme/widgets-ui`'s are not `acme/widgets`'s) and the images built for its
+   folders; and its saved ports, tokens and spec fingerprints.
+3. **What the editor holds**: the keyring's deploy key, its `Host` block in
+   `~/.ssh/config`, the `url.*.insteadOf` rewrites that made it a push and
+   pull target, and its push/pull and review caches.
+4. **Its deploy key on GitHub**, with `gh`, matched by the key itself -- never
+   by its title, which another desolate adding the same repository gives its
+   own key too. Without `gh`, it says which key, and where.
+
+Each step is one a second run repeats harmlessly, so a removal that stops
+part-way (it says what is left) is finished by running it again; a second run
+after the keyring has let go of the key lists GitHub's keys titled as `add`
+titles them rather than guess which was this one.
+
+What it leaves, and says so: the proxy's settings that name the project -- a
+secret scoped to it, a network rule for it, a `learn`/`enforce` policy. They
+are your policy rather than the project's state, a clone under the same name
+gets them again, and dropping a restriction would widen what that next clone
+may reach. The same goes for the base images and CA-trusting derivatives other
+projects share.
+
 ## Worktrees: several branches of one repo at once
 
 A project may carry **worktrees** -- checkouts of other branches, each running in
@@ -2427,6 +2486,13 @@ which recreates the affected containers.
   survives it -- and `/workspaces` is not a volume on any of these daemons. A
   project's own image store goes when the project is purged
   (`desolate --purge owner/repo`), unless it still has worktrees, which share it.
+
+- **`repo add` says a project is "what is left of a clone deleted by hand"**
+  -- its folder was deleted and something stopped the delete part-way (a
+  container's root-owned files; the editor's user cannot remove them).
+  `./cli.sh repo rm owner/repo --force` reclaims and removes what is left, and
+  everything desolate kept of it; then `repo add` it again. See
+  [Removing a project](#removing-a-project).
 
 - **`cli.sh up` says sysbox is missing** -- you're either not on the Colima
   context (`docker context use colima-desolate`) or sysbox isn't installed/

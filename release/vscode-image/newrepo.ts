@@ -3,6 +3,7 @@
 //   newrepo key   owner/repo [alias]   ensure key + ssh/git config; print pubkey
 //   newrepo clone owner/repo [alias]   clone via the alias; set identity
 //   newrepo status                     list configured repos
+//   newrepo rm    owner/repo [alias]   forget it here: key, ssh/git config, caches
 //   newrepo owner/repo [alias]         key, then clone
 //
 // Idempotent by design: existing keys/config/clones are reused, never
@@ -13,14 +14,19 @@
 // Security model: the private key is generated HERE and never leaves the
 // container. Only the "PUBKEY ..." line is read by cli.sh for registration.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { exchange } from "./keyring-client.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { join } from "node:path";
 import { ask } from "./broker-client.ts";
-import { cleanGit, cloneThroughCache } from "./transfer.ts";
+import { cacheRoot, remoteCacheRoot } from "./caches.ts";
+import { reviewsOf, urlSectionsOf, withoutHostBlock } from "./removal.ts";
+import { cleanGit, cloneThroughCache, registrationOf } from "./transfer.ts";
 
-const WORKSPACES = "/workspaces";
+/** Overridable, as desolate.ts and transfer.ts are, so it can be pointed at a
+ *  throwaway workspace; nothing sets it in production. */
+const WORKSPACES = process.env.DESOLATE_WORKSPACES ?? "/workspaces";
 
 // Piping our output to `head`/`grep -q` closes stdout early; bash tools
 // ignore the resulting SIGPIPE, Node crashes on EPIPE. Exit quietly instead.
@@ -48,6 +54,14 @@ const identityFile = (alias: string) => `${KEYRING_RUN}/pub/${alias}.pub`;
  *  Synchronous on purpose: every caller here is a step in a sequential CLI, and
  *  execFileSync sits either side of it. */
 function keyring(request: Record<string, unknown>): Record<string, any> {
+  const parsed = keyringAnswer(request);
+  if (!parsed.ok) return die(`keyring refused: ${parsed.error}`);
+  return parsed;
+}
+
+/** The keyring's answer, refusal and all: only an unreachable keyring, or
+ *  one that says nothing readable, ends this process. */
+function keyringAnswer(request: Record<string, unknown>): Record<string, any> {
   let raw: string;
   try {
     raw = exchange(KEYRING_CONTROL, request);
@@ -71,7 +85,6 @@ function keyring(request: Record<string, unknown>): Record<string, any> {
   } catch {
     return die(`unreadable reply from the keyring: ${raw.slice(0, 200)}`);
   }
-  if (!parsed.ok) return die(`keyring refused: ${parsed.error}`);
   return parsed;
 }
 
@@ -300,6 +313,27 @@ async function doClone(repo: Repo): Promise<void> {
   const dest = `${WORKSPACES}/${repo.project}`;
   fs.mkdirSync(`${WORKSPACES}/${repo.owner}`, { recursive: true });
 
+  // What a hand delete leaves (#63): a container's root-owned files stop a
+  // plain `rm -rf` part-way, and what is left of `.git` -- its objects, say,
+  // with no HEAD -- once read as "already cloned", so `repo add` did nothing
+  // and said READY. Asked of the filesystem, as everything here is: the
+  // project's git is not run in the editor.
+  const leftover = (() => {
+    if (!fs.lstatSync(dest, { throwIfNoEntry: false })) return "";
+    const git = `${dest}/.git`;
+    if (fs.lstatSync(git, { throwIfNoEntry: false })?.isDirectory()) {
+      const missing = ["HEAD", "objects", "refs"].filter((part) => !fs.existsSync(`${git}/${part}`));
+      return missing.length ? `${git} has no ${missing.join(", ")}` : "";
+    }
+    const entries = fs.readdirSync(dest);
+    return entries.length ? `${dest} holds ${entries.slice(0, 3).join(", ")}${entries.length > 3 ? ", ..." : ""} and no clone` : "";
+  })();
+  if (leftover)
+    die(`${leftover}: what is left of a clone deleted by hand, most likely
+        (a container's root-owned files stop a plain rm part-way).
+        Remove what is left, and everything desolate kept of it, then add it again:
+          ./cli.sh repo rm ${repo.project} --force   (on your Mac)`);
+
   if (fs.existsSync(`${dest}/.git`)) {
     console.log(`newrepo: ${dest} already cloned`);
   } else {
@@ -369,12 +403,97 @@ function showStatus(): void {
   if (!found) console.log("  (no repos configured yet)");
 }
 
+/**
+ * Forget a repository here: everything `key` and `clone` wrote in the editor
+ * -- the keyring's deploy key, the ssh Host block, the url rewrites that name
+ * the repository (which is also what makes it a push and pull target), and
+ * the push/pull and review caches. What `cli.sh repo rm` runs once the
+ * orchestrator has removed the project itself, which is why a project still
+ * on disk is refused: forgetting its key first would leave a clone that can
+ * neither push nor be told apart from one somebody dragged in.
+ *
+ * Idempotent, like the rest: whatever is already gone is skipped. Prints, for
+ * cli.sh, `REPOSITORY <owner/repo>` (the registered one, so a project added
+ * under an alias finds its real repository), `PUBKEY <key>` while the key is
+ * still known -- the line GitHub's deploy key is matched by -- and `FORGOTTEN
+ * <project>` once it is all gone.
+ */
+function forget(repo: Repo): void {
+  const dest = `${WORKSPACES}/${repo.project}`;
+  if (fs.lstatSync(dest, { throwIfNoEntry: false }))
+    die(`${dest} is still there. Remove the project first, which runs this after it:
+        ./cli.sh repo rm ${repo.project}   (on your Mac)`);
+
+  // spawnSync: --get-regexp exits 1 when nothing matches, which is an answer.
+  const urls = spawnSync("git", ["config", "--global", "--get-regexp", "^url\\."], { encoding: "utf8" }).stdout ?? "";
+  const registered = registrationOf(repo.project, urls);
+  console.log(`REPOSITORY ${registered?.ownerRepo ?? repo.ownerRepo}`);
+
+  // The push/pull cache (transfer.ts openCache) is not removed under one
+  // that is using it: refused before anything else is touched.
+  const caches = remoteCacheRoot();
+  const lock = join(caches, `${repo.tag}.lock`);
+  if (fs.existsSync(lock)) {
+    const holder = Number(fs.readFileSync(lock, "utf8"));
+    let alive = false;
+    try { process.kill(holder, 0); alive = true; } catch (err: any) { alive = err?.code === "EPERM"; }
+    if (alive && holder !== process.pid) die(`a push or pull of ${repo.project} is running (pid ${holder}); try again once it is done`);
+  }
+
+  // Said first, removed last: a run that stops before the end leaves the key
+  // in the keyring, so the next one can still name it to GitHub.
+  const known = keyringAnswer({ op: "pubkey", alias: repo.tag });
+  if (known.ok) console.log(`PUBKEY ${known.pubkey}`);
+
+  const removed: string[] = [];
+  if (fs.existsSync(SSH_CONFIG)) {
+    const config = fs.readFileSync(SSH_CONFIG, "utf8");
+    const kept = withoutHostBlock(config, repo.hostAlias);
+    if (kept !== config) {
+      // Beside it, then renamed over it: a half-written ssh config would stop
+      // every other repository's push.
+      const scratch = `${SSH_CONFIG}.desolate-${process.pid}`;
+      fs.writeFileSync(scratch, kept, { mode: 0o600 });
+      fs.renameSync(scratch, SSH_CONFIG);
+      removed.push(`its Host ${repo.hostAlias} block in ~/.ssh/config`);
+    }
+  }
+
+  for (const section of urlSectionsOf(urls, repo.tag)) {
+    execFileSync("git", ["config", "--global", "--remove-section", section]);
+    removed.push(`git config ${section}`);
+  }
+
+  for (const entry of [`${repo.tag}.git`, `${repo.tag}.known`, `${repo.tag}.lock`]) {
+    const path = join(caches, entry);
+    if (!fs.lstatSync(path, { throwIfNoEntry: false })) continue;
+    fs.rmSync(path, { recursive: true, force: true });
+    if (entry.endsWith(".git")) removed.push(`its push/pull cache (${path})`);
+  }
+  const reviews = join(cacheRoot(), "reviews");
+  const entries = fs.existsSync(reviews) ? fs.readdirSync(reviews) : [];
+  for (const entry of reviewsOf(entries, repo.tag)) {
+    fs.rmSync(join(reviews, entry), { recursive: true, force: true });
+    removed.push(`its review cache (${entry})`);
+  }
+
+  if (known.ok) {
+    keyring({ op: "remove", alias: repo.tag });
+    removed.push("its deploy key in the keyring");
+  }
+
+  if (removed.length) for (const what of removed) console.log(`newrepo: removed ${what}`);
+  else console.log(`newrepo: nothing of ${repo.project} was left in the editor`);
+  console.log(`FORGOTTEN ${repo.project}`);
+}
+
 function usage(): never {
   console.log(
     [
       "usage: newrepo key   owner/repo [alias]   ensure key + ssh/git config; print pubkey",
       "       newrepo clone owner/repo [alias]   clone via the alias; set identity",
       "       newrepo status                     list configured repos",
+      "       newrepo rm    owner/repo [alias]   forget it here (cli.sh repo rm runs it)",
       "       newrepo owner/repo [alias]         key, then clone",
     ].join("\n"),
   );
@@ -391,6 +510,9 @@ async function main(argv: string[]): Promise<void> {
       break;
     case "status":
       showStatus();
+      break;
+    case "rm":
+      forget(parseRepo(argv[1], argv[2]));
       break;
     case undefined:
     case "-h":

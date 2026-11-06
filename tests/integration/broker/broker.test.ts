@@ -1150,6 +1150,25 @@ describe("purge is not the editor's (docs/agents.md)", () => {
       assert.deepEqual(runnerInvocations(), []);
     }
   });
+
+  test("nor removing a whole project (#63), in any spelling of it", async () => {
+    // `cli.sh repo rm`, the Mac's: it deletes the directory, every target's
+    // containers and volumes and the project's daemon. The editor can delete
+    // the folder itself, but not the rest -- and must not be handed that.
+    project("no-factory", JSON.stringify({ image: "alpine:3" }));
+    for (const request of [
+      { op: "remove-project", project: "no-factory" },
+      { op: "remove-project", project: "no-factory", force: true },
+      { op: "--remove-project", project: "no-factory" },
+      { op: "stop", project: "no-factory", force: true },
+      { op: "worktree-remove", project: "no-factory", worktree: "..", force: true },
+    ]) {
+      resetRunner();
+      const msgs = await ask(request);
+      assert.equal(result(msgs).ok, false, `${JSON.stringify(request)}: ${JSON.stringify(msgs)}`);
+      assert.deepEqual(runnerInvocations(), []);
+    }
+  });
 });
 
 describe("bundle and pull: a push's and a pull's project halves (transfer.ts)", () => {

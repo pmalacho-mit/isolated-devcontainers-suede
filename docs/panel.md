@@ -96,6 +96,8 @@ With nothing in `/workspaces`, Projects offers **Clone a repository…**:
 
 From the Mac, `./cli.sh repo add owner/repo` does all of it with your `gh`.
 
+Removing one is the Mac's alone: `./cli.sh repo rm owner/repo` (release/README.md, "Removing a project"). It reaches the project's containers, volumes and daemon, which the editor cannot, and it checks first that nothing in it is only there. Deleting the folder from the editor's explorer instead leaves all of that behind, and often part of the folder too.
+
 ## What it may do
 
 It runs only the editor's own commands: `desolate` (through the broker), `worktree`, and `newrepo`. Each runs with `execFile`, never through a shell. It runs no git and no docker of its own, and reaches no network. A GitHub link is opened by your browser.

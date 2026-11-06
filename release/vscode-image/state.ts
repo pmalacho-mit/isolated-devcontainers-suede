@@ -14,7 +14,8 @@ import type { Target } from "./projects.ts";
  *  token:  the editor's connection token, so a bookmarked URL keeps working.
  *  daemon: which daemon it last ran on (policy.ts Daemon), so a stop or a
  *          purge drives the same one the start did. */
-type Kind = "ports" | "spec" | "token" | "daemon";
+export const KINDS = ["ports", "spec", "token", "daemon"] as const;
+type Kind = (typeof KINDS)[number];
 
 export const directory = (workspaces: string) => join(workspaces, ".desolate");
 

@@ -151,6 +151,25 @@ describe("parseArgs", () => {
     refuses(["--force", "--worktree", "wip", "myapp"], /--force only means something with --remove-worktree/);
     refuses(["--create-worktree", "--force", "--worktree", "wip", "myapp"], /--force only/);
   });
+
+  test("removing a project (#63): one project, its whole self, --force and --dry-run its own", () => {
+    const removal = parse("--remove-project", "acme/widgets");
+    assert.equal(removal.command, "remove-project");
+    assert.equal(removal.project, "acme/widgets");
+    assert.equal(removal.force, false);
+    assert.equal(removal.dryRun, undefined);
+    assert.equal(parse("--remove-project", "--force", "acme/widgets").force, true);
+    assert.equal(parse("acme/widgets", "--dry-run", "--remove-project").dryRun, true);
+    // The path tab-completion produces denotes the same project.
+    assert.equal(parse("--remove-project", "/workspaces/acme/widgets/").project, "acme/widgets");
+    refuses(["--remove-project"], /usage:/);
+    refuses(["--remove-project", "acme/widgets", "acme/gadgets"], /Only one positional/);
+    // A worktree goes with its project, or alone through --remove-worktree.
+    refuses(["--remove-project", "--worktree", "wip", "acme/widgets"], /takes no --worktree/);
+    refuses(["--dry-run", "acme/widgets"], /--dry-run only means something with --remove-project/);
+    refuses(["--purge", "--dry-run", "acme/widgets"], /--dry-run only/);
+    refuses(["--purge", "--force", "acme/widgets"], /--force only means something with --remove-worktree or --remove-project/);
+  });
 });
 
 describe("every flag shape `Flags` declares round-trips", () => {

@@ -252,7 +252,7 @@ _desolate_complete_newrepo() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     COMPREPLY=()
     [ "$COMP_CWORD" -eq 1 ] && \
-        COMPREPLY=( $(compgen -W "key clone status" -- "$cur") )
+        COMPREPLY=( $(compgen -W "key clone rm status" -- "$cur") )
 }
 
 complete -F _desolate_complete_desolate     desolate

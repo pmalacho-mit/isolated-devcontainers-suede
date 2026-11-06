@@ -8,6 +8,9 @@
 //   desolate --stop <project>    -> stop devcontainer and remove its relays
 //   desolate --ports <project>   -> show current port map
 //   desolate --purge <project>   -> remove its container, relays, volumes, state
+//   desolate --remove-project [--dry-run] [--force] <project>
+//                                -> the project itself, worktrees and all, and
+//                                   everything of it (`cli.sh repo rm`; the Mac's)
 //
 // A project is a directory under /workspaces, either a direct child or ONE
 // level deeper so repositories can be scoped by owner (`cli.sh repo add` clones
@@ -54,8 +57,20 @@ import {
   target as resolveTarget,
   type Target,
 } from "./projects.ts";
-import { directory as stateDirectory, stateFile } from "./state.ts";
+import { KINDS as STATE_KINDS, directory as stateDirectory, stateFile } from "./state.ts";
 import * as worktrees from "./worktrees.ts";
+import {
+  containersOf,
+  describeLosses,
+  imagesOf,
+  nothingLost,
+  parseLosses,
+  parseWorkspaceContainers,
+  volumesOf,
+  worktreesInFolders,
+  worktreesInState,
+  type WorkspaceContainer,
+} from "./removal.ts";
 import { parse as parseJsonc } from "./jsonc.ts";
 import { isEntryPoint, isWithin, run, sha16, type JSONValue } from "./utils.ts";
 import { parseArgs, USAGE, type Args, type Command } from "./args.ts";
@@ -109,6 +124,7 @@ import {
   type PortWorld,
 } from "./ports.ts";
 import {
+  hasConfig,
   labelledConfig,
   remoteUserOf,
   resolveSpec,
@@ -151,6 +167,7 @@ const DOING: Partial<Record<Command, string>> = {
   stop: "stopping",
   purge: "purging",
   "remove-worktree": "removing",
+  "remove-project": "removing",
   "create-worktree": "creating",
   reclaim: "reclaiming",
   uncommitted: "checking for uncommitted work",
@@ -169,7 +186,12 @@ const COMING_OR_GOING = new Set(["starting", "rebuilding", "checking out", "stop
  *  or, when another holds it, said and refused with BUSY_EXIT. */
 const holdTarget = (target: Target, command: Command, rebuild = false) => {
   const what = command === "run" && rebuild ? "rebuilding" : DOING[command];
-  if (!what) return;
+  if (what) holdFor(target, what);
+};
+
+/** `target`, held for `what` (holdTarget's, for a command that holds more
+ *  than one target, or says more than its command does). */
+const holdFor = (target: Target, what: string) => {
   const got = hold(target.namespace, what);
   if (got.held) return;
   console.error(`desolate: ${target.name} is in use: ${got.holder.what}, since ${got.holder.since || "?"} ` +
@@ -1994,7 +2016,7 @@ function purgeTarget(target: Target): void {
     ),
   );
 
-  for (const kind of ["ports", "spec", "token", "daemon"] as const)
+  for (const kind of STATE_KINDS)
     fs.rmSync(stateFile(target, kind), { force: true });
 
   console.log(`purged ${target.name} (container, relays, volumes and state)`);
@@ -2015,6 +2037,322 @@ async function purgeProjectDaemon(target: Target): Promise<void> {
   const answer = await supervisor.ask({ op: "purge", project: target.project });
   if (answer.ok !== true)
     die(`could not purge ${dind.name(target)}: ${answer.error ?? "the supervisor said nothing"}`);
+}
+
+// ------------------------------------------------------ removing a project --
+//
+// `cli.sh repo rm` (#63): everything desolate made for a project, and the
+// project itself, gone -- including when its directory was deleted by hand
+// first, which strands every container, volume and daemon of it, since
+// --purge and every other command start by finding the directory. So nothing
+// here asks the directory where a target is: worktrees are found by what
+// desolate kept (removal.ts), containers by the folder the CLI stamped.
+
+/** Where the broker keeps its spec snapshots: this container's /tmp as well. */
+const BROKER_SPEC_DIR = process.env.DESOLATE_SPECS ?? "/tmp/desolate-specs";
+
+/** What a project has left, found before anything of it is removed. */
+interface Remains {
+  root: Target;
+  /** The root, then each worktree found by any of the three ways. */
+  targets: Target[];
+  /** Per target namespace, its containers on the shared daemon:
+   *  devcontainers, relays, and sandboxes a crash left. */
+  containers: Map<string, string[]>;
+  /** How many of those are running: sessions that end with them. */
+  running: number;
+  /** On the shared daemon, by name: the volumes in its namespaces (overlays
+   *  and its own), and a legacy container's nested-daemon volumes. */
+  volumes: string[];
+  /** On the shared daemon: images built for its folders (removal.imagesOf). */
+  images: string[];
+  /** Its own daemon, as the supervisor sees it; undefined when there is none. */
+  dind?: { name: string; running: boolean };
+  /** Why the supervisor could not say, when it could not. */
+  supervisorSilent?: string;
+}
+
+/** The state directory's entries: [] when there is none yet. */
+const stateEntries = () => {
+  try {
+    return fs.readdirSync(stateDir);
+  } catch {
+    return [];
+  }
+};
+
+/** A project to remove, named as every command names one -- and NOT required
+ *  to be on disk. */
+function removalRoot(project: string): Target {
+  const root = validTarget(project);
+  refuseUnlessItsOwnPath(root);
+  // `acme`, holding acme/widgets and acme/gadgets, is an owner directory: its
+  // projects are removed one by one, never all at once by its name.
+  const inside = dieOnError(() => listTargets(WORKSPACES)).filter(({ project: p, worktree }) => !worktree && p.startsWith(`${project}/`));
+  if (inside.length)
+    die(`${root.dir} is an owner directory, holding ${inside.map(({ project: p }) => p).join(", ")}.
+      Remove each of those by its own name.`);
+  // `solo/sub`, where solo has a spec of its own, is solo's source tree, not
+  // a project (projects.ts list): it goes with solo, never on its own.
+  const owner = path.dirname(root.projectDir);
+  if (project.includes("/") && hasConfig(owner))
+    die(`${owner} is a project of its own, so ${root.dir} is a directory inside it, not a project.`);
+  return root;
+}
+
+/** Every target of the project there is anything of: its worktrees on disk,
+ *  the ones desolate kept state for, and the ones a container was started in. */
+const targetsOfProject = (root: Target, containers: WorkspaceContainer[]): Target[] => {
+  const names = new Set([
+    ...worktreesOf(root).map(({ worktree }) => worktree!),
+    ...worktreesInState(stateEntries(), root.namespace),
+    ...worktreesInFolders(containers.map(({ folder }) => folder), root.dir),
+  ]);
+  return [root, ...[...names].sort().map((name) => resolveTarget(WORKSPACES, root.project, name))];
+};
+
+async function surveyProject(root: Target): Promise<Remains> {
+  daemons.use(root, "shared");
+  // Every listing below is "" from a daemon that does not answer, which would
+  // read as nothing left to remove.
+  if (!daemons.answers(daemons.shared))
+    die(`the shared daemon does not answer, so what is left of ${root.project} cannot be found.
+      Recover it first: ${hint.mac("reset-inner")}`);
+  const workspaceContainers = parseWorkspaceContainers(docker.container.workspaceContainers());
+  const targets = targetsOfProject(root, workspaceContainers);
+  const containers = new Map(targets.map((target) => [target.namespace, [
+    ...containersOf(workspaceContainers, target.dir),
+    ...ownRelayNames(target),
+    ...docker.container.namesWithLabel(`${worktrees.SANDBOX_LABEL}=${target.name}`),
+  ]]));
+  // The volumes a pre-v2 container's nested daemon kept: named for no
+  // project, so found through the container that mounts them (as
+  // migrateOffTheSharedDaemon finds them).
+  const nested = [...containers.values()].flat()
+    .flatMap((id) => docker.container.volumeNames(id))
+    .filter((name) => /^dind-var-lib-(docker|containerd)-/.test(name));
+  const namespaces = targets.map(({ namespace }) => namespace);
+  const contesting = dieOnError(() => listTargets(WORKSPACES)).map(({ namespace }) => namespace);
+  const volumes = [...new Set([...volumesOf(docker.volume.names(), namespaces, contesting), ...nested])].sort();
+  const images = imagesOf(docker.image.references(), targets.map(({ dir }) => dir), namespaces).sort();
+
+  const running = [...containers.values()].flat().filter((id) => docker.container.state(id) === "running").length;
+
+  const status = await supervisor.ask({ op: "status" });
+  if (status.ok !== true)
+    return { root, targets, containers, running, volumes, images, supervisorSilent: String(status.error ?? "no answer") };
+  const own = (Array.isArray(status.dinds) ? status.dinds : []).find((d: any) => d?.project === root.project);
+  return {
+    root, targets, containers, running, volumes, images,
+    ...(own ? { dind: { name: String(own.name), running: Boolean(own.running) } } : {}),
+  };
+}
+
+/** Does anything say this project runs, or ran, on a daemon of its own? */
+const hasOwnDaemon = (remains: Remains) =>
+  remains.dind !== undefined || remains.targets.some((target) => daemons.saved(target) === "project");
+
+/** What will go, as a person reads it before saying yes. */
+function describeRemains(remains: Remains): string[] {
+  const { root, targets, containers, volumes, images } = remains;
+  const lines: string[] = [];
+  const worktreeNames = targets.filter(({ worktree }) => worktree).map(({ worktree }) => worktree!);
+  lines.push(fs.existsSync(root.dir)
+    ? `${root.dir}, and everything in it`
+    : `${root.dir} is not on disk any more; what desolate kept of it:`);
+  if (worktreeNames.length) lines.push(`  its worktrees: ${worktreeNames.join(", ")}`);
+  const count = [...containers.values()].reduce((n, ids) => n + ids.length, 0);
+  if (count) lines.push(`  ${count} container(s) on the shared daemon: devcontainers, relays${remains.running ? ` -- ${remains.running} running now, and stopped by this` : ""}`);
+  if (volumes.length) lines.push(`  volumes on the shared daemon: ${volumes.join(", ")}`);
+  if (images.length) lines.push(`  images built for it: ${images.join(", ")}`);
+  if (remains.dind) lines.push(`  its own daemon, ${remains.dind.name} (${remains.dind.running ? "running" : "stopped"}), with every image, container and volume in it`);
+  else if (hasOwnDaemon(remains)) lines.push(`  what is left of its own daemon (${dind.name(root)}): its image store`);
+  if (remains.supervisorSilent) lines.push(`  (the supervisor could not say whether it has a daemon of its own: ${remains.supervisorSilent})`);
+  const saved = targets.filter((target) => STATE_KINDS.some((kind) => fs.existsSync(stateFile(target, kind))));
+  if (saved.length) lines.push(`  saved ports, tokens and spec fingerprints of ${saved.map(({ name }) => name).join(", ")}`);
+  return lines;
+}
+
+/** The first few lines of what a check printed, for saying why it failed. */
+const firstLines = (text: string) => text.split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 3).join(" / ");
+
+/**
+ * What removing these targets would lose, asked of each in its sandbox, on
+ * its own daemon -- the question `worktree remove` asks, and for the root
+ * what is in the repository and nowhere else (docker.ts lossesScript). A
+ * target not on disk has nothing to lose; a check that did not run is never
+ * read as clean.
+ */
+async function lossesIn(targets: Target[]): Promise<{ lost: string[]; unknown: string[] }> {
+  const lost: string[] = [];
+  const unknown: string[] = [];
+  for (const target of targets) {
+    if (!fs.existsSync(target.dir)) continue;
+    if (target.worktree) {
+      const removal = worktrees.removal(target, false);
+      if (removal.kind === "nothing") continue;
+      if (removal.kind === "refuse") {
+        lost.push(`${target.name}: never checked out, but holds files put there by hand:`, ...removal.stray.slice(0, 20).map((entry) => `  ${entry}`));
+        continue;
+      }
+      await onItsDaemon(target);
+      const report = docker.worktreeChanges(worktreeSandbox(target, worktrees.sandboxMounts(target)));
+      const changes = parseWorktreeChanges(report);
+      if (changes === null) unknown.push(`${target.name}: ${firstLines(report) || "its sandbox did not run"}`);
+      else if (changes.length)
+        lost.push(`${target.name}: uncommitted or untracked:`, ...changes.slice(0, 20).map((line) => `  ${line}`),
+          ...(changes.length > 20 ? [`  ... and ${changes.length - 20} more`] : []));
+      continue;
+    }
+    // A clone `repo add` made and nothing was checked out of: only `.git`,
+    // as GitHub had it.
+    if (!worktrees.isPopulated(target)) continue;
+    await onItsDaemon(target);
+    const report = docker.projectLosses(projectSandbox(target));
+    const losses = parseLosses(report);
+    if (losses === null) unknown.push(`${target.name}: ${firstLines(report) || "its sandbox did not run"}`);
+    else if (!nothingLost(losses)) lost.push(`${target.name}:`, ...describeLosses(losses).map((line) => `  ${line}`));
+  }
+  return { lost, unknown };
+}
+
+/** Root-owned files under the project, given to the editor's uid by a helper
+ *  on the daemon being driven (reclaimTarget's), so they can be deleted. */
+const reclaimForRemoval = (root: Target, where: string) => {
+  const changed = docker.reclaim(worktrees.CHECKOUT_IMAGE, root.projectDir, ".", EDITOR_UID);
+  if (changed === null) desolog(`could not reclaim ${root.dir} on ${where} (the helper did not finish); deleting what can be`);
+  else if (changed > 0) desolog(`reclaimed ${changed} entr${changed === 1 ? "y" : "ies"} a container left as someone else (${where})`);
+};
+
+/**
+ * `--remove-project`: refused if anything in the project would be lost
+ * (unless `force`), then everything of it removed, in an order that leaves
+ * nothing running over the directory while it is deleted. `dryRun` says what
+ * would go, and checks, and stops.
+ *
+ * Every step is one a second run repeats harmlessly, so a removal that fails
+ * part-way says what is left, and running it again finishes it.
+ */
+async function removeProject(project: string, force: boolean, dryRun: boolean): Promise<void> {
+  const root = removalRoot(project);
+  const doing = dryRun ? "checking what removing it would lose" : "removing";
+  holdFor(root, doing);
+  const remains = await surveyProject(root);
+  for (const target of remains.targets.slice(1)) {
+    holdFor(target, doing);
+    refuseUnlessItsOwnPath(target);
+  }
+
+  const there = describeRemains(remains);
+  const anything = fs.existsSync(root.dir) || there.length > 1 || hasOwnDaemon(remains);
+  console.log(anything ? `${dryRun ? "would remove" : "removing"} ${root.project}:` : `nothing of ${root.project} is left here`);
+  if (anything) for (const line of there) console.log(`  ${line}`);
+
+  if (!force && anything) {
+    const { lost, unknown } = await lossesIn(remains.targets);
+    const forced = hint.mac(`repo rm ${root.project} --force`);
+    if (lost.length) {
+      console.error(`desolate: ${root.project} holds work that is nowhere else, and would be lost:`);
+      for (const line of lost) console.error(`  ${line}`);
+      console.error(`Commit it and push it first, or discard it with:
+  ${forced}
+A branch pushed since the last pull reads as unpushed here; this tells the clone what GitHub has:
+  ${hint.mac(`pull ${root.project} --fetch-only`)}`);
+      process.exit(3);
+    }
+    if (unknown.length) {
+      console.error(`desolate: could not check ${root.project} for work that would be lost, so it is not known to be safe to remove:`);
+      for (const line of unknown) console.error(`  ${line}`);
+      console.error(`to remove it whatever is in it:\n  ${forced}`);
+      process.exit(1);
+    }
+    if (dryRun) console.log(`nothing in ${root.project} would be lost: no uncommitted or unpushed work, no stash`);
+  }
+  if (dryRun || !anything) return;
+
+  const failures: string[] = [];
+
+  // 1. The shared daemon's containers of every target, and the forwards to
+  //    them. A pre-v2 container holds a daemon of its own, quiesced first
+  //    (shutdown.ts) so its mounts come down before it does.
+  daemons.use(root, "shared");
+  for (const target of remains.targets) {
+    const ids = remains.containers.get(target.namespace) ?? [];
+    for (const id of ids)
+      if (docker.container.state(id) === "running" && docker.container.isPrivileged(id)) shutdown.devcontainer(docker, id, desolog);
+    if (ids.length && docker.container.remove(ids) !== 0)
+      failures.push(`could not remove every container of ${target.name} on the shared daemon (${ids.join(", ")})`);
+    ingressFiles.withdraw(ports.load(target), target);
+  }
+
+  // 2. Its own daemon, emptied: every container on it is this project's
+  //    (dind.ts), and none must write into the directory while it goes. Its
+  //    files are reclaimed there too, where its containers' root is the
+  //    daemon's own. A daemon that will not start is not emptied: the purge
+  //    below takes what is in it either way.
+  if (remains.dind) {
+    const answer = await supervisor.ask({ op: "ensure", project: root.project });
+    if (answer.ok === true) {
+      daemons.use(root, "project");
+      const every = docker.container.everyId();
+      if (every.length && docker.container.remove(every) !== 0)
+        failures.push(`could not remove every container on ${remains.dind.name}`);
+      if (fs.existsSync(root.dir)) reclaimForRemoval(root, remains.dind.name);
+    } else desolog(`could not start ${remains.dind.name} to empty it first (${answer.error ?? "no answer"}); its purge takes what is in it`);
+  }
+
+  // 3. The directory, worktrees and all, once what the shared daemon's
+  //    containers left as root is the editor's again.
+  daemons.use(root, "shared");
+  if (fs.existsSync(root.dir)) {
+    reclaimForRemoval(root, "the shared daemon");
+    refuseUnlessItsOwnPath(root);
+    try {
+      fs.rmSync(root.dir, { recursive: true, force: true });
+      desolog(`deleted ${root.dir}`);
+    } catch (err: any) {
+      failures.push(`could not delete all of ${root.dir}: ${err?.message ?? err}`);
+    }
+    // An owner directory left empty goes too (newrepo made it); one still
+    // holding another project of that owner does not.
+    if (root.project.includes("/"))
+      try {
+        fs.rmdirSync(path.dirname(root.projectDir));
+      } catch { /* not empty, or not there */ }
+  }
+
+  // 4. Its own daemon: container, image store, bridge (supervisor.ts purge).
+  if (hasOwnDaemon(remains) || remains.supervisorSilent) {
+    const answer = await supervisor.ask({ op: "purge", project: root.project });
+    if (answer.ok !== true) failures.push(`could not purge ${dind.name(root)}: ${answer.error ?? "the supervisor said nothing"}`);
+  }
+
+  // 5. What is left on the shared daemon: its volumes, then its images (a
+  //    container that ran one is gone by now).
+  daemons.use(root, "shared");
+  if (remains.volumes.length) {
+    if (docker.volume.remove(remains.volumes) !== 0) failures.push(`could not remove every volume of it (${remains.volumes.join(", ")})`);
+    else desolog(`removed ${remains.volumes.length} volume(s)`);
+  }
+  if (remains.images.length) {
+    if (docker.image.remove(remains.images) !== 0) failures.push(`could not remove every image built for it (${remains.images.join(", ")})`);
+    else desolog(`removed ${remains.images.length} image(s)`);
+  }
+
+  // 6. What desolate kept about each target, and its copies of their specs.
+  for (const target of remains.targets) {
+    for (const kind of STATE_KINDS) fs.rmSync(stateFile(target, kind), { force: true });
+    for (const copy of [DIRECT_SPEC_DIR, BROKER_SPEC_DIR, RUN_CONFIG_DIR])
+      fs.rmSync(path.join(copy, target.namespace), { recursive: true, force: true });
+    fs.rmSync(path.join(RUN_CONFIG_DIR, `${target.namespace}-build`), { recursive: true, force: true });
+  }
+
+  if (failures.length) {
+    for (const failure of failures) console.error(`desolate: ${failure}`);
+    die(`${root.project} is only partly removed. Running the removal again finishes what it can:
+        ${hint.mac(`repo rm ${root.project} --force`)}`);
+  }
+  console.log(`removed ${root.project}: its directory, containers, volumes, images, daemon and saved state`);
 }
 
 async function runTarget(
@@ -2210,21 +2548,7 @@ async function runTarget(
  *  and must never run a repository's git. The editor creates them, hardened
  *  and without a checkout; `populateWorktree` checks them out in a sandbox. */
 function targetFromArguments(project: string, worktree?: string, absent = false): Target {
-  if (!validName(project))
-    die(`'${project}' is not a usable project name.
-      A project is one path segment under /workspaces, or two for an
-      owner-scoped repo ('owner/repo'). Each segment must start with a letter
-      or digit and hold only [A-Za-z0-9._-], and the name cannot contain
-      '${SLASH_REPLACEMENT}' or '${WORKTREE_REPLACEMENT}' (that is how '/' and
-      a worktree are encoded into docker object names).`);
-
-  if (worktree !== undefined && !validWorktree(worktree))
-    die(`'${worktree}' is not a usable worktree name.
-      A worktree is ONE path segment under <project>/.worktrees, starting with a
-      letter or digit. It names a DIRECTORY, not a branch -- a branch with a '/'
-      in it is fine, it just gets a single-segment directory to live in.`);
-
-  const target = dieOnError(() => resolveTarget(WORKSPACES, project, worktree));
+  const target = validTarget(project, worktree);
 
   if (!fs.existsSync(target.projectDir))
     die(`no such project: ${target.projectDir}`);
@@ -2242,6 +2566,26 @@ function targetFromArguments(project: string, worktree?: string, absent = false)
         ${hint.anywhere(`worktree add ${project} ${worktree}`, `./cli.sh worktree add ${project} ${worktree}`)}`);
 
   return target;
+}
+
+/** The target a command line names, held to the grammar every name is -- and
+ *  nothing asked of the filesystem, which `--remove-project` must not need. */
+function validTarget(project: string, worktree?: string): Target {
+  if (!validName(project))
+    die(`'${project}' is not a usable project name.
+      A project is one path segment under /workspaces, or two for an
+      owner-scoped repo ('owner/repo'). Each segment must start with a letter
+      or digit and hold only [A-Za-z0-9._-], and the name cannot contain
+      '${SLASH_REPLACEMENT}' or '${WORKTREE_REPLACEMENT}' (that is how '/' and
+      a worktree are encoded into docker object names).`);
+
+  if (worktree !== undefined && !validWorktree(worktree))
+    die(`'${worktree}' is not a usable worktree name.
+      A worktree is ONE path segment under <project>/.worktrees, starting with a
+      letter or digit. It names a DIRECTORY, not a branch -- a branch with a '/'
+      in it is fine, it just gets a single-segment directory to live in.`);
+
+  return dieOnError(() => resolveTarget(WORKSPACES, project, worktree));
 }
 
 /** @throws when a command that needs a target was parsed without one. The
@@ -2282,6 +2626,10 @@ async function main(): Promise<void> {
     holdTarget(target, "create-worktree");
     return createWorktree(target, args.branch ?? args.worktree!, args.from);
   }
+
+  // Before targetOf, which needs the directory: this must work without it.
+  if (args.command === "remove-project")
+    return removeProject(args.project!, args.force, args.dryRun ?? false);
 
   const target = targetOf(args);
   // One operation on a target at a time (locks.ts): held until this exits.
