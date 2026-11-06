@@ -32,6 +32,7 @@ It runs the command inside the target's devcontainer, which must be running, wit
 - in its workspace folder;
 - through a login shell, so the PATH its features set up is there: bash's when the container has bash, as its own terminals are, since features write their login scripts for bash; `sh`'s otherwise;
 - with the container's environment, including any placeholder secrets in `containerEnv`.
+- on a project daemon (`docker-outside-of-docker`), with `DOCKER_HOST` pointed at the daemon's own socket, `/var/run/docker-host.sock`, as the container's terminals have it. A plain `docker exec` sees none of `remoteEnv`, and without this an agent's attached `docker run` loses its output after the first ~0.5s pause, with exit status 0 (the feature's `socat` relay at `/var/run/docker.sock` does that). The value is the one the container's spec records, so a project that sets its own `DOCKER_HOST` keeps it; see the README, "`docker` in such a devcontainer talks to the daemon's socket directly".
 
 Not `devcontainer exec`: that finds the container by the config it was started with, and a harness's exec can come after the spec has moved on.
 

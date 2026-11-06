@@ -290,6 +290,11 @@ const dindRunArgv = (spec: DindSpec) => [
   "--",
   "dockerd",
   "--host=unix:///run/dind-sock/docker.sock",
+  // Group 1000 is the devcontainers base image's `vscode` user's own group, so
+  // that user opens the socket DIRECTLY. desolate relies on it: it points
+  // DOCKER_HOST at /var/run/docker-host.sock to bypass docker-outside-of-docker's
+  // socat relay, which truncates attached output (dind.directSocket says why;
+  // tests/static/23-docker-socket.sh pins the pair).
   "--group=1000",
   "--default-ulimit=nofile=65536:524288",
 ];
@@ -366,6 +371,22 @@ export const pullScript = [
  * command is "$@", never spliced into the script.
  */
 export const LOGIN_EXEC = String.raw`if command -v bash >/dev/null 2>&1; then exec bash -lc 'exec "$@"' bash "$@"; fi; exec sh -lc 'exec "$@"' sh "$@"`;
+
+/** The argv of `docker` for `desolate exec`: as the remote user, in the
+ *  workspace, through a login shell, with `env` (`NAME=value`) added to what
+ *  the container already has. */
+export const execArgv = (o: {
+  id: string;
+  user?: string;
+  folder: string;
+  tty: boolean;
+  env: readonly string[];
+  argv: readonly string[];
+}) => [
+  "exec", "-i", ...(o.tty ? ["-t"] : []), ...(o.user ? ["-u", o.user] : []),
+  ...o.env.flatMap((assignment) => ["-e", assignment]),
+  "-w", o.folder, o.id, "sh", "-c", LOGIN_EXEC, "desolate-exec", ...o.argv,
+];
 
 /**
  * What `desolate --push` would send, for a person to read first (`desolate
@@ -751,6 +772,10 @@ export const createDocker = (run: Runner) => {
     /** The NAMES of the volumes it mounts. */
     volumeNames: (cid: string) =>
       nonEmptyLines(query("inspect", "-f", '{{range .Mounts}}{{if .Name}}{{.Name}}{{"\\n"}}{{end}}{{end}}', cid)),
+    /** The container's own environment, `NAME=value` per line: the image's
+     *  ENV and the spec's containerEnv, and none of remoteEnv. */
+    environment: (cid: string) =>
+      nonEmptyLines(query("inspect", "-f", '{{range .Config.Env}}{{println .}}{{end}}', cid)),
     mounts: (cid: string) =>
       parseMounts(query("inspect", "-f", MOUNTS_TEMPLATE, cid)),
     remove: (names: string[]) =>
