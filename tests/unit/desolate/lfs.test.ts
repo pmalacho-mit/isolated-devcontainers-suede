@@ -151,10 +151,12 @@ describe("Git LFS through push and pull", { skip: !haveLfs && "no git-lfs" }, ()
     git(dir, "commit", "--quiet", "-m", "plain");
     said.length = 0;
     let asks = 0;
+    const before = asked.length;
     await push("acme/widgets", { registration, ssh: "/bin/false", lfsAuth: () => { asks++; return auth(() => real)(); }, ask: broker("widgets"), log: (line) => said.push(line) });
     assert.equal(asks, 0);
     assert.deepEqual(said, []);
-    assert.equal(asked.at(-1)!.op, "bundle");
+    // The bundle, and the fetch-only pull that follows every push: no upload.
+    assert.deepEqual(asked.slice(before).map((a) => a.op), ["bundle", "pull"]);
   });
 
   test("an object the project does not have stops the push: the branch is NOT pushed", async () => {

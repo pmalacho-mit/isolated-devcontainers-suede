@@ -58,8 +58,14 @@ const sandbox = (op: string) => async (request: Record<string, unknown>, onLog: 
     onLog(line.replace(/^desolate-bundled/, "BUNDLED").replace(/^desolate-pulled/, "PULLED"));
   return result.status ?? 1;
 };
-const bundler = sandbox("bundle"), puller = sandbox("pull");
-const lastSeen = () => seen.at(-1)!.bundle;
+const puller = sandbox("pull");
+/** A push asks for a bundle, and then -- to update the project's origin/* --
+ *  for a fetch-only pull: so the broker's answer is chosen by the request. */
+const bundler = async (request: Record<string, unknown>, onLog: (line: string) => boolean) =>
+  (request.op === "pull" ? puller : sandbox("bundle"))(request, onLog);
+/** The last run of the sandbox, or of `op`'s: a push's bundle is followed by
+ *  a fetch-only pull, so a push's test asks for the bundle by name. */
+const lastSeen = (op?: string) => seen.filter((s) => !op || s.op === op).at(-1)!.bundle;
 const leftovers = () => readdirSync(join(project, ".git")).filter((f) => f.startsWith("desolate-transfer-"));
 
 before(() => {
@@ -105,10 +111,63 @@ describe("push", () => {
   test("the branch reaches the registered repository, as only what it lacks -- and nothing of the project's git ran", async () => {
     const said = await push("acme/widgets", { registration, ask: bundler });
     assert.match(said, /^pushed feature \([0-9a-f]{12}\) to acme\/widgets$/);
-    assert.equal(lastSeen(), "only what is new", "the cache had main's history; the sandbox sent it anyway");
+    assert.equal(lastSeen("bundle"), "only what is new", "the cache had main's history; the sandbox sent it anyway");
     assert.equal(git(root, "--git-dir", remote, "rev-parse", "refs/heads/feature"), git(project, "rev-parse", "HEAD"));
     assert.equal(git(root, "--git-dir", elsewhere, "for-each-ref").length, 0, "the project's url rewrite sent it elsewhere");
     for (const name of ["pre-push", "ssh-command"]) assert.ok(!existsSync(marker(name)), `the project's ${name} ran`);
+    assert.deepEqual(leftovers(), [], "a transfer file is left behind");
+  });
+
+  test("the project's origin/<branch> is the pushed commit afterwards, and nothing checked out moves (issue 54)", async () => {
+    commitIn(project, "a.txt", "one more\n");
+    const head = git(project, "rev-parse", "HEAD");
+    assert.notEqual(git(project, "rev-parse", "refs/remotes/origin/feature"), head, "the project already had it");
+    const asked: string[] = [];
+    const recording = async (request: Record<string, unknown>, onLog: (line: string) => boolean) => {
+      asked.push(`${request.op}${request.fetch ? " fetch" : ""}`);
+      return bundler(request, onLog);
+    };
+    assert.match(await push("acme/widgets", { registration, ask: recording }), /^pushed feature \([0-9a-f]{12}\) to acme\/widgets$/);
+    assert.deepEqual(asked, ["bundle", "pull fetch"]);
+    assert.equal(git(project, "rev-parse", "refs/remotes/origin/feature"), head);
+    assert.equal(git(project, "rev-parse", "HEAD"), head);
+    assert.equal(git(project, "rev-list", "--count", "refs/remotes/origin/feature..HEAD"), "0", "a review would still count commits to push");
+    assert.deepEqual(leftovers(), [], "a transfer file is left behind");
+  });
+
+  test("a branch GitHub did not have becomes origin/<branch> in the project, so a review compares with it (issue 54)", async () => {
+    git(project, "checkout", "--quiet", "-b", "brand-new");
+    try {
+      commitIn(project, "a.txt", "on a new branch\n");
+      const head = git(project, "rev-parse", "HEAD");
+      assert.match(await push("acme/widgets", { registration, ask: bundler }), /^pushed brand-new/);
+      assert.equal(git(project, "rev-parse", "refs/remotes/origin/brand-new"), head);
+      assert.equal(git(project, "symbolic-ref", "--short", "HEAD"), "brand-new");
+    } finally {
+      git(project, "checkout", "--quiet", "feature");
+    }
+  });
+
+  test("a push that went through is not a failure when the project's origin/* cannot be updated after; it says so", async () => {
+    commitIn(project, "a.txt", "and another\n");
+    const head = git(project, "rev-parse", "HEAD");
+    const refusing = async (request: Record<string, unknown>, onLog: (line: string) => boolean) =>
+      request.op === "pull" ? 1 : bundler(request, onLog);
+    const said = await push("acme/widgets", { registration, ask: refusing });
+    assert.match(said, /^pushed feature \([0-9a-f]{12}\) to acme\/widgets\n  but origin\/\* in the project is not updated yet/);
+    assert.equal(git(root, "--git-dir", remote, "rev-parse", "refs/heads/feature"), head, "GitHub has it");
+    // Nor when what fails is not desolate's own refusal: a broker that throws.
+    commitIn(project, "a.txt", "and one more\n");
+    const throwing = async (request: Record<string, unknown>, onLog: (line: string) => boolean) => {
+      if (request.op === "pull") throw new Error("the broker went away");
+      return bundler(request, onLog);
+    };
+    assert.match(await push("acme/widgets", { registration, ask: throwing }), /not updated yet \(the broker went away\)/);
+    const pushed = git(project, "rev-parse", "HEAD");
+    assert.equal(git(root, "--git-dir", remote, "rev-parse", "refs/heads/feature"), pushed, "GitHub has it");
+    // The next push (or a pull) brings it level.
+    await pull("acme/widgets", { registration, ask: puller, fetchOnly: true });
+    assert.equal(git(project, "rev-parse", "refs/remotes/origin/feature"), pushed);
     assert.deepEqual(leftovers(), [], "a transfer file is left behind");
   });
 
@@ -134,7 +193,7 @@ describe("push", () => {
 
   test("again, with nothing new: no bundle at all, and nothing refused", async () => {
     assert.match(await push("acme/widgets", { registration, ask: bundler }), /^pushed feature/);
-    assert.equal(lastSeen(), "none");
+    assert.equal(lastSeen("bundle"), "none");
   });
 
   test("the remote's default branch is refused unless asked for", async () => {
