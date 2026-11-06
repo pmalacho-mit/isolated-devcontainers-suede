@@ -32,6 +32,8 @@ case "$1 $2" in
     [ ! -e "$STUB_DIR/$f-issues-fail" ] || { cat "$STUB_DIR/$f-issues-fail" >&2; exit 1; }
     cat "$STUB_DIR/$f-issues" ;;
   "api repos/acme/app/git/ref/heads/issue/3") [ -e "$STUB_DIR/app-pushed" ]; exit $? ;;
+  "api repos/acme/app/git/ref/heads/main") cat "$STUB_DIR/main-sha" ;;
+  "api repos/acme/app/git/ref/heads/evil") echo "abc" ;;
   "pr list") cat "$STUB_DIR/open-pr" 2>/dev/null || echo '[]' ;;
   "pr create") echo "https://github.com/acme/app/pull/9" ;;
 esac
@@ -56,6 +58,7 @@ case "$1 $2" in
   "desolate acme/app")
     [ ! -e "$STUB_DIR/start-busy" ] || exit 75
     [ ! -e "$STUB_DIR/start-slow" ] || sleep 30 ;;
+  "nudge acme/app") ;;
   "exec acme/app") [ ! -e "$STUB_DIR/exec-fails" ] || exit 1 ;;
 esac
 # What runs: a start of a worktree adds it, its --stop takes it away.
@@ -275,5 +278,43 @@ rm -rf "$STUB/state"; mkdir -p "$STUB/state"; echo "acme/widget issue-3" > "$STU
 echo '[{"number":3,"title":"Plain work","body":"do it"}]' > "$STUB/app-issues"; echo '[]' > "$STUB/widget-issues"
 tick
 assert_contains "acme/app's issue-3 is started, though acme/widget's runs" "$(cat "$STUB/calls")" "cli desolate acme/app --worktree issue-3"
+
+group "a base that moved: fetched, and a working agent told to catch up -- once, and only while blue"
+rm -rf "$STUB/state"; mkdir -p "$STUB/state"; : > "$STUB/running"
+echo '[{"number":3,"title":"Plain work","body":"do it"}]' > "$STUB/app-issues"; echo '[]' > "$STUB/widget-issues"
+cat > "$STUB/nudger.sh" <<EOF2
+#!/usr/bin/env bash
+agent_start() { return 0; }
+agent_nudge() { echo "cli nudge \$*" >> "\$STUB_DIR/calls"; }
+. "$ROOT/examples/factory/lib/gh-dispatch.sh"
+dispatch_main "\$@"
+EOF2
+ntick() {
+  : > "$STUB/calls"
+  PATH="$STUB/bin:$PATH" DESOLATE_CLI="$STUB/bin/cli" FACTORY_STATE="$STUB/state" \
+    bash "$STUB/nudger.sh" --all --once </dev/null > "$STUB/out" 2>&1
+}
+SHA1=$(printf 'a%.0s' $(seq 40)); SHA2=$(printf 'b%.0s' $(seq 40))
+echo "$SHA1" > "$STUB/main-sha"
+statuses "" blue
+ntick   # the agent starts
+ntick   # first sight of blue: where main is, recorded
+assert_not_contains "nothing moved: not told" "$(cat "$STUB/calls")" "nudge"
+echo "$SHA2" > "$STUB/main-sha"
+statuses "" orange
+ntick
+assert_not_contains "main moved, but the agent asks: nothing is typed at it" "$(cat "$STUB/calls")" "nudge"
+statuses "" blue
+ntick
+assert_contains "working again: origin/* is fetched" "$(cat "$STUB/calls")" "cli pull acme/app --fetch-only"
+assert_contains "  and it is told origin/main moved" "$(cat "$STUB/calls")" "nudge acme/app issue-3 origin/main"
+ntick
+assert_not_contains "  once per move" "$(cat "$STUB/calls")" "nudge"
+echo "not-a-sha" > "$STUB/main-sha"
+ntick
+assert_not_contains "a ref answer that is no sha is no move" "$(cat "$STUB/calls")" "nudge"
+echo '[{"number":3,"title":"x","body":"<!-- desolate-dispatch: {\"base\":\"evil;rm -rf /\"} -->","author":{"login":"me"}}]' > "$STUB/app-issues"
+ntick
+assert_not_contains "a base that is no plain branch name is never used" "$(cat "$STUB/calls")" "nudge"
 
 summary

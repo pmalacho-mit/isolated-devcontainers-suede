@@ -12,6 +12,10 @@
 #     this Mac -- and, in a terminal, asked for a new token; then every agent
 #     that stopped on it carries on its conversation (`claude -c`). No new
 #     agent starts while that waits.
+#   - When a PR is merged (the base branch moves on GitHub), origin/* is
+#     fetched here and each working (blue) agent is told to bring its branch
+#     up to date with origin/<base>: a fixed sentence, typed into its tmux
+#     session by claude-helper.sh nudge.
 #   - Watch one: claude-helper.sh attach <project> --worktree issue-<n>.
 set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -22,6 +26,7 @@ agent_start()   { "$HELPER" start "$1" --worktree "$2" --task "$3"; }
 agent_blocked() { [ "$1" = red ] && [ "$2" = "claude: authentication failed" ]; }
 agent_renew()   { "$HELPER" auth "$1" --renew; }
 agent_resume()  { "$HELPER" resume "$1" --worktree "$2"; }
+agent_nudge()   { "$HELPER" nudge "$1" --worktree "$2" --ref "$3"; }
 agent_events()  { "$HELPER" events "$1" --worktree "$2"; }
 agent_hint()    { local p=$1 w; shift; printf '%s auth %s --renew' "$HELPER" "$p"; for w; do printf '; %s resume %s --worktree %s' "$HELPER" "$p" "$w"; done; }
 

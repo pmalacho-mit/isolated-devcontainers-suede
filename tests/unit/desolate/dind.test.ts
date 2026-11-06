@@ -136,3 +136,122 @@ describe("the per-project bridge", () => {
     );
   });
 });
+
+// Issue #50. A devcontainer on a project daemon reaches it by the socket the
+// feature binds in, not by the feature's socat relay, which cuts attached
+// `docker run` output off after a 0.5s pause. The rule is applied twice, to the
+// spec desolate starts (addDirectSocket) and to `desolate exec`
+// (dockerHostForExec), which is a plain `docker exec` and sees no remoteEnv.
+describe("pointing a project's docker at its daemon's socket (not the relay)", () => {
+  const url = "unix:///var/run/docker-host.sock";
+
+  test("the socket is the one policy lets a project daemon's devcontainer bind", () => {
+    assert.equal(dind.directSocket.path, "/var/run/docker-host.sock");
+    assert.equal(dind.directSocket.url, url);
+    assert.equal(dind.directSocket.variable, "DOCKER_HOST");
+  });
+
+  describe("the spec it starts", () => {
+    test("a spec with no remoteEnv gets one", () => {
+      const spec: Record<string, unknown> = { image: "x" };
+      assert.equal(dind.addDirectSocket(spec), true);
+      assert.deepEqual(spec.remoteEnv, { DOCKER_HOST: url });
+    });
+
+    test("the project's other remoteEnv stays, beside it", () => {
+      const spec: Record<string, unknown> = { remoteEnv: { SSH_AUTH_SOCK: "", POETRY: "true" } };
+      assert.equal(dind.addDirectSocket(spec), true);
+      assert.deepEqual(spec.remoteEnv, { SSH_AUTH_SOCK: "", POETRY: "true", DOCKER_HOST: url });
+    });
+
+    test("what the project declares wins, whatever it is -- that is the way out", () => {
+      for (const own of ["unix:///var/run/docker.sock", "tcp://elsewhere:2375", "", null]) {
+        const spec: Record<string, unknown> = { remoteEnv: { DOCKER_HOST: own } };
+        assert.equal(dind.addDirectSocket(spec), false, String(own));
+        assert.deepEqual(spec.remoteEnv, { DOCKER_HOST: own });
+      }
+    });
+
+    test("a DOCKER_HOST in containerEnv is the project's too, and gets no second one", () => {
+      const spec: Record<string, unknown> = { containerEnv: { DOCKER_HOST: "unix:///var/run/docker.sock" } };
+      assert.equal(dind.addDirectSocket(spec), false);
+      assert.equal(spec.remoteEnv, undefined);
+    });
+
+    test("a containerEnv without it does not stop it", () => {
+      const spec: Record<string, unknown> = { containerEnv: { OPENAI_API_KEY: "SAMPLE-OPENAI-KEY" } };
+      assert.equal(dind.addDirectSocket(spec), true);
+      assert.deepEqual(spec.containerEnv, { OPENAI_API_KEY: "SAMPLE-OPENAI-KEY" });
+    });
+
+    test("a remoteEnv that is not an object is left for the CLI and the policy", () => {
+      for (const odd of ["DOCKER_HOST=x", ["DOCKER_HOST=x"], 7, null]) {
+        const spec: Record<string, unknown> = { remoteEnv: odd };
+        assert.equal(dind.addDirectSocket(spec), false, JSON.stringify(odd));
+        assert.deepEqual(spec.remoteEnv, odd);
+      }
+    });
+
+    test("a key merely INHERITED as DOCKER_HOST is not a declaration", () => {
+      // JSON.parse makes own properties only; this is the case `in` would get wrong.
+      const spec: Record<string, unknown> = { remoteEnv: Object.create({ DOCKER_HOST: "inherited" }) };
+      assert.equal(dind.addDirectSocket(spec), true);
+      assert.equal((spec.remoteEnv as Record<string, unknown>).DOCKER_HOST, url);
+    });
+
+    test("it adds nothing but that one variable, with no project data in it", () => {
+      const spec: Record<string, unknown> = { image: "x", name: "$(touch /tmp/pwn)", features: {} };
+      const before = JSON.stringify(spec);
+      dind.addDirectSocket(spec);
+      delete spec.remoteEnv;
+      assert.equal(JSON.stringify(spec), before);
+    });
+  });
+
+  describe("`desolate exec`, a plain docker exec", () => {
+    const label = (...entries: object[]) => JSON.stringify(entries);
+
+    test("a container made before desolate added it still gets it", () => {
+      assert.equal(dind.dockerHostForExec(label({ remoteUser: "vscode" }, { postCreateCommand: "x" }), ["PATH=/bin"]), url);
+    });
+
+    test("a container desolate made carries it in its label, and gets that", () => {
+      assert.equal(dind.dockerHostForExec(label({ remoteUser: "vscode" }, { remoteEnv: { DOCKER_HOST: url } }), []), url);
+    });
+
+    test("what the project declared is what it gets: the same as its terminals", () => {
+      const own = "unix:///var/run/docker.sock";
+      assert.equal(dind.dockerHostForExec(label({ remoteEnv: { DOCKER_HOST: own } }), []), own);
+    });
+
+    test("the last remoteEnv to declare it wins, as the CLI merges them", () => {
+      const got = dind.dockerHostForExec(
+        label({ remoteEnv: { DOCKER_HOST: "unix:///first" } }, { remoteEnv: { OTHER: "1" } }, { remoteEnv: { DOCKER_HOST: "unix:///last" } }),
+        [],
+      );
+      assert.equal(got, "unix:///last");
+    });
+
+    test("one the container's own environment has is left alone", () => {
+      assert.equal(dind.dockerHostForExec(label({}), ["A=1", "DOCKER_HOST=tcp://x:1"]), undefined);
+      // a name that merely starts the same is not it
+      assert.equal(dind.dockerHostForExec(label({}), ["DOCKER_HOST_EXTRA=1"]), url);
+    });
+
+    test("a project that blanked or nulled it is not handed one", () => {
+      assert.equal(dind.dockerHostForExec(label({ remoteEnv: { DOCKER_HOST: "" } }), []), undefined);
+      assert.equal(dind.dockerHostForExec(label({ remoteEnv: { DOCKER_HOST: null } }), []), undefined);
+    });
+
+    test("an absent or unreadable label is the case of a container made before", () => {
+      assert.equal(dind.dockerHostForExec("", []), url);
+      assert.equal(dind.dockerHostForExec("{not json", []), url);
+      assert.equal(dind.dockerHostForExec("null", []), url);
+      assert.equal(dind.dockerHostForExec(JSON.stringify({ remoteEnv: "x" }), []), url);
+    });
+
+    test("a single object label (not a list) reads the same way", () => {
+      assert.equal(dind.dockerHostForExec(JSON.stringify({ remoteEnv: { DOCKER_HOST: "unix:///one" } }), []), "unix:///one");
+    });
+  });
+});

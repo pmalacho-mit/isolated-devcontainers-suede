@@ -65,7 +65,7 @@ import { buildsFromDockerfile, buildSpec, imageSpec } from "./dockerfile-build.t
 import { hint } from "./hints.ts";
 import {
   createDocker,
-  LOGIN_EXEC,
+  execArgv,
   parseWorktreeChanges,
   type NetworkAttachment,
   type Runner,
@@ -880,6 +880,12 @@ function deriveRunConfig(
       ? `workspace: ${dir}, inside its project mounted at ${source}`
       : `workspace mounted at ${dir}, mirroring its path outside`);
   }
+
+  // Past docker-outside-of-docker's socat relay, which drops an attached
+  // `docker run`'s output after a 0.5s pause (dind.directSocket says why this
+  // is safe here and nowhere else). Only on a daemon of the project's own.
+  if (daemon === "project" && dind.addDirectSocket(spec as Record<string, unknown>))
+    applied.push(`${dind.directSocket.variable}=${dind.directSocket.url} (the project daemon's socket, not the feature's socat relay, which cuts off attached output after a 0.5s pause)`);
 
   const mask = worktrees.runArgs(target);
   if (mask.length) {
@@ -1914,13 +1920,19 @@ function execTarget(target: Target, argv: string[]): never {
     return die(`${target.name}'s own daemon is not running. Start it: ${hint.desolate(invocation(target))}`);
   const id = devcontainerId(target.dir);
   if (!id) return die(`${target.name} is not running. Start it: ${hint.desolate(invocation(target))}`);
-  const user = remoteUserOf(docker.container.metadata(id));
+  const metadata = docker.container.metadata(id);
+  const user = remoteUserOf(metadata);
   const folder = containerWorkspaceFolder(target.dir, id) || target.dir;
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const result = spawnSync("docker", [
-    "exec", "-i", ...(tty ? ["-t"] : []), ...(user ? ["-u", user] : []), "-w", folder, id,
-    "sh", "-c", LOGIN_EXEC, "desolate-exec", ...argv,
-  ], { stdio: "inherit" });
+  // A plain `docker exec` sees none of the spec's remoteEnv, so the one
+  // variable desolate adds to it is given here (dind.dockerHostForExec).
+  const dockerHost = daemons.saved(target) === "project"
+    ? dind.dockerHostForExec(metadata, docker.container.environment(id))
+    : undefined;
+  const result = spawnSync("docker", execArgv({
+    id, user, folder, tty, argv,
+    env: dockerHost === undefined ? [] : [`${dind.directSocket.variable}=${dockerHost}`],
+  }), { stdio: "inherit" });
   process.exit(result.status ?? 1);
 }
 

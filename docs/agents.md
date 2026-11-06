@@ -32,6 +32,7 @@ It runs the command inside the target's devcontainer, which must be running, wit
 - in its workspace folder;
 - through a login shell, so the PATH its features set up is there: bash's when the container has bash, as its own terminals are, since features write their login scripts for bash; `sh`'s otherwise;
 - with the container's environment, including any placeholder secrets in `containerEnv`.
+- on a project daemon (`docker-outside-of-docker`), with `DOCKER_HOST` pointed at the daemon's own socket, `/var/run/docker-host.sock`, as the container's terminals have it. A plain `docker exec` sees none of `remoteEnv`, and without this an agent's attached `docker run` loses its output after the first ~0.5s pause, with exit status 0 (the feature's `socat` relay at `/var/run/docker.sock` does that). The value is the one the container's spec records, so a project that sets its own `DOCKER_HOST` keeps it; see the README, "`docker` in such a devcontainer talks to the daemon's socket directly".
 
 Not `devcontainer exec`: that finds the container by the config it was started with, and a harness's exec can come after the spec has moved on.
 
@@ -162,9 +163,10 @@ Per issue labelled `desolate:run`, each tick:
    - **the agent's own access broken** (for Claude, `red` "claude: authentication failed"): you are told, in the terminal, with a bell, and by a macOS notification. In a terminal you are asked for a new token, and then each agent that stopped on it carries on its conversation. No new agent starts while this waits.
    - **`orange`, `red` or `gray`:** you are told, once per status, in the terminal and by a macOS notification. Never on GitHub: `gh` is your login, and an agent's words would go out as yours.
    - **`green`:** you are told, once, to review the branch and push it (the panel's **Review & Push**, or `desolate --push`). As soon as GitHub has `issue/<n>`, the dispatcher opens a draft PR for it (`gh pr create --draft`), whose description says only which issue it closes.
+   - **`blue`, and its base branch moved on GitHub** (a PR was merged): the dispatcher fetches `origin/*` (`pull --fetch-only`, with your credentials) and, once per move, the agent is told to bring its branch up to date with `origin/<base>`. For Claude, `claude-helper.sh nudge` types one fixed sentence into its tmux session. The security shape: the only variable is the branch name, checked to be plain characters (`[A-Za-z0-9._/-]`, no `..`, no leading `-`), and a ref answer that is not a 40-hex sha counts as no move; nothing from GitHub, an issue or a PR is typed. It is typed only while the status is `blue`, checked again inside the target immediately before typing, because at a permission prompt (`orange`) a typed line could answer it. A move seen while the agent is not `blue` is delivered when it is. `send-keys -l` types literally, so the text is never read as key names.
 4. When the issue is closed: stop and `worktree remove` (refused while it holds uncommitted work).
 
-Another agent is five shell functions: `agent_ready`, `agent_start`, `agent_blocked`, `agent_renew` and `agent_resume`. See the top of `lib/gh-dispatch.sh`.
+Another agent is five shell functions: `agent_ready`, `agent_start`, `agent_blocked`, `agent_renew` and `agent_resume` (plus an optional `agent_nudge`). See the top of `lib/gh-dispatch.sh`.
 
 ### Claude Code on your subscription: `claude/claude-helper.sh`
 
@@ -187,7 +189,7 @@ examples/factory/claude/claude-helper.sh verify acme/widgets                    
 
 `--scoped` limits spending to one project (`DESOLATE-CLAUDE-<project>-OAUTH`), and then that project needs a daemon of its own.
 
-**`start`** runs `claude` in a detached tmux session in the target, in auto permission mode (`-- --permission-mode <mode>` for another; `/desolate` readable and `git add`/`git commit`/`/desolate/status` allowed without asking), with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. If tmux or claude is missing, it installs them:
+**`start`** runs `claude` in a detached tmux session in the target, in auto permission mode and `high` effort (`-- --permission-mode <mode>` for another; `/desolate` readable and `git add`/`git commit`/`/desolate/status` allowed without asking), with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. If tmux or claude is missing, it installs them:
 - tmux through the image's package manager, as root or with passwordless sudo;
 - claude with its native installer.
 

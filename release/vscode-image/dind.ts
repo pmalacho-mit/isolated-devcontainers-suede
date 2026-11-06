@@ -183,3 +183,98 @@ export const isRequiredBy = (featureIds: Iterable<string>) =>
   [...featureIds].some((id) =>
     DAEMON_FEATURES.some((feature) => feature.test(id)),
   );
+
+/**
+ * How a devcontainer on a project daemon reaches it: DIRECTLY, by the socket the
+ * `docker-outside-of-docker` feature binds in, rather than by the relay the
+ * feature puts at /var/run/docker.sock (issue #50).
+ *
+ * The relay is `socat ... fork,mode=660,user=<remote user>` run WITHOUT `-t`.
+ * socat closes the connection 0.5s after one side half-closes, and an attached
+ * `docker run` with no stdin half-closes at once, so its output stops at the
+ * first pause of about 0.5s -- and the client exits 0, so nothing says output
+ * was lost (`docker run -d; docker logs` shows all of it). `apt-get update`,
+ * installs and builds are the usual victims.
+ *
+ * The relay exists for a user who cannot open the socket the feature binds. On
+ * a project daemon that user can: the dind serves it as group 1000 (docker.ts,
+ * `--group=1000`), the primary group of the devcontainers base image's
+ * `vscode` user. So desolate points `DOCKER_HOST` there, for the project --
+ * and ONLY for a project on its own daemon: elsewhere that socket may be
+ * root-only, and the relay is what makes `docker` work at all.
+ *
+ * It grants nothing. The user could already open this socket (it is what the
+ * relay connects to), and the variable is only a path. Both sockets reach the
+ * same daemon, so the one-project view and the sysbox around it are unchanged.
+ *
+ * Two edges, both documented in README.md ("Set DOCKER_HOST ..."): a user whose
+ * primary group is not 1000 gets "permission denied", and a container that
+ * bind-mounts the socket must name /var/run/docker.sock -- this path is not on
+ * the dind, and a bind of it gives an empty directory.
+ */
+export const directSocket = {
+  /** Where the feature binds the daemon's socket (policy.ts allows exactly it). */
+  path: "/var/run/docker-host.sock",
+  variable: "DOCKER_HOST",
+  url: "unix:///var/run/docker-host.sock",
+} as const;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const declares = (env: unknown) =>
+  isPlainObject(env) && Object.hasOwn(env, directSocket.variable);
+
+/**
+ * Add `remoteEnv.DOCKER_HOST` to a spec headed for a project daemon, as the
+ * project could have written it. Returns whether it did.
+ *
+ * What the project declares is never overridden, whatever the value: a
+ * `DOCKER_HOST` in `remoteEnv` or in `containerEnv` is the project's own choice,
+ * and is the way out of this -- `unix:///var/run/docker.sock` is the feature's
+ * relay. (`null` is no way out: the CLI sets the string "null".) A `remoteEnv`
+ * that is not an object is left for the CLI and the policy to make of.
+ */
+export const addDirectSocket = (spec: Record<string, unknown>): boolean => {
+  if (declares(spec.containerEnv)) return false;
+  if (spec.remoteEnv === undefined) {
+    spec.remoteEnv = { [directSocket.variable]: directSocket.url };
+    return true;
+  }
+  if (!isPlainObject(spec.remoteEnv) || declares(spec.remoteEnv)) return false;
+  spec.remoteEnv[directSocket.variable] = directSocket.url;
+  return true;
+};
+
+/**
+ * The `DOCKER_HOST` `desolate exec` gives a command in a container on a project
+ * daemon, or undefined to give it none.
+ *
+ * `desolate exec` is a plain `docker exec`, which sees the container's own
+ * environment and none of `remoteEnv` -- and a harness starts its agents there,
+ * which is where docker output is read. So it applies the rule above itself:
+ * from what the container records of its spec (the `devcontainer.metadata`
+ * label; the last `remoteEnv` that declares it wins, as the CLI merges them), a
+ * value the container's environment already has left alone, and the direct
+ * socket for a container made before desolate added it.
+ *
+ * @param label the `devcontainer.metadata` label, "" when absent.
+ * @param environment the container's `Config.Env`, as `NAME=value` lines.
+ */
+export const dockerHostForExec = (label: string, environment: readonly string[]): string | undefined => {
+  if (environment.some((line) => line.startsWith(`${directSocket.variable}=`))) return undefined;
+  let entries: unknown;
+  try {
+    entries = JSON.parse(label);
+  } catch {
+    entries = [];
+  }
+  const declared = (Array.isArray(entries) ? entries : [entries])
+    .filter(isPlainObject)
+    .map((entry) => entry.remoteEnv)
+    .filter(declares)
+    .at(-1) as Record<string, unknown> | undefined;
+  if (declared === undefined) return directSocket.url;
+  const value = declared[directSocket.variable];
+  return typeof value === "string" && value !== "" ? value : undefined;
+};

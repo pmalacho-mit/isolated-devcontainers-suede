@@ -22,7 +22,7 @@ OUT=$(PATH="$STUBS:$PATH" timeout 120 bash "$RELEASE/preflight.sh" 2>&1)
 group "preflight, with nothing it can ask"
 # The control: it ran -- every section, and it said so -- so that nothing
 # passing is a finding and not a script that stopped at its first line.
-for section in "1. containers" "2. privilege separation" "5. security invariants" "5b. lateral containment" \
+for section in "1. containers" "6b. x86 emulation" "2. privilege separation" "5. security invariants" "5b. lateral containment" \
                "7. egress proxy" "8. ingress" "9. every bridge is covered"; do
   assert_contains "  (it reached section $section)" "$OUT" "== $section"
 done
