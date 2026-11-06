@@ -243,6 +243,54 @@ real push and pull of an LFS file is the check that matters.
 - **Typing `git lfs pull` in a devcontainer** still cannot authenticate (no key
   there); use `desolate --pull`.
 
+## Trying it for real
+
+Nothing here has run against GitHub yet (see above). To check it, with a
+scratch **private** repository (so a public one cannot serve the download
+without the credential) that has an LFS file in it:
+
+```bash
+# on the Mac, once the stack is up
+./cli.sh repo add <you>/lfs-scratch            # registers the deploy key, clones through the cache
+./cli.sh desolate <you>/lfs-scratch            # first start: the checkout runs in the sandbox
+./cli.sh worktree add <you>/lfs-scratch t1     # a worktree to commit from
+./cli.sh desolate <you>/lfs-scratch --worktree t1
+```
+
+1. **First checkout.** In the project's devcontainer, `git status` is clean and
+   any LFS file is a ~130-byte pointer (`cat` it). That is expected; it is not a
+   half-written tree.
+2. **Pull fills them in.** `desolate --pull <you>/lfs-scratch` (outer editor
+   terminal, the panel, or `./cli.sh pull`). It should end `; fetched N LFS
+   object(s)`, and the files are now real. *Needs:* the sandbox reaching the
+   three LFS hosts, and GitHub's `href` being the expected shape.
+3. **Commit a new LFS file** in the worktree (`git lfs track '*.bin'` once, then
+   add a `.bin` and commit). In the devcontainer, `git lfs` stores the object in
+   `.git/lfs`.
+4. **Review.** `desolate --review --worktree t1 <you>/lfs-scratch` should list it
+   as `(LFS, <size>: uploaded with the push)`, with its real size.
+5. **Push.** `desolate --push --worktree t1 <you>/lfs-scratch` (or the panel's
+   Review & Push). It should print `uploading 1 LFS object (...)` and the file's
+   name first, then `pushed t1 ...`. On GitHub, open the file in the web UI: it
+   should show "Stored with Git LFS" and download.
+6. **Round trip.** In a second worktree (or after `rm`-ing the object from
+   `.git/lfs`), `desolate --pull` of that branch brings it back.
+7. **Lost object.** Delete an unpushed LFS object from `.git/lfs/objects`, commit
+   a pointer to it, push: it must fail naming the object and **not** push the
+   branch.
+
+What would tell you which assumption broke:
+`refusing it` / `names an endpoint that is not lfs.github.com/...` -- the `href`
+shape (one regex, `lfsServerOf` in `transfer.ts`);
+a git-lfs connection or TLS error in the sandbox's output -- egress to
+`lfs.github.com`, `github-cloud.s3.amazonaws.com`,
+`github-cloud.githubusercontent.com` (the proxy's allowlist, or the CA);
+`bad_permissions` on upload -- the registered key is read-only.
+`./cli.sh proxy audit --project <you>/lfs-scratch` shows which hosts the sandbox
+reached.
+
+Delete the scratch repository afterwards (its deploy key goes with it).
+
 ## Tests
 
 `tests/unit/desolate/lfs.test.ts` runs the real git-lfs against a stand-in LFS
