@@ -17,7 +17,7 @@
 set -euo pipefail
 : "${MODE:?ref or emu}" "${V86_COMMIT:?}"
 TRACE_TESTS=${TRACE_TESTS:-"fyl2x f2xm1 fptan fsincos fprem fscale fsqrt"}
-PORT=${PORT:-12345}
+PORT=${PORT:-12345}   # traces: PORT+1, PORT+2, ...; fixtures: 20001 and up
 
 export DEBIAN_FRONTEND=noninteractive
 PKGS="git ca-certificates nasm nodejs"
@@ -59,9 +59,13 @@ raw_block() {
   echo '  printf "---END RAW---\n"'
 }
 if [ "$MODE" = emu ]; then
-  START="  shell /usr/bin/qemu-i386-static -g $PORT \$arg0 >/dev/null 2>&1 &
-  target remote :$PORT
-  continue"
+  # $port is set per test by the driver below: a port is never reused, so a
+  # qemu that outlives its test cannot be attached to as the next one's
+  # (measured: with one shared port, a test was recorded with its
+  # predecessor's state).
+  START='  eval "shell /usr/bin/qemu-i386-static -g %d $arg0 >/dev/null 2>&1 &", $port
+  eval "target remote :%d", $port
+  continue'
 else
   START="  run"
 fi
@@ -81,7 +85,45 @@ mv gdb-extract-def.new gdb-extract-def
 
 node create_tests.js >/dev/null
 ( cd build && sha256sum ./*.img | sort -k2 ) > /out/IMG_SHA256
-SYNC_GDB_EXECUTION=1 node gen_fixtures.js | tail -3
+if [ "$MODE" = ref ]; then
+  SYNC_GDB_EXECUTION=1 node gen_fixtures.js | tail -3
+else
+  # gen_fixtures.js's own gdb arguments (GDB_DEFAULT_ARGS + extract-state),
+  # one gdb per test so each gets its own port, nproc at a time.
+  ls build/*.img | sort | awk '{ print 20000 + NR, $0 }' |
+    xargs -P "$(nproc)" -n 2 sh -c '
+      img=$2; n=${img%.img}
+      gdb -batch --eval-command="set disable-randomization off" --command=gdb-extract-def \
+          --eval-command="set breakpoint pending on" --eval-command="break loop" \
+          --eval-command="catch signal SIGFPE" --eval-command="catch signal SIGILL" \
+          --eval-command="catch signal SIGSEGV" --eval-command="catch signal SIGBUS" \
+          --eval-command="set \$port = $1" \
+          --eval-command="extract-state $img $n.fixture" >/dev/null 2>&1 \
+        || echo "gdb exited non-zero: $n"' _ > /tmp/gdb-failures.txt
+  # Under load a qemu is sometimes not listening before gdb's connect times
+  # out ("could not connect: Connection timed out"; 92 of 16529 at -P 8).
+  # Those are rerun one at a time, on fresh ports, up to three times.
+  i=40000
+  for attempt in 1 2 3; do
+  for f in build/*.fixture; do
+    grep -q -- '---END JSON---' "$f" && continue
+    i=$((i + 1)); img=${f%.fixture}.img
+    gdb -batch --eval-command="set disable-randomization off" --command=gdb-extract-def \
+        --eval-command="set breakpoint pending on" --eval-command="break loop" \
+        --eval-command="catch signal SIGFPE" --eval-command="catch signal SIGILL" \
+        --eval-command="catch signal SIGSEGV" --eval-command="catch signal SIGBUS" \
+        --eval-command="set \$port = $i" \
+        --eval-command="extract-state $img $f" >/dev/null 2>&1 || true
+  done
+  done
+  echo "[+] $((i - 40000)) retries for tests whose gdb could not connect the first time"
+  pkill -f qemu-i386-static || true
+  bad=$(grep -L -- '---END JSON---' build/*.fixture | wc -l)
+  [ "$bad" = 0 ] || { echo "$bad fixtures still have no JSON:" >&2; grep -L -- '---END JSON---' build/*.fixture | head >&2; exit 1; }
+  n_img=$(ls build/*.img | wc -l); n_fix=$(ls build/*.fixture | wc -l)
+  [ "$n_img" = "$n_fix" ] || { echo "only $n_fix of $n_img fixtures written" >&2; exit 1; }
+  echo "[+] $n_fix fixtures"
+fi
 cp build/*.fixture /out/
 
 # --- gdb single-step traces: every instruction from _start to `loop` ---
@@ -98,11 +140,13 @@ end
 printf "---END TRACE %d---\n", $n
 kill
 EOF
+tport=$PORT
 for t in $TRACE_TESTS; do
   img=build/$t.img; [ -e "$img" ] || { echo "trace: no $img" >&2; exit 1; }
   if [ "$MODE" = emu ]; then
-    /usr/bin/qemu-i386-static -g "$PORT" "$img" >/dev/null 2>&1 &
-    START_CMDS=(-ex "target remote :$PORT")
+    tport=$((tport + 1))
+    /usr/bin/qemu-i386-static -g "$tport" "$img" >/dev/null 2>&1 &
+    START_CMDS=(-ex "target remote :$tport")
   else
     START_CMDS=(-ex "set disable-randomization off" -ex "starti")
   fi

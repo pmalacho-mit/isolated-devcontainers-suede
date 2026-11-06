@@ -28,7 +28,13 @@ FPU_STATUS_MASK = 0xFFFF & ~(1 << 9 | 1 << 5 | 1 << 3 | 1 << 1)
 EPS = 10 ** -7
 JSON_RE = re.compile(r"---BEGIN JSON---([\s\[\]\.\+\w\":\-,]*)---END JSON---")
 RAW_RE = re.compile(r"---BEGIN RAW---\n(.*?)---END RAW---", re.S)
-FLAGS = {0: "CF", 2: "PF", 4: "AF", 6: "ZF", 7: "SF", 8: "TF", 9: "IF", 10: "DF", 11: "OF"}
+# Not observable on the emulated side, so never counted as a difference:
+# qemu's gdb server reports ftag, fop (and the FPU pointers) as a constant 0
+# (target/i386/gdbstub.c), and a native gdb single-steps with the hardware
+# trap flag, which ptrace shows in EFLAGS while stepping; qemu steps without it.
+UNOBSERVABLE = {"ftag", "fop"}
+TRACE_EFLAGS_IGNORE = 1 << 8  # TF
+FLAGS = {0: "CF", 2: "PF", 4: "AF", 6: "ZF", 7: "SF", 8: "TF", 9: "IF", 10: "DF", 11: "OF", 14: "NT", 16: "RF", 18: "AC", 21: "ID"}
 FSW = {0: "IE", 1: "DE", 2: "ZE", 3: "OE", 4: "UE", 5: "PE", 6: "SF", 7: "ES", 8: "C0", 9: "C1", 10: "C2", 14: "C3"}
 
 
@@ -137,6 +143,8 @@ def raw_diff(act, exp):
     if act["raw"] is None or exp["raw"] is None:
         return d + ["(no raw dump)"]
     for k in exp["raw"]:
+        if k in UNOBSERVABLE:
+            continue
         if exp["raw"][k] != act["raw"].get(k):
             if k == "eflags":
                 x = int(exp["raw"][k], 16) ^ int(act["raw"][k], 16)
@@ -157,15 +165,45 @@ def trace_steps(path):
     return [parse_raw(s.split("---END TRACE")[0]) for s in steps]
 
 
+STACK = range(0x100000, 0x102001)  # the test's own stack: .bss, header.inc's stack_top
+
+
+def in_stack(step):
+    try:
+        return int(step.get("esp", "0"), 16) in STACK
+    except ValueError:
+        return False
+
+
 def trace_diff(act_dir, exp_dir, name):
+    """Every step that differs, from the first step at which the test owns its
+    stack. Before header.inc's `mov esp, stack_top` the registers are the OS's
+    process-start state (a randomized stack -- upstream leaves randomization
+    on -- and the initial EFLAGS), which is not the CPU's doing."""
+    if not (act_dir / f"{name}.trace").exists():
+        return ["missing trace"]
     a, e = trace_steps(act_dir / f"{name}.trace"), trace_steps(exp_dir / f"{name}.trace")
     if len(a) != len(e):
         return [f"{len(e)} steps vs {len(a)}"]
-    for i, (sa, se) in enumerate(zip(a, e)):
-        diff = [k for k in se if se[k] != sa.get(k)]
-        if diff:
-            return [f"step {i} (eip {se.get('eip')}): " + ", ".join(f"{k} {se[k]} vs {sa.get(k)}" for k in diff)]
-    return []
+    start = next((i for i in range(len(e)) if in_stack(e[i]) and in_stack(a[i])), len(e))
+    out = []
+    for i in range(start, len(e)):
+        se, sa = e[i], a[i]
+        for k in se:
+            if k in UNOBSERVABLE:
+                continue
+            if se[k] != sa.get(k):
+                if k in ("eflags", "fstat"):
+                    x = int(se[k], 16) ^ int(sa[k], 16)
+                    if k == "eflags":
+                        x &= ~TRACE_EFLAGS_IGNORE
+                    if not x:
+                        continue
+                    what = bits(x, FLAGS if k == "eflags" else FSW)
+                    out.append(f"step {i} (eip {se.get('eip')}): {k} {se[k]} vs {sa[k]} ({what})")
+                else:
+                    out.append(f"step {i} (eip {se.get('eip')}): {k} {se[k]} vs {sa.get(k)}")
+    return out
 
 
 def compare(act_dir, exp_dir):
@@ -210,19 +248,22 @@ def main():
         print(f"### {d}\n```\n{toolchain(d)}\n```")
 
     hw_dependent = set()
+    hw_trace = set()  # (test, "step N (eip ...)", field) on which real CPUs disagree
     for i, r1 in enumerate(refs):
         for r2 in refs[i + 1:]:
             res, tr = compare(r2, r1)
             raw = {n: v["raw"] for n, v in res.items() if v.get("raw")}
             hw_dependent |= set(raw)
+            for n, t in tr.items():
+                hw_trace |= {(n, line.split(":")[0], line.split(": ")[1].split()[0]) for line in t}
             report["ref_vs_ref"][f"{r1} vs {r2}"] = {"raw": raw, "runner": {n: v["runner"] for n, v in res.items() if v.get("runner")}, "traces": {n: t for n, t in tr.items() if t}}
             print(f"\n## Real CPUs: {r1} vs {r2}\n")
             print(f"{len(res)} tests; raw differences in {len(raw)}; runner-visible in {sum(1 for v in res.values() if v.get('runner'))}")
             for n, d in raw.items():
                 print(f"- `{n}`: {'; '.join(d)}")
             for n, t in tr.items():
-                if t:
-                    print(f"- trace `{n}`: {t[0]}")
+                for line in t:
+                    print(f"- trace `{n}`: {line}")
 
     for r in refs:
         res, tr = compare(emu, r)
@@ -247,9 +288,13 @@ def main():
             print("\n### Raw only (below run.js's tolerance or masks)")
             for k, d in only_raw.items():
                 print(f"- `{k}`{' (hw-dependent)' if k in hw_dependent else ''}: {'; '.join(d)}")
-        print("\n### gdb single-step traces")
+        print("\n### gdb single-step traces (from the step the test owns its stack)")
         for k, t in tr.items():
-            print(f"- `{k}`: {'identical' if not t else t[0]}")
+            if not t:
+                print(f"- `{k}`: identical")
+            for line in t:
+                hw = (k, line.split(":")[0], line.split(": ")[1].split()[0]) in hw_trace
+                print(f"- `{k}`: {line}{' (hw-dependent: real CPUs differ here too)' if hw else ''}")
 
     if jout:
         Path(jout).write_text(json.dumps(report, indent=1, default=str))

@@ -1,6 +1,6 @@
 # x86 emulation on an Apple Silicon VM (issue #37)
 
-**Status: provisioning, preflight and docs are implemented and have run on an aarch64 Colima VM (Ubuntu 24.04, kernel 6.8, sysbox 0.7.1): preflight 6b passes. Equivalence with real x86 is NOT yet demonstrated.** Tooling for it is in place and the emulated side has run; real-x86 references pending. First written in a devcontainer with no VM; the findings below came from the VM.
+**Status: provisioning, preflight and docs are implemented and have run on an aarch64 Colima VM (Ubuntu 24.04, kernel 6.8, sysbox 0.7.1): preflight 6b passes. Equivalence with real x86 was measured: emulation is NOT equivalent for v86_64's fixtures (1,038 of 16,529 differ under its own runner, every one with a named qemu cause); see [x86-equivalence-evidence.md](x86-equivalence-evidence.md).** First written in a devcontainer with no VM; the findings below came from the VM.
 
 ## What was built
 - `release/vm/binfmt-register.sh` (POSIX sh): registers `x86_64`, `i386`, `i486` with the `F` flag in the binfmt_misc of **the user namespace it runs in**, probes that a native binary still execs after each entry, **reads the kernel's registry back** (enabled, `F`, right interpreter) and exits 1 -- undoing its own entries -- otherwise.
@@ -43,4 +43,19 @@ release/emulation-equivalence.sh gen ref ref-intel  # on real x86 (and the x86-r
 release/emulation-equivalence.sh compare emu ref-amd ref-intel
 ```
 
-Results: pending (references not yet collected). Until then AGENTS.md tells agents not to treat emulated fixtures as hardware truth.
+Results ([x86-equivalence-evidence.md](x86-equivalence-evidence.md)), against an Intel Xeon Gold 6140 and an AMD EPYC 9V74:
+- **The two real CPUs are bit-identical on all 16,529 fixtures**, so no difference is hardware-dependent.
+- **Emulated:** 15,491 pass and 1,038 fail under v86_64's `run.js` rules. 920 of the failures are x87 stack faults, which qemu never reports. 56 are `FCOMI`-family flags. 58 are instruction decoding (`F6`/`F7 /1`, the register forms of memory-only SSE moves, `0F 18` hints), plus 16-bit `ENTER`, `FSAVE` reserved bits, `fprem` C3 and the `fyl2xp1` domain.
+- **Raw-only differences:**
+  - MMX writes don't set the x87 exponent field.
+  - Fault frames are missing RF.
+  - C1, DE and `MXCSR.DE` flags are missing.
+  - `fsin`/`fcos`/`fptan`/`fsincos` are computed in host double precision.
+- **gdb single-stepping through qemu's gdb server is reliable.**
+
+AGENTS.md therefore tells agents to use emulation to build, run and debug, and never as a source of fixtures.
+
+Re-running: the commands above, then `compare` with both references. Three harness failures were found and fixed along the way, all on the emulated side:
+- A shared gdb port let a test be recorded with its predecessor's state. Ports are now per test.
+- Under 8-way parallelism, about 0.5% of gdb connections timed out. Those tests are retried serially.
+- awk's escape processing broke the injected gdb `printf`. The text is now passed through `ENVIRON`.
