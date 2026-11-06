@@ -119,6 +119,7 @@ desolate's push and pull keep the two sides apart (`release/vscode-image/transfe
 1. The target's sandbox, which sees only that project, bundles the branch checked out there, less what the editor's cache of the remote already has.
 2. The cache takes the bundle.
 3. It pushes the bundled commit to the repository `repo add` registered for the project, with that repository's key. It never force-pushes, and never pushes to the default branch unless you pass `--allow-default`. Refused for that, it exits **77**, so a caller can ask you and push again with the flag; the panel does. `--expect <commit>` pushes only if the branch is still at that commit: the panel passes the commit you reviewed, so an agent committing between your review and your push gets a refusal and a fresh review, not a push of what you did not read.
+4. Once GitHub has it, the push does a fetch-only pull (below), so the project's `origin/<branch>` is the pushed commit and a review right after says 0 commits to push, with no pull by hand. Nothing checked out moves. If that step fails (the target is busy, say), the push still succeeded and says so; `desolate --pull` brings `origin/*` level.
 
 **Pull** runs the other way:
 1. The editor's cache fetches what is new in that registered repository, and bundles what the project lacks.

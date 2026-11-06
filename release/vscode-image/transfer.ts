@@ -378,8 +378,31 @@ export interface Options {
   ask?: (request: Record<string, unknown>, onLog: (line: string) => boolean) => Promise<number>;
 }
 
-/** Push the branch checked out in a target to its project's repository. */
+/**
+ * Push the branch checked out in a target to its project's repository, then
+ * bring the project's own origin/* up to date with what GitHub now has -- the
+ * way a pull does (fetch only: nothing checked out moves). Without that, the
+ * project's origin/<branch> stays where the last pull left it, and the next
+ * review still counts the pushed commits as not on GitHub.
+ *
+ * The push is done once GitHub has it: if the project's origin/* cannot be
+ * updated after, that is said beside it (a `desolate --pull` does it), and
+ * the push is not reported as failed.
+ */
 export async function push(project: string, options: Options = {}): Promise<string> {
+  const said = await pushBranch(project, options);
+  try {
+    await pull(project, { ...options, fetchOnly: true });
+  } catch (err) {
+    // Any failure, not only a TransferError: GitHub has the commit already,
+    // and a push reported as failed would be pushed again for nothing.
+    const why = err instanceof Error ? err.message : String(err);
+    return `${said}\n  but origin/* in the project is not updated yet (${why}); desolate --pull does it, and until then a review still counts these commits as to push`;
+  }
+  return said;
+}
+
+async function pushBranch(project: string, options: Options): Promise<string> {
   const projectDir = projectDirOf(project);
   const registration = options.registration ?? registered(project, globalUrlConfig());
   if (!options.registration && !(lstatSync(`${KEYRING_RUN}/pub/${registration.tag}.pub`, { throwIfNoEntry: false })?.isFile()))
