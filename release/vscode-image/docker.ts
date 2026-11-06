@@ -374,7 +374,9 @@ const LFS_SANDBOX = [
     'env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git init -q --bare "$lfs_tmp" || return 1; ' +
     'mkdir -p "$lfs_tmp/objects/info" && printf "%s\\n" "$common/objects" > "$lfs_tmp/objects/info/alternates"; }',
   // The auth file, held to what the editor wrote: an https endpoint of URL
-  // characters, and one Authorization header.
+  // characters, and one Authorization header. (Plain http to 127.0.0.1 is the
+  // unit tests' stand-in server; here it is the sandbox's own loopback, and the
+  // editor's lfsAuthFrom never writes it.)
   'lfs_auth() { { IFS= read -r lfs_url && IFS= read -r lfs_head; } < "$auth" || return 1; ' +
     'case "$lfs_url" in https://*|http://127.0.0.1:*) ;; *) return 1 ;; esac; ' +
     'case "$lfs_url" in *[!A-Za-z0-9._~:/%-]*) return 1 ;; esac; ' +

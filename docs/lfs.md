@@ -260,19 +260,23 @@ without the credential) that has an LFS file in it:
 
 ```bash
 # on the Mac, once the stack is up
-./cli.sh repo add <you>/lfs-scratch            # registers the deploy key, clones through the cache
-./cli.sh desolate <you>/lfs-scratch            # first start: the checkout runs in the sandbox
+./cli.sh repo add <you>/lfs-scratch            # deploy key, clone, checkout in the sandbox, then a pull
+./cli.sh desolate <you>/lfs-scratch            # start it (only after the pull above succeeded)
 ./cli.sh worktree add <you>/lfs-scratch t1     # a worktree to commit from
 ./cli.sh desolate <you>/lfs-scratch --worktree t1
 ```
 
-1. **First checkout.** In the project's devcontainer, `git status` is clean and
-   any LFS file is a ~130-byte pointer (`cat` it). That is expected; it is not a
-   half-written tree.
-2. **Pull fills them in.** `desolate --pull <you>/lfs-scratch` (outer editor
-   terminal, the panel, or `./cli.sh pull`). It should end `; fetched N LFS
-   object(s)`, and the files are now real. *Needs:* the sandbox reaching the
-   three LFS hosts, and GitHub's `href` being the expected shape.
+1. **`repo add` fetches the objects.** Its output shows the sandbox's checkout
+   skipping the LFS files (`Skipped checkout for "...", content not local`), then
+   a line `newrepo: main is up to date with origin/main, or ahead of it; fetched
+   N LFS object(s)`. *Needs:* the sandbox reaching the three LFS hosts, and
+   GitHub's credential being the expected shape. If instead it says `the first
+   pull did not finish`, do not start the project yet: fix that, then run
+   `desolate --pull <you>/lfs-scratch` until it succeeds.
+2. **The files are real.** In the started devcontainer, LFS files have their full
+   size and `git status` is clean. (A devcontainer with the git-lfs feature runs
+   `git lfs pull` as it is created; with the objects already local it does
+   nothing and succeeds.)
 3. **Commit a new LFS file** in the worktree (`git lfs track '*.bin'` once, then
    add a `.bin` and commit). In the devcontainer, `git lfs` stores the object in
    `.git/lfs`.
