@@ -308,6 +308,15 @@ export const BUNDLED = "desolate-bundled";
 export const PULLED = "desolate-pulled";
 const TRANSFER_GIT = 'g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }';
 
+/** A first checkout ($1 the CA, for the proxy): without LFS smudging, which
+ *  would fail on every LFS file -- the objects are not here, and the key to
+ *  fetch them is not either (docs/lfs.md) -- and then `git lfs checkout`, which
+ *  fills in the files whose objects ARE here (a worktree of a project that has
+ *  fetched them) and leaves the rest as pointers for the first `--pull`. The
+ *  checkout's own status is what is reported. */
+export const checkoutScript =
+  'GIT_LFS_SKIP_SMUDGE=1 git -c "http.sslCAInfo=$1" checkout --force; rc=$?; git lfs checkout >&2 || true; exit $rc';
+
 /** $1 the target's directory, $2 where to write the bundle, $3 the commits
  *  the editor's cache already has (one per line; its `.haves` file). Bundles
  *  the branch checked out there, less what the cache has -- or, when the cache
@@ -327,6 +336,51 @@ export const bundleScript = [
   `echo ${BUNDLED} "$branch" "$commit" bundled`,
 ].join("; ");
 
+/**
+ * Git LFS, in the sandbox (docs/lfs.md). The sandbox has no deploy key, and
+ * git-lfs gets its credential for an ssh remote by running
+ * `git-lfs-authenticate` over that key -- so the EDITOR does that one step
+ * (transfer.ts lfsAuth) and leaves the answer in a file of the transfer: line 1
+ * the LFS endpoint, line 2 `Authorization: <token>`, good for ONE repository
+ * (the project's registered one) for ten minutes (download) or six hours
+ * (upload). The binary then runs here, beside the objects, and they never
+ * pass through the editor.
+ *
+ * A project's own config must not decide where that token goes. Measured
+ * (tests/unit/desolate/transfer.test.ts): a project's `.git/config` and
+ * committed `.lfsconfig` override an endpoint passed as an argument, and a
+ * `url.<x>.insteadOf` rewrites even a pinned `lfs.url`. So git-lfs does not run
+ * in the project's repository at all: it runs in a scratch bare repository
+ * made here, whose only objects are the project's by `alternates` (read, as
+ * data) and whose only config is the environment's -- the endpoint, the token
+ * for that endpoint alone, the proxy's CA, no proxy, no credential helper --
+ * with the project's LFS store named by `lfs.storage`. The one git-lfs command
+ * that does run in the project, `checkout`, never touches the network.
+ */
+export const LFSED = "desolate-lfs";
+const LFS_SANDBOX = [
+  // The project's LFS store: shared by its worktrees, like its objects.
+  'lfs_common() { common=$(g -C "$dir" rev-parse --path-format=absolute --git-common-dir) && store=$common/lfs; }',
+  // The scratch repository, with the project's objects as its alternate.
+  'lfs_repo() { lfs_tmp=$(mktemp -d) || return 1; ' +
+    'env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git init -q --bare "$lfs_tmp" || return 1; ' +
+    'mkdir -p "$lfs_tmp/objects/info" && printf "%s\\n" "$common/objects" > "$lfs_tmp/objects/info/alternates"; }',
+  // The auth file, held to what the editor wrote: an https endpoint of URL
+  // characters, and one Authorization header.
+  'lfs_auth() { { IFS= read -r lfs_url && IFS= read -r lfs_head; } < "$auth" || return 1; ' +
+    'case "$lfs_url" in https://*|http://127.0.0.1:*) ;; *) return 1 ;; esac; ' +
+    'case "$lfs_url" in *[!A-Za-z0-9._~:/%-]*) return 1 ;; esac; ' +
+    'case "$lfs_head" in "Authorization: "?*) ;; *) return 1 ;; esac; }',
+  // git-lfs, with nothing configured but this.
+  'lfs_net() { env GIT_DIR="$lfs_tmp" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=8 ' +
+    'GIT_CONFIG_KEY_0=lfs.url "GIT_CONFIG_VALUE_0=$lfs_url" GIT_CONFIG_KEY_1=lfs.pushurl "GIT_CONFIG_VALUE_1=$lfs_url" ' +
+    '"GIT_CONFIG_KEY_2=http.$lfs_url.extraheader" "GIT_CONFIG_VALUE_2=$lfs_head" ' +
+    'GIT_CONFIG_KEY_3=http.proxy GIT_CONFIG_VALUE_3= GIT_CONFIG_KEY_4=http.sslVerify GIT_CONFIG_VALUE_4=true ' +
+    'GIT_CONFIG_KEY_5=http.sslCAInfo "GIT_CONFIG_VALUE_5=$ca" GIT_CONFIG_KEY_6=lfs.storage "GIT_CONFIG_VALUE_6=$store" ' +
+    'GIT_CONFIG_KEY_7=credential.helper GIT_CONFIG_VALUE_7= git lfs "$@"; }',
+].join("\n");
+const LFS_CLEANUP = '[ -z "$lfs_tmp" ] || rm -rf "$lfs_tmp"';
+
 /** $1 the target's directory, $2 the bundle the editor wrote (absent when the
  *  project needs no objects), $3 the remote's branches (`<commit> <name>` per
  *  line; its `.refs` file), $4 the CA. origin/* becomes exactly that list --
@@ -334,12 +388,29 @@ export const bundleScript = [
  *  and changes nothing. The branch checked out is fast-forwarded to its own
  *  when it can be, and otherwise left as it is. The merge is the project's own
  *  git, hooks and filters and all -- in here, where they reach nothing but this
- *  project. $5 `fetch` stops once origin/* is set: nothing checked out moves. */
+ *  project. $5 `fetch` stops once origin/* is set: nothing checked out moves.
+ *  $6 the LFS auth file, if the editor wrote one.
+ *
+ *  LFS: when the branch's tip holds LFS files whose objects this project lacks,
+ *  it says `needs-lfs` (changing nothing more) unless $6 is there, and then
+ *  fetches them (see LFS_SANDBOX). The merge never smudges -- a missing object
+ *  must not fail it half-way -- and `git lfs checkout` afterwards fills in the
+ *  files whose objects are here. It says how that went: `desolate-lfs
+ *  fetched <n>`, `present`, or `failed`. */
 export const pullScript = [
   TRANSFER_GIT,
-  'dir=$1 bundle=$2 refs=$3 ca=$4',
-  'trap \'rm -f "$bundle" "$refs"\' EXIT',
-  `say() { echo ${PULLED} "$@"; exit 0; }`,
+  LFS_SANDBOX,
+  'dir=$1 bundle=$2 refs=$3 ca=$4 auth=${6:-} lfs=none lfs_tmp=',
+  `trap 'rm -f "$bundle" "$refs" "$auth"; ${LFS_CLEANUP}' EXIT`,
+  `say() { [ "$lfs" = none ] || echo ${LFSED} "$lfs"; echo ${PULLED} "$@"; exit 0; }`,
+  'settle() { [ "$lfs" = none ] || g -C "$dir" lfs checkout >&2 || true; say "$@"; }',
+  // Objects the tip's LFS files name and the store lacks; fetch them, or ask for the means to.
+  'lfs_sync() { oids=$(g -C "$dir" lfs ls-files -l "$1" 2>/dev/null | cut -d" " -f1 | sort -u); [ -n "$oids" ] || return 0; ' +
+    'lfs_common || { lfs=failed; return 0; }; lfs=present; n=0; ' +
+    'for oid in $oids; do case "$oid" in *[!0-9a-f]*) continue ;; esac; a=${oid%"${oid#??}"}; r=${oid#??}; b=${r%"${r#??}"}; ' +
+    '[ -f "$store/objects/$a/$b/$oid" ] || n=$((n+1)); done; [ "$n" -gt 0 ] || return 0; ' +
+    '[ -s "$auth" ] || say needs-lfs "$branch"; ' +
+    'if lfs_auth && lfs_repo && lfs_net fetch "$lfs_url" "$(g -C "$dir" rev-parse "$1")" >&2; then lfs="fetched $n"; else lfs=failed; fi; }',
   '[ -f "$refs" ] || exit 6',
   'if [ -s "$bundle" ]; then g -C "$dir" bundle verify --quiet "$bundle" >/dev/null 2>&1 || say needs-full -; ' +
     'g -C "$dir" fetch --quiet --no-tags "$bundle" "+refs/heads/*:refs/desolate/incoming/*" || exit 4; fi',
@@ -351,10 +422,29 @@ export const pullScript = [
   '[ "${5:-}" != fetch ] || say fetched -',
   'branch=$(g -C "$dir" symbolic-ref -q --short HEAD) || say fetched -',
   'g -C "$dir" rev-parse -q --verify "refs/remotes/origin/$branch" >/dev/null || say fetched "$branch"',
-  'g -C "$dir" merge-base --is-ancestor "refs/remotes/origin/$branch" HEAD && say current "$branch"',
+  'lfs_sync "refs/remotes/origin/$branch"',
+  'g -C "$dir" merge-base --is-ancestor "refs/remotes/origin/$branch" HEAD && settle current "$branch"',
   'g -C "$dir" merge-base --is-ancestor HEAD "refs/remotes/origin/$branch" || say diverged "$branch"',
-  'git -C "$dir" -c "http.sslCAInfo=$ca" merge --ff-only --quiet "refs/remotes/origin/$branch" && say fast-forwarded "$branch"',
+  'env GIT_LFS_SKIP_SMUDGE=1 git -C "$dir" -c "http.sslCAInfo=$ca" merge --ff-only --quiet "refs/remotes/origin/$branch" && settle fast-forwarded "$branch"',
   'say blocked "$branch"',
+].join("; ");
+
+/** The objects a push needs on GitHub before the commits that name them:
+ *  $1 the target's directory, $2 the oids, one per line (the editor's
+ *  `.lfsneed`), $3 the auth file, $4 the CA. `git lfs push --object-id` sends
+ *  each that GitHub lacks, from the project's store (LFS_SANDBOX). An object
+ *  the store lacks fails it, naming it: the commit that names it is not pushed. */
+export const lfsPushScript = [
+  TRANSFER_GIT,
+  LFS_SANDBOX,
+  'dir=$1 need=$2 auth=$3 ca=$4 lfs_tmp=',
+  `trap 'rm -f "$need" "$auth"; ${LFS_CLEANUP}' EXIT`,
+  'oids=""; while read -r oid; do case "$oid" in ""|*[!0-9a-f]*) exit 8 ;; esac; [ "${#oid}" -eq 64 ] || exit 8; oids="$oids $oid"; done < "$need"',
+  '[ -n "$oids" ] || exit 6',
+  'lfs_common || exit 4',
+  'lfs_auth || { echo "the LFS credential file is not what the editor writes" >&2; exit 7; }',
+  'lfs_repo || exit 4',
+  'lfs_net push --object-id "$lfs_url" $oids >&2 || exit 9',
 ].join("; ");
 
 /**
@@ -387,13 +477,15 @@ export const LOGIN_EXEC = String.raw`if command -v bash >/dev/null 2>&1; then ex
  *
  * Paths are git's, quoted when they hold a tab, a newline, a quote or a
  * backslash. Content is read by blob id (`cat-file blob`), so no filter or
- * textconv of the project's runs; `kind` is text, binary, large or module.
+ * textconv of the project's runs; `kind` is text, binary, large, module or lfs
+ * (a Git LFS pointer, whose sizes are the object's: the push uploads it).
  */
 export const reviewScript = String.raw`set -u
 g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.quotePath=false "$@"; }
 dir=$1 blobmax=$2 totalmax=$3 filesmax=$4 commitsmax=$5
 T=$(printf '\t')
 say() { line=${REVIEWED}; for field in "$@"; do line="$line$T$field"; done; printf '%s\n' "$line"; }
+lfs_size() { g cat-file blob "$1" | awk 'NR==1 && $0!="version https://git-lfs.github.com/spec/v1" {bad=1} NR==2 && $0!~/^oid sha256:[0-9a-f]{64}$/ {bad=1} NR==3 && $0!~/^size (0|[1-9][0-9]*)$/ {bad=1} NR==3 {size=substr($0,6)} END {if (NR==3 && !bad) print size; else exit 1}'; }
 cd "$dir" || exit 2
 head=$(g rev-parse -q --verify 'HEAD^{commit}') || { echo "nothing is committed in $dir" >&2; exit 3; }
 branch=$(g symbolic-ref -q --short HEAD) || branch=
@@ -436,7 +528,16 @@ g -c diff.renameLimit=1000 diff --raw --no-abbrev -M "$left" HEAD | {
     if [ "$kind" = text ]; then
       [ "$a" = "$zero" ] || sa=$(g cat-file -s "$a")
       [ "$b" = "$zero" ] || sb=$(g cat-file -s "$b")
-      if [ "$sa" -gt "$blobmax" ] || [ "$sb" -gt "$blobmax" ] || [ $((total + sa + sb)) -gt "$totalmax" ]; then
+      # An LFS pointer: the file is its object, which the push uploads, so
+      # the sizes are the object's. Its content is not sent.
+      pa= pb=
+      [ "$a" = "$zero" ] || [ "$sa" -gt 1024 ] || pa=$(lfs_size "$a")
+      [ "$b" = "$zero" ] || [ "$sb" -gt 1024 ] || pb=$(lfs_size "$b")
+      if [ -n "$pa$pb" ]; then
+        kind=lfs
+        [ -z "$pa" ] || sa=$pa
+        [ -z "$pb" ] || sb=$pb
+      elif [ "$sa" -gt "$blobmax" ] || [ "$sb" -gt "$blobmax" ] || [ $((total + sa + sb)) -gt "$totalmax" ]; then
         kind=large
       else
         for blob in "$a" "$b"; do
@@ -882,11 +983,11 @@ export const createDocker = (run: Runner) => {
       run.status([
         ...worktreeSandbox(spec, "timeout"),
         String(spec.seconds),
-        "git",
+        "sh",
         "-c",
-        `http.sslCAInfo=${spec.caFile}`,
-        "checkout",
-        "--force",
+        checkoutScript,
+        "desolate-checkout",
+        spec.caFile,
       ]),
     /** A step of a worktree's life -- `createScript`, `removeScript`
      *  (worktrees.ts) -- run in its sandbox, `args` as the script's positional
@@ -910,11 +1011,16 @@ export const createDocker = (run: Runner) => {
     },
     /** `pullScript` in a target's sandbox: what became of its branch, or null
      *  when it did not finish. */
-    pullBranch: (spec: WorktreeSandbox & { caFile: string }, targetDir: string, bundle: string, refs: string, fetchOnly = false) => {
-      const said = query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", pullScript, "pull", targetDir, bundle, refs, spec.caFile, fetchOnly ? "fetch" : "merge");
-      const match = new RegExp(`^${PULLED} (fetched|current|diverged|fast-forwarded|blocked|needs-full) (\\S+)$`, "m").exec(said);
-      return match ? { outcome: match[1], branch: match[2] } : null;
+    pullBranch: (spec: WorktreeSandbox & { caFile: string }, targetDir: string, bundle: string, refs: string, fetchOnly = false, lfsAuth = "") => {
+      const said = query(...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", pullScript, "pull", targetDir, bundle, refs, spec.caFile, fetchOnly ? "fetch" : "merge", lfsAuth);
+      const match = new RegExp(`^${PULLED} (fetched|current|diverged|fast-forwarded|blocked|needs-full|needs-lfs) (\\S+)$`, "m").exec(said);
+      const lfs = new RegExp(`^${LFSED} (present|failed|fetched \\d+)$`, "m").exec(said)?.[1];
+      return match ? { outcome: match[1], branch: match[2], ...(lfs ? { lfs } : {}) } : null;
     },
+    /** `lfsPushScript` in a target's sandbox: its exit status; what git-lfs
+     *  said is the user's. */
+    lfsPush: (spec: WorktreeSandbox & { caFile: string }, targetDir: string, need: string, auth: string) =>
+      run.status([...worktreeSandbox(spec, "timeout"), String(spec.seconds), "sh", "-c", lfsPushScript, "lfs-push", targetDir, need, auth, spec.caFile]),
     /** `reviewScript` in a target's sandbox, its lines straight to this
      *  process's stdout -- a review can be megabytes, and the broker relays
      *  them to the editor as they come (review.ts reads them there). */

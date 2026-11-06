@@ -53,6 +53,9 @@ before(() => {
   write(work, "blob.bin", Buffer.from([0x61, 0, 0x62, 0, 0x63]));
   write(work, "we\tird-ü.txt", "tab\n");
   write(work, "large.txt", "x".repeat(3000));
+  // A Git LFS pointer (the push uploads its object); and a text file that only looks like one.
+  write(work, "model.dat", `version https://git-lfs.github.com/spec/v1\noid sha256:${"a".repeat(64)}\nsize 123456789\n`);
+  write(work, "almost.dat", `version https://git-lfs.github.com/spec/v1\noid sha256:${"b".repeat(64)}\nsize 12\nextra\n`);
   git(work, "add", ".");
   git(work, "commit", "--quiet", "-m", "the feature");
   write(work, "added.txt", "fresh\nmore\n");
@@ -79,6 +82,9 @@ describe("a branch GitHub does not have yet", () => {
     assert.match(byPath.get("new-name.txt")!.status, /^R\d+$/);
     assert.equal(byPath.get("blob.bin")?.kind, "binary");
     assert.equal(byPath.get("large.txt")?.kind, "large", "over the per-file limit, it is listed and not sent");
+    assert.equal(byPath.get("model.dat")?.kind, "lfs", "a pointer is the object the push uploads");
+    assert.deepEqual(byPath.get("model.dat")?.sizes, [0, 123456789], "the object's size, not the pointer's");
+    assert.equal(byPath.get("almost.dat")?.kind, "text", "three lines and no more, or it is just text");
     // git quoted it for the tab; it is read back, and shown as one line.
     assert.ok(byPath.has("we ird-ü.txt"), [...byPath.keys()].join(", "));
   });
@@ -96,6 +102,13 @@ describe("a branch GitHub does not have yet", () => {
     assert.ok(!existsSync(join(dir, `${added.index}.a`)), "an added file has no old side");
     const binary = kept.files.find((f) => f.path === "blob.bin")!;
     assert.ok(!existsSync(join(dir, `${binary.index}.b`)), "nothing of a binary is sent");
+    const pointer = kept.files.find((f) => f.path === "model.dat")!;
+    assert.ok(!existsSync(join(dir, `${pointer.index}.b`)), "nothing of an LFS pointer is sent");
+  });
+
+  test("said for a person, an LFS file is marked with its real size", () => {
+    const { review } = parseReview(said(work, { blobBytes: 1024 }));
+    assert.match(describeReview(review), /A {2}model\.dat {2}\(LFS, 118 MiB: uploaded with the push\)/);
   });
 
   test("past the total, a file is listed and its content not kept", () => {

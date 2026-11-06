@@ -1833,7 +1833,7 @@ async function onItsDaemon(target: Target): Promise<void> {
  *  (`.refs`). The name is held to TRANSFER_NAME, so these are too. */
 const transferFiles = (target: Target, name: string) => {
   const stem = path.join(target.projectDir, ".git", name.replace(/\.bundle$/, ""));
-  return { bundle: `${stem}.bundle`, haves: `${stem}.haves`, refs: `${stem}.refs` };
+  return { bundle: `${stem}.bundle`, haves: `${stem}.haves`, refs: `${stem}.refs`, lfsAuth: `${stem}.lfsauth`, lfsNeed: `${stem}.lfsneed` };
 };
 
 async function bundleTarget(target: Target, name: string): Promise<void> {
@@ -1857,9 +1857,31 @@ async function pullTarget(target: Target, name: string, fetchOnly = false): Prom
     files.bundle,
     files.refs,
     fetchOnly,
+    files.lfsAuth,
   );
   if (!pulled) return die(`could not take the fetched branches into ${target.name} in its sandbox`);
+  if (pulled.lfs) console.log(`LFS ${pulled.lfs}`);
   console.log(`PULLED ${pulled.outcome} ${pulled.branch}`);
+}
+
+/** The LFS objects of a push (docs/lfs.md), sent from the target's sandbox with
+ *  the credential the editor left in the transfer. The commit is the editor's
+ *  to push afterwards, and only if this succeeded. */
+async function lfsPushTarget(target: Target, name: string): Promise<void> {
+  await onItsDaemon(target);
+  const view = SHARED_DIRECTORIES.find((mount) => mount.target === DESOLATE_DIR)!;
+  const files = transferFiles(target, name);
+  const code = docker.lfsPush(
+    {
+      ...worktreeSandbox(target, worktrees.checkoutMounts(target, overlay.ensureVolume(target, view), DESOLATE_DIR)),
+      caFile: `${CA_DIR}/ca.pem`,
+    },
+    target.dir,
+    files.lfsNeed,
+    files.lfsAuth,
+  );
+  if (code !== 0) return die(`could not send ${target.name}'s LFS objects from its sandbox (exit ${code}; git-lfs's own words are above)`);
+  console.log("LFS-PUSHED");
 }
 
 /** `desolate --review`'s project half (review.ts): what a push of the branch
@@ -2295,6 +2317,7 @@ async function main(): Promise<void> {
   else if (args.command === "reclaim") await reclaimTarget(target, args.path);
   else if (args.command === "exec") execTarget(target, args.execArgv!);
   else if (args.command === "bundle") await bundleTarget(target, args.transfer!);
+  else if (args.command === "lfs-push") await lfsPushTarget(target, args.transfer!);
   else if (args.command === "pull") await pullTarget(target, args.transfer!, args.fetchOnly);
   else if (args.command === "review") await reviewTarget(target);
   else if (args.command === "suede-report") await depsReport(target, args.ref ?? "HEAD");

@@ -1,13 +1,14 @@
-# Git LFS through `--push` and `--pull`: what the probe decided, and what is next
+# Git LFS through `--push` and `--pull`
 
-[`tests/probes/lfs-deploy-key.sh`](../tests/probes/lfs-deploy-key.sh) asked
-whether a repository's deploy key, over SSH, is enough to move Git LFS objects
-for that repository. It was run on 2026-11-05 against a scratch private
-repository (issue #51). This page records the answer, what today's code does
-with an LFS project, and the plan the answer allows. **Nothing here is built
-yet**; the open decisions are at the end.
+A project that tracks files with Git LFS now pushes and pulls them like any
+other: `desolate --push` says which LFS objects it is about to upload and
+uploads them before the commits that name them, and `desolate --pull` fetches
+the objects of the branch it fast-forwards. This page records why it works the
+way it does -- above all, **why git-lfs runs where it does, and what that costs
+in security** -- and what is not yet known. (Issue #51; the probe is
+[`tests/probes/lfs-deploy-key.sh`](../tests/probes/lfs-deploy-key.sh).)
 
-## The answer
+## What the probe decided
 
 | | question | result |
 | --- | --- | --- |
@@ -19,156 +20,241 @@ yet**; the open decisions are at the end.
 | Q4 | the same object comes back | yes: batch 200, GET from `github-cloud.githubusercontent.com` 200, sha256 equals the oid |
 | Q5 | pure-SSH LFS (`git-lfs-transfer`) | **no** -- exit 1, "Invalid command" |
 
-So the deploy key `repo add` already registered is enough, and it is scoped
-the way the rest of the design needs (C1). The credential question is closed:
-no new secret, no token stored anywhere.
+The deploy key `repo add` registered is enough, and it is scoped the way the
+design needs (C1): no new secret, no token stored anywhere. Only the
+*authentication* is SSH; the objects move over HTTPS to three hosts, so whoever
+moves them needs a route to `lfs.github.com`, `github-cloud.s3.amazonaws.com`
+and `github-cloud.githubusercontent.com`, and the download token lasts only ten
+minutes.
 
-Two things the answer fixes about the design:
+## What happened before this
 
-- **Only the SSH half is SSH.** `git-lfs-authenticate` over the host alias
-  yields a short-lived token; the objects then move over HTTPS to three hosts
-  -- `lfs.github.com`, `github-cloud.s3.amazonaws.com`,
-  `github-cloud.githubusercontent.com` -- from the **editor**, which is where
-  the keyring's agent is. The probe ran there (`with-ca`), so the proxy let all
-  three through. A sandbox cannot do this: it has no key and no route.
-- **Tokens are short.** The download token lasts ten minutes; authenticate
-  immediately before each batch, never once per transfer.
+Measured by hand with git 2.51 and git-lfs 3.7.1 in a scratch directory:
 
-## What happens today to a project that uses LFS
+- **A push sent the pointer and never the object.** A bundle holds git's
+  objects; an LFS file is, there, a 130-byte pointer (`version
+  https://git-lfs.github.com/spec/v1` / `oid sha256:...` / `size N`). The push
+  ran with hooks off and no git-lfs, so nothing uploaded the object. The branch
+  landed on GitHub with pointers GitHub could not resolve (inferred for GitHub's
+  side; no write credential was at hand).
+- **A pull could not check an LFS file out.** The sandbox's system filter is
+  `filter.lfs.required=true`, the origin is an ssh alias nothing there can
+  resolve, and the fast-forward failed on the smudge (`smudge filter lfs
+  failed`, exit 128) -- reported as "uncommitted changes in the way?".
+- **The first checkout of a new clone failed the same way**, leaving a
+  half-written tree (some files written, the LFS file absent, everything
+  staged-deleted).
+- **Given the objects, the sandbox needed no network.** With the object in
+  `.git/lfs/objects/aa/bb/<oid>` the same merge succeeded and produced the
+  exact bytes.
 
-Measured with git 2.51 and git-lfs 3.7.1 (the image's pin), by hand, in a
-scratch directory -- not through the broker, which needs the VM:
+## Why not simply run `git-lfs`? The security pressures
 
-- **Push sends the pointer and never the object.** The sandbox's
-  `bundleScript` bundles commits; an LFS file is, in git's object store, a
-  130-byte pointer (`version https://git-lfs.github.com/spec/v1` / `oid
-  sha256:...` / `size N`). A 3000-byte tracked file made a 453-byte bundle; the
-  object stayed in `.git/lfs/objects/`. The editor's `push` runs git with
-  `core.hooksPath=/dev/null` and no git-lfs, so nothing uploads it either.
-  Inferred, not run against GitHub (no write credentials in a sandbox): the
-  branch lands on GitHub with pointers whose objects GitHub does not have,
-  and a clone of it cannot materialise those files. **This is the live hazard:
-  today the push succeeds and the remote is quietly broken.**
-- **Pull cannot check out an LFS file.** `pullScript` ends in `git merge
-  --ff-only` in the sandbox, where the image's system filter is
-  `filter.lfs.required=true`. With the objects absent and `origin` an ssh
-  alias nothing can resolve, the merge failed (`smudge filter lfs failed`, exit
-  128) and left the branch where it was. The script maps that to `blocked`,
-  which the editor reports as "uncommitted changes in the way?" -- wrong, and
-  nothing points at LFS.
-- **The first checkout fails the same way.** `repo add` clones with
-  `--no-checkout` and the sandbox then checks out. With the objects absent and
-  the origin unresolvable, `git checkout main` failed on the LFS file and left
-  a half-written tree: `.gitattributes` and `notes.txt` written, `big.bin`
-  absent and every path showing as staged-deleted. (README says a failing
-  post-checkout hook "fails there with a warning; the files still land" --
-  that is not what a failing smudge filter does.) `deliver`, a suede
-  dependency's release branch, reaches the same checkout.
-- **Given the objects, the sandbox needs no network.** With the object copied
-  into the project's `.git/lfs/objects/aa/bb/<oid>`, the same fast-forward
-  merge, with `origin` still unreachable, succeeded and produced the exact
-  bytes. So the sandbox's half can stay offline; only the editor's half grows.
+The obvious design is the one a person would use: run `git lfs` where the git
+work is done. This page first proposed a small LFS client written in the editor
+instead, and then dropped that too, for the reasons below. They are worth having
+in one place because the answer is not obvious, and every alternative looks
+simpler until it meets one of these facts.
 
-## The plan
+**Fact 1 -- the deploy keys are in one place, and it cannot reach the network.**
+They live in the `keyring` container (no network at all). The editor can *use*
+them through an ssh-agent socket, never read them; SSH egress is blocked from
+every devcontainer. So the one step of git-lfs that needs the key --
+`git-lfs-authenticate`, which is how git-lfs gets its credential for an `ssh`
+remote -- can only happen in the editor.
 
-The shape follows the rest of `transfer.ts`: the editor never runs git in a
-project and never reads its config; each direction is two halves meeting at
-files in the project's own git dir; the project's bytes are only ever opened as
-data (`openContained`).
+**Fact 2 -- the editor is the most privileged process and reaches every project,
+and a project is executable configuration.** `.git/config`, `.git/hooks/`,
+`.gitattributes` and `.lfsconfig` are all things a project (or an agent in its
+devcontainer) can write, and each is consumed by git or git-lfs. This is not
+hypothetical: incident M1 was the editor running the git-lfs filter over a
+remote's content and its `.lfsconfig`
+([incidents](../release/docs/incidents.md)). Everything in `transfer.ts` exists
+so that the editor never runs a project's git.
 
-**Do not use the `git-lfs` binary in the editor.** The probe's commit message
-records a measurement: a repository's `.lfsconfig` redirects git-lfs to another
-repository's ssh alias, even in a bare repository (and a command-line `-c
-lfs.url` overrides it). That is
-exactly the confusion `cleanGit` exists to prevent. The editor needs three
-requests and a sha256, so it speaks the protocol itself: the repository name
-comes from the editor's own registration (`Registration.ownerRepo`, from its
-own global git config), never from a project, and there is no config to
-influence.
+**Fact 3 -- the sandbox sees one project, has proxied egress, and no key.** It is
+where a project's git already runs (checkouts, merges, bundles), with the
+project's own hooks and config and nothing else in reach. It *can* reach
+`lfs.github.com` through the proxy (that is why it is handed the proxy's CA), and
+it has the project's LFS objects. It cannot authenticate.
 
-### Phase 0 -- stop the silent breakage (small, independent)
+**Fact 4 -- git-lfs obeys the project's repository.** Measured against the real
+binary with a stand-in LFS server (`tests/unit/desolate/lfs.test.ts` repeats it
+on every run, with a second server playing the attacker):
 
-- **push:** after the bundle is fetched into the cache, list the blobs the push
-  adds (`git rev-list --objects <commit> --not <remote tips>` into `git
-  cat-file --batch-check`, keep blobs of at most 1024 bytes, read them, match a
-  strict pointer: the exact three lines, `oid sha256:` + 64 hex, `size` + digits).
-  Verified to find the pointer and, noisily, `.gitattributes` and other small
-  files -- the strict match is what filters. If any pointer is found and
-  upload is not yet implemented, **refuse** with the count and the first paths.
-- **pull:** map the smudge failure to its own outcome (`lfs-missing`) rather
-  than `blocked`, and say what to do.
+| the project did | result |
+| --- | --- |
+| `lfs.url` / `lfs.pushurl` in `.git/config`, with a committed `.lfsconfig` | **overrode the endpoint passed as an argument**: the request went to the attacker's server |
+| the same, with the endpoint pinned by `-c` / `GIT_CONFIG_*` | the pin won (the probe's commit measured the same for `.lfsconfig` in a bare repository) |
+| `url.<attacker>.insteadOf = <real host>` | **rewrote even the pinned `lfs.url`**: the request went to the attacker |
+| `http.proxy`, `http.sslVerify=false`, `credential.helper`, `core.fsmonitor` | not measured one by one; each would route, trust, ask or run something the project chose |
 
-### Phase 1 -- pull and clone bring the objects down
+Pinning is therefore not enough. The *repository* git-lfs runs in has to be one
+the project did not write.
 
-1. After `refresh`, the editor lists the pointers in the tip tree of the
-   branch the target has checked out (what the merge would write) that the
-   target lacks. The sandbox says what it lacks, as it already does for commits
-   (`.haves`/`needs-full`): a list of oids under `.git/`.
-2. For each: `git-lfs-authenticate <ownerRepo> download`, batch, GET, **check
-   size and sha256 against the pointer** before keeping it. Write into the
-   transfer as `.git/desolate-transfer-<id>.lfs/<oid>`.
-3. `pullScript` moves them to `.git/lfs/objects/aa/bb/<oid>` (after re-checking
-   the sha256 -- it is the sandbox's own git dir) and then merges as now.
-   `repo add` does the same for its first checkout.
+### The options
 
-### Phase 2 -- push uploads the objects first
+| | where `git-lfs` runs | verdict |
+| --- | --- | --- |
+| A | the editor, in the project | **No.** Fact 2, and Fact 4's table is the attack: a project redirects the editor's credential. This is M1 again. |
+| B | the editor, in its own cache of the remote, config pinned | Closes the redirect, but the key-holding process still runs a large Go binary over remote-controlled content, and the *objects* (which live in the project's `.git/lfs`) must be read out of the project into the editor and sent on: every byte crosses a trust boundary twice, and the editor needs disk for the largest object. A bug in the binary is a bug in the process that holds every key. |
+| C | the editor, with a small client of our own in TypeScript (this page's first proposal) | Avoids the binary, but is a new HTTP client -- batch, retries, redirects, host checks, streaming, resumption -- in the same process, over responses from the network. It is more code, and more security-sensitive code, than the binary it replaces. |
+| D | the editor's container, as a less-privileged user | The ssh-agent socket and the keyring's exports are reachable by anything in the container that can open them; a uid that cannot open them cannot authenticate, and one that can is the editor. It also still lacks the project's objects. It is the sandbox with extra steps. |
+| **E** | **the project's sandbox, handed a credential minted by the editor** | **Chosen.** The binary runs where the objects and the egress are, as the user the project's git already runs as. The editor does only what needs the key, in a few lines. |
 
-1. The editor writes the oids the push needs (Phase 0's list) for the sandbox.
-2. The sandbox copies each `.git/lfs/objects/aa/bb/<oid>` it has into the
-   transfer. An oid it lacks is named in the failure, and nothing is pushed.
-3. The editor verifies size and sha256 per object, then `git-lfs-authenticate
-   <ownerRepo> upload`, batch (GitHub answers with no `upload` action for an
-   object it already has -- the probe's code handles that case but did not
-   hit it), PUT, verify.
-4. Only then `git push` of the commit -- objects before the pointers that
-   name them, as git-lfs's own pre-push does.
+### What E is, and what it costs
 
-### Rules for the HTTP client (it is the new attack surface)
+The editor runs `git-lfs-authenticate <owner/repo> <download|upload>` over the
+registration's host alias, so with that repository's key and no other. GitHub's
+answer is an endpoint and one `Authorization` header. The editor checks it
+strictly (below), writes it to a file of the transfer in the project's git dir
+(`.git/desolate-transfer-<id>.lfsauth`), and the sandbox's script reads it, runs
+git-lfs, and the file is deleted when the transfer ends. **No object passes
+through the editor, the editor never runs git-lfs, and no project file is read
+by anything holding a key.**
 
-- Every `href` is `https://` and its host is one of the three above; anything
-  else aborts the transfer. A batch response is GitHub's, but it is also data.
-- The batch request's token goes to `lfs.github.com` only. An action's own
-  `header` goes to that action's href only. Redirects are not followed with
-  credentials.
-- Cap one object (GitHub's limit is 2 GB) and a transfer's total; stream to a
-  file in the editor's cache rather than memory; fail on a size that differs
-  from the pointer's, both ways.
-- Nothing from a response or a pointer is spliced into a path or a command:
-  oids are `^[0-9a-f]{64}$` before they name a file.
-- Errors may quote GitHub's message; they never print a token or a header.
+*In the sandbox*, git-lfs does not run in the project's repository (Fact 4). The
+script makes a scratch bare repository whose only objects are the project's by
+`objects/info/alternates` (read as data) and whose only configuration is the
+environment's: the endpoint, the token for that endpoint alone, the proxy's CA,
+`http.sslVerify=true`, no proxy, no credential helper, and `lfs.storage` naming
+the project's LFS store. A project's `.git/config`, `.lfsconfig` and `insteadOf`
+are not read by that process at all. The one git-lfs command that does run in
+the project -- `git lfs checkout`, which fills in files whose objects are local
+-- never touches the network.
 
-## What the probe did not measure
+**The price, stated plainly: for the length of a push or pull, the project's
+sandbox -- and any agent running in the project's devcontainer, which can read
+the file in `.git` -- can see a credential for that one repository's LFS
+storage.** What that credential is:
 
-- **A read-only deploy key.** Q2 passed with a write key. A project whose key
-  is read-only (a dependency, for `deliver`) should be refused at upload; this
-  is untested.
-- **An object GitHub already has**, **objects over a few MB**, the lifetime of
-  a batch action's own URL (a download of more than ten minutes), partial
-  failure and retry, and fork networks (LFS storage is shared across a fork
-  network; a deploy key is for one repository).
-- **Quota.** LFS storage and bandwidth are billed to the repository's owner. An
-  upload spends them. The probe spent 65 bytes.
-- **A project with its own LFS server** (`.lfsconfig` with `lfs.url` elsewhere).
-  The design ignores `.lfsconfig` by construction, so such objects are fetched
-  from GitHub, where they are not; the failure must say so.
-- **LFS file locking**, not planned.
+- good for one repository (the project's registered one; C1 shows another is
+  refused), and for its LFS objects only -- GitHub's LFS API is not its contents
+  or branches;
+- valid ten minutes for download and about six hours for upload, and the file is
+  deleted when the transfer ends (not a revocation: a copy made meanwhile lives
+  to its expiry);
+- able to read that repository's LFS objects (the project's own data, which it
+  can already read) and to upload objects to it. An uploaded object is
+  unreferenced until a commit names it, and only the editor pushes commits. What
+  an abused upload token costs is *storage quota* on that repository.
 
-## Decisions for a human
+That is a weaker form of "usable while compromised, never copyable"
+([README](../release/README.md#3-credentials-usable-while-compromised-never-copyable)):
+the *deploy key* is still never copyable, and this token is bounded by time and
+by repository. If that is more than you want, the alternatives are B and C,
+which move the exposure from "a repository-scoped token in a project's sandbox"
+to "a large binary, or a new network client, in the process that holds every
+key".
 
-1. **Order.** Recommended: Phase 0 first and alone (it removes a live hazard
-   and is a few dozen lines), then Phase 1 (read-only, so the lower-risk
-   half), then Phase 2. Or all at once.
-2. **Upload on every push, or asked for?** Recommended: with the push, but
-   `--review` should show an LFS pointer as `lfs: <path> (<size>)` rather than
-   as a 130-byte text diff, so the person sees what will be spent before
-   pushing. The alternative is an `--lfs` flag.
-3. **Keep downloaded objects in the editor's cache?** They make a second
-   pull of the same file free, but LFS objects can be large and the cache is
-   otherwise bounded to history. Recommended: keep them for the length of the
-   transfer only, until there is a measured need.
-4. **A non-GitHub LFS server** is refused, not worked around. Say if that is
-   wrong for any project you use.
-5. **The scratch repository** `pmalacho-mit/desolate-lfs-probe` still exists
-   with one object in its LFS storage; the probe asks that it be deleted
-   (`gh repo delete pmalacho-mit/desolate-lfs-probe --yes`) once this page has
-   what it needs, and its registration removed from the keyring.
+### What the editor holds the credential to
+
+`lfsAuthFrom` (`transfer.ts`) refuses anything but: an `https://lfs.github.com/`
+endpoint whose path is this registration's `owner/repo` (optionally with `.git`
+/ `/info/lfs`), and exactly one header, `Authorization`, of printable
+characters. The answer is data from the network and becomes a config value and a
+header in the sandbox, so a newline, a second header, another repository or
+another host is refused before it is written anywhere. The sandbox's script
+checks the file again (an https URL of URL characters, one `Authorization:`
+line); it is the project's directory, so it cannot trust the file.
+
+What the editor *cannot* check: the hosts the objects themselves go to
+(`github-cloud...`) are named by GitHub's batch response, inside the sandbox. The
+proxy's destination allowlist, which applies to every container, bounds them;
+the batch token goes only to the endpoint above.
+
+## How it works
+
+**Push.** After the bundle is fetched into the cache and the default-branch and
+`--expect` checks pass, the editor lists the LFS objects the new commits add:
+`rev-list --objects <commit> --not --branches` in the *cache*, blobs of at most
+1024 bytes, matched as git-lfs's three-line pointer exactly (by content, not by
+`.gitattributes`). If there are none, nothing else happens -- no credential is
+asked for. If there are, it **says so first**, then uploads, then pushes the
+commit:
+
+```
+desolate: uploading 2 LFS objects (118 MiB) to acme/widgets's LFS storage, which counts against its owner's quota:
+desolate:   assets/model.bin  118 MiB  3a85670cf3e7
+desolate:   data/sample.bin  96 KiB  0b7c91e5d2aa
+```
+
+The sandbox runs `git lfs push --object-id` for exactly those oids; an object the
+project's LFS store lacks fails it, naming the oid, and **the branch is not
+pushed**. Objects GitHub already has are skipped by GitHub's batch API.
+`desolate --review` (and the panel's Review & Push) marks LFS files with their
+real size: `A  assets/model.bin  (LFS, 118 MiB: uploaded with the push)`.
+
+**Pull.** After origin/* is set, the sandbox lists the LFS files at the tip of
+the branch checked out (`git lfs ls-files`, offline) and which of their objects
+its store lacks. If it lacks any it says `needs-lfs` and changes nothing more;
+the editor then asks for a *download* credential and hands over again (the
+branches are not re-sent). The sandbox fetches, then merges **with smudging
+off** -- so a missing object can no longer fail the merge half-way -- and
+`git lfs checkout` fills in the files whose objects are local. The result says
+how it went: `; fetched 2 LFS objects`, or `; its LFS objects could NOT be
+fetched ... those files stay pointers until a pull succeeds`. `--fetch-only`
+touches no LFS and asks for no credential. A pull that needs no objects asks for
+no credential either.
+
+**First checkout** (`repo add`, a new worktree). The sandbox checks out with
+smudging off and then runs `git lfs checkout`: LFS files whose objects are local
+(a worktree of a project that has fetched them) are real files, the rest are
+pointers with a clean `git status`, and the first `desolate --pull` fills them
+in.
+
+**Where the objects live.** Only in the project's `.git/lfs` (shared by its
+worktrees). The editor keeps nothing: no cache of objects, which could be large,
+and an object is stored once, where it is used.
+
+## Not covered, and not measured
+
+Nothing below the unit tests has been run against GitHub from the VM; the first
+real push and pull of an LFS file is the check that matters.
+
+- **The sandbox's egress to the three LFS hosts.** Inferred from the sandbox
+  being handed the proxy's CA for git-lfs, and from the probe's editor reaching
+  all three through the same proxy; not exercised. If the proxy's destination
+  allowlist is restricted, add them.
+- **The exact shape of GitHub's `href`.** Taken to be
+  `https://lfs.github.com/<owner>/<repo>`; `lfsAuthFrom` also accepts a `.git`
+  and `/info/lfs` suffix. If GitHub answers otherwise, the push says the endpoint
+  was refused, and the fix is that one regular expression.
+- **A read-only deploy key** should be refused at upload; untested (Q2 used a
+  write key). A pull needs only download.
+- **A download longer than ten minutes.** The credential is minted once per
+  pull; git-lfs batches in groups, and a later batch after expiry fails. Objects
+  already fetched stay in the store, so running the pull again resumes.
+- **An object GitHub already has, objects over a few MB, partial failure and
+  retry, fork networks** (LFS storage is shared across a fork network; a deploy
+  key is for one repository).
+- **Quota.** LFS storage and bandwidth are billed to the repository owner; a push
+  spends them, which is why it says so first.
+- **Pointers with git-lfs extensions** (`ext-N-...` lines, which nothing uses)
+  are not recognised: a push would send them as plain text, as it did before.
+- **Other LFS servers.** Only GitHub's, because every registration is a
+  `github.com` alias. The seam is `lfsServerOf` in `transfer.ts`: a registration
+  for another forge would name its LFS host and how it hands out a token; the
+  sandbox's scripts are told an endpoint and a header and know nothing about
+  GitHub.
+- **Suede dependencies** (`deliver`, `suede upstream`) are unchanged: they move a
+  `release` branch's git objects and do not fetch or send LFS objects.
+- **LFS file locking** is not used.
+- **Typing `git lfs pull` in a devcontainer** still cannot authenticate (no key
+  there); use `desolate --pull`.
+
+## Tests
+
+`tests/unit/desolate/lfs.test.ts` runs the real git-lfs against a stand-in LFS
+server (`tests/unit/fixtures/lfs-server.ts`) through the sandbox scripts as the
+runner runs them, with a project whose config, committed `.lfsconfig`,
+`insteadOf`, proxy and credential helper all point at a second server: it must
+see no request, the credential must reach only the batch endpoint, the project's
+`core.fsmonitor` must not run, and the branch must reach the remote only after
+the objects. It also covers a lost object (the branch is not pushed), the pull
+paths (objects fetched, fast-forward over new LFS files, GitHub missing an
+object, nothing needed, `--fetch-only`), and the strictness of pointer and
+credential parsing. `review.test.ts` covers the `lfs` kind. The same tests were
+also run in an Alpine container (busybox `sh` and `awk`, git 2.54.0, git-lfs
+3.7.1 -- the sandbox image's versions), since the scripts run under busybox
+there. They are skipped where there is no git-lfs.

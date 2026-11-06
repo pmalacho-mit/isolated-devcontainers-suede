@@ -87,7 +87,7 @@ const worktreeOperations = ["worktree-add", "worktree-remove"] as const;
 
 /** The project's halves of `desolate --push` and `--pull` (transfer.ts): a
  *  bundle, named by the editor, made or taken in the target's sandbox. */
-const transferOperations = ["bundle", "pull"] as const;
+const transferOperations = ["bundle", "pull", "lfs-push"] as const;
 
 const operations = [
   "start",
@@ -125,7 +125,7 @@ type Request = {
         ? { op: op; project: string; worktree: string; force?: boolean }
         : op extends "ports"
           ? { op: op; project: string; worktree?: string; move?: { label: string; port: number }; json?: boolean }
-          : op extends "bundle" | "pull"
+          : op extends "bundle" | "pull" | "lfs-push"
             ? { op: op; project: string; worktree?: string; transfer: string; fetch?: boolean }
             : { op: op; project: string; worktree?: string };
 }[Operation];
@@ -341,6 +341,9 @@ async function handle(req: unknown, send: Send) {
         break;
       case "pull":
         flags = [["--pull", req.transfer], ...(req.fetch ? (["--fetch-only"] as const) : [])];
+        break;
+      case "lfs-push":
+        flags = [["--lfs-push", req.transfer]];
         break;
       case "review":
         flags = ["--review"];

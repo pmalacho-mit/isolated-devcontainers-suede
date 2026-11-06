@@ -32,6 +32,15 @@
  *         (docker.ts pullScript). A project that turns out to lack something
  *         is sent all of it, once.
  *
+ * Git LFS rides along (docs/lfs.md). A push lists the LFS objects its new
+ * commits name, says so, and has them uploaded BEFORE the commits are pushed;
+ * a pull has the objects of the branch it fast-forwards fetched. The editor's
+ * part is the one step that needs the deploy key -- `git-lfs-authenticate`,
+ * which yields a token for this one repository -- and the real git-lfs binary
+ * does the rest in the project's sandbox, where the objects are (docker.ts
+ * LFS_SANDBOX). No object passes through the editor, and the editor never runs
+ * git-lfs.
+ *
  * Files are opened as data, and only if they are files of that project
  * (status.ts openContained). What a bundle holds is the project's own, or the
  * remote's: a project can only put in one what it can already read.
@@ -143,7 +152,7 @@ export const registrationOf = (project: string, config: string): Registration | 
 
 /** Git with nothing configured but what is said here: no system or global
  *  config, no hooks, no prompt, and ssh through the editor's host aliases. */
-export const cleanGit = (args: string[], options: { capture?: boolean; ssh?: string } = {}) => {
+export const cleanGit = (args: string[], options: { capture?: boolean; ssh?: string; input?: string; maxBuffer?: number; binary?: boolean } = {}) => {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) if (!key.startsWith("GIT_")) env[key] = value;
   Object.assign(env, {
@@ -161,10 +170,14 @@ export const cleanGit = (args: string[], options: { capture?: boolean; ssh?: str
   });
   const result = spawnSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
     env,
-    encoding: "utf8",
-    stdio: options.capture ? ["ignore", "pipe", "pipe"] : ["ignore", "inherit", "inherit"],
+    // `binary` keeps stdout as bytes (`raw`); otherwise it is text.
+    ...(options.binary ? {} : { encoding: "utf8" as const }),
+    ...(options.input !== undefined ? { input: options.input } : {}),
+    ...(options.maxBuffer ? { maxBuffer: options.maxBuffer } : {}),
+    stdio: [options.input !== undefined ? "pipe" : "ignore", ...(options.capture ? ["pipe", "pipe"] as const : ["inherit", "inherit"] as const)],
   });
-  return { ok: result.status === 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  const text = (value: unknown) => (typeof value === "string" ? value : Buffer.isBuffer(value) ? value.toString("utf8") : "");
+  return { ok: result.status === 0, stdout: text(result.stdout), stderr: text(result.stderr), raw: Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.alloc(0) };
 };
 
 /** The project's directory, if it is one: not a link (projects.ts refuses
@@ -217,7 +230,7 @@ export const defaultBranchOf = (lsRemote: string) =>
  *  project (for openContained). The name is the broker's TRANSFER_NAME. */
 const transferFiles = (projectDir: string, name: string) => {
   const stem = join(".git", name.replace(/\.bundle$/, ""));
-  return { bundle: `${stem}.bundle`, haves: `${stem}.haves`, refs: `${stem}.refs`, projectDir };
+  return { bundle: `${stem}.bundle`, haves: `${stem}.haves`, refs: `${stem}.refs`, lfsNeed: `${stem}.lfsneed`, lfsAuth: `${stem}.lfsauth`, projectDir };
 };
 
 const writeInside = (projectDir: string, inside: string, bytes: Buffer | string) => {
@@ -363,6 +376,134 @@ const branchesOf = (cache: Cache) =>
 const hasCommit = (cache: Cache, commit: string) =>
   COMMIT.test(commit) && cleanGit(["-C", cache.dir, "cat-file", "-e", `${commit}^{commit}`], { capture: true }).ok;
 
+/**
+ * Git LFS: what a push must upload, and the credential for it.
+ */
+export interface LfsObject { oid: string; size: number; path: string }
+
+/** A pointer, strictly: git-lfs's three lines and nothing else (no extensions,
+ *  which nothing uses). A blob that is not exactly this is not uploaded -- and
+ *  an LFS file this misses would land on GitHub as a pointer with no object,
+ *  which is what a push did before any of this. */
+export const parsePointer = (text: string): { oid: string; size: number } | undefined => {
+  const found = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize (0|[1-9][0-9]{0,15})\n$/.exec(text);
+  return found ? { oid: found[1], size: Number(found[2]) } : undefined;
+};
+
+/** git-lfs's own cut-off: a pointer is never longer. */
+const POINTER_MAX = 1024;
+
+/**
+ * The LFS objects `commit` names that the remote's branches do not already
+ * lead to: the pointers among the blobs it adds. Read from the CACHE with
+ * git's plumbing -- the project's files are never opened -- and by content,
+ * not by `.gitattributes`: whatever a project calls a pointer, git-lfs's own
+ * push finds it the same way.
+ */
+export const lfsObjectsAdded = (cacheDir: string, commit: string): LfsObject[] => {
+  const listed = cleanGit(["-C", cacheDir, "rev-list", "--objects", commit, "--not", "--branches"], { capture: true, maxBuffer: 1 << 29 });
+  if (!listed.ok) return fail(`could not list what ${commit.slice(0, 12)} adds: ${listed.stderr.trim()}`);
+  const named = listed.stdout.split("\n").filter(Boolean).map((line) => {
+    const space = line.indexOf(" ");
+    return space < 0 ? { id: line, path: "" } : { id: line.slice(0, space), path: line.slice(space + 1) };
+  }).filter(({ id }) => COMMIT.test(id));
+  if (!named.length) return [];
+  const checked = cleanGit(["-C", cacheDir, "cat-file", "--batch-check=%(objecttype) %(objectsize) %(objectname)"],
+    { capture: true, input: named.map(({ id }) => `${id}\n`).join(""), maxBuffer: 1 << 29 });
+  if (!checked.ok) return fail(`could not size what ${commit.slice(0, 12)} adds: ${checked.stderr.trim()}`);
+  const small = new Set<string>();
+  for (const line of checked.stdout.split("\n")) {
+    const [type, size, id] = line.split(" ");
+    if (type === "blob" && Number(size) <= POINTER_MAX && Number(size) > 0) small.add(id);
+  }
+  if (!small.size) return [];
+  const read = cleanGit(["-C", cacheDir, "cat-file", "--batch"], { capture: true, binary: true, input: [...small].map((id) => `${id}\n`).join(""), maxBuffer: 1 << 29 });
+  if (!read.ok) return fail(`could not read what ${commit.slice(0, 12)} adds: ${read.stderr.trim()}`);
+  const pointers = new Map<string, { oid: string; size: number }>();
+  for (let at = 0; at < read.raw.length; ) {
+    const end = read.raw.indexOf(0x0a, at);
+    if (end < 0) break;
+    const [id, , length] = read.raw.toString("latin1", at, end).split(" ");
+    const size = Number(length);
+    if (!Number.isSafeInteger(size)) break;
+    const pointer = parsePointer(read.raw.toString("utf8", end + 1, end + 1 + size));
+    if (pointer) pointers.set(id, pointer);
+    at = end + 1 + size + 1;
+  }
+  const objects = new Map<string, LfsObject>();
+  for (const { id, path } of named) {
+    const pointer = pointers.get(id);
+    if (!pointer) continue;
+    // A name is for a person to read: no control characters in it.
+    const clean = path.replace(/[\x00-\x1f\x7f]/g, "?");
+    // rev-list names an object once, by the first path it met it at.
+    if (!objects.has(pointer.oid)) objects.set(pointer.oid, { ...pointer, path: clean });
+  }
+  return [...objects.values()];
+};
+
+const humanSize = (bytes: number) => {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${unit === 0 ? value : value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+};
+
+/** What a push is about to upload, for a person: one line each, then the total. */
+export const describeLfs = (objects: LfsObject[], ownerRepo: string) => [
+  `uploading ${objects.length} LFS object${objects.length === 1 ? "" : "s"} (${humanSize(objects.reduce((sum, o) => sum + o.size, 0))}) to ${ownerRepo}'s LFS storage, which counts against its owner's quota:`,
+  ...objects.slice(0, 20).map((o) => `  ${o.path || o.oid.slice(0, 12)}  ${humanSize(o.size)}  ${o.oid.slice(0, 12)}`),
+  ...(objects.length > 20 ? [`  ... and ${objects.length - 20} more`] : []),
+];
+
+/** A credential for ONE repository's LFS storage, as git-lfs-authenticate
+ *  answers: where it is (`href`) and the one header that proves it. */
+export interface LfsAuth { href: string; header: string }
+
+/**
+ * The LFS server a registration's objects live on. GitHub's, today: every
+ * registration is a github.com host alias (`repo add`). Another forge, or an
+ * LFS server of one's own, would name its host here and how it hands out a
+ * token -- the sandbox's half does not change, since it is told an endpoint
+ * and a header and nothing else.
+ */
+const lfsServerOf = (registration: Registration) => ({
+  host: "lfs.github.com",
+  /** `https://lfs.github.com/owner/repo`, as GitHub answers; its `.git` and
+   *  `/info/lfs` spellings are the same endpoint. */
+  endpoint: new RegExp(`^https://lfs\\.github\\.com/${registration.ownerRepo.replace(/[.]/g, "\\.")}(\\.git)?(/info/lfs)?$`, "i"),
+});
+
+/** What git-lfs-authenticate said, held to one endpoint of this registration's
+ *  and one Authorization header of printable characters. Anything else is
+ *  refused -- the answer is data from the network and it becomes a config
+ *  value in the sandbox, and a header there. */
+export const lfsAuthFrom = (registration: Registration, answer: string): LfsAuth => {
+  let parsed: any;
+  try { parsed = JSON.parse(answer); } catch { return fail(`${registration.ownerRepo}'s LFS credential was not JSON`); }
+  const server = lfsServerOf(registration);
+  const href = parsed?.href;
+  if (typeof href !== "string" || !server.endpoint.test(href))
+    return fail(`${registration.ownerRepo}'s LFS credential names an endpoint that is not ${server.host}/${registration.ownerRepo}: refusing it`);
+  const header = parsed?.header;
+  const keys = header && typeof header === "object" ? Object.keys(header) : [];
+  if (keys.length !== 1 || keys[0] !== "Authorization" || typeof header.Authorization !== "string" || !/^[\x21-\x7e][\x20-\x7e]{0,4095}$/.test(header.Authorization))
+    return fail(`${registration.ownerRepo}'s LFS credential is not a single Authorization header: refusing it`);
+  return { href, header: `Authorization: ${header.Authorization}` };
+};
+
+/** `git-lfs-authenticate <owner/repo> <operation>` over the registration's
+ *  host alias, with its key and no other (sshFor): the one step of git-lfs
+ *  that needs the deploy key. */
+const askForLfsAuth = (registration: Registration, ssh: string, operation: "download" | "upload"): LfsAuth => {
+  const [bin, ...rest] = ssh.split(" ");
+  const result = spawnSync(bin, [...rest, "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", `git@github.com-${registration.tag}`,
+    "git-lfs-authenticate", registration.ownerRepo, operation], { encoding: "utf8", timeout: 45_000, stdio: ["ignore", "pipe", "pipe"] });
+  if (result.status !== 0)
+    return fail(`${registration.ownerRepo} gave no LFS credential for ${operation}: ${(result.stderr ?? "").trim().split("\n")[0] || `exit ${result.status}`}`);
+  return lfsAuthFrom(registration, result.stdout ?? "");
+};
+
 export interface Options {
   worktree?: string;
   /** Push to the remote's default branch, which is refused otherwise. */
@@ -374,6 +515,10 @@ export interface Options {
   /** For tests: the registration, and how git reaches it. */
   registration?: Registration;
   ssh?: string;
+  /** For tests: the LFS credential, instead of asking GitHub for one. */
+  lfsAuth?: (operation: "download" | "upload") => LfsAuth;
+  /** Where "what will be uploaded" is said (stdout by default). */
+  log?: (line: string) => void;
   /** For tests: the broker, as `ask` with a line reader. */
   ask?: (request: Record<string, unknown>, onLog: (line: string) => boolean) => Promise<number>;
 }
@@ -437,6 +582,24 @@ export async function push(project: string, options: Options = {}): Promise<stri
       throw new TransferError(`${branch} is ${registration.ownerRepo}'s default branch; push a branch of its own, or pass --allow-default`,
         { defaultBranch: branch });
 
+    // The LFS objects the new commits name go up first: a commit whose
+    // pointers GitHub cannot resolve is a broken branch. Said before it is
+    // done, so what is spent on the repository's quota is not a surprise.
+    const lfsObjects = lfsObjectsAdded(cache.dir, commit);
+    if (lfsObjects.length) {
+      const say = options.log ?? ((line: string) => console.log(`desolate: ${line}`));
+      for (const line of describeLfs(lfsObjects, registration.ownerRepo)) say(line);
+      const auth = (options.lfsAuth ?? ((operation) => askForLfsAuth(registration, options.ssh!, operation)))("upload");
+      writeInside(projectDir, files.lfsNeed, lfsObjects.map((o) => `${o.oid}\n`).join(""));
+      writeInside(projectDir, files.lfsAuth, `${auth.href}\n${auth.header}\n`);
+      const sent = await (options.ask ?? ask)(
+        { op: "lfs-push", project, ...(options.worktree ? { worktree: options.worktree } : {}), transfer: name },
+        () => true,
+      );
+      if (sent === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); push again once that is done", { busy: true });
+      if (sent !== 0) return fail(`its sandbox could not upload the LFS objects (exit ${sent}; git-lfs's words are above). ${branch} was NOT pushed`);
+    }
+
     if (!cleanGit(["-C", cache.dir, "push", "--quiet", registration.url, `${commit}:refs/heads/${branch}`], { ssh: options.ssh }).ok)
       fail(`${registration.ownerRepo} refused ${branch} (not a fast-forward? pull first)`);
     // GitHub has it now, and so does the cache's copy of GitHub.
@@ -445,7 +608,7 @@ export async function push(project: string, options: Options = {}): Promise<stri
     cache.remember([commit]);
     return `pushed ${branch} (${commit.slice(0, 12)}) to ${registration.ownerRepo}`;
   } finally {
-    removeInside(projectDir, files.bundle, files.haves);
+    removeInside(projectDir, files.bundle, files.haves, files.lfsNeed, files.lfsAuth);
     rmSync(scratch, { recursive: true, force: true });
     cache.release();
   }
@@ -461,6 +624,12 @@ const pulledMessage = (outcome: string, branch: string, ownerRepo: string) => ({
     ? `fetched ${ownerRepo}'s branches as origin/*; nothing is checked out to move`
     : `fetched ${ownerRepo}'s branches as origin/*; it has no ${branch}`,
 } as Record<string, string>)[outcome] ?? `pulled (${outcome})`;
+
+/** What became of the branch's LFS files, for a person; nothing when it has none. */
+const lfsMessage = (state: string | undefined) =>
+  !state || state === "present" ? ""
+    : state === "failed" ? "; its LFS objects could NOT be fetched (git-lfs's words are above) -- those files stay pointers until a pull succeeds"
+      : `; fetched ${state.replace("fetched ", "")} LFS object${state === "fetched 1" ? "" : "s"}`;
 
 /** Fetch the project's repository into origin/*, and fast-forward the branch
  *  checked out in the target. */
@@ -485,10 +654,12 @@ export async function pull(project: string, options: Options = {}): Promise<stri
 
     /** One handover: what the project lacks (all of it when `full`), and the
      *  remote's branches; the sandbox's answer. */
-    const handOver = async (full: boolean) => {
+    let lfs: string | undefined;
+    const handOver = async (full: boolean, auth?: LfsAuth) => {
       const name = transferName();
       const files = transferFiles(projectDir, name);
-      created.push(files.bundle, files.refs);
+      created.push(files.bundle, files.refs, files.lfsAuth);
+      if (auth) writeInside(projectDir, files.lfsAuth, `${auth.href}\n${auth.header}\n`);
       const excluded = full ? [] : cache.known().filter((commit) => hasCommit(cache, commit));
       const bundle = join(scratch, name);
       const made = cleanGit(["-C", cache.dir, "bundle", "create", "--quiet", bundle, "--branches", ...excluded.map((commit) => `^${commit}`)], { capture: true });
@@ -501,7 +672,9 @@ export async function pull(project: string, options: Options = {}): Promise<stri
         (line) => {
           const said = /^PULLED (\S+) (\S+)$/.exec(line);
           if (said) pulled = { outcome: said[1], branch: said[2] };
-          return !said;
+          const lfsSaid = /^LFS (present|failed|fetched \d+)$/.exec(line);
+          if (lfsSaid) lfs = lfsSaid[1];
+          return !said && !lfsSaid;
         },
       );
       if (code === BUSY_EXIT) throw new TransferError("its target is busy with something else (above); pull again once that is done", { busy: true });
@@ -512,10 +685,18 @@ export async function pull(project: string, options: Options = {}): Promise<stri
     let pulled = await handOver(false);
     if (pulled.outcome === "needs-full") pulled = await handOver(true);
     if (pulled.outcome === "needs-full") fail("its sandbox still lacks what the whole of the remote holds");
+    if (pulled.outcome === "needs-lfs") {
+      // The sandbox took the branches before it asked, so they are not sent
+      // again; it is given a credential for the objects it lacks.
+      cache.remember(branches.map(([commit]) => commit));
+      const auth = (options.lfsAuth ?? ((operation) => askForLfsAuth(registration, options.ssh!, operation)))("download");
+      pulled = await handOver(false, auth);
+      if (pulled.outcome === "needs-lfs") fail("its sandbox still lacks LFS objects it was given a credential for");
+    }
     cache.remember(branches.map(([commit]) => commit));
-    return options.fetchOnly
+    return (options.fetchOnly
       ? `fetched ${registration.ownerRepo}'s branches as origin/*`
-      : pulledMessage(pulled.outcome, pulled.branch, registration.ownerRepo);
+      : pulledMessage(pulled.outcome, pulled.branch, registration.ownerRepo)) + lfsMessage(lfs);
   } finally {
     removeInside(projectDir, ...created);
     rmSync(scratch, { recursive: true, force: true });
