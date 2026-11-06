@@ -394,8 +394,10 @@ export async function push(project: string, options: Options = {}): Promise<stri
   try {
     await pull(project, { ...options, fetchOnly: true });
   } catch (err) {
-    if (!(err instanceof TransferError)) throw err;
-    return `${said}\n  but origin/* in the project is not updated yet (${err.message}); desolate --pull does it, and until then a review still counts these commits as to push`;
+    // Any failure, not only a TransferError: GitHub has the commit already,
+    // and a push reported as failed would be pushed again for nothing.
+    const why = err instanceof Error ? err.message : String(err);
+    return `${said}\n  but origin/* in the project is not updated yet (${why}); desolate --pull does it, and until then a review still counts these commits as to push`;
   }
   return said;
 }

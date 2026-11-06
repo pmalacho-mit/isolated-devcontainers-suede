@@ -135,6 +135,19 @@ describe("push", () => {
     assert.deepEqual(leftovers(), [], "a transfer file is left behind");
   });
 
+  test("a branch GitHub did not have becomes origin/<branch> in the project, so a review compares with it (issue 54)", async () => {
+    git(project, "checkout", "--quiet", "-b", "brand-new");
+    try {
+      commitIn(project, "a.txt", "on a new branch\n");
+      const head = git(project, "rev-parse", "HEAD");
+      assert.match(await push("acme/widgets", { registration, ask: bundler }), /^pushed brand-new/);
+      assert.equal(git(project, "rev-parse", "refs/remotes/origin/brand-new"), head);
+      assert.equal(git(project, "symbolic-ref", "--short", "HEAD"), "brand-new");
+    } finally {
+      git(project, "checkout", "--quiet", "feature");
+    }
+  });
+
   test("a push that went through is not a failure when the project's origin/* cannot be updated after; it says so", async () => {
     commitIn(project, "a.txt", "and another\n");
     const head = git(project, "rev-parse", "HEAD");
@@ -143,9 +156,18 @@ describe("push", () => {
     const said = await push("acme/widgets", { registration, ask: refusing });
     assert.match(said, /^pushed feature \([0-9a-f]{12}\) to acme\/widgets\n  but origin\/\* in the project is not updated yet/);
     assert.equal(git(root, "--git-dir", remote, "rev-parse", "refs/heads/feature"), head, "GitHub has it");
+    // Nor when what fails is not desolate's own refusal: a broker that throws.
+    commitIn(project, "a.txt", "and one more\n");
+    const throwing = async (request: Record<string, unknown>, onLog: (line: string) => boolean) => {
+      if (request.op === "pull") throw new Error("the broker went away");
+      return bundler(request, onLog);
+    };
+    assert.match(await push("acme/widgets", { registration, ask: throwing }), /not updated yet \(the broker went away\)/);
+    const pushed = git(project, "rev-parse", "HEAD");
+    assert.equal(git(root, "--git-dir", remote, "rev-parse", "refs/heads/feature"), pushed, "GitHub has it");
     // The next push (or a pull) brings it level.
     await pull("acme/widgets", { registration, ask: puller, fetchOnly: true });
-    assert.equal(git(project, "rev-parse", "refs/remotes/origin/feature"), head);
+    assert.equal(git(project, "rev-parse", "refs/remotes/origin/feature"), pushed);
     assert.deepEqual(leftovers(), [], "a transfer file is left behind");
   });
 
