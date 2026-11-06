@@ -72,7 +72,7 @@ What a push of a target's branch would send, before it does (`desolate --review`
 - the commits;
 - the files: a click opens a file's two sides in the diff editor.
 
-The view's title has **Push**, which asks once more, with the counts, and sends exactly the commit you reviewed (`desolate --push --expect <commit>`): if the branch moved since, because an agent committed again, the push is refused and you review again. It also has review again, and close.
+The view's title has **Push**, which asks once more, with the counts, and sends exactly the commit you reviewed (`desolate --push --expect <commit>`): if the branch moved since, because an agent committed again, the push is refused and you review again. It also has review again, and close. When a push succeeds, the Review view reviews again by itself: the project's `origin/<branch>` is brought up to the pushed commit, so it says 0 commits to push, with no pull by hand.
 
 A push to the repository's **default branch** (`main`, say) is refused the first time, as `desolate --push` refuses it without `--allow-default`. The panel then asks whether you mean it, and if you do, pushes with `--allow-default`. That goes for Push without review as well. It is never a force-push: GitHub refuses it if the branch moved there since your last pull.
 
