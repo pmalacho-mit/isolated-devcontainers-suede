@@ -165,11 +165,14 @@ and leave a \`$STATUS_HELPER note\` when they should know something.
 Commit your work on $4; do not push. $after
 How this environment works -- the proxy, secrets, what you cannot reach: /desolate/AGENTS.md.
 
-Be thorough rather than quick. Before you set green:
+Be thorough rather than quick, and keep going until the work is done and checked: do not stop to report while there is a next step you can take. Before you set green:
+  - re-read the issue above and check each thing it asks for, one by one, against what you built;
   - read the code around what you change, and look for callers and other places the change could reach;
+  - where it is a bug, reproduce it first and see it fail, then see it pass; where it is a feature, use it the way a user would;
   - run the project's existing tests, typecheck and linters, and add or update tests for what you changed;
-  - exercise the change for real where you can (run the code or command, not only the tests), and say what you ran;
-  - review your own diff (\`git diff\`) for unintended changes, leftovers and missed edge cases.
+  - exercise the change for real where you can (run the code or command, start the server and call it, not only the tests), and say what you ran;
+  - if a tool you need to run or check any of this is missing, install it (this container is a sandbox; that is what it is for) rather than skipping the check;
+  - review your own diff (\`git diff\`) for unintended changes, leftovers and missed edge cases, and fix what you find.
 If you could not verify something, or a requirement is ambiguous, or a decision is the human's to make, do not guess:
 set orange with the specific question or the input you need, then stop. A green with caveats is fine -- put them
 in the green line and the commit message (what you ran, what you did not, what to check) so review is easy.

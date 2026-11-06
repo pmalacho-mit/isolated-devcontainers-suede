@@ -189,11 +189,22 @@ examples/factory/claude/claude-helper.sh verify acme/widgets                    
 
 `--scoped` limits spending to one project (`DESOLATE-CLAUDE-<project>-OAUTH`), and then that project needs a daemon of its own.
 
-**`start`** runs `claude` in a detached tmux session in the target, in auto permission mode and `high` effort (`-- --permission-mode <mode>` for another; `/desolate` readable and `git add`/`git commit`/`/desolate/status` allowed without asking), with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. If tmux or claude is missing, it installs them:
+**`start`** runs `claude` in a detached tmux session in the target, on Opus (`--model opus`) in auto permission mode and `xhigh` effort (`-- --permission-mode <mode>` or `-- --model <alias>` for another; `/desolate` readable and `git add`/`git commit`/`/desolate/status` allowed without asking), with `CLAUDE_CODE_OAUTH_TOKEN` set to that placeholder. If tmux or claude is missing, it installs them:
 - tmux through the image's package manager, as root or with passwordless sudo;
 - claude with its native installer.
 
 It then tells the agent, in its task, that the devcontainer config should carry them.
+
+**Why Opus is named.** Left alone, Claude Code picks a model by plan and client, and a `setup-token` login in the CLI was seen landing on Sonnet, while the VS Code extension chose differently. An agent that works unattended for an hour wants the stronger model, so `start` passes `--model opus` (the flag outranks `ANTHROPIC_MODEL` and every settings file) unless `-- --model` says otherwise. Effort is `xhigh`, which Anthropic's [power-user tips](https://support.claude.com/en/articles/14554000-claude-code-power-user-tips) recommend for complex coding and agentic work; Opus 5.5 defaults to `medium`. `max` is left for a person to choose per session.
+
+**The standing instruction.** When `start` or `resume` has a task, it appends `AGENT_PROMPT` (in `claude-helper.sh`) to Claude's system prompt; without a task a person is at the keyboard and nothing is appended. It says three things:
+- how a turn may end. The paragraph is Anthropic's own for unattended runs ("Prompting Claude Opus 5.5", [Unattended agentic runs](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5#unattended-agentic-runs)): it names the four ways an agent stops with work still owed (a summary that announces the next step instead of taking it, an offer to carry on, a list of decisions that block nothing, a report because the turn was long). The stops that are wanted are the ones this harness has a status for: done and committed, or `orange`, `red`, `gray`. It is the system prompt and not the task because it is meant to be there from the first request;
+- what "done" means: seen to work, with real inputs, with the neighbouring code tried, and a failing check explained rather than weakened;
+- that installing is expected. The container is a sandbox that only the proxy's ports leave, so a missing tool is installed instead of a check skipped and reported as unverified. The agent is asked to say, in its commit message or status, what the devcontainer config should carry, since a rebuild loses it.
+
+The issue's own task text (`dispatch_task` in `lib/gh-dispatch.sh`) carries the checklist for the issue: re-read it item by item, reproduce a bug before fixing it, use a feature as a user would, install what a check needs, review the diff.
+
+What was not done: a `Stop` hook that sends the agent back to work when it ends a turn with items open. Anthropic's guide suggests it for harnesses, but it needs a definition of "open" the harness can read (a checklist file, say), and the agent's statuses already say when it is finished or needs a human. If agents still stop early with the above in place, that is the next step: the hook, limited to two or three continuations.
 
 Several things outrank the OAuth token, measured on Claude Code 2.1.311:
 - `ANTHROPIC_API_KEY`;
