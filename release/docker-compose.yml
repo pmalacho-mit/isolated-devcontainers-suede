@@ -100,12 +100,15 @@ services:
     # project that uses Docker gets a dind of its own, run the same way by the
     # supervisor (below); the docker-in-docker feature is refused (policy.ts).
     runtime: sysbox-runc
-    # Install the proxy CA before dockerd starts: image pulls traverse the
-    # intercepting proxy, so the daemon must trust it. No-op if not installed.
+    # Before dockerd starts: install the proxy CA (image pulls traverse the
+    # intercepting proxy, so the daemon must trust it), and register qemu-user
+    # for linux/amd64 + linux/386 in THIS container's binfmt_misc -- sysbox
+    # gives it a table of its own, so the VM's registration is invisible here
+    # (vm/binfmt-register.sh). Both no-ops if vm install has not published them.
     entrypoint:
       - /bin/sh
       - -c
-      - '[ -x /desolate/ca/install-ca.sh ] && /desolate/ca/install-ca.sh >/dev/null 2>&1 || true; exec dockerd-entrypoint.sh "$$@"'
+      - '[ -x /desolate/ca/install-ca.sh ] && /desolate/ca/install-ca.sh >/dev/null 2>&1 || true; [ -x /desolate/binfmt/register.sh ] && /desolate/binfmt/register.sh >/dev/null || true; exec dockerd-entrypoint.sh "$$@"'
       - --
     environment:
       DOCKER_TLS_CERTDIR: ""          # no TCP listener at all -> no TLS needed
