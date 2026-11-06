@@ -168,6 +168,7 @@ describe("every flag shape `Flags` declares round-trips", () => {
     { flags: [["--config", "/snap/dc.json"]], expect: { command: "run", config: "/snap/dc.json" } },
     { flags: [["--config", "/snap/dc.json"], "--rebuild"], expect: { rebuild: true } },
     { flags: [["--rebuild", "--no-cache"]], expect: { rebuild: true, noCache: true } },
+    { flags: [["--config", "/snap/dc.json"], ["--appearance", '{"workbench.colorTheme":"Dark 2026"}']], expect: { command: "run" } },
     { flags: ["--stop"], expect: { command: "stop" } },
     { flags: ["--ports"], expect: { command: "ports" } },
     { flags: ["--create-worktree", ["--branch", "feature/1"], ["--worktree", "wip"]], expect: { command: "create-worktree", branch: "feature/1", worktree: "wip" } },
@@ -183,6 +184,41 @@ describe("every flag shape `Flags` declares round-trips", () => {
         assert.equal(parsed[key as keyof typeof parsed], value);
       assert.equal(parsed.project, "myapp");
     });
+});
+
+describe("--appearance (#59)", () => {
+  const theme = JSON.stringify({ "workbench.colorTheme": "Default Dark Modern", "window.autoDetectColorScheme": true });
+
+  test("is the outer editor's colour theme, for a start", () => {
+    assert.deepEqual(parseArgs(["--appearance", theme, "x"]).appearance, {
+      "workbench.colorTheme": "Default Dark Modern",
+      "window.autoDetectColorScheme": true,
+    });
+    assert.equal(parseArgs(["--config", "/snap/dc.json", "--rebuild", "--appearance", theme, "x"]).rebuild, true);
+  });
+
+  test("carries nothing but theme settings, of the right type", () => {
+    const given = JSON.stringify({
+      "workbench.colorTheme": "Light 2026",
+      "window.autoDetectColorScheme": "yes",
+      "terminal.integrated.profiles.linux": { x: { path: "/tmp/evil" } },
+      "security.workspace.trust.enabled": false,
+    });
+    assert.deepEqual(parseArgs(["--appearance", given, "x"]).appearance, { "workbench.colorTheme": "Light 2026" });
+  });
+
+  test("is absent when not given, or when none of it was a theme", () => {
+    assert.equal("appearance" in parseArgs(["x"]), false);
+    assert.equal("appearance" in parseArgs(["--appearance", "{}", "x"]), false);
+    assert.equal("appearance" in parseArgs(["--appearance", '{"editor.fontSize":99}', "x"]), false);
+  });
+
+  test("means nothing but with a start, and must be JSON", () => {
+    assert.throws(() => parseArgs(["--stop", "--appearance", theme, "x"]), /only means something with a start/);
+    assert.throws(() => parseArgs(["--ports", "--appearance", theme, "x"]), /only means something with a start/);
+    assert.throws(() => parseArgs(["--appearance", "{not json", "x"]), /takes a JSON object/);
+    assert.throws(() => parseArgs(["--appearance"]), /takes a JSON object/);
+  });
 });
 
 describe("--move", () => {

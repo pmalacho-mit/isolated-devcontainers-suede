@@ -34,6 +34,7 @@ import {
 } from "./projects.ts";
 import { daemonOf, enforcePolicy, PolicyError } from "./policy.ts";
 import { TRANSFER_NAME, type Flags } from "./args.ts";
+import { readAppearance } from "./editor.ts";
 import { identity, noop, relayLines } from "./utils.ts";
 
 type Config = {
@@ -127,7 +128,9 @@ type Request = {
           ? { op: op; project: string; worktree?: string; move?: { label: string; port: number }; json?: boolean }
           : op extends "bundle" | "pull" | "lfs-push"
             ? { op: op; project: string; worktree?: string; transfer: string; fetch?: boolean }
-            : { op: op; project: string; worktree?: string };
+            : op extends "start" | "rebuild"
+              ? { op: op; project: string; worktree?: string; appearance?: Record<string, unknown> }
+              : { op: op; project: string; worktree?: string };
 }[Operation];
 
 /** Absent, or of this type. */
@@ -191,6 +194,11 @@ const request = {
         (query.op === "worktree-add" ? optional(query, "branch", "string") : !("branch" in query)) &&
         (query.op === "worktree-add" ? optional(query, "from", "string") : !("from" in query)) &&
         (query.op === "worktree-remove" ? optional(query, "force", "boolean") : !("force" in query)) &&
+        (!("appearance" in query) ||
+          ((query.op === "start" || query.op === "rebuild") &&
+            typeof query.appearance === "object" &&
+            query.appearance !== null &&
+            !Array.isArray(query.appearance))) &&
         (!("move" in query) || (query.op === "ports" && isMove(query.move))) &&
         ((transferOperations as readonly string[]).includes(query.op)
           ? "transfer" in query && typeof query.transfer === "string" && TRANSFER_NAME.test(query.transfer)
@@ -331,6 +339,10 @@ async function handle(req: unknown, send: Send) {
         enforcePolicy(target, resolved, listTargets(config.workspaces), daemonOf(resolved));
         flags = [["--config", configPath]];
         if (req.op === "rebuild") flags.push("--rebuild");
+        // Only the theme settings, of the right type: anything else the
+        // editor sent is dropped here and not passed on.
+        const appearance = readAppearance(req.appearance);
+        if (Object.keys(appearance).length) flags.push(["--appearance", JSON.stringify(appearance)]);
         break;
       }
       case "stop":

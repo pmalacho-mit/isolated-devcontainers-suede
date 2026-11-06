@@ -15,6 +15,9 @@ import {
   editorCustomizations,
   editorStartScript,
   externalEnvironment,
+  NO_WORKSPACE_TRUST,
+  readAppearance,
+  APPEARANCE_SETTINGS,
   targetEnvironment,
   externalProfile,
   isValidExtensionId,
@@ -328,8 +331,99 @@ describe("DESOLATE_EXTERNAL_<port> (#17)", () => {
   test("a server running with a different map is restarted rather than kept", () => {
     const script = editorStartScript("/vscode-server", { extensions: [], settings: {} }, "a".repeat(48),
       externalEnvironment(new Map([["5173", 8081]]), "acme-widgets-babf3e111073ee33.localhost"));
-    assert.match(script, /WANT='DESOLATE_EXTERNAL_5173=8081 DESOLATE_EXTERNAL_5173_URL=http:\/\/acme-widgets-babf3e111073ee33\.localhost:8081'/);
+    assert.match(script, /WANT='DESOLATE_EXTERNAL_5173=8081 DESOLATE_EXTERNAL_5173_URL=http:\/\/acme-widgets-babf3e111073ee33\.localhost:8081 flags=--disable-workspace-trust'/);
     assert.match(script, /if listening && \[ "\$HAVE" != "\$WANT" \]; then/);
     assert.match(script, /printf '%s' "\$WANT" > "\$DATA\/desolate-external"/);
+  });
+});
+
+describe("workspace trust in the project's editor (#59)", () => {
+  const start = (customizations: Parameters<typeof editorStartScript>[1], token: string) =>
+    editorStartScript("/vscode-server", customizations, token);
+
+  test("the server is started with workspace trust off", () => {
+    const text = start({ extensions: [], settings: {} }, TOKEN);
+    const launch = text.slice(text.indexOf("setsid nohup"));
+    assert.match(launch, new RegExp(`--connection-token '${TOKEN}' \\\\\n\\s+${NO_WORKSPACE_TRUST} \\\\`));
+    assert.equal(NO_WORKSPACE_TRUST, "--disable-workspace-trust");
+  });
+
+  test("a server started without it is restarted, once: the flag is in the fingerprint", () => {
+    const text = start({ extensions: [], settings: {} }, TOKEN);
+    assert.match(text, /WANT='flags=--disable-workspace-trust'/);
+    assert.match(text, /if listening && \[ "\$HAVE" != "\$WANT" \]; then/);
+    // ... and the message said while doing so must not close the quoting.
+    const said = /echo '(desolate: the port map[^\n]*)'/.exec(text)?.[1];
+    assert.ok(said && !said.includes("'"), "an apostrophe in an echo'd line ends its quoting");
+  });
+
+  test("the pattern that finds an old server still matches how it is launched", () => {
+    const text = start({ extensions: [], settings: {} }, TOKEN);
+    assert.match(text, new RegExp(`pkill -f "server-main.js --host 0.0.0.0 --port ${EDITOR_INTERNAL_PORT}"`));
+    assert.match(text, new RegExp(`--host 0.0.0.0 --port ${EDITOR_INTERNAL_PORT} \\\\\n`));
+  });
+});
+
+describe("the outer editor's colour theme (#59)", () => {
+  const DARK = { "workbench.colorTheme": "Default Dark Modern", "window.autoDetectColorScheme": false };
+  const machine = (text: string) => JSON.parse(/<<'__DESOLATE_SETTINGS_EOF__'\n(?:\/\/[^\n]*\n)*([\s\S]*?)\n__DESOLATE_SETTINGS_EOF__/.exec(text)![1]);
+
+  test("is in the editor's Machine settings when it was sent", () => {
+    const text = editorStartScript("/vscode-server", { extensions: [], settings: {}, appearance: DARK }, TOKEN);
+    assert.deepEqual(machine(text), { "terminal.integrated.macOptionClickForcesSelection": true, ...DARK });
+  });
+
+  test("a project that sets a theme itself keeps it", () => {
+    const text = editorStartScript("/vscode-server", {
+      extensions: [], settings: { "workbench.colorTheme": "Solarized Light" }, appearance: DARK,
+    }, TOKEN);
+    assert.equal(machine(text)["workbench.colorTheme"], "Solarized Light");
+    assert.equal(machine(text)["window.autoDetectColorScheme"], false);
+  });
+
+  test("nothing sent, nothing written", () => {
+    const text = editorStartScript("/vscode-server", { extensions: [], settings: {} }, TOKEN);
+    assert.deepEqual(machine(text), { "terminal.integrated.macOptionClickForcesSelection": true });
+  });
+
+  test("only theme settings of the right type are kept, whatever is sent", () => {
+    const sent = {
+      ...DARK,
+      "workbench.preferredDarkColorTheme": "Dark 2026",
+      "window.autoDetectColorScheme": "true",
+      "workbench.preferredLightColorTheme": 5,
+      "workbench.iconTheme": "x",
+      "terminal.integrated.profiles.linux": { a: { path: "/evil" } },
+      "workbench.preferredHighContrastColorTheme": "line\nbreak",
+      "workbench.preferredHighContrastLightColorTheme": "x".repeat(101),
+    };
+    assert.deepEqual(readAppearance(sent), {
+      "workbench.colorTheme": "Default Dark Modern",
+      "workbench.preferredDarkColorTheme": "Dark 2026",
+    });
+    // And the script re-checks, so a caller that skipped readAppearance cannot widen it.
+    const text = editorStartScript("/vscode-server", { extensions: [], settings: {}, appearance: sent as any }, TOKEN);
+    assert.deepEqual(Object.keys(machine(text)).filter((k) => k !== "terminal.integrated.macOptionClickForcesSelection").sort(),
+      ["workbench.colorTheme", "workbench.preferredDarkColorTheme"]);
+  });
+
+  test("anything but an object yields nothing", () => {
+    for (const raw of [null, undefined, "Dark", 3, [], [["workbench.colorTheme", "x"]]])
+      assert.deepEqual(readAppearance(raw), {}, JSON.stringify(raw));
+  });
+
+  test("a theme name cannot close the settings heredoc: it is data on one JSON line", () => {
+    const text = editorStartScript("/vscode-server", {
+      extensions: [], settings: {}, appearance: { "workbench.colorTheme": "__DESOLATE_SETTINGS_EOF__" },
+    }, TOKEN);
+    assert.equal(machine(text)["workbench.colorTheme"], "__DESOLATE_SETTINGS_EOF__");
+  });
+
+  test("the list is the colour theme's own settings and no more", () => {
+    assert.deepEqual(Object.keys(APPEARANCE_SETTINGS).sort(), [
+      "window.autoDetectColorScheme", "window.autoDetectHighContrast", "workbench.colorTheme",
+      "workbench.preferredDarkColorTheme", "workbench.preferredHighContrastColorTheme",
+      "workbench.preferredHighContrastLightColorTheme", "workbench.preferredLightColorTheme",
+    ]);
   });
 });

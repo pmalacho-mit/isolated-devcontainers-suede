@@ -20,6 +20,7 @@ import * as vscode from "vscode";
 import { execFile } from "node:child_process";
 import { factsOf } from "../panel.ts";
 import { reviewDirectory, type Review } from "../review.ts";
+import { appearanceOf, keepAppearance } from "../appearance.ts";
 import { readNote, readStatus, shownTargets } from "../status.ts";
 import {
   ATTENTION, dindsTree, githubLinks, lastJson, memoryByProject, needsYouTree, pickItems, projectsSummary,
@@ -173,6 +174,16 @@ interface Reviewing {
   target: TargetRef;
   review: Review;
 }
+
+/** The colour theme, as set here, kept where `desolate` finds it to hand to the
+ *  editors it starts (appearance.ts, #59). Written only when it changed. */
+const shareAppearance = () => {
+  try {
+    keepAppearance(appearanceOf((key) => vscode.workspace.getConfiguration().get(key)));
+  } catch (err) {
+    log.appendLine(`could not keep the colour theme for new editors: ${String(err)}`);
+  }
+};
 
 export function activate(context: vscode.ExtensionContext) {
   log = vscode.window.createOutputChannel("desolate");
@@ -590,7 +601,9 @@ export function activate(context: vscode.ExtensionContext) {
   every(60_000, () => refreshDinds());
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((change) => {
     if (change.affectsConfiguration("desolate")) void refreshViews(false);
+    if (change.affectsConfiguration("workbench") || change.affectsConfiguration("window")) shareAppearance();
   }));
+  shareAppearance();
   void refreshAll();
 }
 

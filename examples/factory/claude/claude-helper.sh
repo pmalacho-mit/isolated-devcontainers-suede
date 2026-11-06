@@ -29,6 +29,10 @@
 #
 # start  Starts `claude` in a detached tmux session in the running target, as
 #        its user, in its workspace folder, with the task as its first prompt.
+#        On Opus (`--model opus`; `-- --model <alias|name>` for another) at
+#        xhigh effort, and -- with a task -- a standing instruction appended to
+#        its system prompt (AGENT_PROMPT): do not end a turn with work still
+#        owed, "done" means seen to work, install what is missing.
 #        In auto permission mode (a classifier judges what is safe, and it
 #        asks for the rest), unless `-- --permission-mode <mode>` says
 #        otherwise; /desolate is readable without asking (--add-dir), and
@@ -294,7 +298,7 @@ chmod +x "$dir/hook"
 cat > "$dir/settings.json" <<JSON
 {
   "apiKeyHelper": "",
-  "effortLevel": "high",
+  "effortLevel": "xhigh",
   "permissions": {
     "additionalDirectories": ["/desolate"],
     "allow": ["Read(//desolate/**)", "Bash(git add *)", "Bash(git commit *)", "Bash(/desolate/status *)"]
@@ -357,6 +361,21 @@ tmux set-option -t "=$session" mouse off \; set-option -t "=$session" set-clipbo
 echo "claude-helper: claude is running in tmux session '$session'"
 REMOTE
 
+# Appended to Claude's system prompt when it starts with a task. The first
+# paragraph is Anthropic's own wording for unattended runs, from "Prompting
+# Claude Opus 5.5" (Unattended agentic runs), changed in its last two
+# sentences to name the stops this harness does want: the statuses. The
+# system prompt, not the task, because it holds for the whole conversation and
+# a mid-conversation change would invalidate the earlier thinking. The other two
+# are the sandbox's: what "done" means, and that installing is expected.
+read -r -d '' AGENT_PROMPT <<'PROMPT' || true
+A standing instruction from the user, the person you are working for. It is about how your turns end. A message with no tool call in it ends your turn, and the work stops there until you are asked to continue, which may be hours. The user has seen you end turns in four ways while work they asked for was still owed, and does not want any of them. One: a long summary of what was done that closes by announcing the next step and has no tool call, so the next thing never starts. Two: an offer to carry on with something unless the user would prefer otherwise, which stops to wait for an answer the user was not going to give. Three: a list of decisions for the user when, by your own account, none of them blocks the rest of the work. Four: deciding that this is a good place to report, because the turn has been long or a milestone is done. Status notes are welcome, and so are your recommendations on open decisions, but put them in the same message as your next tool call and carry on with whatever does not depend on the user's answer. If you notice yourself inviting the user to redirect you or offering to wait, delete it and do the next thing. The stops the user does want are the ones where the task is finished and verified and committed, or nothing can move without a human (the orange, red and gray statuses the task describes), or the thing blocking you is deliberately protected from you. This does not override the need for confirmation on risky or destructive actions.
+
+"Done" means you have seen it work, not that you expect it to. Run the code, the command or the test with real inputs and read what it printed. Do not stop at the first passing run: try the edge cases, and the callers and neighbouring code the change could break. When a check fails, find the cause; do not weaken the check or route around it.
+
+You are in a disposable sandbox, and installing things here is expected: this is what the sandbox is for. When a tool, package, compiler, runtime, browser, linter or test runner that you need to build, run or verify the work is missing, install it (sudo apt-get install, pip, npm, cargo, or the project's own installer) and carry on. Do not skip a check, or report something unverified, because a tool was not there. Only TCP 80 and 443 leave the container (/desolate/AGENTS.md). Installs are lost on a rebuild: if the project will need one again, say so in your commit message or status so the devcontainer config can carry it. Install tools globally or into a throwaway directory; change the repository's own dependency files only when the task needs it.
+PROMPT
+
 start() {
   command -v jq >/dev/null || die "needs jq"
   local name line row
@@ -383,6 +402,22 @@ start() {
   local mode_given="" arg
   for arg in ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}; do case "$arg" in --permission-mode|--permission-mode=*) mode_given=1 ;; esac; done
   [ -n "$mode_given" ] || CLAUDE_ARGS=(--permission-mode auto ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"})
+  # Opus unless told otherwise: the model the CLI picks by default depends on
+  # the plan and the client (a setup-token login has landed on Sonnet), and
+  # this is work that wants the stronger one. The flag outranks ANTHROPIC_MODEL
+  # and every settings file; `-- --model <alias|name>` overrides it.
+  local model_given="" prompt_given=""
+  for arg in ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}; do
+    case "$arg" in
+      --model|--model=*) model_given=1 ;;
+      --append-system-prompt|--append-system-prompt=*|--append-system-prompt-file|--append-system-prompt-file=*|--system-prompt|--system-prompt=*|--system-prompt-file|--system-prompt-file=*) prompt_given=1 ;;
+    esac
+  done
+  [ -n "$model_given" ] || CLAUDE_ARGS=(--model opus ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"})
+  # With a task, nobody is at the keyboard: how an unattended agent works here
+  # (AGENT_PROMPT, above) is appended to Claude's system prompt. Without one it
+  # is a person's session, and "do not stop to ask" would be wrong.
+  [ -z "$HAS_TASK" ] || [ -n "$prompt_given" ] || CLAUDE_ARGS=(--append-system-prompt "$AGENT_PROMPT" ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"})
   # desolate's own directory -- AGENTS.md, the status helper -- read without
   # the first-read prompt a path outside the project otherwise gets.
   CLAUDE_ARGS=(--add-dir /desolate "${CLAUDE_ARGS[@]}")
