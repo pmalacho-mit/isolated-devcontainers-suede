@@ -126,6 +126,46 @@ can see one project's files and images. The socket is not the boundary -- the
 one-project view and sysbox around the dind are. A project's worktrees share its
 daemon, as they already share its `.git`.
 
+**`docker` in such a devcontainer talks to the daemon's socket directly.**
+desolate sets `DOCKER_HOST=unix:///var/run/docker-host.sock` for a project that
+declares `docker-outside-of-docker`; you write nothing. Without it, `docker`
+would use `/var/run/docker.sock`, which the feature makes a `socat` relay run
+without `-t`. `socat` closes a connection 0.5s after the client half-closes, and
+an attached `docker run` with no stdin half-closes at once, so its output would
+stop at the first pause of about 0.5s -- and the client exits 0, so nothing says
+output was lost (the container finishes normally, and `docker logs` shows all
+of it). `apt-get update`, installs and builds are the usual victims.
+
+- *How.* desolate adds `remoteEnv.DOCKER_HOST` to the spec it starts, as if the
+  project had written it, so the editor, its terminals and the lifecycle
+  commands get it. `cli.sh exec` is a plain `docker exec`, which sees no
+  `remoteEnv`, so it passes the same value itself: what the container's spec
+  records, or the direct socket for a container made before this existed. Both
+  take effect on the next `desolate <project>` and the next `exec`; neither needs
+  a `--rebuild`.
+- *Why it is safe.* It grants nothing. `docker-host.sock` is the socket the relay
+  connects to, and the user could already open it: the project's dind serves it
+  as group 1000, the primary group of the base image's `vscode` user. Both paths
+  reach the same daemon, with the same view of one project (the section above);
+  `DOCKER_HOST` is only a path. It is applied only on a project's own daemon,
+  never on the shared one, and the spec it is added to is judged by the policy
+  afterwards, like the rest of what desolate derives.
+- *Why not for everyone.* Elsewhere that socket may be root-only (Docker
+  Desktop, Colima, rootless), and the relay is what makes `docker` work there.
+  So the shared templates under `.suede/` do not set it, and a devcontainer run
+  off desolate keeps the relay.
+- *Your own value wins.* A `DOCKER_HOST` in the project's `remoteEnv` or
+  `containerEnv` is left alone, so
+  `"remoteEnv": { "DOCKER_HOST": "unix:///var/run/docker.sock" }` brings the
+  relay back. (`null` is not a way out: the CLI sets the string `"null"`.)
+- *Two edges.* A container user whose primary group is not 1000 gets "permission
+  denied" on the direct socket; declare the relay path as above, or give the
+  user group 1000. And a container that bind-mounts the socket must name
+  `/var/run/docker.sock`, as a compose file does: `/var/run/docker-host.sock` is
+  not a path on the dind, and a bind of it gives an empty directory. A tool that
+  derives the bind source from `DOCKER_HOST` therefore needs it set to the other
+  path for that purpose.
+
 ### 3. Credentials: usable while compromised, never copyable
 
 This is the boundary that took the most work, because the obvious version of it
