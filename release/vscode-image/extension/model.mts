@@ -480,7 +480,7 @@ export const reviewTree = (review: Review, target: TargetRef, now = Date.now()):
       children: review.files.map((file) => {
         const slash = file.path.lastIndexOf("/");
         const [icon, color] = FILE_LOOK[file.status[0]] ?? ["diff-modified", "gitDecoration.modifiedResourceForeground"];
-        const note = file.kind === "text" ? "" : ` (${file.kind === "module" ? "submodule" : file.kind}: not shown)`;
+        const note = file.kind === "text" ? "" : file.kind === "lfs" ? " (LFS: uploaded with the push)" : ` (${file.kind === "module" ? "submodule" : file.kind}: not shown)`;
         return {
           id: `review:file:${file.index}`,
           label: slash < 0 ? file.path : file.path.slice(slash + 1),

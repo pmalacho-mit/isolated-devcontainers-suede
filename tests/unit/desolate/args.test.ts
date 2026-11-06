@@ -245,12 +245,17 @@ describe("--bundle and --pull: the project's halves of a push and a pull (transf
     assert.equal(bundle.transfer, name);
     assert.equal(bundle.worktree, "issue-42");
     assert.equal(parse("--pull", name, "acme/widgets").command, "pull");
+    const lfs = parse("--lfs-push", name, "--worktree", "issue-42", "acme/widgets");
+    assert.equal(lfs.command, "lfs-push");
+    assert.equal(lfs.transfer, name);
   });
 
   test("any other name is refused: no side can be asked for another file", () => {
     for (const bad of ["", "../x.bundle", "desolate-transfer-xyz.bundle", "a/desolate-transfer-0123456789abcdef.bundle", "--worktree"])
       refuses(["--bundle", bad, "acme/widgets"], /takes a bundle name/);
     refuses(["--pull"], /takes a bundle name/);
+    refuses(["--lfs-push", "../x.bundle", "acme/widgets"], /takes a bundle name/);
+    refuses(["--lfs-push", name, "--fetch-only", "acme/widgets"], /only means something with --pull/);
   });
 });
 

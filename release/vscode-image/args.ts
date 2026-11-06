@@ -66,6 +66,9 @@ export type Command =
   /** The project's half of `desolate --pull`: take the bundle the editor
    *  fetched into origin/*, in the target's sandbox, and fast-forward. */
   | "pull"
+  /** The project's half of a push's LFS objects: send the ones GitHub lacks,
+   *  with the credential the editor left in the transfer (docs/lfs.md). */
+  | "lfs-push"
   /** What a push would send, read in the target's sandbox and changing
    *  nothing: `desolate --review` (review.ts), the editor's Review & Push. */
   | "review"
@@ -151,6 +154,7 @@ export type Flags =
   | ["--move", string, string]
   | ["--bundle", string]
   | ["--pull", string]
+  | ["--lfs-push", string]
   | "--review"
   | "--fetch-only"
   | "--rebuild"
@@ -284,7 +288,8 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
         break;
       case "--bundle":
       case "--pull":
-        command = arg === "--bundle" ? "bundle" : "pull";
+      case "--lfs-push":
+        command = arg === "--bundle" ? "bundle" : arg === "--pull" ? "pull" : "lfs-push";
         transfer = queue.shift() ?? "";
         if (!TRANSFER_NAME.test(transfer))
           throw new UsageError(`${arg} takes a bundle name (desolate-transfer-<16 hex>.bundle), got '${transfer}'`);
@@ -373,7 +378,7 @@ export const parseArgs = (argv: string[], workspaces = "/workspaces"): Args => {
     throw new UsageError("--ref only means something with --suede-report or --suede-build");
   if (command === "suede-build" && transfer === undefined)
     throw new UsageError("--suede-build takes --transfer <bundle name>");
-  if (transfer !== undefined && !["bundle", "pull", "suede-build"].includes(command))
+  if (transfer !== undefined && !["bundle", "pull", "lfs-push", "suede-build"].includes(command))
     throw new UsageError("--transfer only means something with --suede-build");
   if (reclaimPath !== undefined && command !== "reclaim")
     throw new UsageError("--path only means something with --reclaim");

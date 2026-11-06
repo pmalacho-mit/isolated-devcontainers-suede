@@ -449,7 +449,7 @@ export function activate(context: vscode.ExtensionContext) {
     const file = kept?.review.files.find((f) => f.index === node?.file);
     if (!kept || !file) return;
     if (file.kind !== "text") {
-      void vscode.window.showInformationMessage(`${file.path}: ${file.kind === "module" ? "a submodule" : `${file.kind}, not sent for review`} -- look at it in the devcontainer.`);
+      void vscode.window.showInformationMessage(`${file.path}: ${file.kind === "module" ? "a submodule" : file.kind === "lfs" ? "a Git LFS file -- its pointer is committed and the object is uploaded with the push" : `${file.kind}, not sent for review`} -- look at it in the devcontainer.`);
       return;
     }
     const side = (which: "a" | "b") =>

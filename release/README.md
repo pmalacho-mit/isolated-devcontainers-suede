@@ -1645,7 +1645,10 @@ repo twice -- two projects are a real boundary; two worktrees are not.
   `.git` or `.worktrees` pointing into another project, `add` made a branch in
   that project's repository. In the sandbox those links point at nothing. A
   post-checkout hook that needs tools the sandbox lacks (it is `alpine/git`,
-  with git-lfs) fails there with a warning; the files still land.
+  with git-lfs) fails there with a warning; the files still land. Git LFS files
+  land as pointers (smudging is off there: the objects, and the key to fetch
+  them, are not in the sandbox); the first `desolate --pull` fills them in
+  ([docs/lfs.md](../docs/lfs.md)).
 - **`worktree remove` checks for uncommitted changes first, in the sandbox.**
   From the editor or the Mac, it refuses -- listing what it found -- if
   anything would be lost, including files put by hand into a worktree that
@@ -2156,7 +2159,9 @@ Boundaries, strongest first:
   which run the project's half in its sandbox and the editor's in a cache of
   the remote that only desolate's clean git touches, to the repository
   `repo add` registered
-  ([docs/agents.md](../docs/agents.md)); and the editor's interactive shell
+  ([docs/agents.md](../docs/agents.md)); Git LFS objects move in the sandbox
+  with a repository-scoped token the editor mints, never through the editor
+  ([docs/lfs.md](../docs/lfs.md) says why, and what the token costs); and the editor's interactive shell
   refuses typed git in `/workspaces/*` (`command git` gets past it -- a guard
   for what you type, not a boundary).
   Assume any project you work on in the outer editor can execute there. The design response is not to

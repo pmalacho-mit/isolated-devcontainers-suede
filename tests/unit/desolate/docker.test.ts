@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import {
+  checkoutScript,
   RECLAIMED,
   STATUS_RAN,
   createDocker,
@@ -623,17 +624,20 @@ describe("a worktree's sandbox", () => {
     });
   }
 
-  test("checkout is bounded from inside, and trusts the proxy for lfs", () => {
+  test("checkout is bounded from inside, trusts the proxy, and does not smudge LFS", () => {
     const argv = argvFor("checkout");
     assert.equal(argv[argv.indexOf("--entrypoint") + 1], "timeout");
     assert.deepEqual(argv.slice(argv.indexOf(spec.image) + 1), [
       "600",
-      "git",
+      "sh",
       "-c",
-      "http.sslCAInfo=/desolate/ca/ca.pem",
-      "checkout",
-      "--force",
+      checkoutScript,
+      "desolate-checkout",
+      "/desolate/ca/ca.pem",
     ]);
+    // The checkout's own status is the one reported; `git lfs checkout` after
+    // it only fills in what is local.
+    assert.match(checkoutScript, /^GIT_LFS_SKIP_SMUDGE=1 git -c "http\.sslCAInfo=\$1" checkout --force; rc=\$\?; git lfs checkout >&2 \|\| true; exit \$rc$/);
   });
 
   test("the changes check prints its marker only after a clean, silent git status", () => {

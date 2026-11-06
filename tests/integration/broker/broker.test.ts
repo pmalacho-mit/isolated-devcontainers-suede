@@ -1161,9 +1161,11 @@ describe("bundle and pull: a push's and a pull's project halves (transfer.ts)", 
     resetRunner();
     assert.equal(result(await ask({ op: "bundle", project: "pushes", transfer: name })).ok, true);
     assert.equal(result(await ask({ op: "pull", project: "pushes", worktree: "issue-1", transfer: name })).ok, true);
+    assert.equal(result(await ask({ op: "lfs-push", project: "pushes", transfer: name })).ok, true);
     assert.deepEqual(runnerInvocations(), [
       ["--bundle", name, "pushes"],
       ["--pull", name, "--worktree", "issue-1", "pushes"],
+      ["--lfs-push", name, "pushes"],
     ]);
     resetRunner();
     assert.equal(result(await ask({ op: "pull", project: "pushes", transfer: name, fetch: true })).ok, true);
@@ -1174,6 +1176,8 @@ describe("bundle and pull: a push's and a pull's project halves (transfer.ts)", 
     ["no bundle name", { op: "bundle", project: "pushes" }],
     ["a name that is a path", { op: "bundle", project: "pushes", transfer: "../../other/.git/x.bundle" }],
     ["a name that is a flag", { op: "pull", project: "pushes", transfer: "--rebuild" }],
+    ["lfs-push without a name", { op: "lfs-push", project: "pushes" }],
+    ["fetch-only on lfs-push", { op: "lfs-push", project: "pushes", transfer: name, fetch: true }],
     ["a bundle name on another op", { op: "start", project: "pushes", transfer: name }],
     ["fetch-only on another op", { op: "bundle", project: "pushes", transfer: name, fetch: true }],
     ["fetch-only that is not a boolean", { op: "pull", project: "pushes", transfer: name, fetch: "yes" }],

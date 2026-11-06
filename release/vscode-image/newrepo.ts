@@ -18,7 +18,7 @@ import { exchange } from "./keyring-client.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { ask } from "./broker-client.ts";
-import { cleanGit, cloneThroughCache } from "./transfer.ts";
+import { cleanGit, cloneThroughCache, pull, TransferError } from "./transfer.ts";
 
 const WORKSPACES = "/workspaces";
 
@@ -346,6 +346,20 @@ async function doClone(repo: Repo): Promise<void> {
   if (populated !== 0)
     die(`${dest} is cloned, but its checkout failed (exit ${populated}; the output is above).
         Starting it (desolate ${repo.project}) tries the checkout again.`);
+
+  // Git LFS files are pointers after that checkout (the sandbox has neither
+  // the objects nor the key to fetch them), and a devcontainer whose image has
+  // the git-lfs feature runs `git lfs pull` when it is created -- which fails,
+  // and fails the start, if the objects are not here. So fetch them now, as a
+  // pull does (docs/lfs.md). A repository with no LFS files costs nothing.
+  try {
+    console.log(`newrepo: ${await pull(repo.project)}`);
+  } catch (err) {
+    if (!(err instanceof TransferError)) throw err;
+    console.error(`newrepo: the first pull did not finish (${err.message}).
+        Files tracked with Git LFS stay pointers, and a devcontainer with the git-lfs feature cannot
+        start, until \`desolate --pull ${repo.project}\` succeeds.`);
+  }
 
   console.log(`READY ${dest}`);
 }

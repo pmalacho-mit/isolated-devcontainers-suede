@@ -32,8 +32,9 @@ export interface ReviewCommit {
   subject: string;
 }
 
-/** text: both sides were sent; binary, large: listed only; module: a submodule. */
-export type ReviewKind = "text" | "binary" | "large" | "module";
+/** text: both sides were sent; binary, large: listed only; module: a submodule;
+ *  lfs: a Git LFS file, whose object the push uploads (sizes are the object's). */
+export type ReviewKind = "text" | "binary" | "large" | "module" | "lfs";
 
 export interface ReviewFile {
   index: number;
@@ -72,7 +73,7 @@ const COUNT = /^\d{1,9}$/;
 const TIME = /^\d{1,12}$/;
 const ZERO = /^0+$/;
 const MODE = /^[0-7]{6}$/;
-const KINDS: readonly string[] = ["text", "binary", "large", "module"];
+const KINDS: readonly string[] = ["text", "binary", "large", "module", "lfs"];
 
 /** One printable line: what a commit or a path says, shown and never obeyed. */
 export const printable = (text: string, max = 300) =>
@@ -182,6 +183,13 @@ export const keepReview = (review: Review, blobs: Map<string, string[]>, dir: st
   return { ...review, files, dir };
 };
 
+const humanBytes = (bytes: number) => {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${unit === 0 ? value : value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+};
+
 const ago = (seconds: number, now: number) => {
   const minutes = Math.max(0, Math.round((now - seconds * 1000) / 60_000));
   if (minutes < 60) return `${minutes}m ago`;
@@ -204,7 +212,7 @@ export const describeReview = (review: Review, now = Date.now()) => {
   lines.push(`${review.files.length}${review.more ? "+" : ""} file${review.files.length === 1 ? "" : "s"} changed:`);
   for (const file of review.files) {
     const name = file.from ? `${file.from} → ${file.path}` : file.path;
-    lines.push(`  ${file.status[0]}  ${name}${file.kind === "text" ? "" : `  (${file.kind})`}`);
+    lines.push(`  ${file.status[0]}  ${name}${file.kind === "text" ? "" : file.kind === "lfs" ? `  (LFS, ${humanBytes(file.sizes[1] || file.sizes[0])}: uploaded with the push)` : `  (${file.kind})`}`);
   }
   if (review.uncommitted) lines.push(`${review.uncommitted} uncommitted change${review.uncommitted === 1 ? " is" : "s are"} in the worktree; a push does not send ${review.uncommitted === 1 ? "it" : "them"}.`);
   if (review.dir) lines.push(`each file's two sides: ${review.dir}/<n>.a and <n>.b`);

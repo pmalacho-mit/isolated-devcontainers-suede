@@ -89,7 +89,7 @@ assert_eq "desolate-client.ts's flags, by the editor's completion" "${missing# }
 # The runner's: every `case "--flag":` in args.ts, offered by `cli.sh desolate`
 # -- or the broker's and cli.sh's own wire form, typed by no one.
 WIRE="--populate --uncommitted --create-worktree --remove-worktree --branch --from --force --reclaim --path
-      --exec --bundle --pull --fetch-only --suede-report --suede-build --transfer --ref --review"
+      --exec --bundle --pull --lfs-push --fetch-only --suede-report --suede-build --transfer --ref --review"
 offered=" $(mac desolate --) $(mac desolate acme/app --) $(mac desolate --stop --) $(mac desolate --ports --) $(mac desolate --list --) "
 missing=""
 for flag in $(sed -n 's/^ *case "\(--[a-z-]*\)":.*/\1/p' "$ROOT/release/vscode-image/args.ts" | sort -u); do
