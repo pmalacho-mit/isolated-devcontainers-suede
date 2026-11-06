@@ -1027,6 +1027,27 @@ selection to copy". With this on, **Option+drag** on a Mac makes the terminal's
 own selection, which ⌘C copies. (It costs Option+drag's column selection in the
 terminal; a project that wants that back sets it to `false`.)
 
+Each target is its own host (`<name>-<id>.localhost`), so your browser has never
+seen it, and an editor opened there would start from scratch: light theme, and a
+workspace-trust prompt on every new target. Two things stop that (#59):
+
+- **Workspace trust is off in a project's editor.** It is started with
+  `--disable-workspace-trust`: the editor already runs inside the project's own
+  sandbox, which is what the prompt would be guarding against, and the outer
+  editor is unaffected (it keeps trust on, above). Because the browser's trust
+  record is per origin, a *setting* could not do this; it is a server flag, and
+  a project's `settings` cannot turn it back on. A project editor that was
+  already running is restarted once, at the next `desolate <project>`, to take it.
+- **The theme follows the outer editor.** The outer editor's extension keeps its
+  colour theme settings (`workbench.colorTheme`, the preferred dark/light themes
+  and the two auto-detect switches -- nothing else) in `~/.cache/desolate/appearance.json`;
+  `desolate` sends them with every start or rebuild, and they are written into the
+  new editor's Machine settings, beneath the project's own (a project that sets
+  `workbench.colorTheme` keeps its theme). A theme from an extension the project
+  editor does not have falls back to the default. Because it is Machine scope, it
+  wins over a theme you pick inside that one editor's User settings at the next
+  start -- to keep a different theme there, set it in `devcontainer.json`.
+
 Two limits worth knowing. Settings whose scope VS Code defines as
 `application` (a small set, e.g. `update.mode`) cannot be set at Machine scope
 by anything, including real Dev Containers -- those belong in User settings.

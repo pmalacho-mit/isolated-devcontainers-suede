@@ -88,6 +88,7 @@ import {
   externalEnvironment,
   targetEnvironment,
   externalProfile,
+  type Appearance,
   type EditorCustomizations,
   isValidToken,
   mintToken,
@@ -2022,6 +2023,7 @@ async function runTarget(
   config?: string,
   rebuild = false,
   noCache = false,
+  appearance?: Appearance,
 ): Promise<void> {
   const { name, dir } = target;
   // The path, checked HERE and not only by the broker: it is checked again
@@ -2033,7 +2035,7 @@ async function runTarget(
   config ??= dieOnError(() => snapshot(target, { specs: DIRECT_SPEC_DIR }));
 
   const resolved = resolveOrDie(target, config);
-  const project = readProjectConfig(resolved);
+  const project = { ...readProjectConfig(resolved), ...(appearance ? { appearance } : {}) };
   const daemon = daemonOf(resolved);
   refuseRestrictedOnTheSharedDaemon(target, daemon);
   if (project.hadLegacyAppPort)
@@ -2312,7 +2314,7 @@ async function main(): Promise<void> {
   else if (args.command === "suede-report") await depsReport(target, args.ref ?? "HEAD");
   else if (args.command === "suede-build") await depsBuild(target, args.ref ?? "HEAD", args.subrepo!, args.transfer!);
   else if (args.command === "populate") populateWorktree(target);
-  else await runTarget(target, args.config, args.rebuild, args.noCache);
+  else await runTarget(target, args.config, args.rebuild, args.noCache, args.appearance);
 }
 
 if (isEntryPoint(import.meta.url)) {
