@@ -2331,6 +2331,39 @@ which recreates the affected containers.
   cache is gone. It confirms before doing it. `/workspaces` is a separate volume
   and is never touched by any rung.
 
+- **An agent (or you) ran `docker rm -f` on the devcontainer, or on everything**
+  -- a project that uses `docker-outside-of-docker` hands its devcontainer the
+  project daemon's socket, and that socket can remove *any* container on the
+  daemon, the devcontainer it is running in included. Nothing in `desolate`
+  stands between a command and the socket (it is root over its dind by design,
+  see boundary 2), so this is what happens. Measured on a project daemon with
+  `docker ps`, `docker stop` and `docker rm -f` against throwaway containers
+  (#52); the recovery path is read from `desolate.ts`, not run end to end:
+
+  | what was removed | what you see | what is lost | recovery |
+  | --- | --- | --- | --- |
+  | the devcontainer itself (`docker rm -f $(hostname)`) | the editor tab and every terminal in it die at once, and the agent with them; nothing restarts it (no restart policy, deliberately). The dind and its other containers are untouched. | everything written in the container outside `/workspaces`: `$HOME` (agent state, shell history), installed packages, running processes. Committed *and* uncommitted work in `/workspaces` survives. | `desolate <project>` (or `... --worktree <name>`) from the Mac. It finds no container, so it creates one from the spec -- the same as `--rebuild`, and it is that rather than a restart. |
+  | the same with `docker stop` | the same, but the container is kept | running processes only | `desolate <project>` restarts it; `$HOME` is intact |
+  | a relay (`desolate-relay-*`) | that one port answers nothing | nothing | `desolate <project>` replaces every relay; `--stop` removes them |
+  | `docker container prune` / `system prune` | removes the *stopped* containers: every target that was stopped (containers are kept on `--stop`) loses its container, `$HOME` included | as above, per container | `desolate <target>` creates a fresh one |
+  | `docker rm -f $(docker ps -aq)` | all of the above, **and the devcontainers of every worktree of the project**, which share the daemon and are listed by `docker ps` in all of them, including other agents' | as above, per container | `desolate` each target that was running. |
+
+  A dead container leaves three small things behind, none of which blocks a
+  start: the forwards in the ingress (they lead nowhere until the next start
+  replaces the relays), the target's `/desolate/status` (it still says what the
+  last write said -- a stale `blue` after the container died is how to tell),
+  and any relay the command did not name. `desolate --stop <target>` clears
+  the forwards and relays and says "not running".
+
+  Not measured: whether removing the devcontainer *during* a lifecycle command
+  or a `shadowImages` build can wedge the daemon (the failure
+  `./cli.sh unwedge` and `dind reset` exist for). Under
+  `docker-outside-of-docker` the devcontainer runs no daemon of its own, so it
+  holds no overlay mounts to fail to tear down; if it does wedge, the ladder
+  below is the way out. Preventing the command at all would take a filtering
+  proxy in front of the socket and is not built; agents are told not to in
+  `AGENTS.md` instead.
+
 - **One project's builds hang, or its daemon is wedged** -- a project that uses
   `docker-outside-of-docker` runs on a daemon of its own, and recovering it is
   the same ladder pointed at that daemon alone. No other project, and not the

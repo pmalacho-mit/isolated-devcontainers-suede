@@ -25,6 +25,14 @@ With `docker-outside-of-docker`, `docker` and `docker compose` here drive a daem
 - **Everything shares the daemon's memory ceiling** (6 GiB unless the project says otherwise): this devcontainer, its editor server and language servers, you, the containers you start, and their builds. An OOM kill of a dev server, or an exit 137, is usually this. You can read it: the `memory.max`, `memory.peak` and `memory.events` cgroup files of the dind (`cat /sys/fs/cgroup/memory.*` from a container on it). Raising it is `customizations.desolate.memory` in `devcontainer.json` (`"12g"`). It applies on the next `desolate <project>`, with no rebuild needed, but it is a `devcontainer.json` change, so it is the human's call.
 - The daemon is **stopped when the project has been idle a while** and started again on the next `desolate <project>` -- images and build cache survive; containers you left running do not.
 
+### Do not remove containers you did not start
+
+`docker` here can remove **any** container on the project's daemon, and `docker ps` lists more than yours: this devcontainer, the `desolate-relay-*` containers that carry its ports, and the devcontainers and relays of **every worktree of this project** -- other agents' sessions included. Nothing stands between a command and the socket.
+
+- `docker rm -f` / `docker kill` / `docker stop` on **your own container** (its id is `$(hostname)`) ends your session, your editor and your terminals at once. Nothing restarts it. Whatever you wrote outside `/workspaces` (your `$HOME`, installed packages, running processes) is lost; `/workspaces` survives, committed or not. Only a human can bring the container back (`desolate <project>` on the Mac), and it comes back as a fresh one.
+- The same commands on a **sibling worktree's** devcontainer end that agent's session. `docker rm -f $(docker ps -aq)` does both. `docker container prune` and `docker system prune` remove only *stopped* containers, but a stopped devcontainer (desolate keeps one when a target is stopped, so it restarts fast) is exactly that, and its `$HOME` goes with it.
+- Remove only what you started: name it, or give it a label you chose and filter on that (`docker rm -f $(docker ps -aq --filter label=mine=1)`). Never remove by a bare `ps -a` listing, and when an id is not one you created in this session, leave it.
+
 ## Network: everything goes through an intercepting proxy
 
 All container egress is force-redirected through a transparent mitmproxy in the VM. The **only** things that leave this container are **TCP 80, TCP 443, and DNS 53**. Everything else is dropped at the VM's firewall.
