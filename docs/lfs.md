@@ -201,7 +201,16 @@ no credential either.
 smudging off and then runs `git lfs checkout`: LFS files whose objects are local
 (a worktree of a project that has fetched them) are real files, the rest are
 pointers with a clean `git status`, and the first `desolate --pull` fills them
-in.
+in. `repo add` runs that pull itself right after its checkout (best effort: if
+it fails it says so and how to retry). This matters beyond convenience: a
+devcontainer that uses the `ghcr.io/devcontainers/features/git-lfs` feature runs
+`git lfs pull` when it is *created*, from a lifecycle command inside the
+container, where there is no key -- so it **fails, and fails the start**, while
+any LFS object of the checked-out branch is missing from the project's
+`.git/lfs`. (Found on the first real run, #51.) The objects must be there before
+the container is first started; a start after a successful pull finds nothing to
+download and passes. A new worktree of a branch whose objects the project has not
+fetched has the same problem: `desolate --pull --worktree <name>` first.
 
 **Where the objects live.** Only in the project's `.git/lfs` (shared by its
 worktrees). The editor keeps nothing: no cache of objects, which could be large,

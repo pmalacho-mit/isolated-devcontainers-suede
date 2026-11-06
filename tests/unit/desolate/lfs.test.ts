@@ -279,7 +279,13 @@ describe("what the editor holds an LFS pointer and credential to", () => {
     assert.deepEqual(lfsAuthFrom(registration, answer()), { href: "https://lfs.github.com/acme/widgets", header: "Authorization: RemoteAuth abc123" });
     assert.equal(lfsAuthFrom(registration, answer({ href: "https://lfs.github.com/Acme/Widgets.git/info/lfs" })).href, "https://lfs.github.com/Acme/Widgets.git/info/lfs");
   });
-  test("anything else is refused: another repository, another host, a scheme, an extra header, a newline", () => {
+  test("other headers GitHub names are not passed on, and one that is missing is said by name only", () => {
+    const extra = lfsAuthFrom(registration, answer({ header: { Accept: "x", Authorization: "RemoteAuth abc123", "X-Other": "y" } }));
+    assert.equal(extra.header, "Authorization: RemoteAuth abc123");
+    assert.throws(() => lfsAuthFrom(registration, answer({ header: { "X-Auth": "secret-value" } })),
+      (err: Error) => /has no Authorization header \(it has: "X-Auth"\)/.test(err.message) && !err.message.includes("secret-value"));
+  });
+  test("anything else is refused: another repository, another host, a scheme, a bad header, a newline", () => {
     for (const bad of [
       answer({ href: "https://lfs.github.com/octocat/Hello-World" }),
       answer({ href: "https://lfs.github.com/acme/widgets-evil" }),
@@ -289,7 +295,6 @@ describe("what the editor holds an LFS pointer and credential to", () => {
       answer({ href: "http://lfs.github.com/acme/widgets" }),
       answer({ href: "https://lfs.github.com/acme/widgets\nevil" }),
       answer({ href: "https://user@lfs.github.com/acme/widgets" }),
-      answer({ header: { Authorization: "x", "X-Other": "y" } }),
       answer({ header: { Authorization: "RemoteAuth a\nHost: evil" } }),
       answer({ header: { Authorization: "" } }),
       answer({ header: { "X-Auth": "x" } }),

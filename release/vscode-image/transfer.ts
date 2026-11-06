@@ -475,7 +475,7 @@ const lfsServerOf = (registration: Registration) => ({
 });
 
 /** What git-lfs-authenticate said, held to one endpoint of this registration's
- *  and one Authorization header of printable characters. Anything else is
+ *  and an Authorization header of printable characters (the one header passed on). Anything else is
  *  refused -- the answer is data from the network and it becomes a config
  *  value in the sandbox, and a header there. */
 export const lfsAuthFrom = (registration: Registration, answer: string): LfsAuth => {
@@ -485,11 +485,17 @@ export const lfsAuthFrom = (registration: Registration, answer: string): LfsAuth
   const href = parsed?.href;
   if (typeof href !== "string" || !server.endpoint.test(href))
     return fail(`${registration.ownerRepo}'s LFS credential names an endpoint that is not ${server.host}/${registration.ownerRepo}: refusing it`);
+  // Only Authorization is passed on. Any other header GitHub names is ignored
+  // here (and its NAME, never a value, is said if the one we need is missing):
+  // the sandbox is told an endpoint and one header and nothing else.
   const header = parsed?.header;
-  const keys = header && typeof header === "object" ? Object.keys(header) : [];
-  if (keys.length !== 1 || keys[0] !== "Authorization" || typeof header.Authorization !== "string" || !/^[\x21-\x7e][\x20-\x7e]{0,4095}$/.test(header.Authorization))
-    return fail(`${registration.ownerRepo}'s LFS credential is not a single Authorization header: refusing it`);
-  return { href, header: `Authorization: ${header.Authorization}` };
+  const names = header && typeof header === "object" ? Object.keys(header) : [];
+  const value = names.includes("Authorization") ? header.Authorization : undefined;
+  if (typeof value !== "string")
+    return fail(`${registration.ownerRepo}'s LFS credential has no Authorization header (it has: ${names.map((n) => JSON.stringify(n.slice(0, 40))).join(", ") || "no header at all"}): refusing it`);
+  if (!/^[\x21-\x7e][\x20-\x7e]{0,4095}$/.test(value))
+    return fail(`${registration.ownerRepo}'s LFS credential's Authorization header is ${value.length} characters, ${/[^\x20-\x7e]/.test(value) ? "with a character that is not printable ASCII" : value.length > 4096 ? "too long" : "empty or starts with a space"}: refusing it`);
+  return { href, header: `Authorization: ${value}` };
 };
 
 /** `git-lfs-authenticate <owner/repo> <operation>` over the registration's
