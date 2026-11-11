@@ -1,0 +1,91 @@
+// The stack as the host sees it: which backend, the root VM, and the CLI channel to it.
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { Refusal, refuse } from "../shared/exit.ts";
+import { readJson, writeJson } from "../shared/json.ts";
+import { rootVmName } from "../shared/names.ts";
+import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
+import { fakeBackend } from "./vm/fake.ts";
+import { limaBackend } from "./vm/lima.ts";
+import type { Backend, VmSpec } from "./vm/types.ts";
+
+export type ForgeConfig = {
+  kind: "github" | "stand-in";
+  ssh: { user: string; host: string; port: number };
+  knownHosts: string;
+};
+export type Config = { backend: "fake" | "qemu" | "vz"; forge: ForgeConfig };
+
+const CONFIG = path.join(paths.state, "config.json");
+export const config = (): Config | null => readJson<Config | null>(CONFIG, null);
+export const saveConfig = (value: Config) => writeJson(CONFIG, value);
+
+export const defaultBackend = (): Config["backend"] => (process.platform === "darwin" ? "vz" : "qemu");
+
+/** Which backend this invocation uses. `fake` is never remembered and never a default: it
+ *  runs only when DESOLATE_BACKEND=fake is in the environment of this very command
+ *  (section 13.2), so a stack cannot quietly be the unisolated kind. */
+export const backendKind = (): Config["backend"] => {
+  const env = process.env.DESOLATE_BACKEND;
+  const stored = config()?.backend;
+  if (env !== undefined && env !== "fake" && env !== "qemu" && env !== "vz") refuse(`DESOLATE_BACKEND is '${env}'`, "use fake, qemu or vz");
+  if (stored === "fake" && env !== "fake") refuse("this stack was bootstrapped on the fake backend, which gives no isolation and runs only when asked for by name", "set DESOLATE_BACKEND=fake for each command (tests only), or `desolate destroy --all` and bootstrap a real backend");
+  if (env === "fake" && stored && stored !== "fake") refuse(`DESOLATE_BACKEND=fake, but this stack was bootstrapped on ${stored}`, "unset DESOLATE_BACKEND");
+  return (env as Config["backend"] | undefined) ?? stored ?? defaultBackend();
+};
+
+let cached: Backend | null = null;
+export const backend = (): Backend => {
+  if (cached) return cached;
+  const kind = backendKind();
+  cached = kind === "fake" ? fakeBackend() : limaBackend(kind);
+  return cached;
+};
+
+export const ROOT_VM = rootVmName(INSTANCE);
+
+export const rootSpec = (): VmSpec => ({
+  name: ROOT_VM,
+  role: "root",
+  egress: "open",
+  shares: [
+    { host: RELEASE_DIR, guest: guest.release, writable: false },
+    { host: paths.mirrors, guest: guest.mirrors, writable: true },
+    { host: paths.rootClones, guest: guest.rootClones, writable: true },
+    // One share for every domain, so a new domain needs no restart of the root. The root
+    // reads a domain's repos/ as data only and never runs git there (P4): that is enforced
+    // by root/git.ts, not by this mount.
+    { host: paths.domains, guest: guest.domains, writable: true },
+  ],
+  sockets: [],
+  cpus: 2,
+  memoryMiB: 2048,
+  diskGiB: 20,
+  labels: { title: "root" },
+});
+
+const NODE = ["node", "--disable-warning=ExperimentalWarning"];
+
+/** One request over the CLI channel. The root's refusals arrive as Refusals, with their fix. */
+export const rootctl = async <T = unknown>(op: string, args: Record<string, unknown> = {}, options: { quiet?: boolean; timeoutMs?: number } = {}): Promise<T> => {
+  const result = await backend().exec(ROOT_VM, [...NODE, `${guest.release}/root/rootctl.ts`], {
+    input: JSON.stringify({ op, args }),
+    inheritStderr: !options.quiet,
+    timeoutMs: options.timeoutMs ?? 900_000,
+  });
+  const line = result.stdout.trim().split("\n").pop() ?? "";
+  let reply: { ok: boolean; result?: T; error?: string; fix?: string; code?: number };
+  try {
+    reply = JSON.parse(line);
+  } catch {
+    throw new Refusal(`the root did not answer '${op}' (exit ${result.code}): ${(result.stderr || result.stdout).trim().slice(-400) || "no output"}`, "desolate doctor");
+  }
+  if (!reply.ok) throw new Refusal(reply.error ?? "the root refused", reply.fix ?? "", reply.code ?? 1);
+  return reply.result as T;
+};
+
+export const ensureHome = () => {
+  for (const dir of [paths.home, paths.mirrors, paths.rootClones, paths.domains, paths.state, paths.run, paths.logs]) fs.mkdirSync(dir, { recursive: true });
+  // The home holds every repository's history and every domain's work: the user's alone.
+  fs.chmodSync(paths.home, 0o700);
+};

@@ -1,0 +1,116 @@
+## bootstrap from nothing
+
+$ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
+desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; tests only), instance <instance>
+  + home <home>
+    base image desolate/base:latest present (<id>)
+  = base image
+  + config: backend fake, forge stand-in (<forge>:22)
+  + root VM dsl-<instance>-root created
+  + root VM running
+  + root services: keyring
+bootstrap: 5 step(s) done.
+  ok   home: <home>
+  ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
+  ok   docker daemon: docker 29.9.3
+  ok   base image: desolate/base:latest <id>
+  ok   root VM running: dsl-<instance>-root
+  ok   root: keyring answers: 0 key(s) held
+  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: forge configured: yes
+doctor: all checks passed.
+[exit 0]
+
+## bootstrap again
+
+$ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
+desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; tests only), instance <instance>
+  = home <home>
+    base image desolate/base:latest present (<id>)
+  = base image
+  = config: backend fake, forge stand-in (<forge>:22)
+  = root VM dsl-<instance>-root created
+  = root VM running
+  = root services: keyring
+bootstrap: nothing changed; the stack was already up.
+  ok   home: <home>
+  ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
+  ok   docker daemon: docker 29.9.3
+  ok   base image: desolate/base:latest <id>
+  ok   root VM running: dsl-<instance>-root
+  ok   root: keyring answers: 0 key(s) held
+  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: forge configured: yes
+doctor: all checks passed.
+[exit 0]
+
+## doctor, outside a test run
+
+$ desolate doctor
+  ok   home: <home>
+  FAIL backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated
+         fix: use a real backend: `desolate destroy --all`, then `desolate bootstrap --backend qemu` (Linux) or `--backend vz` (macOS)
+  ok   docker daemon: docker 29.9.3
+  ok   base image: desolate/base:latest <id>
+  ok   root VM running: dsl-<instance>-root
+  ok   root: keyring answers: 0 key(s) held
+  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: forge configured: yes
+doctor: 1 of 9 checks FAILED.
+[exit 1]
+
+## the fake backend is never a default
+
+$ desolate repos
+desolate: this stack was bootstrapped on the fake backend, which gives no isolation and runs only when asked for by name
+  fix: set DESOLATE_BACKEND=fake for each command (tests only), or `desolate destroy --all` and bootstrap a real backend
+[exit 1]
+
+## clone a pushable repository
+
+$ desolate clone acme/widgets
+  read key: registered
+  write key: registered (it asks you before every push)
+cloned acme/widgets: 1 branch(es), default main, 1 LFS object(s); pushable.
+next: desolate domain create <slug> && desolate domain <slug> add --repo acme/widgets
+fetching acme/widgets with the read key
+[exit 0]
+
+## fetch
+
+$ desolate fetch acme/widgets
+fetched acme/widgets: 1 branch(es), 1 LFS object(s) in the mirror.
+fetching acme/widgets with the read key
+[exit 0]
+
+## try to read a private key
+
+## hostile content in the root clone
+
+## clone a repository to consume only
+
+$ desolate clone acme/consumer --no-push
+  read key: registered
+cloned acme/consumer: 1 branch(es), default main, 0 LFS object(s); read-only (no write key).
+next: desolate domain create <slug> && desolate domain <slug> add --repo acme/consumer
+fetching acme/consumer with the read key
+[exit 0]
+
+$ desolate repos --json
+[{"repo":"acme/consumer","pushable":false,"anonymous":false,"defaultBranch":"main","fetchedAt":"<time>"},{"repo":"acme/widgets","pushable":true,"anonymous":false,"defaultBranch":"main","fetchedAt":"<time>"}]
+[exit 0]
+
+## refusals
+
+$ desolate fetch acme/never-cloned
+desolate: acme/never-cloned is not cloned into the root
+  fix: desolate clone acme/never-cloned
+[exit 1]
+
+$ desolate frobnicate
+desolate: desolate has no command 'frobnicate'
+  fix: desolate help
+[exit 64]

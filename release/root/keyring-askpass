@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run by the write agent (ssh-agent, as the keyring's user) before EVERY signature with a
+# write key. argv[1] is ssh-agent's prompt, which carries the key's comment:
+#   "Allow use of key desolate-write:<owner>/<repo>?\nKey fingerprint SHA256:..."
+# Exit 0 allows the signature; anything else refuses it. Fail closed: no node, no keyring,
+# no approval -> refuse.
+exec node --disable-warning=ExperimentalWarning "$(dirname "$0")/keyring-askpass.ts" "$@"
