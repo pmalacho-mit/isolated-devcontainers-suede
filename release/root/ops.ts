@@ -6,6 +6,7 @@ import { repoOf, writeKnownHosts } from "./git.ts";
 import type { Forge } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { FORGE, KEYRING } from "./layout.ts";
+import * as domains from "./domains.ts";
 import * as repos from "./repos.ts";
 
 type Log = (line: string) => void;
@@ -36,6 +37,36 @@ export const ops: Record<string, Op> = {
   },
   async "repo.list"() {
     return repos.list();
+  },
+
+  async "domain.create"(args) {
+    return domains.create(args.slug, args.title);
+  },
+  async "domain.add-repo"(args) {
+    return domains.addRepo(args.slug, args.repo);
+  },
+  async "domain.list"() {
+    return domains.domains().map((d) => ({ ...d, workspaces: domains.workspaces(d.slug) }));
+  },
+  async "domain.show"(args) {
+    const d = domains.domain(domains.slugOf(args.slug, "domain"));
+    return { ...d, workspaces: domains.workspaces(d.slug) };
+  },
+  async "domain.remove"(args) {
+    return domains.remove(args.slug);
+  },
+  async "workspace.plan"(args) {
+    return domains.plan(args as Parameters<typeof domains.plan>[0]);
+  },
+  async "workspace.state"(args) {
+    domains.setState(domains.slugOf(args.domain, "domain"), domains.slugOf(args.name, "workspace"), args.state as "up" | "stopped");
+    return {};
+  },
+  async "workspace.get"(args) {
+    return domains.workspace(domains.slugOf(args.domain, "domain"), domains.slugOf(args.name, "workspace"));
+  },
+  async "workspace.remove"(args) {
+    return domains.removeWorkspace(domains.slugOf(args.domain, "domain"), domains.slugOf(args.name, "workspace"));
   },
 
   async "keys.list"() {

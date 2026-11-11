@@ -1,6 +1,7 @@
 // The forge's admin: what a person does on GitHub's website, for the tests.
 //   admin.ts create-repo <owner/repo> [<seed git dir>]   a repository, optionally from a local one (LFS objects too)
 //   admin.ts add-key <owner/repo> <read|write> <pubkey>  a deploy key
+//   admin.ts commit <owner/repo> <branch> <file> <text> a commit by someone else, pushed to the forge
 //   admin.ts pulls [<owner/repo>]                        what the stand-in Action opened
 //   admin.ts pushes                                      every push the forge accepted
 //   admin.ts access                                      every request, allowed or denied
@@ -74,6 +75,26 @@ done
   writeJson("keys.json", keys);
   rewriteAuthorizedKeys(keys);
   console.log(`added a ${role} key to ${repo}`);
+} else if (verb === "commit") {
+  // Someone else pushed: a new commit on a branch of the repository, made on the forge.
+  const repo = need(args[0]);
+  const [, branch, file, content] = args;
+  const work = fs.mkdtempSync("/tmp/forge-commit-");
+  const env = { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" };
+  const git = (...argv: string[]) => execFileSync("git", ["-C", work, "-c", "user.name=someone", "-c", "user.email=someone@example.invalid", ...argv], { encoding: "utf8", env });
+  execFileSync("git", ["clone", "--quiet", repoDir(repo), work], { env });
+  try {
+    git("checkout", "--quiet", branch!);
+  } catch {
+    git("checkout", "--quiet", "-b", branch!);
+  }
+  fs.writeFileSync(path.join(work, file!), content ?? "");
+  git("add", "-A");
+  git("commit", "--quiet", "-m", `someone: ${file}`);
+  git("push", "--quiet", "origin", branch!);
+  process.stdout.write(git("rev-parse", "HEAD"));
+  fs.rmSync(work, { recursive: true, force: true });
+  execFileSync("chown", ["-R", "git:git", repoDir(repo)], { stdio: "ignore" });
 } else if (verb === "pulls") {
   console.log(JSON.stringify(lines("pulls.log").filter((pull) => !args[0] || pull.repo === args[0])));
 } else if (verb === "pushes") {

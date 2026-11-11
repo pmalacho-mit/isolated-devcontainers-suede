@@ -243,7 +243,7 @@ const relay = (publicPath: string, agentPath: string): Promise<void> => {
     agent.on("close", close);
     agent.on("data", (chunk) => client.write(chunk));
     client.on("data", (chunk) => {
-      pending = Buffer.concat([pending, chunk]);
+      pending = Buffer.concat([pending, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
       while (pending.length >= 5) {
         const length = pending.readUInt32BE(0);
         if (length < 1 || length > AGENT.maxFrame) return close();

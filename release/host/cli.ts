@@ -13,6 +13,15 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate fetch <owner/repo>                                    remote -> mirror
   desolate repos [--json]
 
+  desolate domain create <slug> [--title "..."]                  a trust boundary: repositories and secrets
+  desolate domain <slug> add --repo <owner/repo>                 give the domain a repository
+  desolate up <domain> [--name <workspace>] [--fetch] [--base <ref>]
+              [--checkout <owner/repo>=main|worktree:<branch>]   a workspace: one VM, its checkouts
+  desolate list [<domain>] [--json]
+  desolate exec <domain>/<workspace> [--checkout <repo>] -- <cmd>  a command, or an agent, inside it
+  desolate stop | start | rm <domain>/<workspace>
+  desolate rm <domain>                                           the domain and its clones; not the root's
+
   desolate help                                                  this text
 
 Every command that reads takes --json. Exit codes: 0 ok, 1 failed, 64 usage, 75 busy,
@@ -20,9 +29,10 @@ Every command that reads takes --json. Exit codes: 0 ok, 1 failed, 64 usage, 75 
 
 const out = (line: string) => process.stdout.write(`${line}\n`);
 
-const flags = (argv: string[], options: Record<string, { type: "boolean" | "string"; multiple?: boolean }>) => {
+type Flags = { values: Record<string, unknown>; positionals: string[] };
+const flags = (argv: string[], options: Record<string, { type: "boolean" | "string"; multiple?: boolean }>): Flags => {
   try {
-    return parseArgs({ args: argv, options: { json: { type: "boolean" }, help: { type: "boolean" }, ...options }, allowPositionals: true, strict: true });
+    return parseArgs({ args: argv, options: { json: { type: "boolean" }, help: { type: "boolean" }, ...options }, allowPositionals: true, strict: true }) as Flags;
   } catch (error) {
     throw new Refusal((error as Error).message, "desolate help", EXIT.usage);
   }
@@ -68,6 +78,36 @@ const main = async (argv: string[]): Promise<number> => {
     const { repos } = await import("./repos.ts");
     await repos(out, values.json === true);
     return EXIT.ok;
+  }
+  if (verb === "domain") {
+    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string" } });
+    const { domainCommand } = await import("./domains.ts");
+    await domainCommand(positionals, values, out);
+    return EXIT.ok;
+  }
+  if (verb === "up") {
+    const { values, positionals } = flags(rest, { name: { type: "string" }, checkout: { type: "string", multiple: true }, base: { type: "string" }, fetch: { type: "boolean" } });
+    const { up } = await import("./workspaces.ts");
+    await up(positionals[0], { name: values.name as string | undefined, checkouts: (values.checkout as string[] | undefined) ?? [], base: values.base as string | undefined, fetch: values.fetch === true }, out, values.json === true);
+    return EXIT.ok;
+  }
+  if (verb === "list" || verb === "status") {
+    const { values, positionals } = flags(rest, {});
+    const { list } = await import("./workspaces.ts");
+    await list(out, values.json === true, positionals[0]);
+    return EXIT.ok;
+  }
+  if (verb === "stop" || verb === "start" || verb === "rm") {
+    const { positionals } = flags(rest, {});
+    const workspaces = await import("./workspaces.ts");
+    await (verb === "stop" ? workspaces.stop : verb === "start" ? workspaces.start : workspaces.remove)(positionals[0], out);
+    return EXIT.ok;
+  }
+  if (verb === "exec") {
+    const split = rest.indexOf("--");
+    const { values, positionals } = flags(split < 0 ? rest : rest.slice(0, split), { checkout: { type: "string" } });
+    const { exec } = await import("./workspaces.ts");
+    return exec(positionals[0], split < 0 ? positionals.slice(1) : rest.slice(split + 1), { checkout: values.checkout as string | undefined });
   }
   throw new Refusal(`desolate has no command '${verb}'`, "desolate help", EXIT.usage);
 };

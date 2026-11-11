@@ -1,0 +1,156 @@
+$ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
+desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; tests only), instance <instance>
+  + home <home>
+    base image desolate/base:latest present (<id>)
+  = base image
+  + config: backend fake, forge stand-in (<forge>:22)
+  + root VM dsl-<instance>-root created
+  + root VM running
+  + root services: keyring
+bootstrap: 5 step(s) done.
+  ok   home: <home>
+  ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
+  ok   docker daemon: docker 29.9.3
+  ok   base image: desolate/base:latest <id>
+  ok   root VM running: dsl-<instance>-root
+  ok   root: keyring answers: 0 key(s) held
+  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: forge configured: yes
+doctor: all checks passed.
+[exit 0]
+
+## create a domain and start a workspace
+
+$ desolate domain create nests-dev --title suede.nests agentic development
+created the domain nests-dev ("suede.nests agentic development").
+next: desolate domain nests-dev add --repo <owner>/<repo>
+[exit 0]
+
+$ desolate domain nests-dev add --repo acme/widgets
+acme/widgets is now in the domain nests-dev: every workspace in it gets a checkout, borrowing the mirror's objects.
+next: desolate up nests-dev
+[exit 0]
+
+$ desolate domain nests-dev add --repo acme/consumer
+acme/consumer is now in the domain nests-dev: every workspace in it gets a checkout, borrowing the mirror's objects.
+next: desolate up nests-dev
+[exit 0]
+
+$ desolate up nests-dev
+workspace nests-dev/w1 is up  [NOT ISOLATED: fake backend]
+  acme/consumer  main checkout (main)  /workspaces/acme/consumer
+  acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  dev servers  http://nests-dev-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
+the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+[exit 0]
+
+## a second workspace in the domain
+
+$ desolate up nests-dev --name issue-12 --checkout acme/widgets=main
+desolate: the main checkout of acme/widgets is held by the workspace 'nests-dev/w1'. Two editors and two agents in one working tree is a corruption, not a feature
+  fix: take a worktree instead: --checkout acme/widgets=worktree:<branch>
+[exit 75]
+
+$ desolate up nests-dev --name issue-12 --checkout acme/widgets=worktree:issue/12
+workspace nests-dev/issue-12 is up  [NOT ISOLATED: fake backend]
+  acme/consumer  worktree issue-12 from main  /workspaces/acme/consumer/.worktrees/issue-12
+  acme/widgets  worktree issue/12 from main  /workspaces/acme/widgets/.worktrees/issue-12
+  dev servers  http://nests-dev-issue-12-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
+the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+[exit 0]
+
+## fetch, then start from the remote's main
+
+$ desolate up nests-dev --name fresh --fetch --base origin/main --checkout acme/widgets=worktree:issue/13
+workspace nests-dev/fresh is up  [NOT ISOLATED: fake backend]
+  acme/consumer  worktree fresh from origin/main  /workspaces/acme/consumer/.worktrees/fresh
+  acme/widgets  worktree issue/13 from origin/main  /workspaces/acme/widgets/.worktrees/issue-13
+  dev servers  http://nests-dev-fresh-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
+the start took <duration>: mirrors refreshed <duration>, planned <duration>, VM booted <duration>, services and checkouts <duration>
+fetching acme/consumer with the read key
+fetching acme/widgets with the read key
+[exit 0]
+
+## a second domain with the same repository
+
+$ desolate domain create other --title another boundary
+created the domain other ("another boundary").
+next: desolate domain other add --repo <owner>/<repo>
+[exit 0]
+
+$ desolate domain other add --repo acme/widgets
+acme/widgets is now in the domain other: every workspace in it gets a checkout, borrowing the mirror's objects.
+next: desolate up other
+[exit 0]
+
+$ desolate domain other add --repo acme/private
+acme/private is now in the domain other: every workspace in it gets a checkout, borrowing the mirror's objects.
+next: desolate up other
+[exit 0]
+
+$ desolate up other
+workspace other/w1 is up  [NOT ISOLATED: fake backend]
+  acme/private  main checkout (main)  /workspaces/acme/private
+  acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  dev servers  http://other-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
+the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+[exit 0]
+
+## exec and list
+
+$ desolate exec nests-dev/issue-12 --checkout acme/widgets -- bash -c pwd; git branch --show-current; exit 7
+/workspaces/acme/widgets/.worktrees/issue-12
+issue/12
+[exit 7]
+
+$ desolate list
+nests-dev  "suede.nests agentic development"  acme/consumer, acme/widgets
+  nests-dev/fresh  running  [not isolated]  acme/consumer@fresh, acme/widgets@issue/13
+  nests-dev/issue-12  running  [not isolated]  acme/consumer@issue-12, acme/widgets@issue/12
+  nests-dev/w1  running  [not isolated]  acme/consumer@main, acme/widgets@main
+other  "another boundary"  acme/private, acme/widgets
+  other/w1  running  [not isolated]  acme/private@main, acme/widgets@main
+[exit 0]
+
+## stop, start, rm
+
+$ desolate stop nests-dev/w1
+stopped nests-dev/w1. Its checkouts stay held; start it again with: desolate start nests-dev/w1
+[exit 0]
+
+$ desolate up nests-dev --name taker --checkout acme/widgets=main
+desolate: the main checkout of acme/widgets is held by the workspace 'nests-dev/w1'. Two editors and two agents in one working tree is a corruption, not a feature
+  fix: take a worktree instead: --checkout acme/widgets=worktree:<branch>
+[exit 75]
+
+$ desolate start nests-dev/w1
+workspace nests-dev/w1 is up (<duration>)
+[exit 0]
+
+$ desolate rm nests-dev/w1
+removed nests-dev/w1. Its branches and worktrees stay in the domain's clones.
+[exit 0]
+
+$ desolate up nests-dev --name taker --checkout acme/widgets=main
+workspace nests-dev/taker is up  [NOT ISOLATED: fake backend]
+  acme/consumer  main checkout (main)  /workspaces/acme/consumer
+  acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  dev servers  http://nests-dev-taker-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
+the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+[exit 0]
+
+## remove a domain
+
+$ desolate rm other
+desolate: the domain 'other' still has 1 workspace(s): w1
+  fix: desolate rm other/w1
+[exit 75]
+
+$ desolate rm other/w1
+removed other/w1. Its branches and worktrees stay in the domain's clones.
+[exit 0]
+
+$ desolate rm other
+removed the domain other; the root clones keep this domain's branches for as long as they are wanted.
+[exit 0]

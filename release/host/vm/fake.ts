@@ -28,9 +28,29 @@ const docker = (args: string[], options: { input?: string | Buffer; timeoutMs?: 
 
 /** A child process's stdio as one Duplex stream. */
 export const duplexOf = (child: ChildProcess): Duplex => {
-  const stream = Duplex.from({ writable: child.stdin!, readable: child.stdout! });
+  const stdin = child.stdin!;
+  const stdout = child.stdout!;
+  const stream = new Duplex({
+    read() {
+      stdout.resume();
+    },
+    write(chunk, encoding, callback) {
+      stdin.write(chunk, encoding, callback);
+    },
+    final(callback) {
+      stdin.end(callback);
+    },
+    destroy(error, callback) {
+      child.kill();
+      callback(error);
+    },
+  });
+  stdout.on("data", (chunk) => {
+    if (!stream.push(chunk)) stdout.pause();
+  });
+  stdout.on("end", () => stream.push(null));
+  stdin.on("error", () => {});
   child.on("error", (error) => stream.destroy(error));
-  stream.on("close", () => child.kill());
   return stream;
 };
 
