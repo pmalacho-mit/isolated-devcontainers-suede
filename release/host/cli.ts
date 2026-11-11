@@ -15,9 +15,13 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
 
   desolate domain create <slug> [--title "..."]                  a trust boundary: repositories and secrets
   desolate domain <slug> add --repo <owner/repo>                 give the domain a repository
+  desolate domain <slug> net [open | enforce | allow <host>... | deny <host>...]
+                                                                 the domain's network rules, at its proxies
+  desolate net log [<domain>] [--json]                           what each workspace asked to reach, and the verdict
   desolate up <domain> [--name <workspace>] [--fetch] [--base <ref>]
               [--checkout <owner/repo>=main|worktree:<branch>]   a workspace: one VM, its checkouts
   desolate list [<domain>] [--json]
+  desolate status | board <domain>[/<workspace>] [--json]        how each checkout says its work is going
   desolate ports [<domain>/<workspace>] [--json]                 what is forwarded, at which URL; what is reserved
   desolate exec <domain>/<workspace> [--checkout <repo>] -- <cmd>  a command, or an agent, inside it
   desolate stop | start | rm <domain>/<workspace>
@@ -92,10 +96,24 @@ const main = async (argv: string[]): Promise<number> => {
     await domainCommand(positionals, values, out);
     return EXIT.ok;
   }
+  if (verb === "net" && rest[0] === "log") {
+    const { values, positionals } = flags(rest.slice(1), {});
+    const { rootctl } = await import("./stack.ts");
+    const entries = await rootctl<{ time: string; domain: string; workspace: string; host: string; port: number; verdict: string; reason?: string }[]>("net.log", { domain: positionals[0] }, { quiet: true });
+    if (values.json === true) out(JSON.stringify(entries));
+    else for (const e of entries) out(`${e.time}  domain=${e.domain} workspace=${e.workspace}  ${e.verdict}  ${String(e.host).replace(/[^\x21-\x7e]/g, "?")}:${e.port}${e.reason ? `  (${e.reason})` : ""}`);
+    return EXIT.ok;
+  }
   if (verb === "up") {
     const { values, positionals } = flags(rest, { name: { type: "string" }, checkout: { type: "string", multiple: true }, base: { type: "string" }, fetch: { type: "boolean" } });
     const { up } = await import("./workspaces.ts");
     await up(positionals[0], { name: values.name as string | undefined, checkouts: (values.checkout as string[] | undefined) ?? [], base: values.base as string | undefined, fetch: values.fetch === true }, out, values.json === true);
+    return EXIT.ok;
+  }
+  if ((verb === "status" || verb === "board") && rest.some((arg) => !arg.startsWith("-"))) {
+    const { values, positionals } = flags(rest, {});
+    const { status } = await import("./status.ts");
+    await status(positionals[0], out, values.json === true);
     return EXIT.ok;
   }
   if (verb === "list" || verb === "status") {

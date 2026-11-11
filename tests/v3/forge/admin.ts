@@ -4,6 +4,7 @@
 //   admin.ts commit <owner/repo> <branch> <file> <text> a commit by someone else, pushed to the forge
 //   admin.ts pulls [<owner/repo>]                        what the stand-in Action opened
 //   admin.ts pushes                                      every push the forge accepted
+//   admin.ts upstream                                    every request the stand-in internet host received
 //   admin.ts access                                      every request, allowed or denied
 //   admin.ts refs <owner/repo>                           its branches and their commits
 //   admin.ts lfs-has <owner/repo> <oid>                  exit 0 if the forge holds that object
@@ -99,6 +100,8 @@ done
   console.log(JSON.stringify(lines("pulls.log").filter((pull) => !args[0] || pull.repo === args[0])));
 } else if (verb === "pushes") {
   console.log(JSON.stringify(lines("pushes.log")));
+} else if (verb === "upstream") {
+  console.log(JSON.stringify(lines("upstream.log")));
 } else if (verb === "access") {
   console.log(JSON.stringify(lines("access.log")));
 } else if (verb === "refs") {

@@ -73,6 +73,12 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     const offers = stack.desolate("offers");
     assert.match(offers.stdout, /Needs you:\n {2}dev {2}acme\/widgets {2}issue\/12 {2}[0-9a-f]{12} {2}from w1 {2}1 LFS object/);
     assert.equal(forgeRefs("acme/widgets")["issue/12"], undefined, "offering pushed nothing");
+    // And it says so, for the person and for a harness: shown, never acted on.
+    assert.equal(inWs("dev/w1", `cd ${WT} && /desolate/status set green "ready: fix for issue 12" && /desolate/status note "touches README only"`).code, 0);
+    const status = JSON.parse(stack.quiet("status", "dev/w1", "--json").stdout) as { status: { color: string; message: string } };
+    assert.deepEqual([status.status.color, status.status.message], ["green", "ready: fix for issue 12"]);
+    assert.match(stack.desolate("board", "dev").stdout, /dev\/w1 {2}\[green\] ready: fix for issue 12\n[\s\S]*\| touches README only/);
+    assert.equal(forgeRefs("acme/widgets")["issue/12"], undefined, "saying green pushed nothing either");
   });
 
   it("the root sees every domain's branches with ordinary git, without an offer", async () => {

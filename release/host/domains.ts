@@ -23,6 +23,19 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
     }
     refuse("add what?", `desolate domain ${first} add --repo <owner>/<repo>`, EXIT.usage);
   }
+  if (second === "net") {
+    // desolate domain <d> net [show] | open | enforce | allow <host>... | deny <host>... | allow-internal <ip>
+    const [, , action, ...rest] = args;
+    type Policy = { mode: string; hosts: string[]; internal: string[] };
+    const change = action === "open" || action === "enforce" ? { mode: action } : action === "allow" ? { allow: rest } : action === "deny" ? { deny: rest } : action === "allow-internal" ? { internal: rest } : null;
+    if (action && action !== "show" && !change) refuse(`'net ${action}' is not understood`, `desolate domain ${first} net show | open | enforce | allow <host>... | deny <host>... | allow-internal <address>`, EXIT.usage);
+    const policy = await rootctl<Policy>("net.policy", { domain: first, change: change ?? undefined }, { quiet: true });
+    if (json) return out(JSON.stringify(policy));
+    out(`${first}: ${policy.mode === "enforce" ? `only these hosts are reachable: ${policy.hosts.join(", ") || "(none)"}` : "any public host is reachable (open). Its workspaces still reach nothing internal"}`);
+    if (policy.mode === "open" && policy.hosts.length) out(`  listed, for when it is enforced: ${policy.hosts.join(", ")}`);
+    if (policy.internal.length) out(`  internal addresses it may reach: ${policy.internal.join(", ")}`);
+    return;
+  }
   if (second === "show" || second === undefined) {
     const d = await rootctl<{ slug: string; title: string; repos: string[]; workspaces: { workspace: string; state: string }[] }>("domain.show", { slug: first }, { quiet: true });
     if (json) return out(JSON.stringify(d));

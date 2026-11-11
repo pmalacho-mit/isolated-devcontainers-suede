@@ -9,6 +9,7 @@ STATE=/var/lib/desolate
 RUN=/run/desolate
 USER_NAME=$(getent passwd "$USER_UID" | cut -d: -f1)
 USER_GROUP=$(id -gn "$USER_NAME")
+USER_HOME=$(getent passwd "$USER_UID" | cut -d: -f6)
 NODE="node --disable-warning=ExperimentalWarning"
 
 id desolate-keyring >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin desolate-keyring
@@ -65,7 +66,7 @@ for _ in $(seq 1 100); do [ -S "$RUN/keyring/control.sock" ] && break; sleep 0.1
 ln -sf "$HERE/git-remote-desolate" /usr/local/bin/git-remote-desolate
 install -d -m 0755 -o "$USER_NAME" -g "$USER_GROUP" "$STATE/push-locks"
 if ! alive "$RUN/rootd.pid"; then
-  setsid runuser -u "$USER_NAME" -- env HOME="/home/$USER_NAME" GIT_CONFIG_GLOBAL="$STATE/gitconfig" \
+  setsid runuser -u "$USER_NAME" -- env HOME="$USER_HOME" GIT_CONFIG_GLOBAL="$STATE/gitconfig" \
     $NODE "$HERE/rootd.ts" >>"$STATE/rootd.log" 2>&1 </dev/null &
   echo $! >"$RUN/rootd.pid"
 fi

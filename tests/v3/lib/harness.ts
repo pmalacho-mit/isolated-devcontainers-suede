@@ -85,6 +85,7 @@ export const newStack = (label: string): Stack => {
     DESOLATE_FORGE_ADMIN: admin,
     DESOLATE_FORGE_SPEC: `stand-in:ssh://git@${ip}:22`,
     DESOLATE_FORGE_KNOWN_HOSTS: path.join(forgeState, "known_hosts"),
+    LIMA_HOME: path.join(home, "lima"),
     NO_COLOR: "1",
   };
   const transcript: string[] = [];
@@ -104,7 +105,7 @@ export const newStack = (label: string): Stack => {
   const vmExec = (vm: string, argv: string[], options: { root?: boolean; input?: string } = {}) =>
     backend === "fake"
       ? sh("docker", ["exec", "-i", "-u", options.root ? "0:0" : "desolate", "-e", `HOME=${options.root ? "/root" : "/home/desolate"}`, vm, ...argv], { input: options.input ?? "" })
-      : sh("limactl", ["shell", "--workdir", "/", vm, ...(options.root ? ["sudo"] : []), ...argv], { env, input: options.input ?? "" });
+      : sh(process.env.DESOLATE_LIMACTL ?? "limactl", ["--tty=false", "shell", "--workdir", "/", vm, ...(options.root ? ["sudo"] : []), ...argv], { env, input: options.input ?? "" });
 
   const stack: Stack = {
     tier: backend === "fake" ? "T2" : "T3",

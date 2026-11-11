@@ -5,7 +5,7 @@ import type { Repo } from "../shared/names.ts";
 export const ROOT = {
   mirrors: "/desolate/mirrors",
   clones: "/desolate/root",
-  domains: "/desolate/domains",
+  domains: process.env.DESOLATE_ROOT_DOMAINS ?? "/desolate/domains",
   release: "/desolate/release",
   state: process.env.DESOLATE_ROOT_STATE ?? "/var/lib/desolate",
   run: process.env.DESOLATE_ROOT_RUN ?? "/run/desolate",

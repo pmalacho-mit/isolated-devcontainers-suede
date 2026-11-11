@@ -46,3 +46,4 @@ todo.txt
 #   samples/     -- fixtures the test suite asserts against
 #   release/     -- the shipped tree; all of it is meant to be committed
 #   docs/dind/HANDOFF.md -- working notes for whoever picks this up next
+image-out/

@@ -1,0 +1,85 @@
+// Starting and stopping each workspace's proxy, and a domain's network rules.
+import { spawn } from "node:child_process";
+import * as fs from "node:fs";
+import { createServer } from "node:net";
+import * as path from "node:path";
+import { refuse } from "../../shared/exit.ts";
+import { readJson, writeJson } from "../../shared/json.ts";
+import { normalizeName } from "../../shared/sniff.ts";
+import { ROOT } from "../layout.ts";
+import type { Policy } from "./proxy.ts";
+
+const DIR = `${ROOT.state}/proxy`;
+const HERE = path.dirname(new URL(import.meta.url).pathname);
+type Running = { port: number; pid: number; domain: string; workspace: string };
+const file = (vm: string) => path.join(DIR, "running", `${vm}.json`);
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const free = (port: number) =>
+  new Promise<boolean>((resolve) => {
+    const probe = createServer();
+    probe.once("error", () => resolve(false));
+    probe.listen(port, "127.0.0.1", () => probe.close(() => resolve(true)));
+  });
+
+export const start = async (vm: string, domain: string, workspace: string): Promise<{ port: number }> => {
+  if (!/^[a-z0-9-]{1,60}$/.test(vm)) throw new Error("not a VM name");
+  const existing = readJson<Running | null>(file(vm), null);
+  if (existing && alive(existing.pid)) return { port: existing.port };
+  fs.mkdirSync(path.join(DIR, "running"), { recursive: true });
+  let port = 0;
+  for (let candidate = 21000; candidate < 22000 && port === 0; candidate++) if (await free(candidate)) port = candidate;
+  if (port === 0) throw new Error("no free port for a proxy in the root");
+  const log = fs.openSync(path.join(DIR, "proxy.log"), "a");
+  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", path.join(HERE, "proxy.ts"), String(port), domain, workspace], { detached: true, stdio: ["ignore", log, log] });
+  child.unref();
+  for (let waited = 0; (await free(port)) && waited < 5000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  writeJson(file(vm), { port, pid: child.pid, domain, workspace });
+  return { port };
+};
+
+export const stop = (vm: string) => {
+  const existing = readJson<Running | null>(file(vm), null);
+  if (existing && alive(existing.pid)) process.kill(existing.pid);
+  fs.rmSync(file(vm), { force: true });
+};
+
+const policyFile = (domain: string) => path.join(DIR, "policy", `${domain}.json`);
+export const policy = (domain: string): Policy => ({ mode: "open", hosts: [], internal: [], ...readJson<Partial<Policy>>(policyFile(domain), {}) });
+
+export const setPolicy = (domain: string, change: { mode?: unknown; allow?: unknown; deny?: unknown; internal?: unknown }): Policy => {
+  const next = policy(domain);
+  if (change.mode !== undefined) {
+    if (change.mode !== "open" && change.mode !== "enforce") refuse("a domain's network is 'open' or 'enforce'", `desolate domain ${domain} net enforce | open`);
+    next.mode = change.mode;
+  }
+  const hosts = (value: unknown) => (Array.isArray(value) ? value : []).map((host) => {
+    const text = String(host);
+    const name = normalizeName(text.startsWith("*.") ? text.slice(2) : text);
+    if (!name || text.includes(":")) refuse(`'${text}' is not a hostname or a *.wildcard`, "for example: api.example.com or *.example.com");
+    return text.startsWith("*.") ? `*.${name}` : name!;
+  });
+  next.hosts = [...new Set([...next.hosts, ...hosts(change.allow)])].filter((host) => !hosts(change.deny).includes(host)).sort();
+  for (const address of Array.isArray(change.internal) ? change.internal : []) {
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(String(address))) refuse(`'${String(address)}' is not an IPv4 address`, "name the one internal address this domain may reach");
+    if (!next.internal.includes(String(address))) next.internal.push(String(address));
+  }
+  writeJson(policyFile(domain), next, 0o600);
+  return next;
+};
+
+export const auditLog = (filter: { domain?: string; last?: number }) => {
+  let lines: string[] = [];
+  try {
+    lines = fs.readFileSync(path.join(DIR, "audit.log"), "utf8").trim().split("\n").filter(Boolean);
+  } catch {
+    /* nothing audited yet */
+  }
+  return lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((entry) => !filter.domain || entry.domain === filter.domain).slice(-(filter.last ?? 100));
+};

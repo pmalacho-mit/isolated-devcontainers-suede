@@ -77,6 +77,10 @@ export interface Backend {
   attach(name: string, argv: string[], options?: { cwd?: string }): Promise<number>;
   /** Open a TCP connection to a port on the VM's loopback, from the host. */
   dial(name: string, port: number): Duplex;
+  /** A workspace's link to its proxy: the address the guest connects to, and, where the
+   *  backend carries it over a loopback port on the host, that port (the host daemon then
+   *  listens there as well as on the socket). */
+  link(name: string): { guest: string; hostPort?: number };
   /** TCP listeners inside the VM right now. */
   listeners(name: string): Promise<Listener[]>;
   logs(name: string): Promise<string>;

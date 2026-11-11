@@ -23,14 +23,20 @@
     // The imports really are written `./thing.ts`, because that is what node
     // resolves at runtime. Without this, every import in the tree is an error.
     "allowImportingTsExtensions": true,
+    // node strips types and nothing more: syntax that needs compiling (enums, parameter
+    // properties, namespaces) would not run, so it is an error here.
+    "erasableSyntaxOnly": true,
+    "noUncheckedIndexedAccess": true,
     // @types/node and friends are not ours to fix, and a break in one of them
     // is not a break in this stack.
     "skipLibCheck": true
   },
-  "include": ["release/**/*.ts", "release/**/*.mts", "tests/**/*.ts"],
+  "include": ["release/**/*.ts", "tests/v3/**/*.ts"],
   // docs/typescript2mermaid-suede is a vendored tool with its own dependency
   // (ts-morph, uninstalled here), and .worktrees holds whole other checkouts of
   // this same repo -- type-checking either would report failures that say
   // nothing about the change in front of you.
-  "exclude": ["node_modules", ".worktrees", "docs"]
+  // carryover/ is v2 code waiting to be ported (carryover/README.md): its imports point at
+  // files that no longer exist, so it is not checked until each piece moves into release/.
+  "exclude": ["node_modules", ".worktrees", "docs", "carryover"]
 }

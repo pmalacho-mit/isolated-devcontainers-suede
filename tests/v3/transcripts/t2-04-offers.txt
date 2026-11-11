@@ -33,6 +33,13 @@ Needs you:
     review: desolate review dev acme/widgets issue/12
 [exit 0]
 
+$ desolate board dev
+dev/w1  [green] ready: fix for issue 12
+  acme/consumer@main  (no status)
+  acme/widgets@issue/12  [green] ready: fix for issue 12  (<time>)
+    | touches README only
+[exit 0]
+
 ## the root's view
 
 ## review

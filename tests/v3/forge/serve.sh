@@ -34,4 +34,6 @@ PidFile $STATE/sshd.pid
 LogLevel VERBOSE
 C
 FORGE_STATE=$STATE FORGE_LFS_PORT=$LFS_PORT node --disable-warning=ExperimentalWarning "$HERE/lfs.ts" >>"$STATE/lfs.log" 2>&1 &
+touch "$STATE/upstream.log"
+FORGE_STATE=$STATE node --disable-warning=ExperimentalWarning "$HERE/upstream.ts" >>"$STATE/upstream.err" 2>&1 &
 exec /usr/sbin/sshd -D -e -f "$STATE/sshd_config" >>"$STATE/sshd.log" 2>&1

@@ -45,12 +45,14 @@ export const specOf = (plan: WorkspacePlan, repos: string[]): VmSpec => ({
 
 const startServices = async (plan: WorkspacePlan) => {
   const b = backend();
-  const services = await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!())], { root: true, timeoutMs: 180_000 });
+  // The workspace's own proxy, in the root; then its link, which leads there and nowhere else.
+  const proxy = await rootctl<{ port: number }>("proxy.start", { vm: plan.vm, domain: plan.domain, workspace: plan.workspace }, { quiet: true });
+  const { connectWorkspace } = await import("./daemon.ts");
+  await connectWorkspace({ ...plan, proxyPort: proxy.port });
+  const services = await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest], { root: true, timeoutMs: 300_000 });
   if (services.code !== 0) throw new Error(`the workspace's services did not start: ${(services.stderr || services.stdout).trim().slice(-600)}`);
   const init = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/init.ts`, plan.workspace], { timeoutMs: 900_000 });
   if (init.code !== 0) throw new Error(`the workspace could not make its checkouts: ${(init.stderr || init.stdout).trim().slice(-800)}`);
-  const { connectWorkspace } = await import("./daemon.ts");
-  await connectWorkspace(plan);
 };
 
 export const urlsOf = (plan: { domain: string; workspace: string }) => ({
@@ -124,6 +126,7 @@ export const stop = async (target: string | undefined, out: Out) => {
   const b = backend();
   const { disconnectWorkspace } = await import("./daemon.ts");
   await disconnectWorkspace(w.vm);
+  await rootctl("proxy.stop", { vm: w.vm }, { quiet: true }).catch(() => {});
   if ((await b.info(w.vm)).status === "running") await b.stop(w.vm);
   await rootctl("workspace.state", { domain: w.domain, name: w.workspace, state: "stopped" }, { quiet: true });
   out(`stopped ${w.domain}/${w.workspace}. Its checkouts stay held; start it again with: desolate start ${w.domain}/${w.workspace}`);
@@ -151,6 +154,7 @@ export const remove = async (target: string | undefined, out: Out) => {
   const w = await find(target);
   const { disconnectWorkspace } = await import("./daemon.ts");
   await disconnectWorkspace(w.vm);
+  await rootctl("proxy.stop", { vm: w.vm }, { quiet: true }).catch(() => {});
   await backend().destroy(w.vm);
   fs.rmSync(paths.link(w.vm), { recursive: true, force: true });
   await rootctl("workspace.remove", { domain: w.domain, name: w.workspace }, { quiet: true });

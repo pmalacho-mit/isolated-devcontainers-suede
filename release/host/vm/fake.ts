@@ -220,6 +220,10 @@ export const fakeBackend = (): Backend => {
       return duplexOf(spawn("docker", ["exec", "-i", "-u", "0:0", name, "socat", "STDIO", `TCP:127.0.0.1:${port}`], { stdio: ["pipe", "pipe", "ignore"] }));
     },
 
+    link() {
+      return { guest: "unix:/desolate/link/proxy.sock" };
+    },
+
     async listeners(name): Promise<Listener[]> {
       const result = await docker(["exec", "-u", "0:0", name, "ss", "-H", "-ltn"], { timeoutMs: 10_000 });
       if (result.code !== 0) throw new Error(`cannot list listeners in ${name}: ${result.stderr.trim()}`);

@@ -8,6 +8,7 @@ import { ask } from "./keyring-client.ts";
 import { FORGE, KEYRING } from "./layout.ts";
 import * as domains from "./domains.ts";
 import * as offers from "./offers.ts";
+import * as proxy from "./proxy/manage.ts";
 import * as repos from "./repos.ts";
 
 type Log = (line: string) => void;
@@ -68,6 +69,21 @@ export const ops: Record<string, Op> = {
   },
   async "workspace.remove"(args) {
     return domains.removeWorkspace(domains.slugOf(args.domain, "domain"), domains.slugOf(args.name, "workspace"));
+  },
+
+  async "proxy.start"(args) {
+    return proxy.start(String(args.vm), domains.slugOf(args.domain, "domain"), domains.slugOf(args.workspace, "workspace"));
+  },
+  async "proxy.stop"(args) {
+    proxy.stop(String(args.vm));
+    return {};
+  },
+  async "net.policy"(args) {
+    const slug = domains.domain(domains.slugOf(args.domain, "domain")).slug;
+    return args.change ? proxy.setPolicy(slug, args.change as Parameters<typeof proxy.setPolicy>[1]) : proxy.policy(slug);
+  },
+  async "net.log"(args) {
+    return proxy.auditLog({ domain: typeof args.domain === "string" ? args.domain : undefined, last: Number(args.last) || 100 });
   },
 
   async "offers.list"(args) {

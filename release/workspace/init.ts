@@ -6,6 +6,7 @@
 // A domain clone borrows the mirror's objects (git clone --shared), so it costs no download
 // and almost no disk, and holds only what was made in it (section 6.2).
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { readJson } from "../shared/json.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
@@ -90,6 +91,6 @@ if (who.code !== 0) {
   await git(null, ["config", "--global", "user.name", `${plan.domain}/${plan.workspace}`]);
   await git(null, ["config", "--global", "user.email", `${plan.workspace}@${plan.domain}.desolate.invalid`]);
 }
-fs.mkdirSync("/home/desolate/.desolate", { recursive: true });
-fs.writeFileSync("/home/desolate/.desolate/workspace.json", JSON.stringify(plan, null, 2));
+fs.mkdirSync(path.join(os.homedir(), ".desolate"), { recursive: true });
+fs.writeFileSync(path.join(os.homedir(), ".desolate", "workspace.json"), JSON.stringify(plan, null, 2));
 process.stdout.write(JSON.stringify({ ok: true, made, checkouts: plan.checkouts.map((c) => ({ repo: c.repo, branch: c.branch, path: c.path })) }) + "\n");

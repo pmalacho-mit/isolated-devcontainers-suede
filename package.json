@@ -2,17 +2,16 @@
   "name": "isolated-devcontainers-suede",
   "private": true,
   "type": "module",
-  "description": "Dev-only manifest. NOT shipped -- release/ is the shipped tree and carries no package.json. Exists for two reasons: it pins ESM resolution for the .ts files node runs during tests, and it gives the suite memorable entry points.",
+  "description": "Dev-only manifest. NOT shipped -- release/ is the shipped tree and carries no package.json. It pins ESM resolution for the .ts files node runs during tests, pins the TypeScript that type-checks them, and gives the suite memorable entry points.",
   "engines": {
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "./tests/run.sh",
-    "test:static": "./tests/run.sh static",
-    "test:unit": "./tests/run.sh unit",
-    "test:integration": "./tests/run.sh integration",
-    "test:all": "./tests/run.sh all",
-    "lint:sh": "shellcheck -S warning release/*.sh release/vm/*.sh release/proxy/vm/install.sh release/proxy/container/*.sh release/vscode-image/*.sh tests/*.sh tests/**/*.sh .devcontainer/*.sh",
+    "test": "./tests/v3/run.sh t1",
+    "test:t1": "./tests/v3/run.sh t1",
+    "test:t2": "./tests/v3/run.sh t2",
+    "test:t3": "./tests/v3/run.sh t3",
+    "test:all": "./tests/v3/run.sh all",
     "lint:types": "tsc --noEmit -p ."
   },
   "devDependencies": {

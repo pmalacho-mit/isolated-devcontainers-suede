@@ -168,15 +168,25 @@ const serve = async () => {
     fs.mkdirSync(dir, { recursive: true });
     const socket = path.join(dir, "proxy.sock");
     fs.rmSync(socket, { force: true });
-    const server = createServer((client) => {
+    const carry = (client: Socket) => {
       client.on("error", () => client.destroy());
       if (entry.proxyPort === null) return client.destroy();
       // To this workspace's proxy in the root, and nowhere else.
       pipe(client, b.dial(ROOT_VM, entry.proxyPort), Buffer.alloc(0));
-    });
+    };
+    const server = createServer(carry);
     server.on("error", (error) => log(`link ${entry.vm}: ${error.message}`));
     server.listen(socket, () => fs.chmodSync(socket, 0o666));
     entry.link = server;
+    // vz: the guest reaches its link through one loopback port on the host, the only one
+    // its confinement allows it.
+    const hostPort = b.link(entry.vm).hostPort;
+    if (hostPort) {
+      const tcp = createServer(carry);
+      tcp.on("error", (error) => log(`link ${entry.vm} on port ${hostPort}: ${error.message}`));
+      tcp.listen({ port: hostPort, host: "127.0.0.1", exclusive: true });
+      server.on("close", () => tcp.close());
+    }
   };
 
   const register = (r: Registered) => {
@@ -258,14 +268,22 @@ const serve = async () => {
   try {
     const domains = await rootctl<{ slug: string; workspaces: (WorkspacePlan & { proxyPort?: number })[] }[]>("domain.list", {}, { quiet: true, timeoutMs: 30_000 });
     const running = new Set((await b.list()).filter((vm) => vm.status === "running").map((vm) => vm.name));
-    for (const d of domains) for (const w of d.workspaces) if (running.has(w.vm)) register({ vm: w.vm, domain: w.domain, workspace: w.workspace, proxyPort: w.proxyPort ?? null });
+    for (const d of domains)
+      for (const w of d.workspaces)
+        if (running.has(w.vm)) {
+          const proxy = await rootctl<{ port: number }>("proxy.start", { vm: w.vm, domain: w.domain, workspace: w.workspace }, { quiet: true, timeoutMs: 60_000 });
+          register({ vm: w.vm, domain: w.domain, workspace: w.workspace, proxyPort: proxy.port });
+        }
   } catch (error) {
     log(`could not list workspaces at start: ${String(error)}`);
   }
   for (;;) {
+    const started = Date.now();
     await Promise.all([...entries.values()].map(sync));
     reconcile();
-    await sleep(1000);
+    // Asking a VM costs what its exec costs: little on a Mac, seconds under emulation. The
+    // pause is never shorter than a second, and never so short that asking is all the VMs do.
+    await sleep(Math.max(1000, 3 * (Date.now() - started)));
   }
 };
 

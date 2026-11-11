@@ -1,0 +1,56 @@
+$ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
+desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; tests only), instance <instance>
+  + home <home>
+    base image desolate/base:latest present (<id>)
+  = base image
+  + config: backend fake, forge stand-in (<forge>:22)
+  + root VM dsl-<instance>-root created
+  + root VM running
+  + root services: keyring
+bootstrap: 5 step(s) done.
+  ok   home: <home>
+  ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
+  ok   docker daemon: docker 29.9.3
+  ok   base image: desolate/base:latest <id>
+  ok   root VM running: dsl-<instance>-root
+  ok   root: keyring answers: 0 key(s) held
+  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: forge configured: yes
+doctor: all checks passed.
+[exit 0]
+
+## internal addresses
+
+## reaching a host through the proxy
+
+$ desolate domain dev net allow-internal <forge>
+dev: any public host is reachable (open). Its workspaces still reach nothing internal
+  internal addresses it may reach: <forge>
+[exit 0]
+
+## per-domain network rules
+
+$ desolate domain dev net allow api.example.test
+dev: any public host is reachable (open). Its workspaces still reach nothing internal
+  listed, for when it is enforced: api.example.test
+  internal addresses it may reach: <forge>
+[exit 0]
+
+$ desolate domain dev net enforce
+dev: only these hosts are reachable: api.example.test
+  internal addresses it may reach: <forge>
+[exit 0]
+
+$ desolate domain dev net allow not a host
+desolate: 'not a host' is not a hostname or a *.wildcard
+  fix: for example: api.example.com or *.example.com
+[exit 1]
+
+## the audit
+
+$ desolate net log two
+<time>  domain=two workspace=w1  allowed  other.example.test:80
+[exit 0]
+
+## root in the workspace, without the relay

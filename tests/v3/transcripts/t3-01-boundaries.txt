@@ -1,0 +1,87 @@
+## bootstrap on the qemu backend
+
+$ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
+desolate bootstrap: backend qemu, instance <instance>
+  + home <home>
+    creating the base VM from /home/claude/img
+  + base image
+  + config: backend qemu, forge stand-in (<forge>:22)
+  + root VM dsl-<instance>-root created
+  + root VM running
+  + root services: keyring
+bootstrap: 6 step(s) done.
+  ok   home: <home>
+  ok   backend gives isolation: qemu
+  ok   lima: limactl version 2.3.0
+  ok   qemu: /usr/bin/qemu-system-x86_64
+  ok   socat (carries a workspace's link): present
+  ok   acceleration: none: software emulation (TCG). A real VM boundary, and slow: minutes to boot
+  ok   base image: the base VM dsl-<instance>-base
+  ok   root VM running: dsl-<instance>-root
+  ok   root: keyring answers: 0 key(s) held
+  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: forge configured: yes
+doctor: all checks passed.
+[exit 0]
+
+## clone, domain, workspace
+
+$ desolate clone acme/widgets
+  read key: registered
+  write key: registered (it asks you before every push)
+cloned acme/widgets: 1 branch(es), default main, 1 LFS object(s); pushable.
+next: desolate domain create <slug> && desolate domain <slug> add --repo acme/widgets
+fetching acme/widgets with the read key
+[exit 0]
+
+$ desolate domain create a
+created the domain a ("a").
+next: desolate domain a add --repo <owner>/<repo>
+[exit 0]
+
+$ desolate domain a add --repo acme/widgets
+acme/widgets is now in the domain a: every workspace in it gets a checkout, borrowing the mirror's objects.
+next: desolate up a
+[exit 0]
+
+$ desolate up a
+workspace a/w1 is up
+  acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  dev servers  http://a-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
+the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+[exit 0]
+
+## root in the VM against the read-only shares
+
+## root in the VM against the network
+
+## a second domain
+
+$ desolate domain create b
+created the domain b ("b").
+next: desolate domain b add --repo <owner>/<repo>
+[exit 0]
+
+$ desolate domain b add --repo acme/widgets
+acme/widgets is now in the domain b: every workspace in it gets a checkout, borrowing the mirror's objects.
+next: desolate up b
+[exit 0]
+
+$ desolate up b
+workspace b/w1 is up
+  acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  dev servers  http://b-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
+the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+[exit 0]
+
+## destroy
+
+$ desolate destroy --all
+  - VM dsl-<instance>-<vm> (a/w1)
+  - VM dsl-<instance>-<vm> (b/w1)
+  - VM dsl-<instance>-base
+  - VM dsl-<instance>-root (root)
+  - <home>
+destroy: nothing of this stack is left.
+[exit 0]

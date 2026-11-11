@@ -5,6 +5,8 @@
 //   desolate offer [<owner/repo>] [<branch>]  bundle a branch for the root; a person pushes it
 //   desolate sync                          write this domain's branches out for the root now
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { isBranch, parseRepo, repoId } from "../shared/names.ts";
 import { run } from "../shared/run.ts";
 import { branches, domainRepos, importDeliveries, request, stageLfs, syncRepo } from "./sync.ts";
@@ -15,7 +17,7 @@ const fail = (message: string, fix: string): never => {
 };
 const workspace = (() => {
   try {
-    return JSON.parse(fs.readFileSync("/home/desolate/.desolate/workspace.json", "utf8")) as { workspace: string; domain: string };
+    return JSON.parse(fs.readFileSync(path.join(os.homedir(), ".desolate", "workspace.json"), "utf8")) as { workspace: string; domain: string };
   } catch {
     return { workspace: "unknown", domain: "unknown" };
   }
