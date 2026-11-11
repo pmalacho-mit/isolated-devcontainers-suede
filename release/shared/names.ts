@@ -70,3 +70,9 @@ export const editorHostPort = () => {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error(`DESOLATE_EDITOR_PORT must be a port from 1024 to 65535, not '${process.env.DESOLATE_EDITOR_PORT}'`);
   return port;
 };
+
+/** The root UI (section 4.8): the state service in the root VM, and the root's editor. Both
+ *  are on the root VM's loopback; the host's forwarder carries them on the editors' port,
+ *  the dashboard at ROOT_HOSTNAME and the root editor at ROOT_EDITOR_HOSTNAME. */
+export const ROOT_UI = { port: 31590 } as const;
+export const ROOT_EDITOR_HOSTNAME = "desolate-editor.localhost";

@@ -58,8 +58,9 @@ desolate domain create dev --title "widgets work"
 desolate domain dev add --repo acme/widgets
 desolate up dev --name issue-12 --fetch \
     --checkout acme/widgets=worktree:issue/12 --base origin/main
+desolate ui                                          # the dashboard (and the root editor): in your browser
 desolate editor dev/issue-12                         # the address of its editor, for your browser
-desolate exec dev/issue-12 -- <an agent, or any command>
+desolate exec dev/issue-12 -- <an agent, or any command>     # in its devcontainer (--vm: the VM itself)
 desolate domain dev secret set MYAPP-OPENAI-KEY --hosts api.openai.com --headers authorization
                                                      # the value on stdin; workspaces send the name
 desolate ports                                       # each dev server's URL, at the port it has inside
@@ -88,6 +89,16 @@ an agent harness, not anything in a VM. Elsewhere it is a key file and a prompt 
 terminal (`DESOLATE_APPROVER=terminal`), which stops everything in the VMs but not a program
 running as you on the host. `desolate approve --selftest` checks it without pushing anything.
 
+**The dashboard** (`desolate ui`) is served by the root VM: every domain as a card, each
+workspace with its status colour, "Needs you" on top, one click to open an editor, start,
+stop, review an offer or push it (a push still waits for your approval on the host). It
+shows the command behind every button. [A screenshot](../docs/v3/dashboard.png).
+
+**Devcontainers.** A workspace runs its project's own `devcontainer.json`, unchanged, with
+the devcontainer CLI and a docker daemon inside the workspace's VM. Nothing in a spec is
+refused: the VM is the boundary. A spec that does not come up leaves the workspace as the
+VM itself, and `up` says why.
+
 **Secrets.** A workspace never holds a secret's value. It holds the name
 (`export OPENAI_API_KEY=MYAPP-OPENAI-KEY`), and the root puts the value in its place on the
 way out, only over TLS, only toward the hosts the secret names, only in the headers it names.
@@ -114,9 +125,10 @@ everything but the hypervisor boundary. "T3" is real VMs on Linux (QEMU through 
 | P5: read-only shares against root in the VM | yes | **T3** (and measured on an M1 for the Mac) | |
 | P5: forced egress against root in the VM | yes | **T3**; Mac: measured for TCP, UDP, DNS; ICMP unverified | |
 | Egress through each workspace's own proxy, per-domain rules, audit by link | yes | T2, T3 | |
-| Secrets: per domain, substituted for the hosts and headers they name, proven by the upstream's certificate, scrubbed from responses | yes | T2 | switching a secret off for a while (v2's `off`/`until`); the CA inside a project's devcontainer |
-| **P1: the editor**: VSCodium's server in every workspace VM, its own hostname, v2's gate | yes | T2 (HTTP, WebSocket, a real browser), T3 | the project's devcontainer is not started (the editor's terminal is the VM's); desolate's extension (`carryover/editor/extension`) is not ported; no root editor |
-| The root UI (dashboard), the state service | no | | |
+| Secrets: per domain, substituted for the hosts and headers they name, proven by the upstream's certificate, scrubbed from responses, switched off and on (`--ttl`) | yes | T2, T3 | v2's self-test fixture; "learn" as a timed mode |
+| **P1: the editor**: VSCodium's server in every workspace VM (in the project's devcontainer when it can), its own hostname, v2's gate | yes | T2 (HTTP, WebSocket, a real browser), T3 | desolate's workspace extension (`carryover/editor/extension`: mapping `localhost` URLs) is not ported |
+| The project's devcontainer, from its own `devcontainer.json`, inside the workspace VM; `exec` and the editor enter it | yes | T2 (an image, a Dockerfile, a failing spec, no spec, a changed spec) | compose specs start but their ports are not forwarded; features, templates and caches (C2 to C4) are not built or untested |
+| The root UI: a state service in the root that pushes changes, a dashboard at `desolate.localhost`, the root editor (Restricted Mode) | yes | T2 (the spec's three budgets, a real browser), T3 (the state reaches the dashboard) | the dashboard is a page beside the root editor, not yet an extension inside it; `upstream` |
 | The Mac backend (`vz`) | written from the M1's measurements | **never run** | `docs/v3/HANDOFF.md` says how to bring it up |
 
 ## Layout
@@ -129,7 +141,10 @@ host/              runs on the host: the CLI, the daemon (forwarder, links), the
   approver.ts      the key that approves pushes (approver/touchid.swift: the Mac's Secure Enclave)
 root/              runs in the root VM: keyring, mirrors, clones, offers, push, proxies
   proxy/           each workspace's proxy; each domain's secrets and its secrets proxy
-workspace/         runs in each workspace VM: its init, its daemon, its network, its editor
+  stated.ts, ui/   the state service and the dashboard it serves; editor.sh: the root editor
+workspace/         runs in each workspace VM: its init, its daemon, its network, its
+                   devcontainer (devcontainer.ts, enter.sh), its editor
+completion.bash    tab completion: source <(desolate completion)
 shared/            names, exit codes, the name sniffer: used on more than one side
 image/             what a VM image contains (provision.sh) and how it is built
 docs/incidents.md  ways desolate has been wrong, and what each taught

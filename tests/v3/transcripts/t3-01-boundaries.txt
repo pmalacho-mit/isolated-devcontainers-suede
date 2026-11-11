@@ -11,7 +11,8 @@ desolate bootstrap: backend qemu, instance <instance>
   + root VM dsl-<instance>-root created
   + root VM running
   + root services: keyring
-  + root: the approver's public key
+  + root: the approver's public key and the host daemon's token
+  dashboard    http://desolate.localhost:31591/   (and: desolate ui)
 bootstrap: 8 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: qemu
@@ -53,9 +54,10 @@ next: desolate up a
 $ desolate up a
 workspace a/w1 is up
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://a-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fwidgets
   dev servers  http://a-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
+the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
 [exit 0]
 
 ## root in the VM against the read-only shares
@@ -92,9 +94,10 @@ next: desolate up b
 $ desolate up b
 workspace b/w1 is up
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://b-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fwidgets
   dev servers  http://b-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
+the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
 [exit 0]
 
 ## destroy

@@ -1,5 +1,6 @@
 // Workspaces, from the host: up, list, stop, rm, exec.
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { EXIT, refuse } from "../shared/exit.ts";
 import { devHostname, editorHostname, editorHostPort, parseRepo } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
@@ -37,11 +38,20 @@ export const specOf = (plan: WorkspacePlan, repos: string[]): VmSpec => ({
     }),
   ],
   sockets: [{ host: `${paths.link(plan.vm)}/proxy.sock`, guest: guest.linkSocket }],
-  cpus: 2,
-  memoryMiB: 4096,
+  // Question 9 (resource limits): fixed for now, with the environment as the one knob.
+  cpus: sized("DESOLATE_WORKSPACE_CPUS", 2, 1, 64),
+  memoryMiB: sized("DESOLATE_WORKSPACE_MEMORY_MIB", 4096, 1024, 262_144),
   diskGiB: 30,
   labels: { title: `${plan.domain}/${plan.workspace}`, domain: plan.domain, workspace: plan.workspace },
 });
+
+const sized = (name: string, fallback: number, min: number, max: number) => {
+  const value = process.env[name];
+  if (value === undefined || value === "") return fallback;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < min || number > max) refuse(`${name} is '${value}'`, `a whole number from ${min} to ${max}`);
+  return number;
+};
 
 const startServices = async (plan: WorkspacePlan) => {
   const b = backend();
@@ -53,6 +63,8 @@ const startServices = async (plan: WorkspacePlan) => {
   if (services.code !== 0) throw new Error(`the workspace's services did not start: ${(services.stderr || services.stdout).trim().slice(-600)}`);
   const init = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/init.ts`, plan.workspace], { timeoutMs: 900_000 });
   if (init.code !== 0) throw new Error(`the workspace could not make its checkouts: ${(init.stderr || init.stdout).trim().slice(-800)}`);
+  // A docker daemon only where one is wanted: a checkout with a spec (start.sh says how).
+  if (plan.checkouts.some((c) => locateSpec(paths.domainRepos(plan.domain), c))) await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest, "docker"], { root: true, timeoutMs: 300_000 });
   // The project's devcontainer, then the editor (which runs in it when it can). Neither
   // fails the workspace: without them it is the VM itself, and `up` says which it is.
   const dev = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/devcontainer.ts`, plan.workspace], { timeoutMs: 3_700_000 });
@@ -81,6 +93,13 @@ export const editor = async (target: string | undefined, out: Out, json: boolean
   out(json ? JSON.stringify(result) : (result as { url: string }).url);
 };
 
+/** Whether a checkout carries a devcontainer spec: its existence only, read on the host as
+ *  data (P4), where the checkout is a directory in the domain's share. */
+const locateSpec = (reposDir: string, c: { repo: string; kind: string; name: string }) => {
+  const dir = c.kind === "main" ? path.join(reposDir, c.repo) : path.join(reposDir, c.repo, ".worktrees", c.name);
+  return fs.existsSync(path.join(dir, ".devcontainer", "devcontainer.json")) || fs.existsSync(path.join(dir, ".devcontainer.json"));
+};
+
 export const urlsOf = (plan: { domain: string; workspace: string }) => ({
   editor: `http://${editorHostname(INSTANCE, plan.domain, plan.workspace)}:${editorHostPort()}`,
   dev: `http://${devHostname(INSTANCE, plan.domain, plan.workspace)}`,
@@ -91,6 +110,8 @@ export const up = async (domain: string | undefined, options: { name?: string; c
   const phases: [string, number][] = [];
   let mark = Date.now();
   const phase = (name: string) => {
+    // For whoever is watching the start as it happens (the dashboard): each phase as it ends.
+    if (process.env.DESOLATE_PROGRESS) process.stderr.write(`progress: ${name} (${((Date.now() - mark) / 1000).toFixed(1)} s)\n`);
     phases.push([name, Date.now() - mark]);
     mark = Date.now();
   };

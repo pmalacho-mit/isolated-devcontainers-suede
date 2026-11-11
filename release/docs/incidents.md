@@ -54,6 +54,15 @@ page is about, and because three of them were mistakes in the *tests*.
 - **A killed process that still had a pid.** In the fake backend nothing reaps a detached
   child, so a secrets proxy that had been killed still answered `kill -0`, was taken for
   running, and its hosts were refused for ever. "Running" now means "listening".
+- **An answer that had arrived, waited for.** The host's daemon talked to the root's state
+  service and waited for the connection to close before believing the answer. What carries
+  a connection into a VM does not close until the caller does, so every call "timed out"
+  with its answer already in hand, and the first hand-off of a dashboard request gave the
+  request to a caller that then threw it away. Two fixes, both kept: an answer is complete
+  at its Content-Length, and a request stays queued until the host reports on it.
+- **A test that read a socket.** "No file on the host holds a private key" read every file
+  under the home, and failed when the host's daemon began to run from bootstrap and left a
+  socket there. The check now reads files.
 
 ## Found by the 2026 security audits
 

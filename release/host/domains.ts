@@ -45,7 +45,7 @@ const trustCa = async (domain: string) => {
   for (const w of d.workspaces) if (running.has(w.vm)) await b.exec(w.vm, ["bash", `${guest.release}/workspace/net/trust-ca.sh`], { root: true, timeoutMs: 120_000 });
 };
 
-export const domainCommand = async (args: string[], values: Record<string, unknown>, out: Out) => {
+export const domainCommand = async (args: string[], values: Record<string, unknown>, out: Out): Promise<void> => {
   const json = values.json === true;
   const [first, second] = args;
   if (first === "create") {
@@ -62,7 +62,16 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
       if (added.note) out(`note: ${added.note}`);
       return out(`next: desolate up ${first}`);
     }
-    refuse("add what?", `desolate domain ${first} add --repo <owner>/<repo>`, EXIT.usage);
+    // The spec's spelling for a secret (section 8): `add --secret NAME --hosts ... [--headers ...]`.
+    if (typeof values.secret === "string") return domainCommand([first, "secret", "set", values.secret], values, out);
+    refuse("add what?", `desolate domain ${first} add --repo <owner>/<repo> | add --secret <NAME> --hosts <host>[,...] [--headers <header>[,...]]`, EXIT.usage);
+  }
+  if (second === "env") {
+    // desolate domain <d> env [--from <owner/repo>]   (section 4.5, way 1; `compose` is not built)
+    if (args[2] === "compose") refuse("composing one environment from several specs is not built yet", `choose one repository's: desolate domain ${first} env --from <owner>/<repo>`);
+    const env = await rootctl<{ env: string | null; repos: string[] }>("domain.env", { slug: first, repo: typeof values.from === "string" ? values.from : undefined }, { quiet: true });
+    if (json) return out(JSON.stringify(env));
+    return out(env.env ? `${first}: its workspaces run ${env.env}'s devcontainer.json. (New workspaces; an existing one keeps what it was made with.)` : `${first}: its workspaces run the devcontainer.json of the first checkout that has one${env.repos.length > 1 ? `. To choose: desolate domain ${first} env --from <owner>/<repo>` : ""}.`);
   }
   if (second === "net") {
     // desolate domain <d> net [show] | open | enforce | allow <host>... | deny <host>... | allow-internal <ip>

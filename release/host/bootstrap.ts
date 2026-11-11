@@ -1,8 +1,10 @@
 // bootstrap, doctor, destroy (section 13.1).
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { refuse } from "../shared/exit.ts";
 import { waitFor } from "../shared/run.ts";
+import { editorHostPort, ROOT_HOSTNAME } from "../shared/names.ts";
 import * as approver from "./approver.ts";
 import { INSTANCE, paths, RELEASE_DIR, guest } from "./paths.ts";
 import { backend, backendKind, config, ensureHome, ROOT_VM, rootctl, rootSpec, saveConfig } from "./stack.ts";
@@ -33,15 +35,22 @@ const startRootServices = async () => {
   if (result.code !== 0) throw new Error(`the root's services did not start: ${(result.stderr || result.stdout).trim().slice(-600)}`);
 };
 
-/** Give the root the approver's PUBLIC key, as root: a file its ordinary users cannot
- *  replace. Returns whether it changed. */
+/** Give the root the approver's PUBLIC key, and the token the host's daemon shows the
+ *  root's state service, both as root: files the root VM's ordinary users cannot replace
+ *  (the token is theirs to read: the state service runs as one). Returns whether either
+ *  changed. */
 const installApprover = async (): Promise<boolean> => {
   const pem = approver.publicKey();
   if (!pem) refuse("this stack has no approver key", "desolate bootstrap");
-  const script = 'install -d -m 0755 -o root -g root /etc/desolate; new=$(cat); if [ "$new" = "$(cat /etc/desolate/approver.pub 2>/dev/null)" ]; then echo same; else printf "%s\\n" "$new" >/etc/desolate/approver.pub.new && chown root:root /etc/desolate/approver.pub.new && chmod 0644 /etc/desolate/approver.pub.new && mv /etc/desolate/approver.pub.new /etc/desolate/approver.pub && echo changed; fi';
-  const result = await backend().exec(ROOT_VM, ["bash", "-c", script], { root: true, input: pem!.trim(), timeoutMs: 60_000 });
-  if (result.code !== 0) throw new Error(`the approver's public key was not installed in the root: ${(result.stderr || result.stdout).trim().slice(-300)}`);
-  return result.stdout.trim() === "changed";
+  const tokenFile = path.join(paths.state, "host-token");
+  if (!fs.existsSync(tokenFile)) fs.writeFileSync(tokenFile, randomBytes(24).toString("hex") + "\n", { mode: 0o600 });
+  const token = fs.readFileSync(tokenFile, "utf8").trim();
+  const put = 'put() { new=$(cat); if [ "$new" = "$(cat "$1" 2>/dev/null)" ]; then echo same; else printf "%s\\n" "$new" >"$1.new" && chown "root:$3" "$1.new" && chmod "$2" "$1.new" && mv "$1.new" "$1" && echo changed; fi; }; install -d -m 0755 -o root -g root /etc/desolate; ';
+  const group = `$(id -gn "$(getent passwd ${process.getuid!()} | cut -d: -f1)")`;
+  const key = await backend().exec(ROOT_VM, ["bash", "-c", `${put}put /etc/desolate/approver.pub 0644 root`], { root: true, input: pem!.trim(), timeoutMs: 60_000 });
+  const tok = await backend().exec(ROOT_VM, ["bash", "-c", `${put}put /etc/desolate/host-token 0640 ${group}`], { root: true, input: token, timeoutMs: 60_000 });
+  for (const result of [key, tok]) if (result.code !== 0) throw new Error(`the host's keys were not installed in the root: ${(result.stderr || result.stdout).trim().slice(-300)}`);
+  return key.stdout.trim() === "changed" || tok.stdout.trim() === "changed";
 };
 
 /** From a clean machine to a working stack. Idempotent: run twice, the second run changes
@@ -87,14 +96,22 @@ export const bootstrap = async (options: { forge?: string; forgeKnownHosts?: str
   step(info.status !== "running", "root VM running");
 
   const wasUp = await rootctl<{ keyring: boolean }>("ping", {}, { quiet: true, timeoutMs: 30_000 }).then((r) => r.keyring, () => false);
-  if (!wasUp) {
+  // Always: start.sh leaves alone what is running, and starts what a newer desolate added.
+  {
     await startRootServices();
     const up = await waitFor(() => rootctl<{ keyring: boolean }>("ping", {}, { quiet: true, timeoutMs: 30_000 }).then((r) => r.keyring), 30_000, 500);
     if (!up) refuse("the root's keyring did not come up", "desolate doctor");
   }
   step(!wasUp, "root services: keyring");
   if (configChanged || !wasUp) await rootctl("forge.set", { forge }, { quiet: true });
-  step(await installApprover(), "root: the approver's public key");
+  step(await installApprover(), "root: the approver's public key and the host daemon's token");
+  // The root's own surfaces: its editor (review), and the host daemon, which carries the
+  // dashboard and tells the root's state service what only the host knows.
+  const editor = await b.exec(ROOT_VM, ["bash", "-lc", `bash ${guest.release}/root/editor.sh`], { timeoutMs: 300_000 });
+  if (editor.code !== 0) out(`    the root editor is not available: ${(editor.stderr || editor.stdout).trim().split("\n").pop() ?? ""}`);
+  const { ensureDaemon } = await import("./daemon.ts");
+  await ensureDaemon();
+  out(`  dashboard    http://${ROOT_HOSTNAME}:${editorHostPort()}/   (and: desolate ui)`);
 
   out(changed.length === 0 ? "bootstrap: nothing changed; the stack was already up." : `bootstrap: ${changed.length} step(s) done.`);
   const failed = await doctor(out);

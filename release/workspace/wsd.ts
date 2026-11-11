@@ -12,6 +12,7 @@
 // The host speaks to it through `wsctl.ts`, over the VM layer's exec: port numbers in, taken
 // ports out, nothing else.
 import * as fs from "node:fs";
+import * as os from "node:os";
 import { createServer } from "node:net";
 import type { Server } from "node:net";
 import { run, sleep } from "../shared/run.ts";
@@ -57,6 +58,26 @@ const listeners = async () => {
   return [...ports].sort((a, b) => a - b);
 };
 
+/** What the host shows about this workspace without asking again: the editor's token (the
+ *  host builds the address) and one line about the devcontainer. */
+const surfaces = (): { editorToken?: string; devcontainer?: string; folder?: string } => {
+  const out: { editorToken?: string; devcontainer?: string; folder?: string } = {};
+  try {
+    const token = fs.readFileSync(`${os.homedir()}/.desolate-editor/token`, "utf8").trim();
+    if (/^[0-9a-f]{48}$/.test(token)) out.editorToken = token;
+  } catch {
+    /* no editor yet */
+  }
+  try {
+    const d = JSON.parse(fs.readFileSync("/run/desolate/devcontainer.json", "utf8")) as { state?: string; why?: string; image?: string; remoteUser?: string; checkout?: string };
+    out.devcontainer = d.state === "up" ? `up (${String(d.image).slice(0, 80)}, user ${String(d.remoteUser).slice(0, 40)})` : d.state === "failed" ? `FAILED: ${String(d.why).slice(0, 300)}` : "none";
+    if (typeof d.checkout === "string") out.folder = d.checkout.slice(0, 300);
+  } catch {
+    /* not decided yet */
+  }
+  return out;
+};
+
 fs.mkdirSync("/run/desolate", { recursive: true });
 fs.rmSync(SOCKET, { force: true });
 createServer((connection) => {
@@ -71,7 +92,7 @@ createServer((connection) => {
       const request = JSON.parse(buffer.slice(0, end)) as { op?: string; reserve?: unknown };
       if (request.op === "ports") {
         if (Array.isArray(request.reserve)) reserve(request.reserve.map(Number));
-        reply = { ok: true, listeners: await listeners(), reserved: [...reserved.keys()].sort((a, b) => a - b) };
+        reply = { ok: true, listeners: await listeners(), reserved: [...reserved.keys()].sort((a, b) => a - b), ...surfaces() };
       } else reply = { ok: false, error: "unknown op" };
     } catch (error) {
       reply = { ok: false, error: String(error) };

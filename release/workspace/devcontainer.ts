@@ -111,7 +111,8 @@ const main = async () => {
     process.stdout.write(state.state === "up" ? `devcontainer: up (${state.image}, user ${state.remoteUser}${state.compose ? ", compose" : ""})\n` : `devcontainer: ${state.state === "none" ? "none" : "FAILED"}: ${state.why}\n`);
   };
   if (!plan) return done({ state: "none", why: `the root sent no plan for the workspace '${name}'` });
-  const checkout = plan.checkouts.find((c) => locate(c.path) !== undefined);
+  // The domain's environment: the repository it names, else the first checkout with a spec.
+  const checkout = plan.checkouts.find((c) => c.repo === plan.env && locate(c.path) !== undefined) ?? plan.checkouts.find((c) => locate(c.path) !== undefined);
   if (!checkout) return done({ state: "none", why: "no checkout has a devcontainer.json; this workspace is the VM itself" });
   const config = locate(checkout.path)!;
   let spec: Record<string, unknown>;

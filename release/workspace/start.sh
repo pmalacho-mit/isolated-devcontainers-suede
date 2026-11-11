@@ -27,13 +27,15 @@ for _ in $(seq 1 100); do [ -S /run/desolate/wsd.sock ] && break; sleep 0.1; don
 [ -S /run/desolate/wsd.sock ] || { echo "start.sh: the workspace daemon did not start; see /var/lib/desolate/wsd.log" >&2; tail -5 /var/lib/desolate/wsd.log >&2; exit 1; }
 echo "workspace services: up"
 # The VM's own docker daemon: for the project's devcontainer (devcontainer.ts) and for
-# whatever the work itself runs. Started here and not at boot, because the root VM, made
-# from the same image, runs no containers. Not waited for: devcontainer.ts waits.
+# whatever the work itself runs. It is not started at boot (the root VM, made from the same
+# image, runs no containers), and here it is started only when something asks for it: a
+# workspace that runs no container should not pay a daemon's memory.
+#   - with systemd (a real VM): docker.socket, so the first `docker` command starts it;
+#   - without (the fake backend): `start.sh <uid> <link> docker` starts it, and the host
+#     runs that when a checkout has a devcontainer.json.
 getent group docker >/dev/null && usermod -aG docker "$USER_NAME"
-if ! docker info >/dev/null 2>&1; then
-  if [ -d /run/systemd/system ]; then
-    systemctl start docker.service >/dev/null 2>&1 &
-  else
-    setsid nohup dockerd >>/var/lib/desolate/dockerd.log 2>&1 </dev/null &
-  fi
+if [ -d /run/systemd/system ]; then
+  systemctl start docker.socket >/dev/null 2>&1 || true
+elif [ "${3:-}" = docker ] && ! docker info >/dev/null 2>&1; then
+  setsid nohup dockerd >>/var/lib/desolate/dockerd.log 2>&1 </dev/null &
 fi

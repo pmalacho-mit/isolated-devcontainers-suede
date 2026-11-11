@@ -148,6 +148,7 @@ describe("T2 phase 1: the root VM", () => {
       entry.isDirectory() ? walk(path.join(dir, entry.name)) : [path.join(dir, entry.name)]);
     for (const file of walk(stack.home)) {
       if (fs.statSync(file).size > 10_000) continue;
+      if (!fs.lstatSync(file).isFile()) continue; // a socket (the host daemon's) holds nothing to read
       assert.doesNotMatch(fs.readFileSync(file, "utf8"), /BEGIN OPENSSH PRIVATE KEY/, `${file} holds a private key`);
     }
   });

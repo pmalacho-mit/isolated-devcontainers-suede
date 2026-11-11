@@ -21,11 +21,13 @@ import * as path from "node:path";
 import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { accept as acceptLink } from "../shared/link.ts";
-import { devHostname, EDITOR, editorHostname, editorHostPort } from "../shared/names.ts";
+import { hostArgv } from "../shared/actions.ts";
+import { devHostname, EDITOR, editorHostname, editorHostPort, ROOT_EDITOR_HOSTNAME, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
+import { statusDir } from "../shared/status.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { sleep, waitFor } from "../shared/run.ts";
 import { sniffSocket } from "../shared/sniff.ts";
-import { guest, INSTANCE, paths } from "./paths.ts";
+import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
 import { backend, ROOT_VM, rootctl } from "./stack.ts";
 
 const SOCKET = path.join(paths.state, "daemon.sock");
@@ -36,7 +38,8 @@ const NODE = ["node", "--disable-warning=ExperimentalWarning"];
 const RAW_PORTS = new Set([3306, 5432, 6379, 27017, 11211, 5672, 9092, 1433, 26257]);
 
 type Registered = { vm: string; domain: string; workspace: string; proxyPort: number | null };
-type Entry = Registered & { listeners: Set<number>; reserved: Set<number>; link: Server | null; lastError: string };
+type Checkouts = { repo: string; kind: string; name: string; path?: string }[];
+type Entry = Registered & { listeners: Set<number>; reserved: Set<number>; link: Server | null; lastError: string; editorToken: string; devcontainer: string; folder: string; watchers: fs.FSWatcher[] };
 export type PortView = {
   workspace: string;
   forwarded: { port: number; url: string }[];
@@ -118,6 +121,13 @@ const serve = async () => {
   const editors = createServer((client) => {
     client.on("error", () => client.destroy());
     void sniffSocket(client, 400).then(({ sniffed, head }) => {
+      // The root's two surfaces: the dashboard (the state service checks the name and the
+      // origin of every request itself) and the root's editor (behind its gate).
+      if (sniffed.kind === "http" && sniffed.name === ROOT_HOSTNAME) {
+        dashboardUsed = Date.now();
+        return pipe(client, toStateService(), head);
+      }
+      if (sniffed.kind === "http" && sniffed.name === ROOT_EDITOR_HOSTNAME) return pipe(client, b.dial(ROOT_VM, EDITOR.gate), head);
       const target = sniffed.kind === "http" && sniffed.name ? byName(sniffed.name) : null;
       if (!target || target.surface !== "editor") {
         if (sniffed.kind === "http") refuseHttp(client, "421 Misdirected Request", "desolate: this port answers to a workspace's editor hostname only. `desolate editor <domain>/<workspace>` prints it.\n");
@@ -174,7 +184,12 @@ const serve = async () => {
   const sync = async (entry: Entry) => {
     try {
       const result = await b.exec(entry.vm, [...NODE, `${guest.release}/workspace/wsctl.ts`], { input: JSON.stringify({ op: "ports", reserve: [...entry.reserved] }), timeoutMs: 15_000 });
-      const reply = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}") as { ok?: boolean; listeners?: number[]; error?: string };
+      const reply = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}") as { ok?: boolean; listeners?: number[]; error?: string; editorToken?: unknown; devcontainer?: unknown; folder?: unknown };
+      // For the dashboard. Shown as text and built into an address: a token is 48 hex, the
+      // rest is cut to a line.
+      entry.editorToken = typeof reply.editorToken === "string" && /^[0-9a-f]{48}$/.test(reply.editorToken) ? reply.editorToken : "";
+      entry.devcontainer = typeof reply.devcontainer === "string" ? reply.devcontainer.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 400) : "";
+      if (typeof reply.folder === "string" && /^\/workspaces\/[A-Za-z0-9._\/-]+$/.test(reply.folder)) entry.folder = reply.folder;
       if (!reply.ok || !Array.isArray(reply.listeners)) throw new Error(reply.error ?? `exit ${result.code}`);
       // Fail closed on what the VM says: integers, 1024 and up, and a sane number of them.
       // The editor's two in-VM ports are never dev-server ports: a dev hostname must not
@@ -229,14 +244,29 @@ const serve = async () => {
       existing.proxyPort = r.proxyPort;
       return;
     }
-    const entry: Entry = { ...r, listeners: new Set(), reserved: new Set(), link: null, lastError: "" };
+    const entry: Entry = { vm: r.vm, domain: r.domain, workspace: r.workspace, proxyPort: r.proxyPort, listeners: new Set(), reserved: new Set(), link: null, lastError: "", editorToken: "", devcontainer: "", folder: "", watchers: [] };
     entries.set(r.vm, entry);
+    // A status set in the workspace is a file changing in a share. A VM gets no events for
+    // a share, so the host watches (the directory, for a change: it reads nothing) and
+    // tells the root's state service to look.
+    const checkouts = (r as Registered & { checkouts?: Checkouts }).checkouts ?? [];
+    // The folder the editor opens: the first checkout (as `desolate editor` prints it).
+    if (typeof checkouts[0]?.path === "string" && /^\/workspaces\/[A-Za-z0-9._\/-]+$/.test(checkouts[0].path)) entry.folder = checkouts[0].path;
+    for (const c of checkouts)
+      try {
+        entry.watchers.push(fs.watch(statusDir(paths.domainRepos(r.domain), c), (_event, file) => {
+          if (file === null || String(file).startsWith("desolate-")) nudge();
+        }));
+      } catch {
+        /* no such checkout yet: the state service's own slow look covers it */
+      }
     openLink(entry);
   };
   const unregister = (vm: string) => {
     const entry = entries.get(vm);
     if (!entry) return;
     entry.link?.close();
+    for (const watcher of entry.watchers) watcher.close();
     entries.delete(vm);
     reconcile();
   };
@@ -250,6 +280,181 @@ const serve = async () => {
         ...[...entry.listeners].filter((port) => hostHeld.has(port)).map((port) => ({ port, why: "listening in the workspace, but a program on this machine holds that port: not forwarded" })),
       ],
     })).sort((a, b) => a.workspace.localeCompare(b.workspace));
+
+
+  // ---------------------------------------------------------------- the root UI's host side
+  // The root's state service cannot see the host, and cannot ask: no VM can open a
+  // connection to the host. So this dials in: it tells the service what only the host
+  // knows, nudges it when a share changed, and collects the dashboard's requests, which it
+  // runs as desolate's own CLI, from the fixed list in shared/actions.ts.
+  const TOKEN_FILE = path.join(paths.state, "host-token");
+  // Connections to the state service, opened ahead of need. Opening one costs what the VM
+  // layer's exec costs (an ssh session; tens to hundreds of milliseconds), and the
+  // dashboard's budget for showing state is 300 ms: so a few are kept ready, each used
+  // once. An idle one is replaced before the service would close it for sending nothing.
+  const ready: { stream: Duplex; at: number; dead: boolean }[] = [];
+  // Only while a dashboard is in use: each one kept ready is an exec into the root VM,
+  // made again every lifetime, and an unwatched stack should be idle.
+  const READY = { count: 5, lifeMs: 40_000, afterUseMs: 180_000 } as const;
+  let dashboardUsed = 0;
+  const stock = () => {
+    for (let i = ready.length - 1; i >= 0; i--)
+      if (ready[i]!.dead || Date.now() - ready[i]!.at > READY.lifeMs) {
+        ready[i]!.stream.destroy();
+        ready.splice(i, 1);
+      }
+    while (rootUp && Date.now() - dashboardUsed < READY.afterUseMs && ready.length < READY.count) {
+      const item = { stream: b.dial(ROOT_VM, ROOT_UI.port), at: Date.now(), dead: false };
+      const die = () => (item.dead = true);
+      item.stream.on("error", die);
+      item.stream.on("close", die);
+      ready.push(item);
+    }
+  };
+  let rootUp = false;
+  const toStateService = (): Duplex => {
+    stock();
+    const item = ready.shift();
+    setImmediate(stock);
+    if (!item || item.dead) return b.dial(ROOT_VM, ROOT_UI.port);
+    item.stream.removeAllListeners("error");
+    item.stream.removeAllListeners("close");
+    return item.stream;
+  };
+  setInterval(stock, 5000).unref();
+  const rootHttp = (method: string, pathname: string, body?: unknown, timeoutMs = 15_000): Promise<{ status: number; body: string }> =>
+    new Promise((resolve, reject) => {
+      let token = "";
+      try {
+        token = fs.readFileSync(TOKEN_FILE, "utf8").trim();
+      } catch {
+        return reject(new Error("no host token"));
+      }
+      const payload = body === undefined ? "" : JSON.stringify(body);
+      const stream = toStateService();
+      let data = Buffer.alloc(0);
+      const timer = setTimeout(() => settle(new Error("the root's state service did not answer")), timeoutMs);
+      let settled = false;
+      const settle = (result: { status: number; body: string } | Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        stream.destroy();
+        if (result instanceof Error) reject(result);
+        else resolve(result);
+      };
+      // The answer is complete when its Content-Length has arrived, not when the stream
+      // closes: what carries the connection (ssh, an exec) may hold it open until this
+      // side closes, which it does not do first (measured: a relay that sees its input
+      // end drops the answer).
+      const complete = () => {
+        const split = data.indexOf("\r\n\r\n");
+        if (split < 0) return;
+        const head = data.subarray(0, split).toString("latin1");
+        const status = Number(/^HTTP\/1\.1 (\d+)/.exec(head)?.[1] ?? 0);
+        const length = Number(/\r\ncontent-length: (\d+)/i.exec(head)?.[1] ?? -1);
+        if (status === 0 || length < 0) return settle(new Error("the root's state service sent something that is not an answer"));
+        if (data.length >= split + 4 + length) settle({ status, body: data.subarray(split + 4, split + 4 + length).toString("utf8") });
+      };
+      stream.on("data", (chunk: Buffer) => {
+        data = Buffer.concat([data, chunk]);
+        complete();
+      });
+      stream.on("error", (error) => settle(error));
+      stream.on("close", () => settle(new Error("the root's state service is not there")));
+      stream.write(`${method} ${pathname} HTTP/1.1\r\nHost: root\r\nAuthorization: Bearer ${token}\r\nConnection: close\r\n${payload ? `Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(payload)}\r\n` : ""}\r\n${payload}`);
+    });
+
+  let nudging: NodeJS.Timeout | null = null;
+  const nudge = () => {
+    if (nudging) return;
+    nudging = setTimeout(() => {
+      nudging = null;
+      rootHttp("POST", "/host/nudge", {}).catch(() => {});
+    }, 60);
+  };
+
+  let rootEditorToken = "";
+  let sentFacts = "";
+  let sentAt = 0;
+  const tellRoot = async () => {
+    const vms = await b.list();
+    rootUp = vms.find((vm) => vm.name === ROOT_VM)?.status === "running";
+    if (!rootUp) return;
+    if (!rootEditorToken) {
+      const token = await b.exec(ROOT_VM, ["bash", "-lc", "cat ~/.desolate-root-editor/token"], { timeoutMs: 20_000 }).catch(() => null);
+      if (token && /^[0-9a-f]{48}$/.test(token.stdout.trim())) rootEditorToken = token.stdout.trim();
+    }
+    const port = editorHostPort();
+    const workspaces: Record<string, unknown> = {};
+    for (const vm of vms) {
+      if (vm.name === ROOT_VM) continue;
+      const entry = entries.get(vm.name);
+      workspaces[vm.name] = {
+        status: vm.status,
+        ...(entry ? {
+          devcontainer: entry.devcontainer || undefined,
+          editor: entry.editorToken && !editorError ? `http://${editorHostname(INSTANCE, entry.domain, entry.workspace)}:${port}/?tkn=${entry.editorToken}${entry.folder ? `&folder=${encodeURIComponent(entry.folder)}` : ""}` : undefined,
+          ports: [...entry.listeners].sort((x, y) => x - y).filter((p) => !hostHeld.has(p)).map((p) => ({ port: p, url: `http://${devHostname(INSTANCE, entry.domain, entry.workspace)}:${p}` })),
+        } : {}),
+      };
+    }
+    const { kind } = await import("./approver.ts");
+    const facts = { stack: { instance: INSTANCE, backend: b.kind, isolated: b.isolated, editorPort: port, approver: kind() }, workspaces, rootEditor: rootEditorToken && !editorError ? `http://${ROOT_EDITOR_HOSTNAME}:${port}/?tkn=${rootEditorToken}&folder=${encodeURIComponent(guest.rootClones)}` : undefined };
+    const text = JSON.stringify(facts);
+    // Said when it changes, and now and then regardless, so the service knows the host is there.
+    if (text === sentFacts && Date.now() - sentAt < 45_000) return;
+    await rootHttp("PUT", "/host/facts", facts);
+    sentFacts = text;
+    sentAt = Date.now();
+  };
+
+  const runAction = (action: { id: string; kind: unknown; args: unknown }) => {
+    // Built here, from the kind and its arguments: never a command line the root wrote.
+    const argv = hostArgv(action.kind, action.args);
+    const report = (lines: string[], done?: number) => rootHttp("POST", "/host/progress", { id: action.id, lines, ...(done === undefined ? {} : { done: true, code: done }) }).catch(() => {});
+    if (!argv) return void report(["the host does not do that"], 64);
+    log(`dashboard: desolate ${argv.join(" ")}`);
+    const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", path.join(RELEASE_DIR, "host", "cli.ts"), ...argv], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, DESOLATE_PROGRESS: "1", NO_COLOR: "1" } });
+    let pending: string[] = [];
+    let flushing: NodeJS.Timeout | null = null;
+    const take = (chunk: Buffer) => {
+      pending.push(...chunk.toString().split("\n").filter((line) => line.trim() !== ""));
+      flushing ??= setTimeout(() => {
+        flushing = null;
+        void report(pending.splice(0));
+      }, 150);
+    };
+    child.stdout!.on("data", take);
+    child.stderr!.on("data", take);
+    void report([]);
+    child.on("close", (code) => {
+      if (flushing) clearTimeout(flushing);
+      void report(pending.splice(0), code ?? 1).then(() => tellRoot().catch(() => {}));
+    });
+  };
+  /** Each request is run once, however many times the root hands it over. */
+  const taken = new Set<string>();
+  let lastFailure = "";
+  const collect = async () => {
+    for (;;) {
+      try {
+        const reply = await rootHttp("GET", "/host/requests", undefined, 70_000);
+        if (reply.status !== 200) throw new Error(`status ${reply.status}`);
+        for (const action of JSON.parse(reply.body) as { id: string; kind: unknown; args: unknown }[]) {
+          if (typeof action.id !== "string" || taken.has(action.id)) continue;
+          taken.add(action.id);
+          runAction(action);
+        }
+        lastFailure = "";
+      } catch (error) {
+        // The root is not up, or its service is not: try again in a while.
+        if (String(error) !== lastFailure) log(`dashboard requests: ${(lastFailure = String(error))}`);
+        await sleep(3000);
+      }
+    }
+  };
+  void collect();
 
   fs.mkdirSync(paths.state, { recursive: true });
   fs.rmSync(SOCKET, { force: true });
@@ -268,9 +473,11 @@ const serve = async () => {
           const entry = entries.get(request.vm!)!;
           await sync(entry);
           reconcile();
+          tellRoot().catch(() => {});
           reply = { ok: true };
         } else if (request.op === "unregister") {
           unregister(request.vm!);
+          tellRoot().catch(() => {});
           reply = { ok: true };
         } else if (request.op === "ports") {
           await Promise.all([...entries.values()].map(sync));
@@ -307,7 +514,7 @@ const serve = async () => {
       for (const w of d.workspaces)
         if (running.has(w.vm)) {
           const proxy = await rootctl<{ port: number }>("proxy.start", { vm: w.vm, domain: w.domain, workspace: w.workspace }, { quiet: true, timeoutMs: 60_000 });
-          register({ vm: w.vm, domain: w.domain, workspace: w.workspace, proxyPort: proxy.port });
+          register({ vm: w.vm, domain: w.domain, workspace: w.workspace, proxyPort: proxy.port, checkouts: w.checkouts } as Registered);
         }
   } catch (error) {
     log(`could not list workspaces at start: ${String(error)}`);
@@ -316,6 +523,7 @@ const serve = async () => {
     const started = Date.now();
     await Promise.all([...entries.values()].map(sync));
     reconcile();
+    await tellRoot().catch(() => {});
     // Asking a VM costs what its exec costs: little on a Mac, seconds under emulation. The
     // pause is never shorter than a second, and never so short that asking is all the VMs do.
     await sleep(Math.max(1000, 3 * (Date.now() - started)));
@@ -360,7 +568,7 @@ export const ensureDaemon = async () => {
 
 export const connectWorkspace = async (plan: WorkspacePlan & { proxyPort?: number | null }) => {
   await ensureDaemon();
-  const reply = await ask({ op: "register", vm: plan.vm, domain: plan.domain, workspace: plan.workspace, proxyPort: plan.proxyPort ?? null });
+  const reply = await ask({ op: "register", vm: plan.vm, domain: plan.domain, workspace: plan.workspace, proxyPort: plan.proxyPort ?? null, checkouts: plan.checkouts });
   if (reply.ok !== true) throw new Error(`the host daemon refused the workspace: ${String(reply.error)}`);
 };
 
@@ -381,6 +589,15 @@ export const editorPort = async (): Promise<{ port: number; error: string }> => 
   const reply = await ask({ op: "ports" });
   if (reply.ok !== true) throw new Error(String(reply.error));
   return reply.editor as { port: number; error: string };
+};
+
+/** Where the root's two surfaces are, for a browser on this machine. */
+export const ui = async (): Promise<{ dashboard: string; rootEditor: string | null }> => {
+  await ensureDaemon();
+  const port = editorHostPort();
+  const token = await backend().exec(ROOT_VM, ["bash", "-lc", "cat ~/.desolate-root-editor/token"], { timeoutMs: 30_000 }).catch(() => null);
+  const ok = token !== null && /^[0-9a-f]{48}$/.test(token.stdout.trim());
+  return { dashboard: `http://${ROOT_HOSTNAME}:${port}/`, rootEditor: ok ? `http://${ROOT_EDITOR_HOSTNAME}:${port}/?tkn=${token!.stdout.trim()}&folder=${encodeURIComponent(guest.rootClones)}` : null };
 };
 
 export const stopForwarder = async () => {

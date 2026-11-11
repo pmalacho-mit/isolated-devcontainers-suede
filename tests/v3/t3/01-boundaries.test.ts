@@ -157,6 +157,24 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     assert.match(await ask(url.hostname.replace("-editor-", "-"), token), /^HTTP\/1\.1 421 /, "the dev-server name does not reach the editor");
     const inside = asRoot("a/w1", "ss -ltnH | grep -E ':(31580|31581) ' | awk '{print $4}' | sort");
     assert.deepEqual(inside.stdout.trim().split("\n"), ["127.0.0.1:31580", "127.0.0.1:31581"], "both on the VM's loopback only");
+    // The dashboard, from the root VM, through the same port by its own name: the host's
+    // daemon has told the root's state service which VMs run and where this editor is.
+    let seen = "";
+    for (let i = 0; i < 40 && !/"status":"running"/.test(seen); i++) {
+      seen = await new Promise<string>((resolve) => {
+        const socket = net.connect(Number(url.port), "127.0.0.1");
+        let data = "";
+        socket.setTimeout(120_000, () => socket.destroy());
+        socket.on("connect", () => socket.write(`GET /state HTTP/1.1\r\nHost: desolate.localhost:${url.port}\r\nConnection: close\r\n\r\n`));
+        socket.on("data", (chunk) => (data += chunk));
+        socket.on("close", () => resolve(data));
+        socket.on("error", () => resolve(data || "ERROR"));
+      });
+      if (!/"status":"running"/.test(seen)) await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    assert.match(seen, /^HTTP\/1\.1 200 /, seen.slice(0, 200));
+    assert.match(seen, /"stack":\{[^}]*"backend":"qemu","isolated":true/);
+    assert.match(seen, new RegExp(`"workspace":"w1"[^\\]]*\\][^{]*\\{[\\s\\S]*"status":"running"[\\s\\S]*"editor":"http://${url.hostname}:${url.port}/\\?tkn=${token}`), "the dashboard knows the workspace is running, and its editor's address");
   });
 
   it("T3 a secret is substituted on the way out of a real VM, and its value stays in the root", () => {

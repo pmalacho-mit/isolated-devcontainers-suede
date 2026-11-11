@@ -9,7 +9,8 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
   + root VM dsl-<instance>-root created
   + root VM running
   + root services: keyring
-  + root: the approver's public key
+  + root: the approver's public key and the host daemon's token
+  dashboard    http://desolate.localhost:31591/   (and: desolate ui)
 bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
@@ -30,9 +31,10 @@ doctor: all checks passed.
 $ desolate up web --name one
 workspace web/one is up  [NOT ISOLATED: fake backend]
   acme/app  main checkout (main)  /workspaces/acme/app
+  devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://web-one-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fapp
   dev servers  http://web-one-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
+the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
 [exit 0]
 
 ## names that are not the editor's

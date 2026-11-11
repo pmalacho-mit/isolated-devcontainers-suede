@@ -72,4 +72,10 @@ if ! alive "$RUN/rootd.pid"; then
     $NODE "$HERE/rootd.ts" >>"$STATE/rootd.log" 2>&1 </dev/null &
   echo $! >"$RUN/rootd.pid"
 fi
-echo "root services: keyring and rootd up"
+# The state service: what the dashboard draws from (stated.ts).
+if ! alive "$RUN/stated.pid"; then
+  setsid runuser -u "$USER_NAME" -- env HOME="$USER_HOME" GIT_CONFIG_GLOBAL="$STATE/gitconfig" \
+    $NODE "$HERE/stated.ts" >>"$STATE/stated.log" 2>&1 </dev/null &
+  echo $! >"$RUN/stated.pid"
+fi
+echo "root services: keyring, rootd and the state service up"

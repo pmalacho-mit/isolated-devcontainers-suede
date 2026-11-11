@@ -19,6 +19,8 @@ export type WorkspacePlan = {
   vm: string;
   title: string;
   checkouts: Checkout[];
+  /** The repository whose devcontainer.json is the environment, if the domain names one. */
+  env?: string;
   /** Refresh origin/* from the mirror before creating worktrees. */
   fetch: boolean;
   createdAt: string;

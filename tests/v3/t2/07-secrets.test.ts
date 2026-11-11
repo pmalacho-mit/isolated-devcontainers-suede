@@ -87,7 +87,8 @@ describe("T2 phase 4: a domain's secrets", () => {
     assert.equal(set.code, 0, set.stderr);
     assert.match(set.stdout, /MYAPP-API-KEY is held in the root for the domain dev\. Its workspaces send the name; the value is put in its place on the way to: api\.example\.test \(in the header authorization only\)\./);
     assert.match(withStdin(`${TOKEN}\n`, "domain", "dev", "secret", "set", "MYAPP-API-KEY-2", "--hosts", "api.example.test").stderr, /MYAPP-API-KEY-2 and MYAPP-API-KEY overlap/);
-    assert.equal(withStdin(`${TOKEN}\n`, "domain", "dev", "secret", "set", "MYAPP-TOKEN-TWO", "--hosts", "*.example.test").code, 0);
+    // The spec's own spelling (section 8) does the same thing.
+    assert.equal(withStdin(`${TOKEN}\n`, "domain", "dev", "add", "--secret", "MYAPP-TOKEN-TWO", "--hosts", "*.example.test").code, 0);
     const listed = stack.desolate("domain", "dev", "secret", "list");
     assert.equal(listed.stdout.trim(), "MYAPP-API-KEY  ->  api.example.test  (headers: authorization)\nMYAPP-TOKEN-TWO  ->  *.example.test");
     // Nothing that reads prints a value, and no workspace can find one.

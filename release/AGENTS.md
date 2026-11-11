@@ -85,13 +85,20 @@ only, the name is replaced by the value. You never see the value, responses that
 are scrubbed back to the name, and looking for it is wasted effort. A name sent anywhere
 else arrives as a name. If the name you need is not in the list, set `orange` and ask.
 
-## What is not here yet
+## Where you are running
 
-desolate v3 is being built. In this workspace today: **the project's `devcontainer.json` is
-not started** (you are in the VM itself, with what its base image has: git, git-lfs, node,
-python3, curl, jq, docker's binaries). The person may be watching in the workspace's editor
-(VSCodium in a browser tab); it is the same VM and the same files. If your task needs the
-project's own container, say so and stop.
+If the project has a `devcontainer.json`, you are in its devcontainer, which runs inside
+this workspace's VM: the project's own image, features and lifecycle commands, as written.
+`/workspaces/<owner>/<repo>` is the same path in the container and in the VM. `docker` in
+the VM (and in the container, if the spec gives it one) is the VM's own daemon; containers
+you start reach the network the same way you do, through the workspace's proxy. A dev
+server you start is reachable by the person at the workspace's own hostname, on the port
+it listens on: tell them the port, not `localhost`.
+
+If the project has no `devcontainer.json`, or it did not come up, you are in the VM itself,
+with what its base image has (git, git-lfs, node, python3, curl, jq, docker). The person
+may be watching in the workspace's editor (VSCodium in a browser tab); it is the same
+place and the same files.
 
 ## When to stop and ask
 

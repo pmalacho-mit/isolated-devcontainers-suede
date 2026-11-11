@@ -18,6 +18,7 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
 
   desolate domain create <slug> [--title "..."]                  a trust boundary: repositories and secrets
   desolate domain <slug> add --repo <owner/repo>                 give the domain a repository
+  desolate domain <slug> env [--from <owner/repo>]               whose devcontainer.json its workspaces run
   desolate domain <slug> net [open | enforce | allow <host>... | deny <host>...]
                                                                  the domain's network rules, at its proxies
   desolate net log [<domain>] [--json]                           what each workspace asked to reach, and the verdict
@@ -42,6 +43,7 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
                                                                  to the remote; you approve it here, on the
                                                                  host: Touch ID on a Mac, else your terminal
   desolate approve [--selftest]                                  approve a raw git push waiting in the root shell
+  desolate ui [--json]                                           the dashboard's address, and the root editor's
   desolate root shell                                            the root's terminal: git on the root clones
 
   desolate help                                                  this text
@@ -108,7 +110,7 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "domain") {
-    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string" }, hosts: { type: "string" }, headers: { type: "string" }, ttl: { type: "string" } });
+    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string" }, hosts: { type: "string" }, headers: { type: "string" }, ttl: { type: "string" }, secret: { type: "string" }, from: { type: "string" } });
     const { domainCommand } = await import("./domains.ts");
     await domainCommand(positionals, values, out);
     return EXIT.ok;
@@ -161,6 +163,17 @@ const main = async (argv: string[]): Promise<number> => {
     flags(rest, { expect: { type: "string" }, "allow-default": { type: "boolean" } });
     const { push } = await import("./push.ts");
     return push(rest);
+  }
+  if (verb === "ui") {
+    const { values } = flags(rest, {});
+    const { ui } = await import("./daemon.ts");
+    const shown = await ui();
+    if (values.json === true) out(JSON.stringify(shown));
+    else {
+      out(`dashboard    ${shown.dashboard}`);
+      out(shown.rootEditor ? `root editor  ${shown.rootEditor}` : "root editor  not running (desolate bootstrap starts it)");
+    }
+    return EXIT.ok;
   }
   if (verb === "down") {
     const { down } = await import("./bootstrap.ts");

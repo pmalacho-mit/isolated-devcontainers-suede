@@ -358,6 +358,74 @@ the VM to print the address.
 Workspace trust is off in the workspace editor: the VM is the boundary (P1), unlike v2's
 outer editor, which ran on the trusted side.
 
+## The devcontainer: the CLI in the VM, the spec unchanged, the VM's network (tested on T2)
+
+Section 4.2's shape A. `release/workspace/devcontainer.ts` runs `devcontainer up` in the
+workspace VM against the checkout's own spec, with the VM's own dockerd, and adds through
+`--override-config`:
+
+- `/workspaces` mounted at `/workspaces`, and the checkout's own path as the folder. A
+  domain clone borrows the mirror's objects by absolute path and its worktrees name each
+  other by absolute path, so git works in the container only if the paths are the VM's.
+  The mirrors are mounted read-only at their own path for the same reason;
+- `--network=host` for a single-container spec. The container's traffic then takes the
+  VM's one way out with nothing more arranged (measured: the VM's docker daemon's own pulls
+  go through the workspace's proxy too), and a dev server in the container is a listener in
+  the VM, which is what the forwarder publishes. A container on a docker bridge of the VM
+  (compose services, a plain `docker run`) also goes out the same way: the redirect is in
+  `prerouting`, and the stub resolver now answers on every address of the VM;
+- the trust store that holds the domain's CA, by environment (`SSL_CERT_FILE` and its
+  relatives). Tools that read only their own store (Java) are not covered;
+- desolate's own CLI and the VM's node, so `desolate offer` works whatever the image has.
+
+Nothing in a spec is refused. `updateRemoteUserUID` (the CLI's default) makes the
+container's user own the checkouts. The editor's server runs in the container when it is a
+glibc container on the VM's network (it is a glibc program), so its terminal, tasks and
+language servers see the project's toolchain; otherwise in the VM, with a terminal that
+enters the container. The gate always stays in the VM.
+
+A docker daemon runs only where one is wanted. In a real VM `docker.socket` is started, so
+the first `docker` command starts the daemon; on the fake backend the host starts it when a
+checkout has a spec. (Measured the hard way: with a daemon in every workspace, the real-VM
+tier's third VM was killed for memory in the 8 GB sandbox.) A workspace's size is 2 CPUs
+and 4 GiB, with `DESOLATE_WORKSPACE_CPUS` and `DESOLATE_WORKSPACE_MEMORY_MIB` as the one
+knob so far (question 9).
+
+Not done: the environment is not frozen and features are not pinned; no templates (C3) or
+caches (C2, C4), so each workspace builds its own environment; compose specs' ports are not
+forwarded. Features and compose are untested: the sandbox has no registry. The tests build
+their image inside the VM from the VM's own files (`tests/v3/lib/devimage.sh`).
+
+## The root UI: a state service that is told, and a dashboard that asks for nothing
+
+Section 4.8's requirements, and how each came out:
+
+- **One state service in the root** (`release/root/stated.ts`) holds the state and pushes
+  it over an event stream. The dashboard draws from the stream and spawns nothing.
+- **It cannot see the host, and cannot ask.** Which VMs run, forwarded ports, each editor's
+  address, a start's phases: only the host knows, and no VM may open a connection to the
+  host. So the host's daemon dials in (through the VM layer, as it does for a proxy) and
+  tells it, with a token the host installed as root.
+- **A VM gets no file events for a share** (virtiofs and 9p deliver none for another
+  writer's changes). A status set in a workspace is a file changing in a share. The host
+  does get events for it, so the host's daemon watches the status files' directories and
+  nudges the service. The service also looks once a second, which costs a few small reads,
+  so that a missed event is late and not lost. "Not by polling" is therefore true of the
+  path that meets the budget, with a slow net under it.
+- **Actions.** The dashboard queues a request; the host's daemon collects it and runs
+  desolate's own CLI with arguments it builds itself from a fixed list
+  (`release/shared/actions.ts`). The root VM never hands the host a command line. This is a
+  new direction of control (root VM to host), limited to: start, stop, up, fetch, create a
+  domain, add a repository. None of them can push.
+- **Push.** From the dashboard it is a `git push origin` in the root clone, which waits for
+  `desolate approve` on the host like any raw push. The dashboard raises no dialog.
+- **Budgets** are asserted on the fake backend. Two things were needed to meet "state shown
+  within 300 ms": the daemon keeps a few connections to the service open ahead of need
+  (opening one costs an exec into the VM), and an answer is taken as complete at its
+  Content-Length (the relay that carries a connection into a VM holds it open until the
+  caller closes, half a second with socat).
+- **It is a page, not an extension.** See `status-by-section.md`.
+
 ## Timings in the sandbox (TCG, no KVM), for scale only
 
 Tier T2 (52 tests, the fake backend): 3 minutes 15 seconds. Tier T3 under software emulation:

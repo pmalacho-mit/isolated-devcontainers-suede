@@ -1,0 +1,34 @@
+<!doctype html>
+<!-- desolate's dashboard (section 4.8). Its own code only: no remote resource, no inline
+     script, and nothing from a repository is ever put on this page as HTML. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>desolate</title>
+<link rel="stylesheet" href="/ui.css">
+</head>
+<body>
+<header>
+  <h1>desolate</h1>
+  <span id="stack" class="chip"></span>
+  <span id="host" class="chip"></span>
+  <span class="grow"></span>
+  <a id="root-editor" class="button quiet" target="_blank" rel="noopener" hidden>Root editor: review and diff</a>
+</header>
+<main>
+  <section id="needs" hidden>
+    <h2>Needs you</h2>
+    <ul id="needs-list" class="rows"></ul>
+  </section>
+  <section id="review" hidden></section>
+  <section id="first-run" hidden></section>
+  <section id="domains"></section>
+  <section id="activity" hidden>
+    <h2>What the dashboard ran</h2>
+    <ul id="activity-list" class="rows"></ul>
+  </section>
+</main>
+<script src="/ui.js"></script>
+</body>
+</html>

@@ -9,7 +9,8 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
   + root VM dsl-<instance>-root created
   + root VM running
   + root services: keyring
-  + root: the approver's public key
+  + root: the approver's public key and the host daemon's token
+  dashboard    http://desolate.localhost:31591/   (and: desolate ui)
 bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
@@ -30,7 +31,7 @@ doctor: all checks passed.
 $ desolate up app
 workspace app/w1 is up  [NOT ISOLATED: fake backend]
   acme/app  main checkout (main)  /workspaces/acme/app
-  devcontainer FAILED: An error occurred setting up the container. (the whole log: /home/desolate/.desolate-devcontainer/up.log in the workspace)
+  devcontainer FAILED: An error occurred setting up the container. (Error: Command failed: docker pull registry.invalid/desolate-test/dev:1) (the whole log: /home/desolate/.desolate-devcontainer/up.log in the workspace)
   editor       http://app-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fapp
   dev servers  http://app-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
 the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>

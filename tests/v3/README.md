@@ -33,6 +33,8 @@ How the tests are built (move-to-vms.md section 13):
   answer to a prompt. The tests' stacks use the `terminal` approver, whose prompt is on the
   host; `docs/v3/decisions.md` says why that approver cannot tell this from a real person,
   and why the Mac's (Touch ID) can.
+- **Devcontainers need no registry**: `lib/devimage.sh` makes a small image inside a
+  workspace VM from the VM's own files, under a name whose registry does not exist.
 - **The editor is the real one**: the pinned VSCodium server in the base image. `t2/06`
   drives it over HTTP and WebSocket, and from headless Chrome.
 

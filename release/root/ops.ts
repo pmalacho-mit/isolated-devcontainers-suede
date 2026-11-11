@@ -50,6 +50,9 @@ export const ops: Record<string, Op> = {
   async "domain.add-repo"(args) {
     return domains.addRepo(args.slug, args.repo);
   },
+  async "domain.env"(args) {
+    return domains.setEnv(args.slug, args.repo);
+  },
   async "domain.list"() {
     return domains.domains().map((d) => ({ ...d, workspaces: domains.workspaces(d.slug) }));
   },

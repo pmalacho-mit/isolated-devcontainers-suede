@@ -68,10 +68,10 @@ describe("T2 phases 2-3: domains, workspaces and their checkouts", () => {
 
   it("git fetch works from the mirror, with no key and no network; a commit stays in the domain clone", () => {
     const before = fs.readdirSync(path.join(stack.home, "mirrors/acme/widgets.git/objects"), { recursive: true }).length;
-    const work = inWs("nests-dev/w1", "cd /workspaces/acme/widgets && git fetch origin && echo change >> README.md && git commit -qam 'a change in the domain' && git count-objects -v | head -1 && ip -o link | wc -l");
+    const work = inWs("nests-dev/w1", "cd /workspaces/acme/widgets && git fetch origin && echo change >> README.md && git commit -qam 'a change in the domain' && git count-objects -v | head -1 && ip -o link | grep -cvE ': (docker0|br-[0-9a-f]+|veth[0-9a-f]+)[@:]'");
     assert.equal(work.code, 0, work.stderr);
     assert.match(work.stdout, /^count: [1-9]/m, "the commit's objects are the domain clone's own");
-    assert.match(work.stdout, /^1$/m, "the workspace has one interface: loopback. Its fetch used no network");
+    assert.match(work.stdout, /^1$/m, "the workspace has one interface that leads anywhere, and it is loopback (the VM's own docker bridge leads only to its containers). Its fetch used no network");
     const after = fs.readdirSync(path.join(stack.home, "mirrors/acme/widgets.git/objects"), { recursive: true }).length;
     assert.equal(after, before, "the mirror did not change");
   });
@@ -187,6 +187,20 @@ describe("T2 phases 2-3: domains, workspaces and their checkouts", () => {
     assert.equal(fs.existsSync(path.join(stack.home, "domains/other")), false);
     assert.ok(fs.existsSync(path.join(stack.home, "root/acme/widgets/.git")), "the root clone is untouched");
     assert.ok(fs.existsSync(path.join(stack.home, "mirrors/acme/widgets.git/HEAD")), "the mirror is untouched");
+  });
+
+  it("a domain with several repositories names whose devcontainer.json its workspaces run", () => {
+    stack.step("the domain's environment");
+    assert.match(stack.desolate("domain", "nests-dev", "env").stdout, /its workspaces run the devcontainer\.json of the first checkout that has one\. To choose: desolate domain nests-dev env --from <owner>\/<repo>/);
+    const refused = stack.desolate("domain", "nests-dev", "env", "--from", "acme/elsewhere");
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.stderr, /acme\/elsewhere is not in the domain nests-dev/);
+    assert.match(stack.desolate("domain", "nests-dev", "env", "--from", "acme/widgets").stdout, /its workspaces run acme\/widgets's devcontainer\.json/);
+    assert.equal(stack.quiet("up", "nests-dev", "--name", "env-check").code, 0);
+    const plan = JSON.parse(fs.readFileSync(path.join(stack.home, "domains/nests-dev/inbox/workspaces/env-check.json"), "utf8")) as { env?: string };
+    assert.equal(plan.env, "acme/widgets", "the workspace's plan, which the domain cannot write, carries it");
+    assert.match(stack.desolate("domain", "nests-dev", "env", "compose").stderr, /composing one environment from several specs is not built yet/);
+    assert.equal(stack.quiet("rm", "nests-dev/env-check").code, 0);
   });
 
   it("the transcript reads as reviewed", () => {
