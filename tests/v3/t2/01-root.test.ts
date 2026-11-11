@@ -193,6 +193,16 @@ describe("T2 phase 1: the root VM", () => {
     assert.doesNotMatch(keys.stdout, /write/, "no write key exists for it anywhere");
   });
 
+  it("keys: which the root holds, and public halves only", () => {
+    stack.step("keys");
+    const held = stack.desolate("keys");
+    assert.match(held.stdout, /acme\/widgets {2}read\nacme\/widgets {2}write {2}\(asks you before every push\)/);
+    const shown = stack.desolate("keys", "acme/widgets");
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.match(shown.stdout, /read key \(a deploy key, read-only\):\n {2}ssh-ed25519 \S+ desolate-read:acme\/widgets/);
+    assert.doesNotMatch(shown.stdout, /PRIVATE/);
+  });
+
   it("a refusal names what to do", () => {
     stack.step("refusals");
     const result = stack.desolate("fetch", "acme/never-cloned");

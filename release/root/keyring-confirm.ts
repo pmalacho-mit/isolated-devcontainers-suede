@@ -33,7 +33,7 @@ let tty: number;
 try {
   tty = fs.openSync("/dev/tty", "r+");
 } catch {
-  tty = fail("a push needs a person's confirmation, and there is no terminal to ask on. Run the push from the root's terminal (desolate root shell), or use Push in the root editor.");
+  tty = fail("a push needs a person's confirmation, and there is no terminal to ask on. Run `desolate push` from a terminal of your own, or `git push` inside `desolate root shell`.");
 }
 // Everything shown is a value this program validated: nothing here can carry an escape
 // sequence that repaints the prompt.

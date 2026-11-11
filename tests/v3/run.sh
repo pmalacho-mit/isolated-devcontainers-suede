@@ -7,6 +7,8 @@
 #                           Minutes. Needs Docker, the base image, and a non-root user.
 #   tests/v3/run.sh t3      end to end on real VMs (the qemu backend: KVM if /dev/kvm exists,
 #                           software emulation if not). Tens of minutes under emulation.
+#   tests/v3/run.sh t4      the same end-to-end boundary tests on a Mac (the vz backend).
+#                           NEVER RUN YET: see docs/v3/HANDOFF.md.
 #   tests/v3/run.sh all     t1, t2, t3
 #
 # A tier whose needs are not met FAILS and says what to install: it does not skip, because a
@@ -72,10 +74,19 @@ t3() {
   DESOLATE_TIER=T3 DESOLATE_IMAGE_DIR=$image run_node_tests tests/v3/t3/*.test.ts
 }
 
+t4() {
+  echo "== T4: end to end, the product backend (vz) on a Mac"
+  [ "$(uname -s)" = Darwin ] || need "T4 is the Mac's tier" "run it on macOS; on Linux the real-VM tier is t3"
+  docker_ready
+  command -v limactl >/dev/null 2>&1 || need "limactl is not on PATH" "brew install lima"
+  DESOLATE_TIER=T4 run_node_tests tests/v3/t3/*.test.ts
+}
+
 case "${1:-t1}" in
   t1) t1 ;;
   t2) t2 ;;
   t3) t3 ;;
+  t4) t4 ;;
   all) t1 && t2 && t3 ;;
   *) sed -n '2,20p' "$0"; exit 64 ;;
 esac

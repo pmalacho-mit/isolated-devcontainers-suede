@@ -1,207 +1,88 @@
 # Your environment
 
-You are running inside a **devcontainer managed by `desolate`** (isolated-devcontainers-suede). The nesting is: macOS host → Colima Linux VM → an unprivileged Docker-in-Docker daemon (sysbox runtime) → your devcontainer. You are at the bottom of that stack, and several things you would normally reach are deliberately unreachable. Read this before diagnosing any network, TLS, or git failure — most of them are expected here and are not bugs in the project.
+You are in a **workspace** managed by `desolate` v3: a virtual machine of your own, in a
+**domain**. Read this before diagnosing any network or git failure: most of what you cannot
+reach is unreachable on purpose, and is not a bug in the project.
 
-- Your project lives at `/workspaces/<project>` or `/workspaces/<owner>/<repo>`. The in-container path mirrors the outer path.
-- `/desolate` is desolate's read-only directory, in every container. It holds:
-  - `ca/`: the proxy's CA and the scripts that trust it;
-  - `status`: say how your work is going, below;
-  - `net`: join your project's compose networks;
-  - `AGENTS.md`: this file.
-- There is **no host Docker socket** anywhere in the stack. If this project declares the `docker-outside-of-docker` feature, `docker` here talks to **the project's own daemon** -- a sandboxed dind desolate runs for this project alone, which sees only this project's files (see "Docker" below). Otherwise there is no `docker` at all. `docker-in-docker` is refused: switch to `docker-outside-of-docker`.
-- Sibling projects' devcontainers are reachable over the network; the editor/orchestrator containers are not.
-- Dev servers: bind to `0.0.0.0`, not `127.0.0.1`. Ports declared in `customizations.desolate.ports` get forwarded to a host port (from 8080 up; `desolate` prints which). **The port you listen on is not the one the human opens.** When you print a URL for the human, read it from `DESOLATE_EXTERNAL_<port>_URL` (e.g. `$DESOLATE_EXTERNAL_5173_URL` for a server on 5173; `DESOLATE_EXTERNAL_<port>` is the bare host port). They are set in the editor's terminals and in login shells (`bash -l`); a port not declared in `devcontainer.json` has none, because nothing forwards it. Never add `appPort` to `devcontainer.json` — `desolate` hard-fails on it.
-- Changes to `devcontainer.json` need a rebuild from the host (`desolate --rebuild <project>`); you cannot apply them from in here.
-- Editor settings: `customizations.vscode.settings` IS applied, at Machine scope (`~/.desolate-editor/data/Machine/settings.json`, rewritten every start — do not edit it). A `.vscode/settings.json` in the repo overrides it, which is the right place for anything you want committed. The editor starts with Workspace Trust off (the container is the sandbox) and, unless `customizations.vscode.settings` says otherwise, in the outer editor's colour theme. Extensions come from Open VSX, not the Microsoft marketplace, so a marketplace-only extension will not install.
+- Your checkouts are under `/workspaces/<owner>/<repo>`: the domain's clone of each of its
+  repositories. You are in its main checkout, or in a worktree of your own at
+  `/workspaces/<owner>/<repo>/.worktrees/<name>`. `cat ~/.desolate/workspace.json` says which.
+- Other workspaces of your domain may be working in the same repositories at the same time,
+  each in its own worktree. You share one `.git` with them: you can see their branches, and
+  they can see yours. Workspaces of other domains see nothing of yours.
+- `/desolate/` is desolate's: `/desolate/mirrors/` (read-only: what each remote has
+  published), `/desolate/status` (say how your work is going), `/desolate/release/AGENTS.md`
+  (this file).
 
-## Docker: your project's own daemon
+## Git: commit freely; you cannot push, and need not try
 
-With `docker-outside-of-docker`, `docker` and `docker compose` here drive a daemon that belongs to this project and its worktrees, and nothing else:
+**No credential exists in this VM, and there is no route to use one.**
 
-- **`docker` here talks to `/var/run/docker-host.sock` directly** (`DOCKER_HOST` is set for you, in the editor's terminals and for `exec`). The feature's own `/var/run/docker.sock` is a `socat` relay with no `-t`: it tears the connection down 0.5s after the client half-closes, so an attached `docker run` with no stdin would lose everything after the first ~0.5s pause in its output, and still exit 0. If `docker run` output ever stops early while `docker logs` shows the rest, check `echo $DOCKER_HOST`; `export DOCKER_HOST=unix:///var/run/docker-host.sock` fixes that shell (the socket is group 1000, the `vscode` user's own group: no `sudo`). A project that sets its own `DOCKER_HOST` keeps it. A container that bind-mounts the socket should name `/var/run/docker.sock`: `/var/run/docker-host.sock` is not a path on the dind, and a bind of it gives an empty directory.
-- **Containers you start are siblings, not children.** They run beside this devcontainer on the project's daemon. `docker run -v $PWD:/x ...` works, because the project sits at the same path on both sides. Its `/workspaces` holds only this project, so a bind of `/workspaces` shows nothing of anyone else's.
-- **Reaching a compose service by name** needs this container on its network. desolate joins every network that exists when the project starts; for one a later `docker compose up` creates, run `/desolate/net join --all` (or `join <network>`). `desolate-net list` shows what there is.
-- **A file a container wrote as root** (a compose service writing into the repo) can be reclaimed from here: `docker run --rm -v "$PWD":/w alpine chown -R "$(id -u):$(id -g)" /w`. The daemon sees only this project, so this reaches nothing else.
-- **TLS inside builds** still needs `/desolate/ca/trust-proxy-in-builds.sh` (below); the daemon's own pulls already trust the proxy.
-- **Everything shares the daemon's memory ceiling** (6 GiB unless the project says otherwise): this devcontainer, its editor server and language servers, you, the containers you start, and their builds. An OOM kill of a dev server, or an exit 137, is usually this. You can read it: the `memory.max`, `memory.peak` and `memory.events` cgroup files of the dind (`cat /sys/fs/cgroup/memory.*` from a container on it). Raising it is `customizations.desolate.memory` in `devcontainer.json` (`"12g"`). It applies on the next `desolate <project>`, with no rebuild needed, but it is a `devcontainer.json` change, so it is the human's call.
-- **x86 containers on an Apple Silicon host.** The VM is aarch64, so `docker run --platform linux/amd64 <image> <cmd>` (and `linux/386`) works only through qemu-user, which the human publishes when provisioning the VM (`./cli.sh vm install`) and which your project's daemon registers for itself at start. Do not try to install it yourself (`tonistiigi/binfmt` needs `--privileged` and is refused). If you see `exec format error`, it is not registered or not usable here: say so and stop. Preflight section 6b checks it. What to expect: it is **slow** (several times to tens of times slower than native), so build, link and run test binaries are what it is for (`apt-get install nasm binutils` in a `linux/amd64` Debian, `ld -m elf_i386`, run the result). It is **not** evidence of real-x86 behaviour. desolate's maintainers measured it against real Intel and AMD CPUs (isolated-devcontainers-suede, `docs/x86-equivalence-evidence.md`): integer, SSE and ordinary x87 arithmetic match. qemu 8.2.2 differs on x87 stack overflow/underflow (it never faults), `FCOMI`-family flags, `fsin`/`fcos`/`fptan`/`fsincos` beyond ~16 digits, x87/MXCSR exception flags, `FSAVE` images, 16-bit `ENTER`, and a few encodings (`F6`/`F7 /1`, register forms of `MOVNTQ`/`MOVNTDQ`/`MOVLPD`/`MOVHPD`, `0F 18`). **`gdb` does not work inside a `linux/amd64` container** (`ptrace: Function not implemented`: qemu-user has no ptrace). To debug or single-step an x86 binary, run it under qemu's own gdb server from a *native* container instead: in `ubuntu:24.04` (arm64), `apt-get install qemu-user-static gdb-multiarch`, then `qemu-i386-static -g 1234 ./prog &` (or `qemu-x86_64-static`) and `gdb-multiarch -ex 'target remote :1234' ./prog`. aarch64 gdb converts x87 registers through a double when printing them; read `info registers st0`'s `(raw 0x...)` for the exact 80 bits. **Never record expected results (fixtures) from emulation**: for v86_64's nasm tests, 1,038 of 16,529 would be wrong. Generate them on real x86 (for example, your project's CI on GitHub's `ubuntu-latest` runners, which are x86) and use emulation to build, run and debug. This holds for qemu 8.2.2; a newer qemu changes nothing until the human has it re-measured. Rosetta does not help: it runs x86_64 only, never i386.
-- The daemon is **stopped when the project has been idle a while** and started again on the next `desolate <project>` -- images and build cache survive; containers you left running do not.
-
-### Do not remove containers you did not start
-
-`docker` here can remove **any** container on the project's daemon, and `docker ps` lists more than yours: this devcontainer, the `desolate-relay-*` containers that carry its ports, and the devcontainers and relays of **every worktree of this project** -- other agents' sessions included. Nothing stands between a command and the socket.
-
-- `docker rm -f` / `docker kill` / `docker stop` on **your own container** (its id is `$(hostname)`) ends your session, your editor and your terminals at once. Nothing restarts it. Whatever you wrote outside `/workspaces` (your `$HOME`, installed packages, running processes) is lost; `/workspaces` survives, committed or not. Only a human can bring the container back (`desolate <project>` on the Mac), and it comes back as a fresh one.
-- The same commands on a **sibling worktree's** devcontainer end that agent's session. `docker rm -f $(docker ps -aq)` does both. `docker container prune` and `docker system prune` remove only *stopped* containers, but a stopped devcontainer (desolate keeps one when a target is stopped, so it restarts fast) is exactly that, and its `$HOME` goes with it.
-- Remove only what you started: name it, or give it a label you chose and filter on that (`docker rm -f $(docker ps -aq --filter label=mine=1)`). Never remove by a bare `ps -a` listing, and when an id is not one you created in this session, leave it.
-
-## Network: everything goes through an intercepting proxy
-
-All container egress is force-redirected through a transparent mitmproxy in the VM. The **only** things that leave this container are **TCP 80, TCP 443, and DNS 53**. Everything else is dropped at the VM's firewall.
-
-- **No SSH.** Port 22 is blocked from devcontainers entirely. No `git+ssh`, no ssh submodules, no private Go modules or npm git deps over ssh, no scp/rsync-over-ssh. Use HTTPS equivalents.
-- **No arbitrary ports outbound.** No SMTP, no direct external database ports, no ICMP/ping. If a tool needs a non-80/443 port to reach the internet, it will not work — say so rather than retrying.
-- **No QUIC/HTTP3.** UDP 443 is dropped so TLS falls back to interceptable TCP. Clients that prefer HTTP/3 will just be slow to fall back.
-- **No private/internal addresses.** RFC1918, loopback, link-local, `100.64.0.0/10`, and cloud metadata endpoints are refused at the proxy and again in the kernel. You cannot reach the Mac, the VM, or the LAN. Don't try.
-- Public hosts are generally reachable (the destination allowlist ships permissive), but a blocked host returns **403** from the proxy. A 403 with no server-side explanation is a policy refusal, not an application bug.
-
-### TLS: the proxy's CA, and the one gotcha
-
-HTTPS is intercepted with a private CA. That CA is installed into this container's **system** trust store automatically at start, so `curl`, `git`, `apt`, and Go work out of the box.
-
-Runtimes that ignore the system store and carry their own bundle — **Python (pip, requests, httpx via certifi), Node, Cargo** — depend on environment variables that are written to `/etc/profile.d/desolate-ca.sh`, **which only login shells source.** If you shell out non-interactively (`sh -c`, `bash -c`, a spawned server process), you may hit:
-
-```
-[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate
-```
-
-That is this, not a broken package index. Fix it by sourcing the file or exporting directly:
-
-```bash
-. /etc/profile.d/desolate-ca.sh
-# or
-export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
-       REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
-       CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt \
-       NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/desolate-proxy.crt
-```
-
-## Git: local operations only
-
-**You have no git remote credentials and no route to use them.** Deploy keys live in a separate keyring container with no network at all; they are usable only from the outer editor, and SSH egress is blocked from here regardless.
-
-- **Do:** commit, branch, rebase, stash, diff, log, reset. `.git` is local and fully yours.
-- **Don't:** `push`, `pull`, `fetch`, `clone` from a private remote, `gh auth login`, or attempt to configure credentials/SSH keys. These will fail; retrying or "fixing" them wastes time and is out of scope.
-- **The human operating outside the devcontainer is responsible for all push/pull.** When your work is ready, commit locally and say so — don't try to publish it.
-- Anonymous HTTPS reads of public repos do go through the proxy and generally work. Anything requiring auth will not, unless a token placeholder has been provisioned (see Secrets).
-
-## Fetching remote content
-
-Plain HTTPS `GET` is your channel for reading remote content — docs, package registries, APIs. It works and is fine to use.
-
-That is **for reading content only.** It is not a workaround for the missing git remote, not a way to reach internal services, and not a path for pushing anything anywhere.
-
-## Installing things during a build
-
-This is the failure that most often looks like a broken Dockerfile and isn't. A stock base image doesn't trust the proxy's CA, so HTTPS *inside a build step* fails:
-
-```
-fatal: unable to access 'https://...': SSL certificate problem:
-       unable to get local issuer certificate
-```
-
-Plain-HTTP `apt` is unaffected, which is why this often doesn't surface until the first `pip install`.
-
-**It usually doesn't look like a TLS error. It looks like a hang.** `npm install` and `pip install` retry with backoff before they surface anything, so the symptom is a build step that sits there for 60–90 seconds and only then fails. If a package install seems to stall, this is the first thing to suspect — not a slow registry, not a network problem. Search your build log for `certificate`, not for `hang`.
-
-- **This project's own image** is already handled if it uses `"image"` + Features — `desolate` pre-derives a CA-trusting base. Features that download over HTTPS work normally.
-- **Builds you run yourself** (your own `compose.yml`, `docker build` inside the devcontainer) are not, and need this script, published into every devcontainer:
-
-```bash
-/desolate/ca/trust-proxy-in-builds.sh --service <service> --image <base-image>
-```
-
-Note the path is `/desolate/ca/`. It derives `desolate-ca/<base-image>` with the CA installed plus the TLS env vars above, and writes a gitignored `compose.override.yml` pointing that service's build at it. Your `Dockerfile` and `compose.yml` are never modified.
-
-- Run it **once per (service, base image)** — a second service on a different base needs its own run.
-- **Never pass `--pull`** to the subsequent build; BuildKit will try to fetch `desolate-ca/*` from a registry and fail with `pull access denied`.
-- `--print-recipe` shows the Dockerfile it would build without building. `--image` alone derives without wiring up compose.
-- It needs `docker` here — i.e. the `docker-outside-of-docker` feature. If `docker info` fails, that's why, and adding the feature requires a rebuild from the host.
-- `compose.override.yml` is a development artifact. Leave it gitignored; it breaks builds if it reaches production.
-
-- **Builds that go through neither compose nor buildx** — anything driven by an SDK (`dockerode`, `docker-py`, `testcontainers`, the Go client) posting to the Engine API, or plain `docker build` with no buildx — cannot be handed a named build context at all. There is nothing to override. Point the base image's own tag at the derivative instead:
-
-```bash
-/desolate/ca/trust-proxy-in-builds.sh --image node:22-bookworm-slim --shadow
-```
-
-`FROM node:22-bookworm-slim` in this daemon then resolves to the CA-trusting image for every builder that reads the local image store. The Dockerfile stays unmodified and production-clean. `--unshadow` puts the upstream image back. Two things to know: a later `docker pull node:22-bookworm-slim` silently restores the untrusting image (re-run the script), and the tag is lost when the container is rebuilt.
-
-- **A shadow does not bind a BuildKit build posted to the Engine API** (`POST /build?version=2` — `dockerode` with `version: "2"` and tools built on it). That path resolves the tag at the registry and pins `FROM ...@sha256:<upstream>`, so the retag is never consulted and the build silently gets the pristine, non-CA-trusting base: a long download, then a hang on its first HTTPS fetch. `docker build`, `docker compose build` and the classic builder (`version: "1"`, `DOCKER_BUILDKIT=0`) all honour the shadow. For a build stuck on the BuildKit path, either point it at the derivative directly (`FROM desolate-ca/node:22-bookworm-slim`, which exists in no registry so BuildKit falls back to the local store) or ask it for the classic builder. With a daemon of your own, `--shadow` also fills its registry mirror, and a `version=2` build of a Docker Hub base then gets the derivative from there; on the shared daemon, or for a base from another registry, it still does not.
-
-- **The declare-once form** of that, so it survives rebuilds and needs no manual step — this is a `devcontainer.json` change, so it needs the human and a rebuild:
-
-```jsonc
-"customizations": { "desolate": { "shadowImages": ["node:22-bookworm-slim"] } }
-```
-
-Applied automatically at container start, in the foreground — a first start pulls and rebuilds each image, so it is minutes, printed as it goes. It does not detach: the work is a nested image build holding mounts inside the container, and a container stopped with one in flight cannot be stopped at all. Needs the `docker-outside-of-docker` feature; the shadow lives in the project's own daemon, so it applies to every build any of the project's containers starts.
-
-- **What does not work, and looks like it should:** configuring the CA in the daemon's `buildkitd.toml`. That is BuildKit's *registry* client — how it pulls images — and has no effect on the HTTPS your `RUN` steps make. Don't spend time on it.
-
-If a project builds from **its own `Dockerfile`** at the devcontainer level (rather than `"image"` + Features), build-time HTTPS will fail and cannot be fixed from in here — report it rather than working around it.
-
-## Secrets: placeholders are correct, leave them alone
-
-Environment variables may contain **placeholders** (e.g. `MYAPP-OPENAI-KEY`) rather than real credentials. This is intentional and working as designed. Send them exactly as-is — `Authorization: Bearer MYAPP-OPENAI-KEY` — and the proxy substitutes the real value on the way out, only toward that secret's allowlisted hosts.
-
-- Do **not** report a placeholder as a misconfiguration, try to resolve it, or search the filesystem for the real value. It does not exist inside any container.
-- A placeholder sent over plain `http://` is **refused with 403** — secrets require HTTPS (the destination is proven via TLS SNI).
-- Sending one to a non-allowlisted host sends the placeholder text as-is (never the real value) and is logged as a leak suspect. So committing or pushing code that mentions a placeholder works; it just never becomes the secret there.
-- New secrets and allowlist changes can only be made by the human on the Mac.
-
-## Filesystem and mount constraints
-
-- `workspaceMount` must bind exactly `/workspaces/<project>`. Bind mounts are refused outright.
-- Volumes must be named `<project>` or `<project>-*`. For a nested repo, `owner/repo` encodes as `owner__repo`, so the namespace is `owner__repo-*`.
-- `${localWorkspaceFolderBasename}` in a `mounts` entry drops the owner segment and gets refused — name volumes explicitly.
-- Never `COPY .env` or `ARG` a real credential into an image; layers are permanent.
-- Files you cannot delete because a container wrote them as root: with a daemon of your own, reclaim them yourself (the Docker section above). Without one, ask the human to run `./cli.sh reclaim <project> [<path>]` on the Mac. `./cli.sh worktree remove` does it before it removes anything.
+- **Do:** commit, branch, rebase, stash, diff, log. `git fetch` works: `origin` is the
+  read-only mirror, so it needs no key and no network.
+- **To get what the remote has now:** `desolate fetch` asks the root to refresh the mirror,
+  then fetches. `origin/main` is then current.
+- **When your work is ready:** commit it, then `desolate offer` (in the checkout, on the
+  branch). That hands the branch to the person, who reviews it and pushes it. **Offering is
+  not pushing, and nothing you do here pushes.** Do not look for a token, install `gh`, or
+  add a remote: there is nothing to find.
+- Do not add or remove worktrees of your own in a loop: other workspaces share this `.git`.
+- LFS works: files check out from the mirror, and new large files travel with your offer.
 
 ## Saying how it's going: `/desolate/status`
-
-Your target -- the project's tree, or this worktree -- has one status, a colour and a one-line message, that the human sees beside it in the editor's panel and a harness reads from the Mac. Set it whenever what you need changes:
 
 ```bash
 /desolate/status set blue   "working: issue #42"
 /desolate/status set orange "needs a human: which API version?"
-/desolate/status set red    "authentication failed"
-/desolate/status set green  "ready for a PR on issue/42-headers"
-/desolate/status clear
+/desolate/status set red    "the tests cannot run: no database"
+/desolate/status set green  "ready: offered issue/42"
+/desolate/status note "what I changed, for the other agents here"
+/desolate/status board      # every checkout in this repository: its status and its note
 ```
 
-- Colours: `gray`, `blue`, `green`, `yellow`, `orange`, `red`. Unless your task says otherwise: blue working, orange needs a human, red failed, green done.
-- One line, at most 200 characters; it is shown as plain text.
-- It is a file in your git dir (`desolate-status path`), not in the repository: it is never committed or pushed, and nothing needs cleaning up.
-- It is shown, never acted on. Saying `green` pushes nothing: pushing and merging are a human's, from outside this container. Leave the branch committed and the worktree clean.
-- Unless your task says otherwise, `gray` means *withdrawn*: you finished and recommend this branch **not** be merged. Say why in the message, for example `gray "withdrawn: carried into issue-14's branch"`.
+One line, at most 200 characters. Colours: `gray`, `blue`, `green`, `yellow`, `orange`,
+`red`. Unless your task says otherwise: blue working, orange needs a human, red failed, green
+done, gray withdrawn (say why). It is shown to the person and read by scripts. It is never
+acted on: `green` pushes nothing.
 
-### Coordinating with other agents in this repository: `note` and `board`
+## Network: named HTTP and HTTPS, through a proxy; nothing else
 
-Other agents may be working in this same repository at the same time, each in its own worktree on its own branch. For example, several proposals into one dependency might each be prepared by a different agent. You share one `.git`, so you can see each other's work and words:
+This VM has no route to anything. Its one way out is a proxy that belongs to this workspace.
+
+- **What works:** `http://` and `https://` to a **hostname**, on ports 80 and 443. You need
+  no proxy settings: connections are redirected for you. TLS is end to end with the real
+  server.
+- **What does not, by design:** any other port; SSH (no `git+ssh`, no `scp`); an address
+  without a name (`curl https://1.2.3.4` is refused); the host machine, the LAN, the root,
+  other workspaces; ICMP. Do not retry these or work around them: say what you needed.
+- Names resolve to a placeholder address (`198.18.0.1`) here. That is expected: the proxy
+  resolves the real name. Do not "fix" `/etc/resolv.conf`.
+- A refusal comes back as `403` with a line starting `desolate:` that says why. "Not on the
+  domain's allowlist" means the person has limited this domain to listed hosts: ask them.
+- Every request is logged with this workspace's name.
+
+## Dev servers
+
+Bind to `0.0.0.0` or `127.0.0.1` on any port from 1024 up, and that is all: desolate notices
+the listener and publishes it. **The person opens it at this workspace's own hostname, on the
+same port number**, not at `localhost`:
 
 ```bash
-/desolate/status board                 # every target here: its status and its note; yours is marked (you)
-/desolate/status note "text..."        # your note (or pipe it in: ... | /desolate/status note)
-/desolate/status note --clear
-git branch -a                          # their branches, if the human pulled them in (origin/...)
-git diff HEAD...<their branch>         # what they changed
+jq -r '"http://\(.domain)-\(.workspace)"' ~/.desolate/workspace.json   # the name's start
 ```
 
-- **Read the board when you start, and again before you finish.** Write your note when you have something another agent should know: what you're changing, what you need from them, what you decided.
-- **Agreeing that one branch carries another's change is normal.** Say it in both notes. The one that hands its change over finishes `gray "withdrawn: carried by <worktree>"`, and the one carrying it says what it took in its own note.
-- Notes are prose for other agents. They're shown, never acted on, and they're not the place for questions to the human: use `orange` for those.
+The exact URL is what the person's `desolate ports` shows; tell them the port. If a port you
+wanted is already taken here, something else needs that number on their machine: let your
+server move to the next one.
+
+## What is not here yet
+
+desolate v3 is being built. In this workspace today: **no editor**, and **the project's
+`devcontainer.json` is not started** (you are in the VM itself, with what its base image has:
+git, git-lfs, node, python3, curl, jq, docker's binaries). **No API secret is available**:
+placeholders are not substituted yet. If your task needs one of these, say so and stop.
 
 ## When to stop and ask
 
-Escalate to the human rather than working around it: anything needing `git push`/`pull`, a new secret or allowlist entry, a `devcontainer.json` change, a new forwarded port, SSH access, or reaching a host the proxy refuses. These are all outside-the-container operations by design.
-
-## Filing GitHub issues from inside this devcontainer
-
-You have no GitHub write credentials and no route to get any. gh isn't installed, there's no token in the environment, and POST https://api.github.com/repos/.../issues returns 401. Anonymous reads work fine — you can fetch public repo files and API metadata, so research is unaffected. Only publishing is blocked, and it's by design: credentials live outside the container. Don't install gh, don't run gh auth login, don't go looking for a token. It's wasted time and it won't work.
-
-Instead, write the issue and hand it off:
-
-Write the body to a markdown file in the project root — e.g. <topic>-issue.md. Root, not /tmp or a scratch dir: the human has to reach it from outside the container.
-Don't put a title in the body. No H1 line — it duplicates the issue title GitHub renders above it. The title goes in the command.
-Give them the exact command, filled in, ready to paste:
-
-gh issue create --repo <owner>/<repo> \
-  --title "<title>" \
-  --body-file <file>.md
-They'll download the file and run this from wherever it landed (~/Downloads works — --body-file takes a relative path).
-
-Say the file is disposable, and delete it once they confirm it's filed.
-Same pattern for PRs, review comments, and anything else that writes to a remote: produce the artifact, hand over the command, let the human execute.
-
-One habit worth keeping: verify, don't assume. Run the 401 probe before telling someone you can't do something — the answer could differ if a token placeholder has been provisioned for a given host.
+Anything needing a push, a secret, a host the proxy refuses, SSH, or another domain's work.
+These are the person's, from outside this VM, by design. Set `orange` with what you need.

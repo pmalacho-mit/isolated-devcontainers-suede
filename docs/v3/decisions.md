@@ -225,3 +225,64 @@ and a kernel (the sandbox has no route to Ubuntu's cloud images or Docker Hub, o
 package archive). On a Mac, the Lima backend runs the same script on the first boot of a
 digest-pinned Ubuntu cloud image and clones the result. Root and workspace VMs boot the same
 image.
+
+## The qemu backend uses 9p, because Lima's virtiofs on Linux is not read-only (measured)
+
+In the sandbox, a Lima VM on QEMU with `mountType: virtiofs` and a share marked
+`writable: false`: root in the guest ran `mount -o remount,rw` on it and then created a file,
+and the file appeared on the host. Lima starts `virtiofsd` with no read-only option (its
+source says so: "read-only mode is not supported on the QEMU/virtiofsd side yet"), so the
+read-only is only the guest's mount flag. That is exactly the boundary P5 says must not live
+in the guest. With `mountType: 9p` Lima passes QEMU's `readonly` for such a share, and the
+same attack fails (tests/v3/t3). So: **qemu uses 9p; vz uses virtiofs**, where the Mac
+refuses the write (measured on the M1). A consequence worth knowing: 9p mounts a share once
+per guest, so the "mount the tag afresh, read-write" attack does not exist there, while on
+virtiofs it does and is refused by the host.
+
+## The qemu backend's egress: QEMU's own `restrict=on` (measured)
+
+Lima gives every QEMU VM the user-mode network and has no setting to restrict it. Lima does
+run whatever `$QEMU_SYSTEM_<ARCH>` names, so desolate points that at a wrapper
+(`release/host/vm/qemu-wrapper.sh`) which, for a workspace VM, appends `restrict=on` to the
+user network and a `guestfwd` from one guest address to the link's socket on the host. The
+wrapper refuses to start a workspace VM whose network it did not restrict, or one with a
+second network, and the backend checks the running QEMU's command line after the start.
+Tier T3 then tries, as root in the guest: the host by its gateway address and its other
+addresses, the forge, the internet by address and by name, DNS, UDP; and again after
+rewriting routes, flushing every firewall rule and choosing a resolver.
+
+## Inside a VM with no interface, connections need somewhere to go (measured)
+
+On the fake backend a workspace has only loopback. For a program's connection to reach the
+redirect to the egress relay it must first be routable. A dummy interface would do, but the
+sandbox's kernel has no dummy module; a default route through `lo` routes the connection but
+the redirected connection never completes; `ip route replace local default dev lo` (every
+address is local to loopback) works. Real VMs have an interface and a default route, and are
+not touched. None of this is a boundary.
+
+## git-lfs: `lfs.url` outranks `remote.<name>.lfspushurl` (measured; a bug the tests caught)
+
+The root clone sets `lfs.url` to the mirror (so downloads are offline and a hostile
+`.lfsconfig` is ignored). With the push endpoint set as `remote.origin.lfspushurl`,
+`git lfs env` showed the mirror as the endpoint for uploads too, and a person's push
+"uploaded" its LFS object into the mirror instead of the remote, then pushed the commit: the
+remote had a pointer with no object. `lfs.pushurl` is consulted first, so the root clone sets
+that. A clone that is not pushable gets a push URL and an LFS push URL that lead nowhere,
+and every mirror has a `pre-receive` hook that refuses everything, in a directory only root
+writes: before those, `git push` in an unpushable root clone wrote a branch into the mirror.
+
+## The proxy does not yet terminate TLS
+
+Each workspace's proxy (`release/root/proxy/proxy.ts`) takes `CONNECT <name>:<80|443>`,
+applies the domain's rules, resolves the name itself, refuses internal addresses, connects
+to the address it checked, and audits by link. TLS runs end to end between the workspace and
+the real server. It therefore cannot substitute a secret's placeholder in a header: Phase 4
+is not done. v2's `addon.py` (in `carryover/proxy/`) is the piece that does, under mitmproxy;
+it goes behind the same `CONNECT` interface, one instance per workspace, with
+`project_of(flow)` replaced by the instance's own domain and workspace.
+
+## Timings in the sandbox (TCG, no KVM), for scale only
+
+Tier T2 (52 tests, the fake backend): 3 minutes 15 seconds. Tier T3 under software emulation:
+about 3 minutes to boot each VM, about 20 minutes for the tier. These say nothing about a
+Mac, where a VM boots in under 10 seconds.

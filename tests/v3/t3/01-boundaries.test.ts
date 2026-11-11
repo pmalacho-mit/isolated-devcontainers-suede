@@ -1,4 +1,5 @@
-// T3 (qemu backend: real VMs, under KVM or TCG). The boundaries that need a real VM
+// T3 (qemu backend: real VMs, under KVM or TCG) and T4 (vz, on a Mac: DESOLATE_TIER=T4).
+// The boundaries that need a real VM
 // (move-to-vms.md section 13.2): read-only shares against root inside the VM, forced egress
 // with root inside the VM, and no cross-domain path. Every negative check sits beside a
 // control that shows it would have caught the failure.
@@ -6,7 +7,8 @@
 // Run: tests/v3/run.sh t3   (tens of minutes under TCG: each VM takes minutes to boot)
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as http from "node:http";
+import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -14,8 +16,9 @@ import { bootstrap, git, newStack } from "../lib/harness.ts";
 import type { Stack } from "../lib/harness.ts";
 
 let stack: Stack;
-let listener: http.Server;
+let listener: ChildProcess;
 let port = 0;
+const REAL = process.env.DESOLATE_TIER === "T3" || process.env.DESOLATE_TIER === "T4";
 const vms = new Map<string, string>();
 const vmOf = (target: string) => {
   if (!vms.has(target)) {
@@ -28,7 +31,7 @@ const asRoot = (target: string, script: string) => stack.inVm(vmOf(target), ["ba
 const asUser = (target: string, script: string) => stack.inVm(vmOf(target), ["bash", "-c", script]);
 const lines = (text: string) => Object.fromEntries(text.split("\n").filter((line) => line.includes("=")).map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
 
-describe("T3: boundaries that need a real VM", { skip: process.env.DESOLATE_TIER !== "T3" ? "set DESOLATE_TIER=T3 (tests/v3/run.sh t3)" : false }, () => {
+describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOLATE_TIER=T3 (tests/v3/run.sh t3), or T4 on a Mac" }, () => {
   before(async () => {
     stack = newStack("t3");
     stack.seed("acme/widgets", (dir) => {
@@ -40,13 +43,13 @@ describe("T3: boundaries that need a real VM", { skip: process.env.DESOLATE_TIER
       git(dir, "commit", "--quiet", "-m", "seed");
     });
     // Something on the host for a VM to try to reach: on every address, so that only the
-    // VM's own confinement can be what stops it.
-    listener = http.createServer((_request, response) => response.end("the-host-answered\n"));
-    await new Promise<void>((resolve) => listener.listen(0, "0.0.0.0", () => resolve()));
-    port = (listener.address() as { port: number }).port;
+    // VM's own confinement can be what stops it. In a process of its own: this one blocks
+    // while a command runs in a VM, and a listener that cannot answer proves nothing.
+    listener = spawn(process.execPath, ["-e", `const s = require("http").createServer((q, r) => r.end("the-host-answered\\n")); s.listen(0, "0.0.0.0", () => console.log(s.address().port));`], { stdio: ["ignore", "pipe", "ignore"] });
+    port = await new Promise<number>((resolve) => listener.stdout!.once("data", (chunk) => resolve(Number(String(chunk).trim()))));
   });
   after(() => {
-    listener?.close();
+    listener?.kill();
     stack?.destroy();
   });
 
@@ -138,7 +141,14 @@ describe("T3: boundaries that need a real VM", { skip: process.env.DESOLATE_TIER
     const hostAddresses = Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === "IPv4" && !a.internal).map((a) => a!.address);
     const forge = stack.env.DESOLATE_FORGE_SPEC!.replace(/^.*@/, "").replace(/:\d+$/, "");
     const probe = (targets: string) => `
-      try() { curl -s -m 20 -o /dev/null "$2"; rc=$?; [ $rc = 0 ] && echo "$1=REACHED" || echo "$1=refused (curl exit $rc)"; }
+      # REACHED only if the destination itself answered. A 403 whose body begins "desolate:"
+      # is desolate's own relay or proxy refusing, which is a refusal.
+      try() {
+        code=$(curl -s -m 20 -o /tmp/try-body -w '%{http_code}' "$2"); rc=$?
+        if [ $rc != 0 ]; then echo "$1=refused (curl exit $rc)"
+        elif [ "$code" = 403 ] && head -c 9 /tmp/try-body | grep -q '^desolate:'; then echo "$1=refused (by desolate: $(head -c 80 /tmp/try-body | tr -d '\n'))"
+        else echo "$1=REACHED (http $code)"; fi
+      }
       ${targets}`;
     const targets = [
       `try gateway http://192.168.5.2:${port}/`,
@@ -149,7 +159,7 @@ describe("T3: boundaries that need a real VM", { skip: process.env.DESOLATE_TIER
     ].join("\n");
     // Control: the same requests from the root VM, whose egress is open, do reach the host.
     const control = lines(stack.inRoot(["bash", "-c", probe(`try gateway http://192.168.5.2:${port}/`)]).stdout);
-    assert.equal(control.gateway, "REACHED", "control: a VM with open egress reaches the host's listener, so a refusal below is the confinement");
+    assert.match(control.gateway ?? "", /^REACHED/, "control: a VM with open egress reaches the host's listener, so a refusal below is the confinement");
     const first = lines(asRoot("a/w1", probe(targets)).stdout);
     for (const [name, verdict] of Object.entries(first)) assert.match(verdict, /^refused/, `${name}, as root in the workspace`);
     assert.ok(Object.keys(first).length >= 4, "the probe ran");
@@ -162,11 +172,14 @@ describe("T3: boundaries that need a real VM", { skip: process.env.DESOLATE_TIER
       getent hosts example.com >/dev/null 2>&1 && echo dns=REACHED || echo dns=refused
       python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(4); s.sendto(b'x', ('192.168.5.2', ${port})); s.recvfrom(10)" 2>/dev/null && echo udp=REACHED || echo udp=refused`).stdout);
     for (const [name, verdict] of Object.entries(second)) assert.match(verdict, /^refused/, `${name}, after root rewrote routes, flushed the firewall and chose a resolver`);
-    // And outside the VM: the hypervisor process that is running is the restricted one.
-    const pid = fs.readFileSync(path.join(stack.home, "lima", vmOf("a/w1"), "qemu.pid"), "utf8").trim();
-    assert.match(fs.readFileSync(`/proc/${pid}/cmdline`, "utf8"), /restrict=on/);
-    const rootPid = fs.readFileSync(path.join(stack.home, "lima", `dsl-${stack.instance}-root`, "qemu.pid"), "utf8").trim();
-    assert.doesNotMatch(fs.readFileSync(`/proc/${rootPid}/cmdline`, "utf8"), /restrict=on/, "control: the root VM's network is the unrestricted kind");
+    // And outside the VM, on the qemu backend: the hypervisor that is running is the
+    // restricted one, and the root VM's is not (the control).
+    if (stack.backend === "qemu") {
+      const pid = fs.readFileSync(path.join(stack.home, "lima", vmOf("a/w1"), "qemu.pid"), "utf8").trim();
+      assert.match(fs.readFileSync(`/proc/${pid}/cmdline`, "utf8"), /restrict=on/);
+      const rootPid = fs.readFileSync(path.join(stack.home, "lima", `dsl-${stack.instance}-root`, "qemu.pid"), "utf8").trim();
+      assert.doesNotMatch(fs.readFileSync(`/proc/${rootPid}/cmdline`, "utf8"), /restrict=on/, "control: the root VM's network is the unrestricted kind");
+    }
   });
 
   it("T3 two domains: neither can reach the other's work, whatever it writes", () => {
@@ -191,7 +204,7 @@ describe("T3: boundaries that need a real VM", { skip: process.env.DESOLATE_TIER
     assert.equal(result.code, 0, result.stdout);
     assert.match(result.stdout, /nothing of this stack is left/);
     assert.equal(fs.existsSync(stack.home), false);
-    const left = fs.readdirSync("/proc").filter((entry) => /^\d+$/.test(entry)).filter((pid) => {
+    const left = !fs.existsSync("/proc/self/cmdline") ? [] : fs.readdirSync("/proc").filter((entry) => /^\d+$/.test(entry)).filter((pid) => {
       try {
         return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(stack.home);
       } catch {

@@ -8,6 +8,38 @@ the rules at the bottom exist.
 The design rationale for each control is in [the README](../README.md); this
 is the history that rationale was earned from.
 
+## Found while building v3 (2026-11), by its own tests
+
+These were caught before any of v3 shipped. They are here because each has the shape this
+page is about, and because three of them were mistakes in the *tests*.
+
+- **An LFS upload went into the mirror, and the commit went to the remote.** The root clone
+  set `lfs.url` to the mirror and the push endpoint as `remote.origin.lfspushurl`; git-lfs
+  lets `lfs.url` outrank the per-remote setting, so `git lfs push` "succeeded" into the
+  mirror and the remote received a pointer with no object. Found by the test that asks the
+  forge whether it holds the object after a push. Now `lfs.pushurl`.
+  (`tests/v3/t2/04-offers.test.ts`)
+- **`git push` in a clone the root cannot push wrote a branch into the mirror.** With no
+  push URL, a push goes to the fetch URL, which is the mirror, which the root can write. The
+  test expected a refusal and got exit 0. Now such a clone's push URLs lead nowhere, and
+  every mirror refuses every push with a hook only root can change.
+- **A read-only share that root in the VM could write.** Lima on Linux starts `virtiofsd`
+  with no read-only option, so a share marked read-only was read-only by the guest's mount
+  flag alone: `mount -o remount,rw`, then a file created in the guest appeared on the host.
+  Found by hand before the backend was written, then pinned by tier T3. The qemu backend
+  uses 9p, whose read-only is QEMU's. (On a Mac the host refuses the write: measured.)
+- **A probe that said "ok" whatever happened.** The second egress probe for the Mac tested
+  whether `dig` printed anything; `dig` prints its timeout. Two rows of that probe's results
+  are not evidence, and `docs/v3/decisions.md` says so beside them.
+- **Controls that could not pass.** Tier T3's first run failed twice, both times in a
+  control: one assumed a share can be mounted a second time (9p allows one mount), the other
+  gave a slow emulated VM six seconds. The negative checks beside them had passed. A control
+  that fails is the suite working; a suite with no controls would have been green.
+- **Tests that closed their own connection.** Requests written straight to a workspace's link
+  with `printf ... | socat` got no answer, because the proxy hangs up on a client that closes
+  its side before the answer is ready. The proxy was right. The test now holds the
+  connection open.
+
 ## Found by the 2026 security audits
 
 **Tab completion ran commands a project named.** `compgen -W` expands its

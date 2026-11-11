@@ -1,9 +1,9 @@
 # Isolated Devcontainers Suede (`desolate`)
 
-**desolate** (dev + isolate) is a browser-based, container-isolated VS Code
+**desolate** (dev + isolate) is a browser-based, VM-isolated development
 environment for macOS[^1].
 
-It's goal is to enable human developers to work alongside coding agents
+Its goal is to enable human developers to work alongside coding agents
 without sacrificing developer experience nor sandbox isolation.
 
 Whether or not you trust LLMs, supply chain attacks are on the rise.
@@ -21,77 +21,65 @@ This repo is a [suede dependency](https://github.com/pmalacho-mit/suede).
 
 To see the installable source code along with the full documentation, please checkout the [release branch](https://github.com/pmalacho-mit/isolated-devcontainers-suede/tree/release).
 
+## Status: v3 in progress on this branch
+
+This branch replaces v2 (containers on a sysbox daemon in one Colima VM) with **v3: a VM per
+workspace**, as specified in [`move-to-vms.md`](move-to-vms.md). v3 is not finished, and
+`release/` on this branch is **not** an installable replacement for v2 yet: do not merge it
+to `main`, whose `release/` is pushed to the `release` branch that users install from.
+
+- What v3 is, its principles, and exactly what works today: [`release/README.md`](release/README.md).
+- Where it stands and how to carry on: [`docs/v3/HANDOFF.md`](docs/v3/HANDOFF.md).
+- What was decided along the way, with the measurements: [`docs/v3/decisions.md`](docs/v3/decisions.md).
+- v2 is in history at `4f32c77` and on the `release` branch. The v2 code that v3 will reuse
+  and has not ported yet is in [`carryover/`](carryover/README.md).
+
 ## At a glance
 
-Projects run as devcontainers inside an unprivileged Docker-in-Docker daemon in a Colima VM, reached through a browser tab rather than a desktop editor. A compromised project cannot reach your Mac, your credentials, or another project -- and secrets are never stored in a devcontainer: they live in the VM, and an intercepting proxy substitutes them in flight, only toward each secret's allowlisted hosts.
+One VM per workspace, workspaces collected into domains that share repositories and network
+rules, and one root VM that holds every key and is the only place a push can start. A
+compromised workspace cannot reach your Mac, your credentials, another domain, or a remote:
+its shares and its one network link are decided outside it, and a push needs you, on a
+terminal, naming the commit you reviewed.
 
-How it holds up, and where it has been wrong: [what holds, and what does
-not](release/README.md#what-holds-and-what-does-not), and [incidents, and what
-each taught](release/docs/incidents.md).
+How desolate has been wrong before, and what each time taught:
+[incidents](release/docs/incidents.md).
 
-## System Requirements
+## System requirements
 
-- MacOS
-- Colima (`colima`)
-- Github CLI (`gh`)
-
-## Installation
-
-```bash
-bash <(curl https://suede.sh/install/release) --repo pmalacho-mit/isolated-devcontainers-suede
-```
-
-<details>
-<summary>
-See alternative to using <a href="https://github.com/pmalacho-mit/suede#suedesh">suede.sh</a> script proxy
-</summary>
-
-```bash
-bash <(curl https://raw.githubusercontent.com/pmalacho-mit/suede/refs/heads/main/scripts/install/release.sh) --repo pmalacho-mit/isolated-devcontainers-suede
-```
-
-</details>
+- macOS, with [Lima](https://lima-vm.io) 2.0 or newer (`brew install lima`) and node 22.18 or
+  newer. (Linux with QEMU is a backend for testing and CI, not a supported host.)
+- GitHub CLI (`gh`), to register deploy keys when you clone a repository.
 
 ## Working on this repo
 
-`release/` is the **shipped tree** -- everything in it installs onto a user's
-Mac. Everything else is dev and test harness and does not ship. That split is
-prescribed by the suede dependency workflow, and must be respected when
-adding files.
+`release/` is the **shipped tree**: everything in it installs onto a user's machine.
+Everything else is dev and test harness and does not ship. That split is prescribed by the
+suede dependency workflow, and must be respected when adding files.
 
 ```
-release/                 THE SHIPPED TREE
-  cli.sh                 the only command you run on the Mac
-  docker-compose.yml     the stack; heavily commented, read it first
-  preflight.sh           post-start verification, incl. the containment proof
-  observe.sh             host-side view of the inner daemon (no port published)
-  vm/                    VM provisioning: install.sh + install-sysbox.sh
-  proxy/vm/              egress+secrets layer: mitmproxy addon, nftables,
-                         dnsmasq, systemd units
-  vscode-image/          one image, three roles -- broker.ts (orchestrator),
-                         the editor, and keyring.ts (the private SSH keys);
-                         policy.ts is the spec policy, pure and unit-tested
-samples/                 example devcontainers; fixtures, NOT shipped
-tests/                   static / unit / integration -- see tests/README.md
-.devcontainer/           the INSECURE bootstrap container this work happens in
+release/           THE SHIPPED TREE (see release/README.md for its layout)
+tests/v3/          the tiers: t1 (unit), t2 (end to end, containers), t3 (end to end, real VMs)
+tests/probes/v3/   Phase 0 probes to run on a Mac
+docs/v3/           the handoff, the decisions and the Mac's measurements
+carryover/         v2 code that v3 keeps and has not ported yet; not shipped, not run
+samples/           example devcontainers; fixtures
+.devcontainer/     the INSECURE bootstrap container this work happens in
 ```
 
 ```bash
-./tests/run.sh           # static + unit; fast, no docker daemon needed
+npm install              # TypeScript, for the type check
+make test                # T1: seconds, anywhere
+make e2e-fast            # T2: minutes; needs Docker and the base image (tests/v3/README.md)
+make e2e-slow            # T3: real VMs; run whenever something structural changes
 ```
 
-The densest source of design rationale is the comment block at the top of
-`release/docker-compose.yml`, then the header of `release/vscode-image/broker.ts`
-("WHY THE POLICY CHECK MATTERS").
+Three conventions the code holds to, all load-bearing:
 
-Two conventions the code holds to, both load-bearing:
-
-- **Fail closed.** `broker.ts` refuses anything it cannot resolve, `cli.sh up`
-  refuses to run with egress unprotected, `install-sysbox.sh` verifies against
-  `docker info` rather than trusting the package. A step that reports success
-  while having done nothing is the failure mode this stack is most prone to --
-  several real bugs have had exactly that shape.
-- **Anything that speaks TLS goes through `with-ca`.** Proxy-CA trust is granted
-  by exported environment variables, and `docker exec` inherits none of what an
-  entrypoint exported. Two static tests enforce this on the image's wrappers and
-  the compose entrypoints.
+- **Fail closed, and say so.** A step that cannot be checked refuses, and every refusal
+  names the command or flag that fixes it. A step that reports success while having done
+  nothing is the failure this project is most prone to.
+- **A negative test sits beside a control.** "Root cannot write the mirror" proves nothing
+  unless the same write demonstrably lands somewhere root may write.
+- **A boundary is tested on the tier that has it.** The fake backend (T2) is for speed; a
+  claim about what a VM stops is tested on real VMs (T3), and on a Mac for the Mac.

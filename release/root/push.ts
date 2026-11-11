@@ -57,7 +57,7 @@ const main = async () => {
   try {
     for (const warning of r.warnings) process.stderr.write(`desolate: WARNING: this push ${warning}\n`);
     approval = await confirm(r.repo, branch!, r.commit, `${r.commits.length} commit(s), ${r.stat || "no file changes"}${r.lfsObjects ? `, ${r.lfsObjects} LFS object(s)` : ""}`);
-    if (!approval) throw new Refusal("no person confirmed the push, so nothing was pushed", "run it from a terminal in the root (desolate root shell), and type the branch name when asked", EXIT.unconfirmed);
+    if (!approval) throw new Refusal("no person confirmed the push, so nothing was pushed", "run `desolate push` from a terminal of your own, and type the branch name when it asks", EXIT.unconfirmed);
     const clone = clonePath(repo);
     // LFS objects first: the remote never has a pointer without its object.
     const own = (await lfsOf(repo, r.commit)).filter((oid) => fs.existsSync(path.join(clone, ".git", "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid)));

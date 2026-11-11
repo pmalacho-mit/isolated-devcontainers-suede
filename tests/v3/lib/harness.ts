@@ -16,7 +16,8 @@ const TRANSCRIPTS = path.join(REPO_ROOT, "tests", "v3", "transcripts");
 
 export type Result = { code: number; stdout: string; stderr: string; ms: number };
 export type Stack = {
-  tier: "T2" | "T3";
+  tier: "T2" | "T3" | "T4";
+  backend: "fake" | "qemu" | "vz";
   instance: string;
   home: string;
   work: string;
@@ -50,7 +51,8 @@ const sh = (command: string, args: string[], options: { env?: NodeJS.ProcessEnv;
 export const git = (dir: string, ...args: string[]) =>
   execFileSync("git", ["-C", dir, "-c", "user.name=seed", "-c", "user.email=seed@example.invalid", "-c", "init.defaultBranch=main", ...args], { encoding: "utf8" });
 
-export const backendOfTier = (): "fake" | "qemu" => (process.env.DESOLATE_TIER === "T3" ? "qemu" : "fake");
+/** T2: the fake backend. T3: real VMs on Linux (qemu). T4: the product backend on a Mac (vz). */
+export const backendOfTier = (): "fake" | "qemu" | "vz" => (process.env.DESOLATE_TIER === "T3" ? "qemu" : process.env.DESOLATE_TIER === "T4" ? "vz" : "fake");
 
 export const newStack = (label: string): Stack => {
   const backend = backendOfTier();
@@ -96,6 +98,7 @@ export const newStack = (label: string): Stack => {
     text
       .split(home).join("<home>").split(work).join("<work>").split(REPO_ROOT).join("<repo>")
       .split(instance).join("<instance>").split(ip).join("<forge>")
+      .replace(/ssh-ed25519 [A-Za-z0-9+/=]+/g, "ssh-ed25519 <key>")
       .replace(/\b[0-9a-f]{40}\b/g, "<commit>").replace(/\b[0-9a-f]{64}\b/g, "<oid>")
       .replace(/sha256:[0-9a-f]{12}|\b[0-9a-f]{12}\b/g, "<id>")
       .replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, "<time>")
@@ -108,8 +111,8 @@ export const newStack = (label: string): Stack => {
       : sh(process.env.DESOLATE_LIMACTL ?? "limactl", ["--tty=false", "shell", "--workdir", "/", vm, ...(options.root ? ["sudo"] : []), ...argv], { env, input: options.input ?? "" });
 
   const stack: Stack = {
-    tier: backend === "fake" ? "T2" : "T3",
-    instance, home, work, env, timings,
+    tier: backend === "fake" ? "T2" : backend === "qemu" ? "T3" : "T4",
+    backend, instance, home, work, env, timings,
     desolate: (...args) => {
       const result = sh(CLI, args, { env });
       transcript.push(scrub(`$ desolate ${args.join(" ")}`), ...scrub(result.stdout + result.stderr).trimEnd().split("\n").filter((line) => line.length > 0), `[exit ${result.code}]`, "");

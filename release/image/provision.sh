@@ -91,14 +91,20 @@ say "editor server (VSCodium $VSCODIUM_VERSION)"
 if [ ! -x /opt/desolate/editor/bin/codium-server ]; then
   if [ -d "$STAGE/editor/bin" ]; then
     mkdir -p /opt/desolate && cp -a "$STAGE/editor" /opt/desolate/editor
-  elif curl -fsSI -m 20 -o /dev/null "https://github.com/VSCodium/vscodium/releases/download/$VSCODIUM_VERSION/"; then
-    fetch "https://github.com/VSCodium/vscodium/releases/download/$VSCODIUM_VERSION/vscodium-reh-web-linux-$ARCH-$VSCODIUM_VERSION.tar.gz" "$(pin VSCODIUM_SHA256)" /tmp/reh.tar.gz
-    mkdir -p /opt/desolate/editor && tar -xz -C /opt/desolate/editor -f /tmp/reh.tar.gz && rm -f /tmp/reh.tar.gz
   else
-    # No route to the release. The image is still usable for everything but P1's editor, and
-    # says so: `desolate up` refuses to claim an editor that is not there.
-    mkdir -p /opt/desolate && echo "the editor server could not be fetched when this image was built" >/opt/desolate/EDITOR-MISSING
-    echo "    NOT INSTALLED: no route to github.com releases from this builder"
+    url="https://github.com/VSCodium/vscodium/releases/download/$VSCODIUM_VERSION/vscodium-reh-web-linux-$ARCH-$VSCODIUM_VERSION.tar.gz"
+    [ -n "$(pin VSCODIUM_SHA256)" ] || { echo "provision: no checksum pinned for the editor server" >&2; exit 1; }
+    if curl -fsSL -m 600 -o /tmp/reh.tar.gz "$url"; then
+      # It came: then it must be the pinned one. A wrong checksum is a failure, never a skip.
+      echo "$(pin VSCODIUM_SHA256)  /tmp/reh.tar.gz" | sha256sum -c - >/dev/null || { echo "provision: checksum mismatch for $url" >&2; rm -f /tmp/reh.tar.gz; exit 1; }
+      mkdir -p /opt/desolate/editor && tar -xz -C /opt/desolate/editor -f /tmp/reh.tar.gz && rm -f /tmp/reh.tar.gz
+      rm -f /opt/desolate/EDITOR-MISSING
+    else
+      # No route to the release (the agent's sandbox). The image is still usable for everything
+      # but P1's editor, and says so: nothing may claim an editor that is not there.
+      mkdir -p /opt/desolate && echo "the editor server could not be fetched when this image was built" >/opt/desolate/EDITOR-MISSING
+      echo "    NOT INSTALLED: could not download $url"
+    fi
   fi
 fi
 

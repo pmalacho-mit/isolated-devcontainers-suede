@@ -54,6 +54,13 @@ the start took <duration>: planned <duration>, VM booted <duration>, services an
 
 ## root in the VM against the read-only shares
 
+## out through the proxy
+
+$ desolate domain a net allow-internal <forge>
+a: any public host is reachable (open). Its workspaces still reach nothing internal
+  internal addresses it may reach: <forge>
+[exit 0]
+
 ## root in the VM against the network
 
 ## a second domain

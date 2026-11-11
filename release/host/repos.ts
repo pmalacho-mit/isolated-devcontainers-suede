@@ -68,3 +68,22 @@ export const repos = async (out: Out, json: boolean) => {
   if (list.length === 0) return out("no repositories yet. Start with: desolate clone <owner>/<repo>");
   for (const r of list) out(`${r.repo}  ${r.pushable ? "pushable" : r.anonymous ? "read-only (anonymous)" : "read-only"}  default ${r.defaultBranch ?? "?"}  fetched ${r.fetchedAt ?? "never"}`);
 };
+
+/** The keys the root holds, and a key's public half, for adding it to a forge by hand. */
+export const keys = async (name: string | undefined, out: Out, json: boolean) => {
+  const held = await rootctl<{ repo: string; role: string }[]>("keys.list", {}, { quiet: true });
+  if (!name) {
+    if (json) return out(JSON.stringify(held));
+    if (held.length === 0) return out("the root holds no keys yet. `desolate clone <owner>/<repo>` makes a repository's.");
+    for (const key of held) out(`${key.repo}  ${key.role}${key.role === "write" ? "  (asks you before every push)" : ""}`);
+    return out("a key's public half: desolate keys <owner>/<repo>");
+  }
+  const repo = repoId(repoArg(name));
+  const mine = held.filter((key) => key.repo === repo);
+  if (mine.length === 0) refuse(`the root holds no key for ${repo}`, `desolate clone ${repo}`);
+  const shown: { role: string; pubkey: string }[] = [];
+  for (const key of mine) shown.push({ role: key.role, pubkey: (await rootctl<{ pubkey: string }>("keys.pubkey", { repo, role: key.role }, { quiet: true })).pubkey });
+  if (json) return out(JSON.stringify(shown));
+  for (const key of shown) out(`${repo}  ${key.role} key (a deploy key${key.role === "write" ? " with write access" : ", read-only"}):\n  ${key.pubkey}`);
+  out("Only public halves are ever shown: the private halves do not leave the root's keyring.");
+};

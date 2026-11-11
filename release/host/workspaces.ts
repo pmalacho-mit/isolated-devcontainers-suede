@@ -82,7 +82,10 @@ export const up = async (domain: string | undefined, options: { name?: string; c
     await startServices(plan);
     phase("services and checkouts");
   } catch (error) {
-    // A workspace that did not come up holds no checkout.
+    // A workspace that did not come up holds no checkout, and leaves no proxy or link.
+    const { disconnectWorkspace } = await import("./daemon.ts");
+    await disconnectWorkspace(plan.vm).catch(() => {});
+    await rootctl("proxy.stop", { vm: plan.vm }, { quiet: true }).catch(() => {});
     await b.destroy(plan.vm).catch(() => {});
     await rootctl("workspace.remove", { domain, name: plan.workspace }, { quiet: true }).catch(() => {});
     throw error;

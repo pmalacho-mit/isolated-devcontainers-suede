@@ -12,6 +12,7 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate clone <owner/repo> [--no-push] [--anonymous]          keys, mirror (with LFS), root clone
   desolate fetch <owner/repo>                                    remote -> mirror
   desolate repos [--json]
+  desolate keys [<owner/repo>] [--json]                          which keys the root holds; a key's public half
 
   desolate domain create <slug> [--title "..."]                  a trust boundary: repositories and secrets
   desolate domain <slug> add --repo <owner/repo>                 give the domain a repository
@@ -82,6 +83,12 @@ const main = async (argv: string[]): Promise<number> => {
     const { values, positionals } = flags(rest, {});
     const { fetch } = await import("./repos.ts");
     await fetch(positionals[0], out, values.json === true);
+    return EXIT.ok;
+  }
+  if (verb === "keys") {
+    const { values, positionals } = flags(rest, {});
+    const { keys } = await import("./repos.ts");
+    await keys(positionals[0], out, values.json === true);
     return EXIT.ok;
   }
   if (verb === "repos") {

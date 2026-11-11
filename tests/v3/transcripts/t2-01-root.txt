@@ -103,6 +103,23 @@ $ desolate repos --json
 [{"repo":"acme/consumer","pushable":false,"anonymous":false,"defaultBranch":"main","fetchedAt":"<time>"},{"repo":"acme/widgets","pushable":true,"anonymous":false,"defaultBranch":"main","fetchedAt":"<time>"}]
 [exit 0]
 
+## keys
+
+$ desolate keys
+acme/consumer  read
+acme/widgets  read
+acme/widgets  write  (asks you before every push)
+a key's public half: desolate keys <owner>/<repo>
+[exit 0]
+
+$ desolate keys acme/widgets
+acme/widgets  read key (a deploy key, read-only):
+  ssh-ed25519 <key> desolate-read:acme/widgets
+acme/widgets  write key (a deploy key with write access):
+  ssh-ed25519 <key> desolate-write:acme/widgets
+Only public halves are ever shown: the private halves do not leave the root's keyring.
+[exit 0]
+
 ## refusals
 
 $ desolate fetch acme/never-cloned
