@@ -130,6 +130,35 @@ describe("T2 section 4.3: egress through the workspace's own proxy", () => {
     assert.ok(!seen.some((r) => r.host === "other.example.test" && r.path !== "/from-two" && r.path !== "/forged"), "the enforced domain never reached the host off its list");
   });
 
+  it("recommend: what a domain reached that is not on its list, as a command to read and run", () => {
+    stack.step("what to allow");
+    const r = JSON.parse(stack.quiet("domain", "dev", "net", "recommend", "--json").stdout) as { mode: string; listed: string[]; reached: { host: string; count: number }[]; refused: { host: string }[] };
+    const shown = stack.desolate("domain", "dev", "net", "recommend");
+    assert.equal(shown.code, 0, shown.stderr);
+    for (const host of [...r.reached, ...r.refused].map((entry) => entry.host)) {
+      assert.ok(!r.listed.includes(host), `${host} is listed already, so it is not recommended`);
+      assert.match(shown.stdout, new RegExp(`net allow .*${host.replace(/\./g, "\\.")}`));
+    }
+    assert.ok(r.reached.length + r.refused.length > 0, "control: there is something to recommend");
+    assert.match(shown.stdout, /Read the list before you allow it/);
+  });
+
+  it("down stops every VM and the daemon and removes nothing; bootstrap and start bring it back", () => {
+    stack.step("down, and back");
+    const down = stack.desolate("down");
+    assert.equal(down.code, 0, down.stderr);
+    assert.match(down.stdout, /down: nothing of this stack is running; nothing was removed/);
+    const running = stack.quiet("list", "--json");
+    assert.notEqual(running.code, 0, "the root is not there to ask");
+    assert.equal(bootstrap(stack).code, 0);
+    const listed = JSON.parse(stack.quiet("list", "--json").stdout) as { domain: string; workspaces: { workspace: string; status: string }[] }[];
+    assert.deepEqual(listed.map((d) => [d.domain, d.workspaces.map((w) => w.status).join()]), [["dev", "stopped"], ["two", "stopped"]], "every workspace is still there, stopped");
+    assert.equal(stack.quiet("start", "dev/w1").code, 0);
+    // (The test's own name for the stand-in host: a restarted container gets a fresh /etc/hosts.)
+    stack.inRoot(["bash", "-c", `printf '%s api.example.test\\n' ${forge} >> /etc/hosts`], { root: true });
+    assert.equal(curl("dev/w1", "http://api.example.test/after-down").stdout.trim(), "upstream http host=api.example.test path=/after-down", "its rules, its allowed address and its checkouts came back with it");
+  });
+
   it("the transcript reads as reviewed", () => {
     stack.checkTranscript("t2-05-egress");
   });

@@ -59,3 +59,49 @@ $ desolate net log two
 [exit 0]
 
 ## root in the workspace, without the relay
+
+## what to allow
+
+$ desolate domain dev net recommend
+refused for not being on the list:
+      2  other.example.test
+      1  loop.example.test
+to allow them:
+  desolate domain dev net allow other.example.test loop.example.test
+Read the list before you allow it: a workspace chooses what it asks for.
+[exit 0]
+
+## down, and back
+
+$ desolate down
+  - stopping two/w1
+  - stopping dev/w1
+  - stopping the root VM
+down: nothing of this stack is running; nothing was removed. To come back: desolate bootstrap, then desolate start <domain>/<workspace>.
+[exit 0]
+
+$ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
+desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; tests only), instance <instance>
+  = home <home>
+    base image desolate/base:latest present (<id>)
+  = base image
+  = config: backend fake, forge stand-in (<forge>:22)
+  = approver (terminal): the key that approves pushes, held on this host
+  = root VM dsl-<instance>-root created
+  + root VM running
+  + root services: keyring
+  = root: the approver's public key
+bootstrap: 2 step(s) done.
+  ok   home: <home>
+  ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
+  ok   docker daemon: docker 29.9.3
+  ok   base image: desolate/base:latest <id>
+  ok   root VM running: dsl-<instance>-root
+  ok   approver: terminal; pushes are approved on this host
+  ok   root: keyring answers: 2 key(s) held
+  ok   root: the write agent's askpass socket is closed to the root's own user: only the keyring's user can answer for a signature
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: approver key installed: sha256 <oid>
+  ok   root: forge configured: yes
+doctor: all checks passed.
+[exit 0]

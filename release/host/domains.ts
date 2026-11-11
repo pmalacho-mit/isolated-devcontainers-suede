@@ -68,8 +68,26 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
     // desolate domain <d> net [show] | open | enforce | allow <host>... | deny <host>... | allow-internal <ip>
     const [, , action, ...rest] = args;
     type Policy = { mode: string; hosts: string[]; internal: string[] };
+    if (action === "recommend") {
+      type Ranked = { host: string; count: number }[];
+      const r = await rootctl<{ mode: string; listed: string[]; reached: Ranked; refused: Ranked }>("net.recommend", { domain: first }, { quiet: true });
+      if (json) return out(JSON.stringify(r));
+      const names = (list: Ranked) => list.map((entry) => entry.host).join(" ");
+      if (r.reached.length === 0 && r.refused.length === 0) return out(`${first}: its workspaces have reached nothing that is not already listed${r.listed.length ? ` (${r.listed.length} listed)` : ""}.`);
+      if (r.reached.length) {
+        out(`${first} (${r.mode}): hosts its workspaces reached that are not on its list, most used first:`);
+        for (const entry of r.reached.slice(0, 60)) out(`  ${String(entry.count).padStart(5)}  ${entry.host}`);
+        out(`to keep reaching them once the network is enforced:\n  desolate domain ${first} net allow ${names(r.reached.slice(0, 60))}\n  desolate domain ${first} net enforce`);
+      }
+      if (r.refused.length) {
+        out(`refused for not being on the list:`);
+        for (const entry of r.refused.slice(0, 60)) out(`  ${String(entry.count).padStart(5)}  ${entry.host}`);
+        out(`to allow them:\n  desolate domain ${first} net allow ${names(r.refused.slice(0, 60))}`);
+      }
+      return out("Read the list before you allow it: a workspace chooses what it asks for.");
+    }
     const change = action === "open" || action === "enforce" ? { mode: action } : action === "allow" ? { allow: rest } : action === "deny" ? { deny: rest } : action === "allow-internal" ? { internal: rest } : null;
-    if (action && action !== "show" && !change) refuse(`'net ${action}' is not understood`, `desolate domain ${first} net show | open | enforce | allow <host>... | deny <host>... | allow-internal <address>`, EXIT.usage);
+    if (action && action !== "show" && !change) refuse(`'net ${action}' is not understood`, `desolate domain ${first} net show | open | enforce | allow <host>... | deny <host>... | allow-internal <address> | recommend`, EXIT.usage);
     const policy = await rootctl<Policy>("net.policy", { domain: first, change: change ?? undefined }, { quiet: true });
     if (json) return out(JSON.stringify(policy));
     out(`${first}: ${policy.mode === "enforce" ? `only these hosts are reachable: ${policy.hosts.join(", ") || "(none)"}` : "any public host is reachable (open). Its workspaces still reach nothing internal"}`);

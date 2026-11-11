@@ -156,6 +156,25 @@ export const doctor = async (out: Out, json = false): Promise<number> => {
   return failed.length;
 };
 
+/** Stop everything, keep everything: every workspace VM, the host daemon, the root VM. The
+ *  way back is `desolate bootstrap`, then `desolate start` for each workspace wanted. */
+export const down = async (out: Out) => {
+  const b = backend();
+  const { stopForwarder } = await import("./daemon.ts");
+  const vms = await b.list();
+  for (const vm of vms.filter((v) => v.name !== ROOT_VM && v.status === "running")) {
+    out(`  - stopping ${vm.labels.title ?? vm.name}`);
+    await b.stop(vm.name);
+    if (vm.labels.domain && vm.labels.workspace) await rootctl("workspace.state", { domain: vm.labels.domain, name: vm.labels.workspace, state: "stopped" }, { quiet: true }).catch(() => {});
+  }
+  await stopForwarder();
+  if (vms.some((v) => v.name === ROOT_VM && v.status === "running")) {
+    out("  - stopping the root VM");
+    await b.stop(ROOT_VM);
+  }
+  out("down: nothing of this stack is running; nothing was removed. To come back: desolate bootstrap, then desolate start <domain>/<workspace>.");
+};
+
 /** Put the machine back as it was. With --all the home goes too. Returns what is left that
  *  should not be (an empty list is the passing answer; the test asserts it). */
 export const destroy = async (options: { all: boolean }, out: Out): Promise<string[]> => {

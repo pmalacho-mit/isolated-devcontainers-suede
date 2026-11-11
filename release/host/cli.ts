@@ -7,7 +7,9 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
 
   desolate bootstrap [--backend vz|qemu|fake] [--forge github]   from nothing to a working stack
   desolate doctor [--json]                                       check it; every failure names its fix
+  desolate down                                                  stop every VM and the daemon; remove nothing
   desolate destroy [--all]                                       remove the VMs (--all: and ~/.desolate)
+  desolate completion                                            tab completion: source <(desolate completion)
 
   desolate clone <owner/repo> [--no-push] [--anonymous]          keys, mirror (with LFS), root clone
   desolate fetch <owner/repo>                                    remote -> mirror
@@ -19,6 +21,9 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate domain <slug> net [open | enforce | allow <host>... | deny <host>...]
                                                                  the domain's network rules, at its proxies
   desolate net log [<domain>] [--json]                           what each workspace asked to reach, and the verdict
+  desolate domain <domain> net recommend                         what it reached that is not on its list
+  desolate domain <domain> secret set <NAME> --hosts <h>[,...] [--headers <h>[,...]] | list | off | on [--ttl 30m] | rm
+                                                                 a secret: the value on stdin, the name in workspaces
   desolate up <domain> [--name <workspace>] [--fetch] [--base <ref>]
               [--checkout <owner/repo>=main|worktree:<branch>]   a workspace: one VM, its checkouts
   desolate list [<domain>] [--json]
@@ -156,6 +161,17 @@ const main = async (argv: string[]): Promise<number> => {
     flags(rest, { expect: { type: "string" }, "allow-default": { type: "boolean" } });
     const { push } = await import("./push.ts");
     return push(rest);
+  }
+  if (verb === "down") {
+    const { down } = await import("./bootstrap.ts");
+    await down(out);
+    return EXIT.ok;
+  }
+  if (verb === "completion") {
+    const fs = await import("node:fs");
+    const { RELEASE_DIR } = await import("./paths.ts");
+    process.stdout.write(fs.readFileSync(`${RELEASE_DIR}/completion.bash`, "utf8"));
+    return EXIT.ok;
   }
   if (verb === "editor") {
     const { values, positionals } = flags(rest, {});

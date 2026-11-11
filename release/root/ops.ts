@@ -101,6 +101,9 @@ export const ops: Record<string, Op> = {
     const slug = domains.domain(domains.slugOf(args.domain, "domain")).slug;
     return args.change ? proxy.setPolicy(slug, args.change as Parameters<typeof proxy.setPolicy>[1]) : proxy.policy(slug);
   },
+  async "net.recommend"(args) {
+    return proxy.recommend(domains.domain(domains.slugOf(args.domain, "domain")).slug);
+  },
   async "net.log"(args) {
     return proxy.auditLog({ domain: typeof args.domain === "string" ? args.domain : undefined, last: Number(args.last) || 100 });
   },

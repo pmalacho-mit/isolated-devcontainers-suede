@@ -74,6 +74,24 @@ export const setPolicy = (domain: string, change: { mode?: unknown; allow?: unkn
   return next;
 };
 
+/** What the domain has been reaching, against its allowlist: v2's `proxy recommend`. With
+ *  the network open, this is the list to allow before enforcing; enforced, it is what was
+ *  refused for not being on the list. Only names: nothing here is acted on. */
+export const recommend = (domain: string) => {
+  const rules = policy(domain);
+  const listed = (host: string) => rules.hosts.some((pattern) => (pattern.startsWith("*.") ? host.endsWith(pattern.slice(1)) && host.length > pattern.length - 1 : host === pattern));
+  const reached = new Map<string, number>();
+  const refused = new Map<string, number>();
+  for (const entry of auditLog({ domain, last: 100_000 })) {
+    const host = typeof entry.host === "string" ? normalizeName(entry.host) : null;
+    if (!host || listed(host)) continue;
+    if (entry.verdict === "allowed") reached.set(host, (reached.get(host) ?? 0) + 1);
+    else if (entry.verdict === "refused" && /allowlist/.test(String(entry.reason ?? ""))) refused.set(host, (refused.get(host) ?? 0) + 1);
+  }
+  const rank = (map: Map<string, number>) => [...map].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([host, count]) => ({ host, count }));
+  return { mode: rules.mode, listed: rules.hosts, reached: rank(reached), refused: rank(refused) };
+};
+
 export const auditLog = (filter: { domain?: string; last?: number }) => {
   let lines: string[] = [];
   try {
