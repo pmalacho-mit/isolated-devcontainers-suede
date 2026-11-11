@@ -1,0 +1,168 @@
+./phase0-mac.sh       
+
+=== probe: prereq ===
+  [prereq] macOS: 14.5 on arm64, 10 CPUs, 64 GiB
+  [prereq] filesystem of $HOME: 
+  [prereq] lima: limactl version 2.1.2
+  [prereq] Apple Container CLI: not installed
+  [prereq] microsandbox (msb): not installed
+  [prereq] colima (v2's VM), for reference: colima version 0.10.1
+  [prereq] probe took: 0.5 s
+
+=== probe: boot ===
+  [boot] first VM ever: create + boot (includes the image download): 38.1 s
+  [boot] second VM: create + first boot (image cached): 16.5 s
+  [boot] warm boot 1: 'limactl start' of a stopped VM, to SSH ready: 9.3 s
+  [boot] warm boot 2: 'limactl start' of a stopped VM, to SSH ready: 9.5 s
+  [boot] warm boot 3: 'limactl start' of a stopped VM, to SSH ready: 10.5 s
+  [boot] one 'limactl shell' round trip: 0.1 s
+  [boot] probe took: 132.6 s
+
+=== probe: idle ===
+  [idle] guest memory after 30 s idle (free -m: total used free): 1958 232 1548
+  [idle] host processes for the VM (rss MB, command): 1931 MB /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine; 975 MB /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine; 6431 MB /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine; 64 MB /opt/homebrew/bin/limactl; 
+  [idle] VM directory on disk (du -sh): 2.2G
+  [idle] VM directory, files: cidata.iso=18MB cloud-config.yaml=0MB default_ep.sock=0MB default_fd.sock=0MB disk=20480MB ha.pid=0MB ha.sock=0MB ha.stderr.log=0MB ha.stdout.log=0MB lima-version=0MB lima.yaml=0MB serialv.log=0MB ssh.config=0MB ssh.sock=0MB vz-efi=0MB vz-identifier=0MB vz.pid=0MB 
+  [idle] probe took: 30.2 s
+
+=== probe: clone ===
+  [clone] 'limactl clone' of a stopped VM: 0.0 s
+  [clone] free space the clone consumed (df delta; near 0 means copy-on-write): 0 MB
+  [clone] APFS clonefile ('cp -c') of the VM disk: as expected (ok)
+  [clone] 'cp -c' of the VM disk (20480 MB apparent): 0.0 s
+  [clone] the clone's first boot: 9.3 s
+  [clone] the clone has what the original installed (git-lfs): git-lfs/3.4.1 (GitHub; linux arm64; go 1.22.2)
+  [clone] probe took: 20.2 s
+
+=== probe: git ===
+  [git] who owns the shared files, seen from a VM (uid:gid), and the VM user: 501:1000 / 501:1000
+  [git] two VMs, one .git over virtiofs: 500 commits each + 20 worktree add/remove each: 11.7 s
+  [git] VM 1 result (want failed_ops=0 commits=500): failed_ops=0 commits=500
+  [git] VM 2 result (want failed_ops=0 commits=500): failed_ops=1 commits=500
+  [git] lock or other errors logged (lines): ws1: 0, ws2: 1
+  [git] git fsck --full from VM 1 after the run: as expected (ok)
+  [git] git fsck --full from VM 2 after the run: as expected (ok)
+  [git] each VM sees the other's branch tip (ws1 sees ws2 / ws2 sees ws1): 500 / 500
+  [git] control: a commit under a held index.lock is refused: as expected (refused)
+  [git] probe took: 14.1 s
+
+=== probe: readonly ===
+  [readonly] control: the root VM (writable share) writes the mirror: as expected (ok)
+touch: cannot touch '/desolate/mirrors/by-user': Read-only file system
+  [readonly] workspace VM, as its user: create a file in the mirror: as expected (refused)
+touch: cannot touch '/desolate/mirrors/by-root': Read-only file system
+  [readonly] workspace VM, as root: create a file in the mirror: as expected (refused)
+sh: 1: cannot create /desolate/mirrors/r.git/HEAD: Read-only file system
+  [readonly] workspace VM, as root: append to the mirror's HEAD: as expected (refused)
+  [readonly] workspace VM, as root: 'mount -o remount,rw' exit code (0 = the guest agreed): 0
+touch: cannot touch '/desolate/mirrors/after-remount': Operation not permitted
+  [readonly] workspace VM, as root, after remount,rw: create a file (host must still refuse): as expected (refused)
+  [readonly] workspace VM, as root: mount every virtiofs tag afresh and write (want the mirror's tag NOT among 'wrote-through'; the other tag is the control): mirror-tag=lima-d21c1a9241aa5ab0 wrote-through-lima-1bb66ba28b0f4164 
+  [readonly] files that appeared in the mirror on the Mac (want only big.sha and r.git): big.sha r.git 
+  [readonly] git clone --shared from the read-only mirror: as expected (ok)
+  [readonly] the clone's own objects (want count: 0 and in-pack: 0): count: 0 size: 0 in-pack: 0 packs: 0 size-pack: 0 prune-packable: 0 garbage: 0 size-garbage: 0 alternate: /desolate/mirrors/r.git/objects 
+  [readonly] LFS object smudged from the read-only mirror (lfs.url=file://), sha256 matches: as expected (ok)
+  [readonly] commit in the clone, then 'git fetch origin' from the mirror: as expected (ok)
+  [readonly] push from the clone into the read-only mirror: as expected (refused)
+  [readonly] the mirror is intact and has no branch from the workspace: as expected (ok)
+  [readonly] probe took: 12.2 s
+
+=== probe: network ===
+  [network] control: the Mac reaches its own loopback listener: as expected (ok)
+  [network] guest addresses: lo=127.0.0.1/8 eth0=192.168.5.15/24 
+  [network] guest default route: default via 192.168.5.2 dev eth0 proto dhcp src 192.168.5.15 metric 200 
+  [network] guest resolver: nameserver 127.0.0.53 
+  [network] guest reaches a listener on the MAC'S LOOPBACK via host.lima.internal (want refused): **UNEXPECTED: ok, wanted refused**
+  [network] guest reaches the Mac's loopback listener via its gateway 192.168.5.2 (want refused): **UNEXPECTED: ok, wanted refused**
+  [network] guest pings the LAN's router 10.1.10.1 (want refused): **UNEXPECTED: ok, wanted refused**
+  [network] guest opens TCP 80 on the LAN's router 10.1.10.1 (want refused): **UNEXPECTED: ok, wanted refused**
+  [network] guest reaches the internet directly (want refused once egress is forced; today's default): **UNEXPECTED: ok, wanted refused**
+  [network] VM 1 pings VM 2's address 192.168.5.15 (0 = answered; with user-mode nets both often hold the same address, so it answers itself): 0
+  [network] lima networks available: NAME       MODE       GATEWAY             INTERFACE;bridged    bridged    -                   en0;host       host       192.168.106.1/24    -;shared     shared     192.168.105.1/24    -;user-v2    user-v2    192.168.104.1/24    -;
+./phase0-mac.sh: line 72: 44867 Terminated: 15          ( cd "$WORK/yaml" && exec python3 -m http.server $port --bind 127.0.0.1 > /dev/null 2>&1 )
+  [network] probe took: 2.1 s
+
+=== probe: ports ===
+  [ports] guest listener on 127.0.0.1:5173 appears on the Mac's 127.0.0.1:5173 after: 0.3 s
+  [ports] what holds 5173 on the Mac (lsof): limactl 127.0.0.1:5173; 
+  [ports] same port in a second VM: who answers on the Mac's 127.0.0.1:5173: ws1
+  [ports] listeners on the Mac for 5173 now: limactl 127.0.0.1:5173; 
+  [ports] guest listener on 0.0.0.0:5173: Mac-side listen address (want 127.0.0.1, never *): 127.0.0.1:5173; 
+  [ports] guest port 80 (below 1024): listeners on the Mac (want none): limactl *:80; 
+  [ports] a port the Mac holds (5180): who answers on the Mac (want the Mac's own listing, not 'ws1-5180'): <!DOCTYPE HTML> <html lang="en">     <he
+./phase0-mac.sh: line 79: 45148 Terminated: 15          ( cd "$WORK/yaml" && exec python3 -m http.server 5180 --bind 127.0.0.1 > /dev/null 2>&1 )
+  [ports] probe took: 20.0 s
+
+=== probe: suspend ===
+  [suspend] 'limactl snapshot create' on a vz VM (exit 1): time="2026-11-10T23:50:55-08:00" level=fatal msg=unimplemented
+  [suspend] 'limactl stop --help' mentions save/suspend: 0
+  [suspend] 'limactl start --help' mentions restore/resume: 0
+  [suspend] SIGSTOP the host agent 5 s, SIGCONT, then a shell round trip: as expected (ok)
+  [suspend] round trip after SIGCONT: 0.1 s
+  [suspend] probe took: 5.3 s
+
+=== probe: npm ===
+  [npm] local-disk cold-cache npm ci: 3.267685984 s
+  [npm] packages: 187 dirs, 5180 files, 109 MB
+  [npm] local-disk warm-cache npm ci: 1.992343120 s
+  [npm] virtiofs-share warm-cache npm ci: 3.063983397 s
+  [npm] virtiofs-share find node_modules: .184566471 s
+  [npm] virtiofs-share rm -rf node_modules: .977683635 s
+  [npm] local-disk find node_modules: .009012144 s
+  [npm] local-disk rm -rf node_modules: .059825998 s
+  [npm] probe took: 41.6 s
+
+=== probe: devcontainer ===
+  [devcontainer] install dockerd in the VM: 20.693897472 s
+  [devcontainer] dockerd: 29.9.3 overlayfs systemd
+  [devcontainer] devcontainer CLI: 0.90.0
+  [devcontainer] devcontainer up, img, cold: 87.280288454 s, ok
+  [devcontainer] devcontainer up, img, again (already built): .302493362 s
+  [devcontainer] devcontainer up, df, cold: 18.839541236 s, ok
+  [devcontainer] devcontainer up, df, again (already built): .256204674 s
+  [devcontainer] devcontainer up, co, cold: 6.929553977 s, ok
+  [devcontainer] devcontainer up, co, again (already built): .302897174 s
+  [devcontainer] docker-in-docker inside the image+features devcontainer: 1 (want 1)
+  [devcontainer] images on the VM's daemon: 5, disk 1823 MB
+  [devcontainer] probe took: 138.3 s
+
+=== probe: others ===
+  [others] Apple Container: not installed; DID NOT RUN (github.com/apple/container; needs macOS 26 for full networking)
+  [others] microsandbox: not installed; DID NOT RUN
+  [others] probe took: 0.0 s
+removed the probe's VMs and ~/.desolate-phase0
+
+Results: ~/desolate-phase0-results/20261110-234703/results.md
+Send back: ~/desolate-phase0-results/20261110-234703/results.tar.gz
+rows needing a look: 8
+$ chmod +x phase0-mac-egress.sh 
+$ ./phase0-mac-egress.sh 
+  control: the Mac's stand-in proxy answers on 127.0.0.1:47700: as expected (ok)
+  create the VM (unsandboxed, so the image can download): as expected (ok)
+  control: start the VM WITHOUT the sandbox: as expected (ok)
+  control: unsandboxed, the guest reaches the internet: as expected (ok)
+  control: unsandboxed, the guest reaches another loopback service on the Mac: as expected (ok)
+  start the VM with its host process under sandbox-exec: **UNEXPECTED: refused, wanted ok**
+  the hostagent's process (pid, started by): 47600 ppid=1 
+  sandboxed: 'limactl shell' works: as expected (ok)
+  sandboxed: the virtiofs share is readable: as expected (ok)
+touch: cannot touch '/desolate/share/w': Read-only file system
+  sandboxed: root in the guest writes the read-only share: as expected (refused)
+  sandboxed: the guest reaches its proxy's port: as expected (ok)
+  sandboxed: the guest reaches ANOTHER loopback service on the Mac: as expected (refused)
+  sandboxed: the guest reaches the internet by name: as expected (refused)
+  sandboxed: the guest reaches the internet by address: as expected (refused)
+  sandboxed: ROOT in the guest reaches the internet by address: as expected (refused)
+  sandboxed: root, after rewriting routes and flushing every firewall rule: as expected (refused)
+  sandboxed: the guest opens TCP 80 on the LAN's router 10.1.10.1: as expected (refused)
+  sandboxed: the guest pings the LAN's router: **UNEXPECTED: ok, wanted refused**
+  sandboxed: DNS in the guest resolves example.com (0 = yes: then the resolver must be closed too): 0
+  sandboxed: DNS resolves a made-up name (exit code; the query leaving the Mac is the channel): 2
+  sandboxed: a direct UDP DNS query to 1.1.1.1 (empty = no answer): ;; communications error to 1.1.1.1#53: timed out 
+  sandboxed: a clean stop: as expected (ok)
+  refusals logged by the hostagent (lines mentioning 'not permitted'): 214
+./phase0-mac-egress.sh: line 42: 47423 Terminated: 15          ( cd "$WORK/www-proxy" && exec python3 -m http.server $PROXY_PORT --bind 127.0.0.1 > /dev/null 2>&1 )
+./phase0-mac-egress.sh: line 42: 47424 Terminated: 15          ( cd "$WORK/www-other" && exec python3 -m http.server $OTHER_PORT --bind 127.0.0.1 > /dev/null 2>&1 )
+
+Results: ~/desolate-phase0-results/egress-20261110-235808/results.md
+rows needing a look: 2

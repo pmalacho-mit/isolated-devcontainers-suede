@@ -18,6 +18,7 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate up <domain> [--name <workspace>] [--fetch] [--base <ref>]
               [--checkout <owner/repo>=main|worktree:<branch>]   a workspace: one VM, its checkouts
   desolate list [<domain>] [--json]
+  desolate ports [<domain>/<workspace>] [--json]                 what is forwarded, at which URL; what is reserved
   desolate exec <domain>/<workspace> [--checkout <repo>] -- <cmd>  a command, or an agent, inside it
   desolate stop | start | rm <domain>/<workspace>
   desolate rm <domain>                                           the domain and its clones; not the root's
@@ -101,6 +102,20 @@ const main = async (argv: string[]): Promise<number> => {
     const { positionals } = flags(rest, {});
     const workspaces = await import("./workspaces.ts");
     await (verb === "stop" ? workspaces.stop : verb === "start" ? workspaces.start : workspaces.remove)(positionals[0], out);
+    return EXIT.ok;
+  }
+  if (verb === "ports") {
+    const { values, positionals } = flags(rest, {});
+    const { ports } = await import("./daemon.ts");
+    const view = (await ports()).filter((w) => !positionals[0] || w.workspace === positionals[0]);
+    if (values.json === true) out(JSON.stringify(view));
+    else if (view.length === 0) out("no workspace is running.");
+    else for (const w of view) {
+      out(w.workspace);
+      if (w.forwarded.length === 0) out("  nothing is listening yet: start a dev server in it and its URL appears here");
+      for (const f of w.forwarded) out(`  ${f.url}`);
+      for (const r of w.reserved) out(`  port ${r.port} is kept taken here: ${r.why}`);
+    }
     return EXIT.ok;
   }
   if (verb === "exec") {

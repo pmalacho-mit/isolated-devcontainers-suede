@@ -1,0 +1,64 @@
+./phase0-mac-egress2.sh 
+  [control] start WITHOUT a sandbox: as expected (ok)
+  [control] unsandboxed: ping 1.1.1.1 answers (else the ping rows below prove nothing): as expected (ok)
+  [control] unsandboxed: DNS resolves example.com: as expected (ok)
+  [P1-ssh] 'limactl start' under the sandbox: exit code, time: 0, 8.4 s
+  [P1-ssh] guest reaches its proxy port: as expected (ok)
+  [P1-ssh] guest reaches another loopback port: as expected (refused)
+  [P1-ssh] guest opens the Mac's forwarded ssh port (its own sshd; curl exit): 1
+  [P1-ssh] root: TCP to the internet: as expected (refused)
+  [P1-ssh] root: ping 1.1.1.1: **UNEXPECTED: ok, wanted refused**
+  [P1-ssh] root: ping the LAN router 10.1.10.1: **UNEXPECTED: ok, wanted refused**
+  [P1-ssh] root: ping the gateway 192.168.5.2 (answered locally is fine; exit): 0
+  [P1-ssh] DNS resolves example.com: **UNEXPECTED: ok, wanted refused**
+  [P1-ssh] DNS resolves a made-up name: as expected (refused)
+  [P1-ssh] root: a query straight to Lima's resolver 192.168.5.3: **UNEXPECTED: ok, wanted refused**
+  [P1-ssh] root: a UDP query straight to 1.1.1.1: **UNEXPECTED: ok, wanted refused**
+  [P1-ssh] clean stop: exit, time: 0, 27.6 s
+  [P1-ssh] refusals in the hostagent's log: 2
+  [P2-ssh-nodns] 'limactl start' under the sandbox: exit code, time: 0, 8.3 s
+  [P2-ssh-nodns] guest reaches its proxy port: as expected (ok)
+  [P2-ssh-nodns] guest reaches another loopback port: as expected (refused)
+  [P2-ssh-nodns] guest opens the Mac's forwarded ssh port (its own sshd; curl exit): 1
+  [P2-ssh-nodns] root: TCP to the internet: as expected (refused)
+  [P2-ssh-nodns] root: ping 1.1.1.1: **UNEXPECTED: ok, wanted refused**
+  [P2-ssh-nodns] root: ping the LAN router 10.1.10.1: **UNEXPECTED: ok, wanted refused**
+  [P2-ssh-nodns] root: ping the gateway 192.168.5.2 (answered locally is fine; exit): 0
+  [P2-ssh-nodns] DNS resolves example.com: as expected (refused)
+  [P2-ssh-nodns] DNS resolves a made-up name: as expected (refused)
+  [P2-ssh-nodns] root: a query straight to Lima's resolver 192.168.5.3: **UNEXPECTED: ok, wanted refused**
+  [P2-ssh-nodns] root: a UDP query straight to 1.1.1.1: **UNEXPECTED: ok, wanted refused**
+  [P2-ssh-nodns] clean stop: exit, time: 0, 3.1 s
+  [P2-ssh-nodns] refusals in the hostagent's log: 1
+  [P3-nodns-bind] 'limactl start' under the sandbox: exit code, time: 0, 8.5 s
+  [P3-nodns-bind] guest reaches its proxy port: as expected (ok)
+  [P3-nodns-bind] guest reaches another loopback port: as expected (refused)
+  [P3-nodns-bind] guest opens the Mac's forwarded ssh port (its own sshd; curl exit): 1
+  [P3-nodns-bind] root: TCP to the internet: as expected (refused)
+  [P3-nodns-bind] root: ping 1.1.1.1: **UNEXPECTED: ok, wanted refused**
+  [P3-nodns-bind] root: ping the LAN router 10.1.10.1: **UNEXPECTED: ok, wanted refused**
+  [P3-nodns-bind] root: ping the gateway 192.168.5.2 (answered locally is fine; exit): 0
+  [P3-nodns-bind] DNS resolves example.com: as expected (refused)
+  [P3-nodns-bind] DNS resolves a made-up name: as expected (refused)
+  [P3-nodns-bind] root: a query straight to Lima's resolver 192.168.5.3: **UNEXPECTED: ok, wanted refused**
+  [P3-nodns-bind] root: a UDP query straight to 1.1.1.1: **UNEXPECTED: ok, wanted refused**
+  [P3-nodns-bind] clean stop: exit, time: 0, 8.2 s
+  [P3-nodns-bind] refusals in the hostagent's log: 1
+  [P4-nodns-icmpsock] 'limactl start' under the sandbox: exit code, time: 0, 8.4 s
+  [P4-nodns-icmpsock] guest reaches its proxy port: as expected (ok)
+  [P4-nodns-icmpsock] guest reaches another loopback port: as expected (refused)
+  [P4-nodns-icmpsock] guest opens the Mac's forwarded ssh port (its own sshd; curl exit): 1
+  [P4-nodns-icmpsock] root: TCP to the internet: as expected (refused)
+  [P4-nodns-icmpsock] root: ping 1.1.1.1: **UNEXPECTED: ok, wanted refused**
+  [P4-nodns-icmpsock] root: ping the LAN router 10.1.10.1: **UNEXPECTED: ok, wanted refused**
+  [P4-nodns-icmpsock] root: ping the gateway 192.168.5.2 (answered locally is fine; exit): 0
+  [P4-nodns-icmpsock] DNS resolves example.com: as expected (refused)
+  [P4-nodns-icmpsock] DNS resolves a made-up name: as expected (refused)
+  [P4-nodns-icmpsock] root: a query straight to Lima's resolver 192.168.5.3: **UNEXPECTED: ok, wanted refused**
+  [P4-nodns-icmpsock] root: a UDP query straight to 1.1.1.1: **UNEXPECTED: ok, wanted refused**
+  [P4-nodns-icmpsock] clean stop: exit, time: 0, 3.2 s
+  [P4-nodns-icmpsock] refusals in the hostagent's log: 1
+./phase0-mac-egress2.sh: line 109: 52188 Terminated: 15          ( cd "$WORK/www" && exec python3 -m http.server $PROXY_PORT --bind 127.0.0.1 > /dev/null 2>&1 )
+./phase0-mac-egress2.sh: line 109: 52189 Terminated: 15          ( cd "$WORK/www" && exec python3 -m http.server $OTHER_PORT --bind 127.0.0.1 > /dev/null 2>&1 )
+
+Results: ~/desolate-phase0-results/egress2-20261111-002555/results.md  (and raw.log beside it)
