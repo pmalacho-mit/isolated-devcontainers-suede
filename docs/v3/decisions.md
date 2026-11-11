@@ -32,9 +32,17 @@ network is open and its custom networks need macOS 26 (the Mac is on 14.5), whic
 for now on this machine; microsandbox boots OCI images as the VM, which is shape B, not the
 decided shape A.
 
+Template to workspace (`phase0-mac-backend.sh`, `docs/v3/phase0/mac-m1-backend-2026-11-11.md`):
+a template VM with dockerd and one built devcontainer (image + node feature: 136 s to make,
+5.3 GB) was cloned **with a different set of twelve shares** (`limactl clone --set
+'.mounts = [...]'`, 0.1 s), booted (9.7 s), its dockerd answered (0.3 s) and
+`devcontainer up` found nothing to build (0.7 s): **11.0 s from clone to a running
+devcontainer.** The template's shares were gone from the clone and the new ones present,
+ten of them read-only and nested under one parent.
+
 Consequences for section 4.7's targets:
-- **A new workspace from a template in 15 s:** a clone boots in 9.3 s, leaving about 5 s for
-  services, the devcontainer and the editor. Possible, not yet shown.
+- **A new workspace from a template in 15 s: within reach.** 11.0 s measured to a running
+  devcontainer, leaving 4 s for the editor server, which was not in that measurement.
 - **Resume in 5 s: not met on Lima/vz.** There is no suspend; a stopped VM takes 9.5 s. Either
   the target becomes "about 10 s", or workspaces are paused rather than stopped (SIGSTOP of
   the host process froze and thawed a VM cleanly in the probe, but frees no memory).
@@ -54,10 +62,15 @@ Consequences for section 4.7's targets:
 
 Two VMs, one `.git`, each making 500 commits in its own worktree with a worktree added and
 removed every 25 commits: 11.7 s, 1,000 commits present, `git fsck --full --strict` clean from
-both. One operation of the 1,040 failed in one VM (a lock held by the other; the raw log was
-not kept, so which operation is unknown). So: no corruption, and lock contention is real but
-rare. `gc.auto=0` is set in every domain clone, and desolate's own init takes a directory lock
-before it touches a shared `.git`. A caller that hits "unable to create ... .lock" retries.
+both. One operation of the 1,040 failed in one VM: `fatal: failed to read
+.git/worktrees/ws1-t425/commondir`. That is one VM's git listing worktrees while the other VM
+was halfway through creating or removing one, and reading the half-made entry. So: no
+corruption, and the one hazard seen is a worktree being added or removed while another VM
+runs a command that walks the worktree list. desolate makes worktrees only under a directory
+lock that every workspace's init takes, sets `gc.auto=0` in every domain clone, and does not
+remove worktrees while a domain has workspaces running. An agent that adds and removes
+worktrees of its own in a loop can still make a neighbour's command fail once; the neighbour
+retries.
 
 ## Question 14. Where checkouts live: on the share (measured)
 
@@ -124,6 +137,18 @@ Inside the VM, all of this is made transparent to programs (they need no proxy s
 resolver that answers every name with a placeholder address and a redirect of ports 80 and
 443 to a small relay that reads the name from the TLS SNI or the HTTP Host and asks the proxy
 for it. None of that is a boundary: with all of it removed, the VM still has no way out.
+
+## The forwarder's way into a VM: a session, not ssh's stdio forwarding (measured)
+
+`ssh -W host:port` through Lima's ssh config fails on the Mac with "Stdio forwarding request
+failed: Session open refused by peer": Lima's control master refuses that kind of channel.
+Ordinary sessions through the same master work (that is what `limactl shell` is, 0.1 s a
+round trip). So a backend's `dial` runs `socat STDIO TCP:127.0.0.1:<port>` in the guest over
+a session, as the fake backend does over `docker exec`. The base image carries socat.
+
+The egress path's throughput, guest to a listener on the Mac's loopback: 366 MB/s for one
+download, about 50 to 70 MB/s each for six at once (two of eight failed to connect in that
+burst; not investigated).
 
 ## Section 4.4. Ports: Lima's own forwarding is turned off (measured)
 
