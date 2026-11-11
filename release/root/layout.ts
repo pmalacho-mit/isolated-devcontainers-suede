@@ -36,4 +36,5 @@ export const KEYRING = {
 
 export const REGISTRY = `${ROOT.state}/registry.json`;
 export const HOOKS = `${ROOT.state}/hooks`;
+export const MIRROR_HOOKS = `${ROOT.state}/mirror-hooks`;
 export const FORGE = `${ROOT.state}/forge.json`;

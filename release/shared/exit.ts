@@ -24,6 +24,7 @@ export class Refusal extends Error {
     this.fix = fix;
   }
 }
-export const refuse = (message: string, fix: string, code?: number): never => {
+// A function declaration, so that TypeScript narrows after `if (!ok) refuse(...)`.
+export function refuse(message: string, fix: string, code?: number): never {
   throw new Refusal(message, fix, code);
-};
+}

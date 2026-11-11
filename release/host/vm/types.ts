@@ -72,6 +72,9 @@ export interface Backend {
   exec(name: string, argv: string[], options?: ExecOptions): Promise<RunResult>;
   /** exec() as a live process: stdin, stdout and stderr are pipes. */
   spawn(name: string, argv: string[], options?: ExecOptions): ChildProcess;
+  /** Run a command with this process's own stdin, stdout and stderr, and a terminal if this
+   *  process has one: a person's shell, or a prompt only a person can answer. */
+  attach(name: string, argv: string[], options?: { cwd?: string }): Promise<number>;
   /** Open a TCP connection to a port on the VM's loopback, from the host. */
   dial(name: string, port: number): Duplex;
   /** TCP listeners inside the VM right now. */

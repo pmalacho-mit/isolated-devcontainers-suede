@@ -8,7 +8,7 @@ import type { Repo } from "../shared/names.ts";
 import { refuse } from "../shared/exit.ts";
 import { forge, git, gitBare, gitOk, remoteUrl, sshCommand } from "./git.ts";
 import { ask } from "./keyring-client.ts";
-import { clonePath, HOOKS, KEYRING, mirrorPath, REGISTRY } from "./layout.ts";
+import { clonePath, HOOKS, KEYRING, MIRROR_HOOKS, mirrorPath, REGISTRY } from "./layout.ts";
 
 export type RepoRecord = {
   /** The root holds a write key for it. A domain has no access level: every domain reads,
@@ -25,6 +25,8 @@ export const registry = (): Registry => readJson<Registry>(REGISTRY, { repos: {}
 const save = (value: Registry) => writeJson(REGISTRY, value);
 export const recordOf = (repo: Repo): RepoRecord =>
   registry().repos[repoId(repo)] ?? refuse(`${repoId(repo)} is not cloned into the root`, `desolate clone ${repoId(repo)}`);
+
+const NOWHERE = "/dev/null/desolate/this-repository-is-not-pushable";
 
 const keyring = async (request: Record<string, unknown>) => {
   const reply = await ask(KEYRING.control, request);
@@ -85,6 +87,9 @@ export const fetch = async (repo: Repo, log: (line: string) => void = () => {}) 
     // would otherwise choose where LFS goes, and with which key.
     "lfs.url": url,
     "lfs.locksverify": "false",
+    // Nothing is ever pushed INTO the mirror: it holds what the remote published. The hook
+    // lives in a directory only root writes.
+    "core.hooksPath": `${MIRROR_HOOKS}`,
   });
   if (!record.anonymous) await config(mirror, { "core.sshCommand": sshCommand(repo, "read") });
   await git(mirror, ["config", "--unset-all", "remote.origin.fetch"]);
@@ -145,17 +150,20 @@ export const ensureClone = async (repo: Repo, defaultBranch: string | null): Pro
     "lfs.locksverify": "false",
     "desolate.repo": repoId(repo),
   });
+  await git(clone, ["config", "--unset-all", "remote.origin.lfspushurl"]);
   if (record.pushable) {
     const url = remoteUrl(repo);
     await config(clone, {
       "remote.origin.pushurl": url,
-      "remote.origin.lfspushurl": url,
+      // `lfs.pushurl`, not remote.origin.lfspushurl: git-lfs lets `lfs.url` outrank the
+      // per-remote setting, and an upload would then go into the mirror (measured).
+      "lfs.pushurl": url,
       "core.sshCommand": sshCommand(repo, "write"),
     });
   } else {
-    // Not pushable: `git push origin` goes to the mirror's path, which refuses it.
-    await git(clone, ["config", "--unset-all", "remote.origin.pushurl"]);
-    await git(clone, ["config", "--unset-all", "remote.origin.lfspushurl"]);
+    // Not pushable: a push, of commits or of LFS objects, has nowhere to go. Without these
+    // it would land in the mirror, which the root can write.
+    await config(clone, { "remote.origin.pushurl": NOWHERE, "lfs.pushurl": `file://${NOWHERE}` });
     await git(clone, ["config", "--unset-all", "core.sshCommand"]);
   }
   if (fresh && defaultBranch) {

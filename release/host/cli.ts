@@ -23,6 +23,12 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate stop | start | rm <domain>/<workspace>
   desolate rm <domain>                                           the domain and its clones; not the root's
 
+  desolate offers [<domain>] [--json]                            what workspaces have offered: needs you
+  desolate review <domain> <owner/repo> <branch> [--json]        what a push would send
+  desolate push <domain> <owner/repo> <branch> --expect <commit> [--allow-default]
+                                                                 to the remote; asks you, on a terminal
+  desolate root shell                                            the root's terminal: git on the root clones
+
   desolate help                                                  this text
 
 Every command that reads takes --json. Exit codes: 0 ok, 1 failed, 64 usage, 75 busy,
@@ -103,6 +109,27 @@ const main = async (argv: string[]): Promise<number> => {
     const workspaces = await import("./workspaces.ts");
     await (verb === "stop" ? workspaces.stop : verb === "start" ? workspaces.start : workspaces.remove)(positionals[0], out);
     return EXIT.ok;
+  }
+  if (verb === "offers") {
+    const { values, positionals } = flags(rest, {});
+    const { offers } = await import("./push.ts");
+    await offers(positionals[0], out, values.json === true);
+    return EXIT.ok;
+  }
+  if (verb === "review") {
+    const { values, positionals } = flags(rest, {});
+    const { review } = await import("./push.ts");
+    await review(positionals, out, values.json === true);
+    return EXIT.ok;
+  }
+  if (verb === "push") {
+    flags(rest, { expect: { type: "string" }, "allow-default": { type: "boolean" } });
+    const { push } = await import("./push.ts");
+    return push(rest);
+  }
+  if (verb === "root" && rest[0] === "shell") {
+    const { rootShell } = await import("./push.ts");
+    return rootShell();
   }
   if (verb === "ports") {
     const { values, positionals } = flags(rest, {});

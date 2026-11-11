@@ -2,6 +2,9 @@
 // with the domain's trust: if an agent that is root here tampers with it, it can only lie
 // about its own VM, and the host (the authority) still forwards nothing it should not.
 //
+//   branches  when a branch of the domain's moves, an incremental bundle and the list of refs
+//             go to the outbox, so the root always sees every domain's branches (6.5); and
+//             what the root delivered to the inbox is imported as root/<branch>.
 //   ports     which TCP ports are listening here (for the host's forwarder to publish), and
 //             which the host asks this VM to keep taken, so a dev server moves to the next
 //             number instead of colliding with one that cannot be shared by name.
@@ -11,7 +14,8 @@
 import * as fs from "node:fs";
 import { createServer } from "node:net";
 import type { Server } from "node:net";
-import { run } from "../shared/run.ts";
+import { run, sleep } from "../shared/run.ts";
+import { branches, domainRepos, importDeliveries, syncRepo } from "./sync.ts";
 
 const SOCKET = "/run/desolate/wsd.sock";
 /** desolate's own listeners in the VM: never offered for forwarding. */
@@ -75,3 +79,28 @@ createServer((connection) => {
     connection.end(JSON.stringify(reply) + "\n");
   });
 }).listen(SOCKET, () => fs.chmodSync(SOCKET, 0o600));
+
+// The domain's refs, watched by comparing them every few seconds (a shared .git on virtiofs
+// delivers no file events across VMs). Every workspace of a domain does this; the bundles
+// are idempotent, so two writing the same refs is harmless.
+const seen = new Map<string, string>();
+const watch = async () => {
+  for (;;) {
+    for (const repo of domainRepos()) {
+      try {
+        const now = JSON.stringify(await branches(repo));
+        if (seen.get(repo) !== now) {
+          // Debounce: a rebase moves a branch many times in a second.
+          await sleep(500);
+          await syncRepo(repo);
+          seen.set(repo, JSON.stringify(await branches(repo)));
+        }
+        await importDeliveries(repo);
+      } catch (error) {
+        console.error(`wsd: ${repo}: ${String(error)}`);
+      }
+    }
+    await sleep(3000);
+  }
+};
+void watch();

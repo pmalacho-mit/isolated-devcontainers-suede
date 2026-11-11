@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node --disable-warning=ExperimentalWarning /desolate/release/root/git-remote-desolate.ts "$@"

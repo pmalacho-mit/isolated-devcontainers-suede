@@ -23,6 +23,9 @@ export type Stack = {
   env: NodeJS.ProcessEnv;
   /** Run the CLI; the command, its output and exit code go into the transcript. */
   desolate: (...args: string[]) => Result;
+  /** Run the CLI as a person at a terminal would: on a pseudo-terminal, typing `answer` when
+   *  the output shows `wait`. Recorded in the transcript. */
+  person: (wait: string, answer: string, ...args: string[]) => Result;
   /** Run the CLI without recording (polling, set-up noise). */
   quiet: (...args: string[]) => Result;
   /** Run a command in the root VM as its unprivileged user (or as root). */
@@ -109,6 +112,11 @@ export const newStack = (label: string): Stack => {
     desolate: (...args) => {
       const result = sh(CLI, args, { env });
       transcript.push(scrub(`$ desolate ${args.join(" ")}`), ...scrub(result.stdout + result.stderr).trimEnd().split("\n").filter((line) => line.length > 0), `[exit ${result.code}]`, "");
+      return result;
+    },
+    person: (wait, answer, ...args) => {
+      const result = sh("python3", [path.join(HERE, "person.py"), wait, answer, "--", CLI, ...args], { env });
+      transcript.push(scrub(`$ desolate ${args.join(" ")}    # at a terminal; the person types: ${answer}`), ...scrub(result.stdout + result.stderr).trimEnd().split("\n").filter((line) => line.length > 0), `[exit ${result.code}]`, "");
       return result;
     },
     quiet: (...args) => sh(CLI, args, { env }),

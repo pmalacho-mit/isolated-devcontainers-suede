@@ -208,6 +208,13 @@ export const fakeBackend = (): Backend => {
       return spawn("docker", execArgs(name, argv, options, true), { stdio: ["pipe", "pipe", "pipe"] });
     },
 
+    attach(name, argv, options = {}) {
+      const args = ["exec", "-i", ...(process.stdin.isTTY ? ["-t"] : []), "-u", GUEST_USER, "-e", `HOME=/home/${GUEST_USER}`, "-e", `TERM=${process.env.TERM ?? "xterm"}`];
+      if (options.cwd) args.push("-w", options.cwd);
+      const child = spawn("docker", [...args, name, ...argv], { stdio: "inherit" });
+      return new Promise((resolve) => child.on("close", (code) => resolve(code ?? 1)));
+    },
+
     dial(name, port) {
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`bad port ${port}`);
       return duplexOf(spawn("docker", ["exec", "-i", "-u", "0:0", name, "socat", "STDIO", `TCP:127.0.0.1:${port}`], { stdio: ["pipe", "pipe", "ignore"] }));

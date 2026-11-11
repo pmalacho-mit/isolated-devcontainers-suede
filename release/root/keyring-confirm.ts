@@ -16,14 +16,19 @@ import { ask } from "./keyring-client.ts";
 import { KEYRING } from "./layout.ts";
 
 const [, , repoArg, ref, commit, summary] = process.argv;
+if (repoArg === "--revoke") {
+  // The push is over: its approval must not outlive it. Needs no terminal.
+  await ask(KEYRING.internal, { op: "revoke", id: ref }).catch(() => {});
+  process.exit(0);
+}
 const repo = parseRepo(repoArg);
 const fail = (message: string): never => {
   console.error(`desolate: ${message}`);
   process.exit(78);
 };
 if (!repo || !isBranch(ref) || !isCommit(commit)) fail("usage: keyring-confirm <owner/repo> <branch> <commit>");
-if (!process.stdin.isTTY) fail("a push needs a person's confirmation, and there is no terminal to ask on. Run the push from the root's terminal (desolate root shell), or use Push in the root editor.");
-
+// The terminal is the process's CONTROLLING terminal, opened by name: not stdin, which git
+// hands a hook as a pipe, and which a caller could point anywhere.
 let tty: number;
 try {
   tty = fs.openSync("/dev/tty", "r+");

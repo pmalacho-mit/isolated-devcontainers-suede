@@ -7,6 +7,7 @@ import type { Forge } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { FORGE, KEYRING } from "./layout.ts";
 import * as domains from "./domains.ts";
+import * as offers from "./offers.ts";
 import * as repos from "./repos.ts";
 
 type Log = (line: string) => void;
@@ -67,6 +68,13 @@ export const ops: Record<string, Op> = {
   },
   async "workspace.remove"(args) {
     return domains.removeWorkspace(domains.slugOf(args.domain, "domain"), domains.slugOf(args.name, "workspace"));
+  },
+
+  async "offers.list"(args) {
+    return offers.allOffers(typeof args.domain === "string" ? domains.slugOf(args.domain, "domain") : undefined);
+  },
+  async "review"(args) {
+    return offers.review(domains.slugOf(args.domain, "domain"), args.repo, args.branch);
   },
 
   async "keys.list"() {

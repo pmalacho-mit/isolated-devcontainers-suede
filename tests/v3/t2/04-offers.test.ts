@@ -1,0 +1,247 @@
+// T2 (fake backend). Phase 5: offers and pushes, and the root's view of every domain.
+// Exit criteria of move-to-vms.md section 13.4, phase 5 (all but `upstream`).
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { after, before, describe, it } from "node:test";
+import { bootstrap, git, newStack } from "../lib/harness.ts";
+import type { Stack } from "../lib/harness.ts";
+
+let stack: Stack;
+let commit = "";
+let oid = "";
+const vms = new Map<string, string>();
+const vmOf = (target: string) => {
+  if (!vms.has(target)) {
+    const list = JSON.parse(stack.quiet("list", "--json").stdout) as { domain: string; workspaces: { workspace: string; vm: string }[] }[];
+    for (const d of list) for (const w of d.workspaces) vms.set(`${d.domain}/${w.workspace}`, w.vm);
+  }
+  return vms.get(target)!;
+};
+const inWs = (target: string, script: string) => stack.inVm(vmOf(target), ["bash", "-lc", script]);
+const WT = "/workspaces/acme/widgets/.worktrees/issue-12";
+const ROOT_CLONE = "/desolate/root/acme/widgets";
+const inRootClone = (script: string) => stack.inRoot(["bash", "-c", `export GIT_CONFIG_GLOBAL=/var/lib/desolate/gitconfig; cd ${ROOT_CLONE} && ${script}`]);
+const forgeRefs = (repo: string) => Object.fromEntries(stack.forge("refs", repo).trim().split("\n").filter(Boolean).map((line) => line.split(" ") as [string, string]));
+const audit = () => (JSON.parse(stack.inRoot(["node", "--disable-warning=ExperimentalWarning", "/desolate/release/root/rootctl.ts"], { input: JSON.stringify({ op: "keys.audit", args: { last: 500 } }) }).stdout).result as { event: string; repo?: string; ref?: string; commit?: string }[]);
+const forgeHasLfs = (repo: string, id: string) => {
+  try {
+    stack.forge("lfs-has", repo, id);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("T2 phase 5: offers, the root's view, and pushes", () => {
+  before(() => {
+    stack = newStack("offers");
+    stack.seed("acme/widgets", (dir) => {
+      git(dir, "lfs", "install", "--local");
+      git(dir, "lfs", "track", "*.bin");
+      fs.writeFileSync(path.join(dir, "big.bin"), Buffer.alloc(100_000, 7));
+      fs.writeFileSync(path.join(dir, "README.md"), "# widgets\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "--quiet", "-m", "seed");
+    });
+    stack.seed("acme/consumer", (dir) => {
+      fs.writeFileSync(path.join(dir, "README.md"), "# consumer\n");
+      git(dir, "add", "-A");
+      git(dir, "commit", "--quiet", "-m", "seed");
+    });
+    assert.equal(bootstrap(stack).code, 0);
+    assert.equal(stack.quiet("clone", "acme/widgets").code, 0);
+    assert.equal(stack.quiet("clone", "acme/consumer", "--no-push").code, 0);
+    assert.equal(stack.quiet("domain", "create", "dev").code, 0);
+    assert.equal(stack.quiet("domain", "dev", "add", "--repo", "acme/widgets").code, 0);
+    assert.equal(stack.quiet("domain", "dev", "add", "--repo", "acme/consumer").code, 0);
+    const up = stack.quiet("up", "dev", "--name", "w1", "--checkout", "acme/widgets=worktree:issue/12");
+    assert.equal(up.code, 0, up.stderr);
+  });
+  after(() => stack.destroy());
+
+  it("an agent finishes: commits, a new LFS file, and `desolate offer`", () => {
+    stack.step("offer a branch from a workspace");
+    const work = inWs("dev/w1", `cd ${WT} && head -c 50000 /dev/urandom > new.bin && echo 'fix #12' >> README.md && git add -A && git commit -qm 'fix: issue 12' && git rev-parse HEAD && sha256sum new.bin | cut -d' ' -f1`);
+    assert.equal(work.code, 0, work.stderr);
+    [commit, oid] = work.stdout.trim().split("\n") as [string, string];
+    const offered = stack.desolate("exec", "dev/w1", "--checkout", "acme/widgets", "--", "desolate", "offer");
+    assert.equal(offered.code, 0, offered.stderr);
+    assert.match(offered.stdout, /offered acme\/widgets issue\/12 at [0-9a-f]{12}, with 1 LFS object\(s\)/);
+    assert.match(offered.stdout, /Offering is not pushing/);
+    const offers = stack.desolate("offers");
+    assert.match(offers.stdout, /Needs you:\n {2}dev {2}acme\/widgets {2}issue\/12 {2}[0-9a-f]{12} {2}from w1 {2}1 LFS object/);
+    assert.equal(forgeRefs("acme/widgets")["issue/12"], undefined, "offering pushed nothing");
+  });
+
+  it("the root sees every domain's branches with ordinary git, without an offer", async () => {
+    stack.step("the root's view");
+    const fetched = inRootClone("git fetch --all --quiet && git branch -r --format='%(refname:short)' && git log -1 --format=%s dev/issue/12 && git remote -v | grep dev");
+    assert.equal(fetched.code, 0, fetched.stderr);
+    assert.match(fetched.stdout, /^dev\/issue\/12$/m);
+    assert.match(fetched.stdout, /^dev\/main$/m);
+    assert.match(fetched.stdout, /^fix: issue 12$/m);
+    assert.match(fetched.stdout, /desolate::dev/);
+    // A branch nobody offered arrives too: the workspace's daemon writes it out on its own.
+    inWs("dev/w1", `cd ${WT} && git branch experiment && git commit -q --allow-empty -m wip`);
+    let seen = false;
+    for (let waited = 0; waited < 15_000 && !seen; waited += 1000) {
+      await sleep(1000);
+      seen = /^dev\/experiment$/m.test(inRootClone("git fetch dev --quiet; git branch -r --format='%(refname:short)'").stdout);
+    }
+    assert.ok(seen, "an unoffered branch reaches the root's view within seconds");
+    // The amended tip: the offer names the commit that was offered, and the branch moved on.
+    commit = inWs("dev/w1", `cd ${WT} && git reset -q --hard HEAD~1 && git rev-parse HEAD`).stdout.trim();
+    stack.quiet("exec", "dev/w1", "--", "desolate", "sync");
+  });
+
+  it("review shows what a push would send", () => {
+    stack.step("review");
+    const text = stack.desolate("review", "dev", "acme/widgets", "issue/12");
+    assert.equal(text.code, 0, text.stderr);
+    assert.match(text.stdout, /a push would send 1 commit\(s\): 2 files changed.*, and 1 LFS object\(s\) first/);
+    assert.match(text.stdout, new RegExp(`to push exactly this: desolate push dev acme/widgets issue/12 --expect ${commit}`));
+    const json = JSON.parse(stack.quiet("review", "dev", "acme/widgets", "issue/12", "--json").stdout) as { commit: string; files: string[]; pushable: boolean };
+    assert.equal(json.commit, commit);
+    assert.deepEqual(json.files.sort(), ["README.md", "new.bin"]);
+  });
+
+  it("a push is impossible without a person: every automation path is tried, and refused", () => {
+    stack.step("automation tries to push");
+    // 1. The CLI, driven by a script: no terminal.
+    const cli = stack.desolate("push", "dev", "acme/widgets", "issue/12", "--expect", commit);
+    assert.equal(cli.code, 78);
+    assert.match(cli.stderr, /there is no terminal to ask on/);
+    assert.match(cli.stderr, /no person confirmed the push, so nothing was pushed/);
+    // 2. Raw git in the root clone, from a script.
+    const raw = inRootClone(`git push origin ${commit}:refs/heads/issue/12 2>&1`);
+    assert.notEqual(raw.code, 0);
+    // 3. Skipping desolate's hook: then the write key itself refuses to sign.
+    const noVerify = inRootClone(`git push --no-verify origin ${commit}:refs/heads/issue/12 2>&1`);
+    assert.notEqual(noVerify.code, 0);
+    assert.match(noVerify.stdout, /Permission denied|agent refused|signing failed|Could not read from remote/i);
+    // 4. Skipping the LFS-first rule changes nothing either.
+    assert.notEqual(inRootClone(`git lfs push origin --object-id ${oid} 2>&1`).code, 0);
+    // 5. Filing the approval directly.
+    const confirm = stack.inRoot(["bash", "-c", `sudo -n -u desolate-keyring /usr/local/bin/node --disable-warning=ExperimentalWarning /desolate/release/root/keyring-confirm.ts acme/widgets issue/12 ${commit} x </dev/null`]);
+    assert.equal(confirm.code, 78);
+    assert.notEqual(stack.inRoot(["bash", "-c", `echo '{"op":"approve","repo":"acme/widgets","ref":"issue/12","commit":"${commit}"}' | socat - UNIX-CONNECT:/run/desolate/keyring/internal.sock`]).code, 0);
+    // 6. Adding a key of its own to the write agent, or one that needs no confirmation.
+    const addKey = stack.inRoot(["bash", "-c", "ssh-keygen -q -t ed25519 -N '' -f /tmp/mine && SSH_AUTH_SOCK=/run/desolate/keyring/write-agent.sock ssh-add /tmp/mine 2>&1; SSH_AUTH_SOCK=/run/desolate/keyring/write-agent.sock ssh-add -D 2>&1; SSH_AUTH_SOCK=/run/desolate/keyring/write-agent.sock ssh-add -l"]);
+    assert.match(addKey.stdout, /desolate-write:acme\/widgets/, "the write agent still holds its key, and only its key");
+    assert.match(addKey.stdout, /Could not add identity .*agent refused operation/, "adding a key is refused by the relay");
+    assert.match(addKey.stdout, /Failed to remove all identities/, "so is removing them");
+    assert.equal(addKey.stdout.trim().split("\n").filter((line) => /^\d+ SHA256:/.test(line)).length, 1, "one identity is listed: the write key");
+    // The outcome: the remote has nothing, and the audit shows refusals and no signature.
+    assert.equal(forgeRefs("acme/widgets")["issue/12"], undefined, "nothing reached the remote");
+    assert.equal(forgeHasLfs("acme/widgets", oid), false, "nor its LFS object");
+    const entries = audit();
+    assert.ok(entries.some((e) => e.event === "refused" && e.repo === "acme/widgets"), "the write key's refused uses are audited");
+    assert.equal(entries.filter((e) => e.event === "signed" || e.event === "approved").length, 0, "no approval was filed and nothing was signed");
+  });
+
+  it("refusals that need no person: --expect, the default branch, a terminal answer that is not the branch", () => {
+    stack.step("refusals before and at the prompt");
+    const moved = stack.desolate("push", "dev", "acme/widgets", "issue/12", "--expect", "0".repeat(40));
+    assert.equal(moved.code, 79);
+    assert.match(moved.stderr, /it moved since/);
+    const none = stack.desolate("push", "dev", "acme/widgets", "issue/12");
+    assert.equal(none.code, 64);
+    const main = JSON.parse(stack.quiet("review", "dev", "acme/widgets", "main", "--json").stdout) as { commit: string };
+    const def = stack.desolate("push", "dev", "acme/widgets", "main", "--expect", main.commit);
+    assert.equal(def.code, 77);
+    assert.match(def.stderr, /fix: push a branch and open a pull request; or, to push the default branch itself, add --allow-default/);
+    const wrong = stack.person("Type the branch name", "yes", "push", "dev", "acme/widgets", "issue/12", "--expect", commit);
+    assert.equal(wrong.code, 78, "a 'yes' is not the branch name");
+    assert.equal(forgeRefs("acme/widgets")["issue/12"], undefined);
+  });
+
+  it("a person pushes: the prompt names repository, branch and commit; LFS objects go first", () => {
+    stack.step("a person pushes");
+    const pushed = stack.person("Type the branch name", "issue/12", "push", "dev", "acme/widgets", "issue/12", "--expect", commit);
+    assert.equal(pushed.code, 0, pushed.stdout);
+    assert.match(pushed.stdout, /this push needs your confirmation\.\s+repository {2}acme\/widgets\s+branch {6}issue\/12\s+commit {6}[0-9a-f]{40}/);
+    assert.match(pushed.stdout, /pushed acme\/widgets issue\/12 at [0-9a-f]{40} \(1 commit\(s\), 1 LFS object\(s\) first\)/);
+    assert.equal(forgeRefs("acme/widgets")["issue/12"], commit, "the remote has exactly the reviewed commit");
+    assert.equal(forgeHasLfs("acme/widgets", oid), true, "the remote serves the new LFS object");
+    const access = JSON.parse(stack.forge("access")) as { key?: string; command?: string; lfs?: string }[];
+    const upload = access.findIndex((e) => e.lfs === "upload");
+    const receive = access.findIndex((e) => /git-receive-pack/.test(e.command ?? ""));
+    assert.ok(upload >= 0 && receive > upload, "the LFS object was uploaded before the commit was pushed");
+    assert.ok(access.filter((e) => /receive-pack|upload$/.test(e.command ?? "")).every((e) => e.key === "write:acme/widgets"), "writes used the write key");
+    const entries = audit();
+    const approved = entries.find((e) => e.event === "approved");
+    assert.deepEqual([approved?.repo, approved?.ref, approved?.commit], ["acme/widgets", "issue/12", commit], "the approval names what was pushed");
+    assert.ok(entries.some((e) => e.event === "signed"), "each use of the write key is audited");
+    assert.ok(entries.some((e) => e.event === "revoked"), "the approval did not outlive the push");
+    assert.doesNotMatch(stack.desolate("offers").stdout, /issue\/12/, "the offer is no longer waiting");
+    // The mirror followed: every clone's origin/* now has the branch.
+    assert.equal(inWs("dev/w1", "cd /workspaces/acme/widgets && git fetch -q origin && git rev-parse origin/issue/12").stdout.trim(), commit);
+    // And the approval is spent: the same push again, by a script, is refused.
+    assert.notEqual(inRootClone(`git push --no-verify origin ${commit}:refs/heads/again 2>&1`).code, 0);
+  });
+
+  it("a repository cloned --no-push is never written: there is no key to write it with", () => {
+    stack.step("a repository the root cannot push");
+    inWs("dev/w1", "cd /workspaces/acme/consumer && git checkout -q -b tweak && echo x >> README.md && git commit -qam tweak");
+    assert.equal(stack.quiet("exec", "dev/w1", "--checkout", "acme/consumer", "--", "desolate", "offer").code, 0);
+    const review = JSON.parse(stack.quiet("review", "dev", "acme/consumer", "tweak", "--json").stdout) as { commit: string; pushable: boolean };
+    assert.equal(review.pushable, false);
+    const pushed = stack.person("Type the branch name", "tweak", "push", "dev", "acme/consumer", "tweak", "--expect", review.commit);
+    assert.equal(pushed.code, 1);
+    assert.match(pushed.stdout, /is not pushable: the root holds no write key for it/);
+    assert.equal(inRootClone("cd /desolate/root/acme/consumer && git push --no-verify origin HEAD:refs/heads/x 2>&1").code === 0, false);
+    const mirrorRefs = stack.inRoot(["bash", "-c", "git -C /desolate/mirrors/acme/consumer.git for-each-ref --format='%(refname)'"]).stdout.trim();
+    assert.equal(mirrorRefs, "refs/heads/main", "nothing was pushed into the mirror either");
+    const pushes = JSON.parse(stack.forge("pushes")) as { repo: string }[];
+    assert.ok(pushes.every((p) => p.repo !== "acme/consumer"), "the consumer's remote was never written");
+    assert.ok(pushes.some((p) => p.repo === "acme/widgets"), "control: the forge does log pushes");
+  });
+
+  it("the root never runs git in a domain's repository: a booby-trapped clone and a lying outbox", () => {
+    stack.step("a hostile domain repository");
+    // The trap: config and hooks in the domain clone that run a command when git works there.
+    const trap = inWs("dev/w1", `cd /workspaces/acme/widgets && git config core.fsmonitor 'touch /tmp/PWNED-fsmonitor; false' && git config uploadpack.packObjectsHook 'touch /tmp/PWNED-uploadpack; cat' && git config core.hooksPath /workspaces/acme/widgets/.git/trap-hooks && mkdir -p .git/trap-hooks && for h in post-checkout reference-transaction pre-auto-gc post-index-change; do printf '#!/bin/sh\\ntouch /tmp/PWNED-hook\\n' > .git/trap-hooks/$h; chmod +x .git/trap-hooks/$h; done && git status >/dev/null 2>&1; ls /tmp/PWNED-*`);
+    assert.match(trap.stdout, /PWNED-fsmonitor/, "control: the trap fires when git runs in the domain clone (here, in its own workspace)");
+    // Then everything the root does with this domain.
+    inWs("dev/w1", `cd ${WT} && echo more >> README.md && git commit -qam 'more' && desolate offer`);
+    assert.equal(inRootClone("git fetch --all --quiet && git log -1 --format=%s dev/issue/12").stdout.trim(), "more");
+    assert.equal(stack.quiet("review", "dev", "acme/widgets", "issue/12").code, 0);
+    stack.quiet("push", "dev", "acme/widgets", "issue/12", "--expect", "0".repeat(40));
+    const rootTmp = stack.inRoot(["bash", "-c", "ls /tmp/PWNED-* 2>/dev/null; true"], { root: true });
+    assert.equal(rootTmp.stdout.trim(), "", "nothing from the domain's config or hooks ran in the root");
+    // A lying outbox: ref names that are paths or options, a commit that is not one, a
+    // bundle that is a symlink out of the outbox.
+    inWs("dev/w1", "pkill -f wsd.ts; true");
+    const sync = path.join(stack.home, "domains/dev/outbox/sync/acme/widgets");
+    const good = commit;
+    fs.writeFileSync(path.join(sync, "refs.json"), JSON.stringify({ refs: { "../../../etc/evil": good, "-oProxyCommand=evil": good, "ok/../../x": good, "notasha": "zz", "honest": good, "refs/heads/double": good } }));
+    fs.symlinkSync("/etc/passwd", path.join(sync, "zz-evil.bundle"));
+    fs.writeFileSync(path.join(sync, "zy-garbage.bundle"), "this is not a bundle");
+    const lied = inRootClone("git fetch dev 2>&1; git for-each-ref --format='%(refname)' refs/remotes/dev refs/desolate; ls /desolate/root/acme/widgets/.git/refs/remotes/dev");
+    assert.match(lied.stdout, /^refs\/remotes\/dev\/honest$/m, "control: a well-formed ref from the same list is accepted");
+    assert.doesNotMatch(lied.stdout, /evil|notasha|ProxyCommand|refs\/desolate/);
+    assert.ok(fs.lstatSync(path.join(sync, "zz-evil.bundle")).isSymbolicLink(), "the symlink was not followed or consumed");
+  });
+
+  it("a person moves work between domains through the root: git push <domain> delivers", () => {
+    stack.step("a delivery to another domain");
+    assert.equal(stack.quiet("domain", "create", "other").code, 0);
+    assert.equal(stack.quiet("domain", "other", "add", "--repo", "acme/widgets").code, 0);
+    assert.equal(stack.quiet("up", "other", "--name", "w1").code, 0);
+    const delivered = inRootClone(`git push other ${commit}:refs/heads/fix-from-dev 2>&1`);
+    assert.equal(delivered.code, 0, delivered.stdout);
+    // The workspace's daemon may import it first; either way it is there after a fetch.
+    const got = stack.quiet("exec", "other/w1", "--", "desolate", "fetch", "acme/widgets");
+    assert.equal(got.code, 0, got.stderr);
+    const there = inWs("other/w1", "cd /workspaces/acme/widgets && git rev-parse refs/remotes/root/fix-from-dev && git branch --format='%(refname:short)'");
+    assert.equal(there.stdout.split("\n")[0], commit);
+    assert.deepEqual(there.stdout.trim().split("\n").slice(1), ["main"], "it arrived as root/<branch>, not over a branch of the domain's own");
+    assert.equal(forgeRefs("acme/widgets")["fix-from-dev"], undefined, "a delivery is a local transfer: the remote was not written");
+  });
+
+  it("the transcript reads as reviewed", () => {
+    stack.checkTranscript("t2-04-offers");
+  });
+});

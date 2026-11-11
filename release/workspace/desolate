@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node --disable-warning=ExperimentalWarning /desolate/release/workspace/desolate.ts "$@"
