@@ -41,8 +41,8 @@ isolated). "T3" is real VMs under QEMU, in the sandbox under software emulation.
 | 6. Root UI and agents | **Not started.** `status` and `board` exist on the CLI. | |
 | 7. Hardening | **Partly.** P1 to P6 are in the README; doctor's false-pass rule holds for the root's checks; the incidents page has v3's findings. | |
 
-Test counts at this commit, in the sandbox: **T1 16, T2 52, T3 %T3_COUNT%; all passing.**
-T2 takes about 3 minutes. T3 takes about %T3_MINUTES% minutes under software emulation.
+Test counts at this commit, in the sandbox: **T1 16, T2 53, T3 8; all passing.**
+T2 takes about 3 minutes. T3 takes about 17 minutes under software emulation (each VM takes about 3 minutes to boot there). T3 passed once at this commit; it has not been repeated enough to call its transcript stable.
 
 ### What has never been run
 

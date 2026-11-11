@@ -1,4 +1,4 @@
-./phase0-mac-egress2.sh 
+./phase0-mac-egress2.sh
   [control] start WITHOUT a sandbox: as expected (ok)
   [control] unsandboxed: ping 1.1.1.1 answers (else the ping rows below prove nothing): as expected (ok)
   [control] unsandboxed: DNS resolves example.com: as expected (ok)
