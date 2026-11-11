@@ -175,6 +175,35 @@ describe("T2 phase 4: a domain's secrets", () => {
     assert.equal(logs.stdout.trim(), "searched", "no log, audit or inbox file holds a value");
   });
 
+  it("a secret can be switched off, and on for a while: off, its name is refused, never sent in its place", async () => {
+    stack.step("switching a secret off and on");
+    const count = upstream().length;
+    const off = stack.desolate("domain", "dev", "secret", "off", "MYAPP-API-KEY");
+    assert.match(off.stdout, /MYAPP-API-KEY is OFF: its value goes nowhere, and a request that carries its name toward api\.example\.test is refused/);
+    assert.match(stack.desolate("domain", "dev", "secret", "list").stdout, /^MYAPP-API-KEY {2}-> {2}api\.example\.test {2}\(headers: authorization\) {2}\[OFF\]$/m);
+    const refused = curl("dev/w1", "https://api.example.test/off -H 'Authorization: Bearer MYAPP-API-KEY'");
+    assert.match(refused.stdout, /desolate: secret \['MYAPP-API-KEY'\] is switched off; on the host: desolate domain dev secret on MYAPP-API-KEY \[--ttl 30m\]/);
+    assert.equal(upstream().length, count, "nothing reached the upstream: neither the value nor the name");
+    // CONTROL: the other secret, still on, is substituted on the same host; and a request
+    // that carries no secret's name goes through.
+    curl("dev/w1", "https://api.example.test/still-on -H 'X-Api-Key: MYAPP-TOKEN-TWO'");
+    assert.deepEqual([last().path, last().apiKey], ["/still-on", TOKEN]);
+    // On for a while.
+    const on = stack.desolate("domain", "dev", "secret", "on", "MYAPP-API-KEY", "--ttl", "4s");
+    assert.match(on.stdout, /MYAPP-API-KEY is on for \d s more, then off\./);
+    curl("dev/w1", "https://api.example.test/on-for-a-while -H 'Authorization: Bearer MYAPP-API-KEY'");
+    assert.deepEqual([last().path, last().authorization], ["/on-for-a-while", `Bearer ${VALUE}`]);
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    assert.match(curl("dev/w1", "https://api.example.test/expired -H 'Authorization: Bearer MYAPP-API-KEY'").stdout, /is switched off/);
+    assert.match(stack.quiet("domain", "dev", "secret", "list").stdout, /MYAPP-API-KEY .*\[OFF\]/, "the list says so too, with nothing having been switched");
+    assert.notEqual(last().path, "/expired");
+    for (const bad of [["on", "MYAPP-API-KEY", "--ttl", "soon"], ["off", "MYAPP-API-KEY", "--ttl", "5m"], ["on", "NO-SUCH-SECRET"]]) assert.notEqual(stack.quiet("domain", "dev", "secret", ...bad).code, 0, bad.join(" "));
+    assert.match(stack.desolate("domain", "dev", "secret", "on", "MYAPP-API-KEY").stdout, /^MYAPP-API-KEY is on\.$/m);
+    curl("dev/w1", "https://api.example.test/on-again -H 'Authorization: Bearer MYAPP-API-KEY'");
+    assert.deepEqual([last().path, last().authorization], ["/on-again", `Bearer ${VALUE}`]);
+    assert.ok(log("dev").some((e) => e.verdict === "refused" && /is switched off/.test(e.reason ?? "") && e.secrets?.join() === "MYAPP-API-KEY"), "the refusal is on record, by name");
+  });
+
   it("fail closed: with the secrets proxy down its hosts are refused, not passed around it; a removed secret is a name again", () => {
     stack.step("the secrets proxy stops; a secret is removed");
     const count = upstream().length;

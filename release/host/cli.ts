@@ -25,7 +25,9 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate status | board <domain>[/<workspace>] [--json]        how each checkout says its work is going
   desolate ports [<domain>/<workspace>] [--json]                 what is forwarded, at which URL; what is reserved
   desolate editor <domain>/<workspace> [--json]                  the address of its editor, for your browser
-  desolate exec <domain>/<workspace> [--checkout <repo>] -- <cmd>  a command, or an agent, inside it
+  desolate exec <domain>/<workspace> [--checkout <repo>] [--vm] -- <cmd>
+                                                                 a command, or an agent, in its devcontainer
+                                                                 (or in the VM itself: when it has none, or --vm)
   desolate stop | start | rm <domain>/<workspace>
   desolate rm <domain>                                           the domain and its clones; not the root's
 
@@ -101,7 +103,7 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "domain") {
-    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string" }, hosts: { type: "string" }, headers: { type: "string" } });
+    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string" }, hosts: { type: "string" }, headers: { type: "string" }, ttl: { type: "string" } });
     const { domainCommand } = await import("./domains.ts");
     await domainCommand(positionals, values, out);
     return EXIT.ok;
@@ -186,9 +188,9 @@ const main = async (argv: string[]): Promise<number> => {
   }
   if (verb === "exec") {
     const split = rest.indexOf("--");
-    const { values, positionals } = flags(split < 0 ? rest : rest.slice(0, split), { checkout: { type: "string" } });
+    const { values, positionals } = flags(split < 0 ? rest : rest.slice(0, split), { checkout: { type: "string" }, vm: { type: "boolean" } });
     const { exec } = await import("./workspaces.ts");
-    return exec(positionals[0], split < 0 ? positionals.slice(1) : rest.slice(split + 1), { checkout: values.checkout as string | undefined });
+    return exec(positionals[0], split < 0 ? positionals.slice(1) : rest.slice(split + 1), { checkout: values.checkout as string | undefined, vm: values.vm === true });
   }
   throw new Refusal(`desolate has no command '${verb}'`, "desolate help", EXIT.usage);
 };

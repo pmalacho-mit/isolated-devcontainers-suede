@@ -1,0 +1,76 @@
+$ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
+desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; tests only), instance <instance>
+  + home <home>
+    base image desolate/base:latest present (<id>)
+  = base image
+  + config: backend fake, forge stand-in (<forge>:22)
+    approver: a software key in <home>/approver; every push will ask on your terminal
+  + approver (terminal): the key that approves pushes, held on this host
+  + root VM dsl-<instance>-root created
+  + root VM running
+  + root services: keyring
+  + root: the approver's public key
+bootstrap: 7 step(s) done.
+  ok   home: <home>
+  ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
+  ok   docker daemon: docker 29.9.3
+  ok   base image: desolate/base:latest <id>
+  ok   root VM running: dsl-<instance>-root
+  ok   approver: terminal; pushes are approved on this host
+  ok   root: keyring answers: 0 key(s) held
+  ok   root: the write agent's askpass socket is closed to the root's own user: only the keyring's user can answer for a signature
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: approver key installed: sha256 <oid>
+  ok   root: forge configured: yes
+doctor: all checks passed.
+[exit 0]
+
+## a devcontainer whose image cannot be had
+
+$ desolate up app
+workspace app/w1 is up  [NOT ISOLATED: fake backend]
+  acme/app  main checkout (main)  /workspaces/acme/app
+  devcontainer FAILED: An error occurred setting up the container. (the whole log: /home/desolate/.desolate-devcontainer/up.log in the workspace)
+  editor       http://app-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fapp
+  dev servers  http://app-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
+the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+[exit 0]
+
+## the devcontainer comes up
+
+$ desolate start app/w1
+workspace app/w1 is up (<duration>)
+  devcontainer up (registry.invalid/desolate-test/dev:1, user dev)
+[exit 0]
+
+## git inside the devcontainer
+
+$ desolate offers
+Needs you:
+  app  acme/app  from-container  <id>  from unknown
+    review: desolate review app acme/app from-container
+[exit 0]
+
+## network inside the devcontainer
+
+## the editor, in the devcontainer
+
+## a spec that builds
+
+$ desolate start built/w1
+workspace built/w1 is up (<duration>)
+  devcontainer up (vsc-built-<oid>-uid, user dev)
+[exit 0]
+
+## no devcontainer.json
+
+$ desolate up plain
+workspace plain/w1 is up  [NOT ISOLATED: fake backend]
+  acme/plain  main checkout (main)  /workspaces/acme/plain
+  devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
+  editor       http://plain-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fplain
+  dev servers  http://plain-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
+the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+[exit 0]
+
+## the spec changes

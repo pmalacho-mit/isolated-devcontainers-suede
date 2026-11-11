@@ -87,6 +87,9 @@ export const ops: Record<string, Op> = {
   async "secret.set"(args) {
     return secrets.set(domains.domain(domains.slugOf(args.domain, "domain")).slug, args);
   },
+  async "secret.switch"(args) {
+    return secrets.switchSecret(domains.domain(domains.slugOf(args.domain, "domain")).slug, args);
+  },
   async "secret.remove"(args) {
     return secrets.remove(domains.domain(domains.slugOf(args.domain, "domain")).slug, args.name);
   },

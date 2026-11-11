@@ -80,9 +80,23 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
   if (second === "secret") {
     // desolate domain <d> secret [list] | set <NAME> --hosts a,b [--headers h,...] | rm <NAME>
     const [, , action, name] = args;
-    type Listed = { name: string; hosts: string[]; headers: string[] | null };
-    const usage = `desolate domain ${first} secret list | set <NAME> --hosts <host>[,...] [--headers <header>[,...]] | rm <NAME>`;
+    type Listed = { name: string; hosts: string[]; headers: string[] | null; on: boolean; secondsLeft?: number };
+    const usage = `desolate domain ${first} secret list | set <NAME> --hosts <host>[,...] [--headers <header>[,...]] | off <NAME> | on <NAME> [--ttl 30m] | rm <NAME>`;
+    const left = (seconds: number) => (seconds >= 7200 ? `${Math.round(seconds / 3600)} h` : seconds >= 120 ? `${Math.round(seconds / 60)} min` : `${seconds} s`);
+    const stateOf = (s: Listed) => (!s.on ? "OFF" : s.secondsLeft !== undefined ? `on for ${left(s.secondsLeft)} more` : "on");
     const csv = (value: unknown) => (typeof value === "string" ? value.split(",").map((part) => part.trim()).filter(Boolean) : []);
+    if (action === "on" || action === "off") {
+      if (!name) refuse("which secret?", usage, EXIT.usage);
+      let ttlSeconds: number | undefined;
+      if (values.ttl !== undefined) {
+        const match = /^(\d+)([smhd])$/.exec(String(values.ttl));
+        if (!match || action === "off") refuse(action === "off" ? "--ttl goes with `secret on`" : `'${String(values.ttl)}' is not a time to live`, `desolate domain ${first} secret on ${name} --ttl 30m   (s, m, h or d)`, EXIT.usage);
+        ttlSeconds = Number(match![1]) * { s: 1, m: 60, h: 3600, d: 86400 }[match![2] as "s" | "m" | "h" | "d"];
+      }
+      const switched = await rootctl<Listed>("secret.switch", { domain: first, name, on: action === "on", ttlSeconds }, { quiet: true });
+      if (json) return out(JSON.stringify(switched));
+      return out(switched.on ? `${name} is ${stateOf(switched)}${switched.secondsLeft !== undefined ? ", then off" : ""}.` : `${name} is OFF: its value goes nowhere, and a request that carries its name toward ${switched.hosts.join(", ")} is refused. To switch it on: desolate domain ${first} secret on ${name} [--ttl 30m]`);
+    }
     if (action === "set" || action === "rm") {
       if (!name) refuse("which secret?", usage, EXIT.usage);
       if (action === "set") {
@@ -103,7 +117,7 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
     const listed = await rootctl<Listed[]>("secret.list", { domain: first }, { quiet: true });
     if (json) return out(JSON.stringify(listed));
     if (listed.length === 0) return out(`the domain ${first} has no secrets. To add one: ${usage.split(" | ")[1]}`);
-    for (const s of listed) out(`${s.name}  ->  ${s.hosts.join(", ")}${s.headers ? `  (headers: ${s.headers.join(", ")})` : ""}`);
+    for (const s of listed) out(`${s.name}  ->  ${s.hosts.join(", ")}${s.headers ? `  (headers: ${s.headers.join(", ")})` : ""}${stateOf(s) === "on" ? "" : `  [${stateOf(s)}]`}`);
     return;
   }
   if (second === "show" || second === undefined) {

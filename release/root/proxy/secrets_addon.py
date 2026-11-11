@@ -23,6 +23,10 @@ tests/v3/t2/07-secrets.test.ts here):
                       and audited.
   HEADERS             a secret with `headers` is substituted in those request headers and
                       nowhere else; without, in the path, the headers and the body.
+  SWITCHED OFF        a secret can be switched off, or on for a while (`off`, `until`). A
+                      request that carries the name of a secret that is off is refused: the
+                      name is not sent in the value's place. A switch that cannot be read
+                      is off.
   SCRUB               a value echoed back in a response (headers, body, websocket frames
                       from the server) is replaced by its name before the workspace sees it.
   FAIL CLOSED         any error in here refuses the request or withholds the response.
@@ -109,8 +113,13 @@ class DesolateSecrets:
                                             or not all(isinstance(h, str) and HEADER_NAME.fullmatch(h) for h in headers)):
                     log.error(f"secret {name!r}: its headers cannot be read; skipping (a confinement that cannot be read is not widened)")
                     continue
+                off, until = entry.get("off", False), entry.get("until")
+                if not isinstance(off, bool) or (until is not None and (isinstance(until, bool) or not isinstance(until, (int, float)))):
+                    log.error(f"secret {name!r}: off {off!r} / until {until!r} cannot be read; holding it OFF")
+                    off, until = True, None
                 secrets[name] = {"value": value, "hosts": [h.lower() for h in hosts],
-                                 "headers": None if headers is None else frozenset(h.lower() for h in headers)}
+                                 "headers": None if headers is None else frozenset(h.lower() for h in headers),
+                                 "off": off, "until": until}
             for name in self._overlapping(secrets):
                 del secrets[name]
             self.secrets, self._mtime = secrets, mtime
@@ -126,6 +135,10 @@ class DesolateSecrets:
             except (OSError, ValueError):
                 self.internal = set()
             self._policy_mtime = policy_mtime
+
+    def is_on(self, name):
+        entry = self.secrets[name]
+        return not entry["off"] and (entry["until"] is None or time.time() < entry["until"])
 
     @staticmethod
     def _overlapping(secrets):
@@ -285,6 +298,10 @@ class DesolateSecrets:
                               f"'{proven}'; refusing to substitute a secret", found)
         suspect = {name for name in found if not self._host_matches(proven, self.secrets[name]["hosts"])}
         found -= suspect
+        switched_off = sorted(name for name in found if not self.is_on(name))
+        if switched_off:
+            return refuse(f"secret {switched_off} is switched off; on the host: "
+                          f"desolate domain {self.domain} secret on {switched_off[0]} [--ttl 30m]", switched_off)
         body = flow.request.content or b""
         substituted = body
         for name in found:

@@ -24,7 +24,9 @@ import { inbox } from "../outbox.ts";
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const DIR = `${ROOT.state}/proxy`;
 const MITMDUMP = "/opt/desolate/proxy-venv/bin/mitmdump";
-type Secret = { value: string; hosts: string[]; headers?: string[] };
+/** `off`: switched off until someone switches it on. `until` (seconds since the epoch): on
+ *  until then, off after: `secret on NAME --ttl 30m`. Neither: on. (v2's switch.) */
+type Secret = { value: string; hosts: string[]; headers?: string[]; off?: boolean; until?: number };
 type Store = { domain: string; secrets: Record<string, Secret> };
 export type Running = { port: number; pid: number; hosts: string[] };
 
@@ -52,10 +54,16 @@ const free = (port: number) =>
 
 /** What the domain's workspaces may know: names, hosts, headers. Never a value. */
 export const list = (domain: string) =>
-  Object.entries(store(domain).secrets).map(([name, s]) => ({ name, hosts: s.hosts, headers: s.headers ?? null })).sort((a, b) => a.name.localeCompare(b.name));
+  Object.entries(store(domain).secrets).map(([name, s]) => {
+    const now = Date.now() / 1000;
+    const on = s.off !== true && (s.until === undefined || now < s.until);
+    return { name, hosts: s.hosts, headers: s.headers ?? null, on, ...(on && s.until !== undefined ? { secondsLeft: Math.max(0, Math.round(s.until - now)) } : {}) };
+  }).sort((a, b) => a.name.localeCompare(b.name));
 
 const publish = (domain: string) => {
-  writeJson(path.join(inbox(domain), "secrets.json"), list(domain));
+  // For the workspaces: the switch as stored (`off`, `until`), not "on right now", which
+  // would go stale in a file when a time to live ran out.
+  writeJson(path.join(inbox(domain), "secrets.json"), Object.entries(store(domain).secrets).map(([name, s]) => ({ name, hosts: s.hosts, headers: s.headers ?? null, ...(s.off ? { off: true } : {}), ...(s.until !== undefined ? { until: s.until } : {}) })).sort((a, b) => a.name.localeCompare(b.name)));
   const ca = path.join(confdir(domain), "mitmproxy-ca-cert.pem");
   if (fs.existsSync(ca)) fs.copyFileSync(ca, path.join(inbox(domain), "ca.pem"));
 };
@@ -131,6 +139,27 @@ export const set = async (domain: string, input: { name?: unknown; value?: unkno
   next.domain = domain;
   next.secrets[name] = { value, hosts: [...new Set(hosts)].sort(), ...(headers ? { headers: [...new Set(headers)].sort() } : {}) };
   fs.mkdirSync(path.dirname(storeFile(domain)), { recursive: true, mode: 0o700 });
+  writeJson(storeFile(domain), next, 0o600);
+  await ensure(domain);
+  return list(domain).find((s) => s.name === name)!;
+};
+
+/** Switch a secret off, or on (for good, or for a while). Off, its value goes nowhere and a
+ *  request that carries its name toward its hosts is refused: the name is never sent in
+ *  the value's place. The addon reads the store again by itself. */
+export const switchSecret = async (domain: string, input: { name?: unknown; on?: unknown; ttlSeconds?: unknown }) => {
+  const next = store(domain);
+  const name = String(input.name ?? "");
+  const secret = next.secrets[name];
+  if (!secret) refuse(`the domain ${domain} has no secret named ${name}`, `desolate domain ${domain} secret list`);
+  delete secret!.off;
+  delete secret!.until;
+  if (input.on !== true) secret!.off = true;
+  else if (input.ttlSeconds !== undefined) {
+    const ttl = Number(input.ttlSeconds);
+    if (!Number.isFinite(ttl) || ttl < 1 || ttl > 366 * 86400) refuse("a time to live is between a second and a year", `desolate domain ${domain} secret on ${name} --ttl 30m`);
+    secret!.until = Math.floor(Date.now() / 1000 + ttl);
+  }
   writeJson(storeFile(domain), next, 0o600);
   await ensure(domain);
   return list(domain).find((s) => s.name === name)!;

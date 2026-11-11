@@ -53,7 +53,7 @@ describe("T2 phases 2-3: domains, workspaces and their checkouts", () => {
     assert.equal(up.code, 0, up.stderr);
     assert.match(up.stdout, /workspace nests-dev\/w1 is up {2}\[NOT ISOLATED: fake backend\]/);
     assert.match(up.stdout, /acme\/widgets {2}main checkout \(main\) {2}\/workspaces\/acme\/widgets/);
-    assert.match(up.stdout, /the start took [\d.]+ s: planned [\d.]+ s, VM booted [\d.]+ s, services, editor and checkouts [\d.]+ s/);
+    assert.match(up.stdout, /the start took [\d.]+ s: planned [\d.]+ s, VM booted [\d.]+ s, services, checkouts, devcontainer and editor [\d.]+ s/);
   });
 
   it("the domain clone borrows the mirror: nothing of its own until its first commit; LFS checks out", () => {

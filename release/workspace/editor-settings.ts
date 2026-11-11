@@ -2,7 +2,11 @@
 // written since (v2's editor-settings.ts, for the workspace's own editor). Everything else
 // in the file is the person's.
 //
-//   node editor-settings.ts <Machine/settings.json>
+//   node editor-settings.ts <Machine/settings.json> [enter|plain]
+//
+// "enter": the editor's server runs in the VM, so its terminal goes through enter.sh, which
+// enters the project's devcontainer when there is one. "plain": the server runs in the
+// devcontainer itself, and its terminal is the container's own shell.
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -19,7 +23,12 @@ export const HELD: Record<string, unknown> = {
   "terminal.integrated.macOptionClickForcesSelection": true,
 };
 
-export const hold = (text: string | undefined): string => {
+const TERMINAL = {
+  "terminal.integrated.profiles.linux": { desolate: { path: "/desolate/release/workspace/enter.sh", args: ["--here", "--", "bash", "-l"] } },
+  "terminal.integrated.defaultProfile.linux": "desolate",
+};
+
+export const hold = (text: string | undefined, terminal: "enter" | "plain" | undefined = undefined): string => {
   let settings: Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(text ?? "{}");
@@ -27,6 +36,9 @@ export const hold = (text: string | undefined): string => {
   } catch {
     // Unreadable (hand-edited into something that is not JSON): start again from what is held.
   }
+  if (terminal === "enter") Object.assign(settings, TERMINAL);
+  // Only what desolate put there is taken away: a profile of the person's own stays.
+  if (terminal === "plain" && settings["terminal.integrated.defaultProfile.linux"] === "desolate") for (const key of Object.keys(TERMINAL)) delete settings[key];
   return JSON.stringify({ ...settings, ...HELD }, null, 2) + "\n";
 };
 
@@ -43,6 +55,7 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
     text = undefined;
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(`${file}.desolate-tmp`, hold(text), { mode: 0o600 });
+  const terminal = process.argv[3] === "enter" || process.argv[3] === "plain" ? process.argv[3] : undefined;
+  fs.writeFileSync(`${file}.desolate-tmp`, hold(text, terminal), { mode: 0o600 });
   fs.renameSync(`${file}.desolate-tmp`, file);
 }

@@ -17,12 +17,15 @@ PLACEHOLDER=198.18.0.1   # RFC 2544's benchmarking range: never a real destinati
 # redirected connection never completes. Measured.)
 ip route show default | grep -q . || ip route replace local default dev lo
 
-# Names: one answer for every question. The proxy resolves the real name, outside.
+# Names: one answer for every question. The proxy resolves the real name, outside. It
+# listens on every address of this VM, not only loopback: a container on one of the VM's
+# docker bridges asks whatever resolver it was given, the redirect below brings the
+# question to the bridge's own address, and the answer must come from there.
 systemctl disable --now systemd-resolved >/dev/null 2>&1 || true
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 if ! alive /run/desolate/dnsmasq.pid; then
   dnsmasq --conf-file=/dev/null --pid-file=/run/desolate/dnsmasq.pid --no-resolv --no-hosts \
-    --listen-address=127.0.0.1 --bind-interfaces --address="/#/$PLACEHOLDER" --local-ttl=60 --user=root
+    --address="/#/$PLACEHOLDER" --local-ttl=60 --user=root
 fi
 # A symlink (systemd's stub) is replaced; a file that cannot be replaced (a container's bind
 # mount) is written in place.
