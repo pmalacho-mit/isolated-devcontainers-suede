@@ -6,10 +6,13 @@ desolate bootstrap: backend qemu, instance <instance>
     creating the base VM from /home/claude/img
   + base image
   + config: backend qemu, forge stand-in (<forge>:22)
+    approver: a software key in <home>/approver; every push will ask on your terminal
+  + approver (terminal): the key that approves pushes, held on this host
   + root VM dsl-<instance>-root created
   + root VM running
   + root services: keyring
-bootstrap: 6 step(s) done.
+  + root: the approver's public key
+bootstrap: 8 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: qemu
   ok   lima: limactl version 2.3.0
@@ -18,9 +21,11 @@ bootstrap: 6 step(s) done.
   ok   acceleration: none: software emulation (TCG). A real VM boundary, and slow: minutes to boot
   ok   base image: the base VM dsl-<instance>-base
   ok   root VM running: dsl-<instance>-root
+  ok   approver: terminal; pushes are approved on this host
   ok   root: keyring answers: 0 key(s) held
-  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: the write agent's askpass socket is closed to the root's own user: only the keyring's user can answer for a signature
   ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
 doctor: all checks passed.
 [exit 0]
@@ -48,8 +53,9 @@ next: desolate up a
 $ desolate up a
 workspace a/w1 is up
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  editor       http://a-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fwidgets
   dev servers  http://a-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+the start took <duration>: planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
 [exit 0]
 
 ## root in the VM against the read-only shares
@@ -60,6 +66,14 @@ $ desolate domain a net allow-internal <forge>
 a: any public host is reachable (open). Its workspaces still reach nothing internal
   internal addresses it may reach: <forge>
 [exit 0]
+
+## the editor, in a real VM
+
+$ desolate editor a/w1
+http://a-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fwidgets
+[exit 0]
+
+## a secret, in a real VM
 
 ## root in the VM against the network
 
@@ -78,8 +92,9 @@ next: desolate up b
 $ desolate up b
 workspace b/w1 is up
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  editor       http://b-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fwidgets
   dev servers  http://b-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+the start took <duration>: planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
 [exit 0]
 
 ## destroy

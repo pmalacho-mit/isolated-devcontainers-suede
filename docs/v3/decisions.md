@@ -165,24 +165,63 @@ On the M1, in a Lima/vz VM: an image with two features (node, docker-in-docker) 
 docker-in-docker devcontainer worked. The 87 s is what a domain template (C3) saves every
 workspace after the first.
 
-## Section 5.3. The push confirmation, and what it does not stop
+## Section 5.3. A push is approved on the host, outside every VM (decided; Touch ID unrun)
 
-The write key is held by an ssh-agent that runs a check before every signature; the check
-passes only against an approval on file; approvals are filed through a socket only the
-keyring's user can open; and the one program that files them asks on a terminal and requires
-the branch name typed back. A caller with no terminal (the CLI channel from the host, a
-script) cannot push.
+**What it was.** The write key is held by an ssh-agent that runs a check before every
+signature, and the check passes only against an approval on file. In the first v3 cut the
+approval was filed by a program in the root VM that asked on a terminal. A program in the
+root VM that fabricated a terminal could answer it, and so could a harness on the host that
+ran `desolate push` on a pseudo-terminal (the tests' `person.py` is exactly that).
 
-What this does not stop: a program inside the root VM that fabricates a terminal and types the
-answer. That is deliberate impersonation of the person, from the one VM where no workspace
-code runs; the same program could as well drive a browser at the root UI's button. It is
-recorded here rather than claimed away. A stronger gate needs something outside the root VM
-that only a person can operate (Touch ID on the Mac, for example): a candidate for later.
+**What it is now.** An approval is a signature made on the host:
 
-Also: in a Lima VM the login user has passwordless sudo, so inside the root VM the keys are
-protected from the root's unprivileged processes (git, node) by file mode and by the agent
-relay's filter, not from a person who types `sudo`. Nothing outside the root VM has a path to
-them at all.
+1. the keyring issues a challenge: a short text naming the repository, branch and commit,
+   with a nonce of its own (`release/shared/approval.ts`);
+2. the host's approver shows that text's contents to the person and signs it
+   (`release/host/approver.ts`);
+3. the keyring files the approval only if the signature verifies against the approver's
+   public key, which the host installed as root at `/etc/desolate/approver.pub`, and only
+   for a challenge it issued, once, within two minutes.
+
+Nothing in the root VM holds the private key, so nothing in it can approve: there is no
+sudo rule and no confirmation program there any more. `desolate push` does the three steps
+itself. A raw `git push origin <branch>` in the root's terminal goes to
+`git-remote-desolate-push`, which leaves the challenge where the host can read it and waits
+for `desolate approve`, run by the person on the host. It is a remote helper and not the
+pre-push hook because git authenticates to the remote, which takes the write key's
+signature, before it runs pre-push (measured: the first cut's hook could never have asked).
+
+**The two approvers.**
+
+- `touchid` (the default on macOS): a P-256 key made in the Secure Enclave with
+  `userPresence` access control (`release/host/approver/touchid.swift`, compiled by
+  bootstrap with `swiftc`). It signs only after Touch ID or the login password. A program
+  running as the person on the Mac, an agent harness included, cannot make it sign, and
+  cannot copy it. **This file has never been compiled or run** (it was written on Linux).
+  If it does not compile or the enclave refuses, bootstrap stops and says how to choose the
+  other kind on purpose; it never falls back silently.
+- `terminal` (Linux, the tests, or `DESOLATE_APPROVER=terminal`): a key file in
+  `~/.desolate/approver`, used after the branch name is typed on the controlling terminal.
+
+**What is left, said plainly.**
+
+- With the `terminal` approver, a program running as the person on the host can read the
+  key file or fabricate the terminal. It stops everything in the VMs; it does not stop the
+  host's own processes.
+- With either approver, a program running as the person on the host controls the VMs: it
+  can enter the root VM as root (`limactl shell ... sudo`) and read the write key itself.
+  The approval gate is then beside the point. Closing that means the write key must not be
+  in a file anywhere: the next step is a write key that is itself a Secure Enclave key (GitHub
+  accepts `ecdsa-sha2-nistp256` deploy keys), served to the root's ssh by an agent on the
+  host, so every push signature is a Touch ID. Not done; it changes the keyring's shape.
+- An approval names a commit, but ssh authentication cannot be bound to what is then sent.
+  While an approval is live (it is revoked when its push ends; at most two minutes, eight
+  signatures), a process in the root VM that pushes straight to the remote with
+  `--no-verify` could send another commit to that repository. The pre-push hook refuses
+  that for everything that does not skip hooks.
+- No prompt appears by itself: an approval is always started by the person, from the host
+  (`desolate push`, `desolate approve`). A process in the root VM can leave a request; it
+  cannot make a dialog appear.
 
 ## ssh-agent needs a relay in front of it (measured)
 
@@ -271,15 +310,53 @@ that. A clone that is not pushable gets a push URL and an LFS push URL that lead
 and every mirror has a `pre-receive` hook that refuses everything, in a directory only root
 writes: before those, `git push` in an unpushable root clone wrote a branch into the mirror.
 
-## The proxy does not yet terminate TLS
+## Secrets: TLS is terminated only for a secret's hosts (decided; tested on T2)
 
-Each workspace's proxy (`release/root/proxy/proxy.ts`) takes `CONNECT <name>:<80|443>`,
-applies the domain's rules, resolves the name itself, refuses internal addresses, connects
-to the address it checked, and audits by link. TLS runs end to end between the workspace and
-the real server. It therefore cannot substitute a secret's placeholder in a header: Phase 4
-is not done. v2's `addon.py` (in `carryover/proxy/`) is the piece that does, under mitmproxy;
-it goes behind the same `CONNECT` interface, one instance per workspace, with
-`project_of(flow)` replaced by the instance's own domain and workspace.
+v2 ran every request through mitmproxy. v3 terminates TLS only where it must:
+
+- each workspace's proxy (`release/root/proxy/proxy.ts`) still takes `CONNECT <name>:<80|443>`,
+  applies the domain's rules, resolves the name itself, refuses internal addresses, and
+  audits by link;
+- a connection to port 443 of a host that one of the domain's secrets names is then handed
+  to the domain's **secrets proxy** (mitmproxy 11.0.2, already in the image, with
+  `release/root/proxy/secrets_addon.py`), together with the name and the address that were
+  checked. That proxy accepts TLS for that name only, checks the upstream's certificate for
+  that name against the root VM's trust store, connects to that address (nothing is
+  resolved twice), substitutes, and scrubs the response;
+- every other connection stays end-to-end TLS, and the domain's CA is never used for it.
+
+The addon is v2's `addon.py` cut down to what v3 needs: v2's network rules, project
+attribution by source address and per-project modes are gone (the workspace's proxy and the
+link do those), and what remains is v2's code for proving a destination, the allowlist,
+header confinement, overlapping names and scrubbing. Attribution comes from the header
+`proxy.ts` puts on the tunnel it opens; a workspace's own bytes begin inside the tunnel.
+
+One secrets proxy per domain, started when the domain gets its first secret and when one of
+its workspaces starts, stopped when it has none. If it is not running, connections to its
+hosts are refused, not passed around it.
+
+Not carried over from v2 yet: switching a secret off for a while (`off`, `until`), the
+self-test fixture, TLS passthrough lists, and trusting the CA inside a project's
+devcontainer (`carryover/proxy/install-ca.sh`, `trust-proxy-in-builds.sh`): the devcontainer
+itself is not started yet.
+
+## The editor's gate runs in the workspace VM, and that is not a P5 exception
+
+Each workspace runs VSCodium's server (the pinned `reh-web` build, baked into the image) on
+its VM's loopback, with v2's `editor-gate.ts` in front of it, also on loopback. The host's
+forwarder listens on one port (31581, `DESOLATE_EDITOR_PORT`) for every editor and carries a
+connection to a VM's gate only if it named that workspace's editor hostname. The editor's
+two in-VM ports are never forwarded as dev-server ports.
+
+The gate (Host, Sec-Fetch-Site, Origin, and a sandbox for checkout files opened as pages)
+protects a workspace's own editor from other pages in the person's browser. A workspace
+that removed its own gate would expose only itself, so the gate can live with the editor.
+What separates workspaces from each other, which name reaches which VM, is decided on the
+host. The connection token stays, as a second lock behind the gate; the host reads it from
+the VM to print the address.
+
+Workspace trust is off in the workspace editor: the VM is the boundary (P1), unlike v2's
+outer editor, which ran on the trusted side.
 
 ## Timings in the sandbox (TCG, no KVM), for scale only
 

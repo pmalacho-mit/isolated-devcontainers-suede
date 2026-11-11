@@ -48,12 +48,13 @@ export GIT_CONFIG_GLOBAL=/var/lib/desolate/gitconfig
 export PS1='[desolate root: review and push here; never run a repository'"'"'s own code] \w \$ '
 P
 
-# The one sudo rule: the root's user may run the confirmation program, and only it, as the
-# keyring's user. The program itself refuses without a terminal (P2).
-cat >/etc/sudoers.d/desolate-keyring <<S
-$USER_NAME ALL=(desolate-keyring) NOPASSWD: /usr/local/bin/node --disable-warning=ExperimentalWarning $HERE/keyring-confirm.ts *
-S
-chmod 0440 /etc/sudoers.d/desolate-keyring
+# No sudo rule: nothing in this VM can approve a push. An approval is a signature by the
+# approver on the HOST, checked against the public key the host installs here (a directory
+# and file only root writes; keyring.ts refuses a key anyone else could have replaced).
+rm -f /etc/sudoers.d/desolate-keyring
+install -d -m 0755 -o root -g root /etc/desolate
+# Where a raw `git push` in the root's terminal leaves its request for `desolate approve`.
+install -d -m 0700 -o "$USER_NAME" -g "$USER_GROUP" "$STATE/approvals"
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 if ! alive "$RUN/keyring.pid"; then
@@ -64,6 +65,7 @@ fi
 for _ in $(seq 1 100); do [ -S "$RUN/keyring/control.sock" ] && break; sleep 0.1; done
 [ -S "$RUN/keyring/control.sock" ] || { echo "start.sh: the keyring did not start; see $STATE/keyring.log" >&2; tail -5 "$STATE/keyring.log" >&2; exit 1; }
 ln -sf "$HERE/git-remote-desolate" /usr/local/bin/git-remote-desolate
+ln -sf "$HERE/git-remote-desolate-push" /usr/local/bin/git-remote-desolate-push
 install -d -m 0755 -o "$USER_NAME" -g "$USER_GROUP" "$STATE/push-locks"
 if ! alive "$RUN/rootd.pid"; then
   setsid runuser -u "$USER_NAME" -- env HOME="$USER_HOME" GIT_CONFIG_GLOBAL="$STATE/gitconfig" \

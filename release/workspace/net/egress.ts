@@ -8,17 +8,21 @@
 // the other end still decides what this workspace reaches. With no link there is no way out
 // at all: that is the backend's doing, outside the VM (P5).
 //
-//   node egress.ts <link>      link: unix:/path  or  tcp:host:port
+//   node egress.ts <link>      link: unix:/path  or  tcp:host:port[#token]  (shared/link.ts)
 import { connect, createServer } from "node:net";
 import type { Socket } from "node:net";
+import { hello, parseLink } from "../../shared/link.ts";
 import { sniffSocket } from "../../shared/sniff.ts";
 
-const link = process.argv[2] ?? "";
+const link = parseLink(process.argv[2] ?? "");
+if (!link) throw new Error(`egress: '${process.argv[2] ?? ""}' is not a link address`);
 const dial = (): Socket => {
-  if (link.startsWith("unix:")) return connect(link.slice(5));
-  const match = /^tcp:([0-9.]+):(\d+)$/.exec(link);
-  if (!match) throw new Error(`egress: '${link}' is not a link address`);
-  return connect(Number(match[2]), match[1]);
+  if ("unix" in link) return connect(link.unix);
+  const socket = connect(link.port, link.host);
+  // A link carried over a port opens with this workspace's token; the host's end closes a
+  // connection that does not. Queued here, it goes out before anything else.
+  if (link.token) socket.write(hello(link.token));
+  return socket;
 };
 
 const refuse = (client: Socket, http: boolean, status: string, text: string) => {

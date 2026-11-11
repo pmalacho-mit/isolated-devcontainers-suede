@@ -1,7 +1,6 @@
 #!/bin/sh
 # desolate's pre-push hook, the only hook a root clone runs (core.hooksPath).
-# A raw `git push origin ...` in the root's terminal lands here: it asks the person to
-# confirm each branch being pushed, naming the repository, the branch and the commit read
-# from the refs git is about to send (section 5.3). `--no-verify` skips this hook and then
-# the write key simply refuses to sign: the gate is the keyring, not this file.
+# It lets a push straight to the remote's address through only for the exact commit a
+# person approved on the host (pre-push.ts). `--no-verify` skips this hook, and then the
+# write key refuses to sign without an approval: the gate is the keyring, not this file.
 exec node --disable-warning=ExperimentalWarning /desolate/release/root/pre-push.ts "$@"

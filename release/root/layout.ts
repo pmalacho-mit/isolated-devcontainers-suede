@@ -27,14 +27,19 @@ export const KEYRING = {
   private: `${ROOT.run}/keyring/private`,
   /** Requests any root process may make: create, pubkey, list, remove, audit. No export. */
   control: `${ROOT.run}/keyring/control.sock`,
-  /** Approvals. Only the keyring's own user can connect (mode 0600). */
+  /** The askpass's socket. Only the keyring's own user can connect (mode 0600). */
   internal: `${ROOT.run}/keyring/internal.sock`,
   pub: `${ROOT.run}/keyring/pub`,
   audit: `${ROOT.state}/keyring/audit.log`,
+  /** The HOST approver's public key, installed by root at bootstrap. An approval is a
+   *  signature that verifies against it (keyring.ts). */
+  approver: "/etc/desolate/approver.pub",
   user: "desolate-keyring",
 } as const;
 
 export const REGISTRY = `${ROOT.state}/registry.json`;
 export const HOOKS = `${ROOT.state}/hooks`;
 export const MIRROR_HOOKS = `${ROOT.state}/mirror-hooks`;
+/** Raw `git push` in the root's terminal waits here for `desolate approve` on the host. */
+export const APPROVALS = `${ROOT.state}/approvals`;
 export const FORGE = `${ROOT.state}/forge.json`;

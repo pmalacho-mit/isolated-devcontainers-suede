@@ -13,9 +13,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "==> apt: jq, shellcheck, git-lfs"
+echo "==> apt: jq, shellcheck, git-lfs, chromium (tier T2 opens a workspace's editor in a real browser)"
 sudo apt-get update -qq
 sudo apt-get install -y -qq jq shellcheck git-lfs
+sudo apt-get install -y -qq chromium || echo "    no chromium package here: install Chrome or Chromium and set DESOLATE_CHROME to its path"
 
 echo "==> npm install (typescript, @types/node)"
 npm install --no-audit --no-fund --loglevel=error

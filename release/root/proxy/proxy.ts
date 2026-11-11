@@ -13,10 +13,12 @@
 //     address explicitly; then connects to the address it checked, not to the name again;
 //   - audits the verdict.
 //
-// WHAT THIS DOES NOT DO YET (Phase 4): it does not terminate TLS, so it cannot substitute a
-// secret's placeholder in a header. TLS runs end to end between the workspace and the real
-// server. v2's addon.py (carryover/proxy/addon.py) is the piece that does substitution; it
-// takes this process's place behind the same CONNECT interface.
+// SECRETS (Phase 4): this process never sees one. A connection to port 443 of a host that
+// one of the domain's secrets names is handed, after every check above, to the domain's
+// secrets proxy (secrets.ts, secrets_addon.py), with the name and the ADDRESS checked here:
+// that proxy terminates TLS for that name only, substitutes placeholders, and connects to
+// that address, never resolving again. Every other connection stays end-to-end TLS between
+// the workspace and the real server.
 import { lookup } from "node:dns/promises";
 import * as fs from "node:fs";
 import { connect, createServer, isIP } from "node:net";
@@ -24,6 +26,7 @@ import type { Socket } from "node:net";
 import { readJson } from "../../shared/json.ts";
 import { normalizeName } from "../../shared/sniff.ts";
 import { ROOT } from "../layout.ts";
+import type { Running } from "./secrets.ts";
 
 const [, , portArg, domain, workspace] = process.argv;
 const AUDIT = `${ROOT.state}/proxy/audit.log`;
@@ -70,23 +73,44 @@ const handle = async (client: Socket, head: string) => {
     return refuse(`${host} does not resolve`);
   }
   if (isInternal(address) && !rules.internal.includes(address)) return refuse(`${host} resolves to an internal address (${address}), which a workspace is not carried to`);
+  // A host one of the domain's secrets names goes through the domain's secrets proxy. If
+  // that proxy is not running the connection is refused, not passed around it: a
+  // placeholder must never reach such a host as if it were the value (P6).
+  const secrets = port === 443 ? readJson<Running | null>(`${ROOT.state}/proxy/secrets/${domain}.json`, null) : null;
+  const viaSecrets = secrets !== null && hostAllowed(host, secrets.hosts);
   // To the address that was checked: a second lookup could answer differently.
-  const upstream = connect({ host: address, port });
+  const upstream = viaSecrets ? connect({ host: "127.0.0.1", port: secrets.port }) : connect({ host: address, port });
   let open = false;
   upstream.setTimeout(30_000, () => upstream.destroy(new Error("timed out")));
-  upstream.on("connect", () => {
+  const established = () => {
     open = true;
     upstream.setTimeout(0);
-    audit({ host, port, address, verdict: "allowed" });
+    audit({ host, port, address, verdict: "allowed", ...(viaSecrets ? { via: "secrets" } : {}) });
     client.write("HTTP/1.1 200 Connection established\r\n\r\n");
     client.pipe(upstream);
     upstream.pipe(client);
+  };
+  upstream.on("connect", () => {
+    if (!viaSecrets) return established();
+    // The tunnel into the secrets proxy: the checked address as the destination, and what
+    // this process knows about the connection in headers the workspace cannot set (its own
+    // bytes begin after this exchange).
+    upstream.write(`CONNECT ${address}:443 HTTP/1.1\r\nHost: ${address}:443\r\nX-Desolate-Workspace: ${workspace}\r\nX-Desolate-Host: ${host}\r\n\r\n`);
+    let reply = "";
+    const onReply = (chunk: Buffer) => {
+      reply += chunk.toString("latin1");
+      if (!reply.includes("\r\n\r\n") && reply.length < 8192) return;
+      upstream.off("data", onReply);
+      if (!/^HTTP\/1\.[01] 200/.test(reply)) return refuse(`the domain's secrets proxy refused the connection to ${host}`);
+      established();
+    };
+    upstream.on("data", onReply);
   });
   const close = () => {
     client.destroy();
     upstream.destroy();
   };
-  upstream.on("error", (error) => (open ? close() : refuse(`could not connect to ${host}: ${error.message}`)));
+  upstream.on("error", (error) => (open ? close() : refuse(viaSecrets ? `${host} is a host of one of this domain's secrets, and the domain's secrets proxy is not running (${error.message})` : `could not connect to ${host}: ${error.message}`)));
   upstream.on("close", close);
   client.on("close", close);
 };

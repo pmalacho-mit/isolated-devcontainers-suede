@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { refuse } from "../shared/exit.ts";
 import { waitFor } from "../shared/run.ts";
+import * as approver from "./approver.ts";
 import { INSTANCE, paths, RELEASE_DIR, guest } from "./paths.ts";
 import { backend, backendKind, config, ensureHome, ROOT_VM, rootctl, rootSpec, saveConfig } from "./stack.ts";
 import type { Config, ForgeConfig } from "./stack.ts";
@@ -30,6 +31,17 @@ const startRootServices = async () => {
   const uid = process.getuid!();
   const result = await backend().exec(ROOT_VM, ["bash", `${guest.release}/root/start.sh`, String(uid)], { root: true, timeoutMs: 120_000 });
   if (result.code !== 0) throw new Error(`the root's services did not start: ${(result.stderr || result.stdout).trim().slice(-600)}`);
+};
+
+/** Give the root the approver's PUBLIC key, as root: a file its ordinary users cannot
+ *  replace. Returns whether it changed. */
+const installApprover = async (): Promise<boolean> => {
+  const pem = approver.publicKey();
+  if (!pem) refuse("this stack has no approver key", "desolate bootstrap");
+  const script = 'install -d -m 0755 -o root -g root /etc/desolate; new=$(cat); if [ "$new" = "$(cat /etc/desolate/approver.pub 2>/dev/null)" ]; then echo same; else printf "%s\\n" "$new" >/etc/desolate/approver.pub.new && chown root:root /etc/desolate/approver.pub.new && chmod 0644 /etc/desolate/approver.pub.new && mv /etc/desolate/approver.pub.new /etc/desolate/approver.pub && echo changed; fi';
+  const result = await backend().exec(ROOT_VM, ["bash", "-c", script], { root: true, input: pem!.trim(), timeoutMs: 60_000 });
+  if (result.code !== 0) throw new Error(`the approver's public key was not installed in the root: ${(result.stderr || result.stdout).trim().slice(-300)}`);
+  return result.stdout.trim() === "changed";
 };
 
 /** From a clean machine to a working stack. Idempotent: run twice, the second run changes
@@ -62,6 +74,9 @@ export const bootstrap = async (options: { forge?: string; forgeKnownHosts?: str
   if (configChanged) saveConfig(next);
   step(configChanged, `config: backend ${kind}, forge ${forge.kind} (${forge.ssh.host}:${forge.ssh.port})`);
 
+  // The approver is made before anything that could push exists.
+  step(approver.init((line) => out(`    ${line}`)), `approver (${approver.kind()}): the key that approves pushes, held on this host`);
+
   const info = await b.info(ROOT_VM);
   if (info.status === "missing") await b.create(rootSpec());
   step(info.status === "missing", `root VM ${ROOT_VM} created`);
@@ -79,6 +94,7 @@ export const bootstrap = async (options: { forge?: string; forgeKnownHosts?: str
   }
   step(!wasUp, "root services: keyring");
   if (configChanged || !wasUp) await rootctl("forge.set", { forge }, { quiet: true });
+  step(await installApprover(), "root: the approver's public key");
 
   out(changed.length === 0 ? "bootstrap: nothing changed; the stack was already up." : `bootstrap: ${changed.length} step(s) done.`);
   const failed = await doctor(out);
@@ -112,7 +128,7 @@ export const doctor = async (out: Out, json = false): Promise<number> => {
   }
   // What only the root can say. If it cannot be asked, each of these is a failure: a probe
   // that did not run is not a probe that found nothing (P6).
-  const rootChecks = ["root: keyring answers", "root: approvals socket is closed to the root's own user", "root: private keys are unreadable to the root's own user", "root: forge configured"];
+  const rootChecks = ["root: keyring answers", "root: the write agent's askpass socket is closed to the root's own user", "root: private keys are unreadable to the root's own user", "root: approver key installed", "root: forge configured"];
   let asked: Check[] | null = null;
   if (rootUp)
     try {
@@ -120,6 +136,14 @@ export const doctor = async (out: Out, json = false): Promise<number> => {
     } catch {
       asked = null;
     }
+  // The approver: this host holds it, and the root must have been given the same key.
+  const pem = approver.publicKey();
+  checks.push({ name: "approver", ok: approver.kind() !== null && pem !== null, detail: pem ? `${approver.kind()}; pushes are approved on this host${approver.kind() === "terminal" && process.platform === "darwin" ? " (terminal: weaker than Touch ID)" : ""}` : "this stack has no approver key", fix: "desolate bootstrap" });
+  if (asked && pem) {
+    const installed = asked.find((check) => check.name === "root: approver key installed");
+    // Compared as the root stores it: the PEM text and one newline.
+    if (installed?.ok && installed.detail !== `sha256 ${approver.fingerprint(pem.trim() + "\n")}`) Object.assign(installed, { ok: false, detail: "the root holds a different approver key than this host's", fix: "desolate bootstrap" });
+  }
   if (asked) checks.push(...asked);
   else for (const name of rootChecks) checks.push({ name, ok: false, detail: "could not be asked: the root does not answer", fix: "desolate bootstrap" });
 

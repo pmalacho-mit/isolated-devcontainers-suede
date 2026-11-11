@@ -39,6 +39,21 @@ page is about, and because three of them were mistakes in the *tests*.
   with `printf ... | socat` got no answer, because the proxy hangs up on a client that closes
   its side before the answer is ready. The proxy was right. The test now holds the
   connection open.
+- **A confirmation that could never have been asked.** v3's first cut asked the person to
+  confirm a raw `git push origin` from the pre-push hook. git authenticates to the remote,
+  which takes the write key's signature, before it runs pre-push; with no approval on file
+  the signature was refused and the hook never ran. The test only asserted that the push
+  failed, which it did, for the wrong reason. Found when the approval moved to the host and
+  the test asserted the message. A raw push now goes through a remote helper, which git
+  runs before it connects to anything.
+- **A terminal is not a person.** The same first cut filed an approval when the branch name
+  was typed on a terminal, and the tests typed it from a script on a pseudo-terminal. That
+  was written down as a residual; with an agent harness running on the same Mac it was the
+  ordinary case. An approval is now a signature by a key on the host that, on a Mac, only
+  Touch ID or the login password can use.
+- **A killed process that still had a pid.** In the fake backend nothing reaps a detached
+  child, so a secrets proxy that had been killed still answered `kill -0`, was taken for
+  running, and its hosts were refused for ever. "Running" now means "listening".
 
 ## Found by the 2026 security audits
 

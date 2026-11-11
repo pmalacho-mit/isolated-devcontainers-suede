@@ -59,3 +59,14 @@ export const devHostname = (instance: string, domain: string, workspace: string)
 export const editorHostname = (instance: string, domain: string, workspace: string) =>
   `${domain}-${workspace}-editor-${surfaceHex(instance, domain, workspace)}.localhost`;
 export const ROOT_HOSTNAME = "desolate.localhost";
+
+/** A workspace's editor (P1: it runs in the workspace VM). In the VM, the editor's server
+ *  listens on loopback at `server`, and editor-gate.ts in front of it at `gate`; the host's
+ *  forwarder reaches only the gate, on one host port, by the editor's own hostname. Neither
+ *  in-VM port is ever forwarded as a dev-server port. */
+export const EDITOR = { server: 31580, gate: 31581 } as const;
+export const editorHostPort = () => {
+  const port = Number(process.env.DESOLATE_EDITOR_PORT ?? 31581);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error(`DESOLATE_EDITOR_PORT must be a port from 1024 to 65535, not '${process.env.DESOLATE_EDITOR_PORT}'`);
+  return port;
+};

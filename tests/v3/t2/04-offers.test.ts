@@ -1,6 +1,7 @@
 // T2 (fake backend). Phase 5: offers and pushes, and the root's view of every domain.
 // Exit criteria of move-to-vms.md section 13.4, phase 5 (all but `upstream`).
 import assert from "node:assert/strict";
+import { createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -24,6 +25,9 @@ const ROOT_CLONE = "/desolate/root/acme/widgets";
 const inRootClone = (script: string) => stack.inRoot(["bash", "-c", `export GIT_CONFIG_GLOBAL=/var/lib/desolate/gitconfig; cd ${ROOT_CLONE} && ${script}`]);
 const forgeRefs = (repo: string) => Object.fromEntries(stack.forge("refs", repo).trim().split("\n").filter(Boolean).map((line) => line.split(" ") as [string, string]));
 const audit = () => (JSON.parse(stack.inRoot(["node", "--disable-warning=ExperimentalWarning", "/desolate/release/root/rootctl.ts"], { input: JSON.stringify({ op: "keys.audit", args: { last: 500 } }) }).stdout).result as { event: string; repo?: string; ref?: string; commit?: string }[]);
+/** One request to the keyring's public socket, made by the root's ordinary user. */
+const keyring = (request: Record<string, unknown>) =>
+  JSON.parse(stack.inRoot(["node", "--disable-warning=ExperimentalWarning", "--input-type=module", "-e", 'import { ask } from "/desolate/release/root/keyring-client.ts"; console.log(JSON.stringify(await ask("/run/desolate/keyring/control.sock", JSON.parse(process.argv[1]))));', JSON.stringify(request)]).stdout) as { ok: boolean; error?: string; message?: string; id?: string };
 const forgeHasLfs = (repo: string, id: string) => {
   try {
     stack.forge("lfs-has", repo, id);
@@ -120,19 +124,36 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     assert.equal(cli.code, 78);
     assert.match(cli.stderr, /there is no terminal to ask on/);
     assert.match(cli.stderr, /no person confirmed the push, so nothing was pushed/);
-    // 2. Raw git in the root clone, from a script.
-    const raw = inRootClone(`git push origin ${commit}:refs/heads/issue/12 2>&1`);
+    // 2. Raw git in the root clone: it asks for an approval on the host, none comes, it gives up.
+    const raw = inRootClone(`DESOLATE_APPROVAL_WAIT_MS=1500 git push origin ${commit}:refs/heads/issue/12 2>&1`);
     assert.notEqual(raw.code, 0);
+    assert.match(raw.stdout, /needs your approval, given on the host, outside this VM/);
+    assert.match(raw.stdout, /no person approved the push on the host, so nothing was pushed/);
     // 3. Skipping desolate's hook: then the write key itself refuses to sign.
-    const noVerify = inRootClone(`git push --no-verify origin ${commit}:refs/heads/issue/12 2>&1`);
+    //    Straight to the remote's own address, around desolate's helper and its hook.
+    const noVerify = inRootClone(`git push --no-verify "$(git config lfs.pushurl)" ${commit}:refs/heads/issue/12 2>&1`);
     assert.notEqual(noVerify.code, 0);
+    assert.match(inRootClone("git config remote.origin.pushurl; git config lfs.pushurl").stdout, /^desolate-push::acme\/widgets\nssh:\/\//, "control: that address is the remote's");
     assert.match(noVerify.stdout, /Permission denied|agent refused|signing failed|Could not read from remote/i);
     // 4. Skipping the LFS-first rule changes nothing either.
     assert.notEqual(inRootClone(`git lfs push origin --object-id ${oid} 2>&1`).code, 0);
-    // 5. Filing the approval directly.
-    const confirm = stack.inRoot(["bash", "-c", `sudo -n -u desolate-keyring /usr/local/bin/node --disable-warning=ExperimentalWarning /desolate/release/root/keyring-confirm.ts acme/widgets issue/12 ${commit} x </dev/null`]);
-    assert.equal(confirm.code, 78);
-    assert.notEqual(stack.inRoot(["bash", "-c", `echo '{"op":"approve","repo":"acme/widgets","ref":"issue/12","commit":"${commit}"}' | socat - UNIX-CONNECT:/run/desolate/keyring/internal.sock`]).code, 0);
+    // 5. Approving it from inside the root VM. Anyone there may ask the keyring for a
+    //    challenge; answering takes the host approver's key, which is not in the VM.
+    const challenge = keyring({ op: "challenge", repo: "acme/widgets", ref: "issue/12", commit });
+    assert.equal(challenge.ok, true, String(challenge.error));
+    assert.match(challenge.message!, new RegExp(`^desolate push approval v1\\nrepo: acme/widgets\\nbranch: issue/12\\ncommit: ${commit}\\nnonce: [0-9a-f]{32}\\n$`));
+    const own = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey;
+    const forged = keyring({ op: "approve", message: challenge.message, signature: sign("sha256", Buffer.from(challenge.message!), own).toString("base64") });
+    assert.equal(forged.ok, false);
+    assert.match(forged.error!, /signature is not the host approver's/);
+    assert.equal(keyring({ op: "approve", message: challenge.message, signature: "" }).ok, false, "no signature");
+    assert.equal(keyring({ op: "approve", repo: "acme/widgets", ref: "issue/12", commit }).ok, false, "v3's first protocol, with no signature at all");
+    //    Swapping in a key of its own: the installed key is root's alone to write.
+    const swap = stack.inRoot(["bash", "-c", "echo x > /etc/desolate/approver.pub; echo x > /etc/desolate/other; sudo -n true; ls -ld /etc/desolate /etc/desolate/approver.pub"]);
+    assert.match(swap.stderr, /approver\.pub: Permission denied/);
+    assert.match(swap.stdout, /^drwxr-xr-x \d+ root root .*\n-rw-r--r-- \d+ root root /);
+    //    The write agent's own question ("is there an approval?") is not answerable from outside it.
+    assert.notEqual(stack.inRoot(["bash", "-c", `echo '{"op":"consume","repo":"acme/widgets"}' | socat - UNIX-CONNECT:/run/desolate/keyring/internal.sock`]).code, 0);
     // 6. Adding a key of its own to the write agent, or one that needs no confirmation.
     const addKey = stack.inRoot(["bash", "-c", "ssh-keygen -q -t ed25519 -N '' -f /tmp/mine && SSH_AUTH_SOCK=/run/desolate/keyring/write-agent.sock ssh-add /tmp/mine 2>&1; SSH_AUTH_SOCK=/run/desolate/keyring/write-agent.sock ssh-add -D 2>&1; SSH_AUTH_SOCK=/run/desolate/keyring/write-agent.sock ssh-add -l"]);
     assert.match(addKey.stdout, /desolate-write:acme\/widgets/, "the write agent still holds its key, and only its key");
@@ -145,6 +166,18 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     const entries = audit();
     assert.ok(entries.some((e) => e.event === "refused" && e.repo === "acme/widgets"), "the write key's refused uses are audited");
     assert.equal(entries.filter((e) => e.event === "signed" || e.event === "approved").length, 0, "no approval was filed and nothing was signed");
+    // CONTROL: the same request, signed with the approver's key (which this test, being on
+    // the host, can read: the terminal approver's documented limit), IS accepted. So the
+    // refusals above are about whose key signed, not about the request being malformed.
+    const hostKey = createPrivateKey(fs.readFileSync(path.join(stack.home, "approver", "key"), "utf8"));
+    const signature = sign("sha256", Buffer.from(challenge.message!), hostKey).toString("base64");
+    const real = keyring({ op: "approve", message: challenge.message, signature });
+    assert.equal(real.ok, true, String(real.error));
+    // A signature approves once: replayed, the challenge is no longer outstanding.
+    const replay = keyring({ op: "approve", message: challenge.message, signature });
+    assert.equal(replay.ok, false);
+    assert.match(replay.error!, /not outstanding/);
+    assert.equal(keyring({ op: "revoke", id: real.id }).ok, true);
   });
 
   it("refusals that need no person: --expect, the default branch, a terminal answer that is not the branch", () => {
@@ -177,7 +210,7 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     assert.ok(upload >= 0 && receive > upload, "the LFS object was uploaded before the commit was pushed");
     assert.ok(access.filter((e) => /receive-pack|upload$/.test(e.command ?? "")).every((e) => e.key === "write:acme/widgets"), "writes used the write key");
     const entries = audit();
-    const approved = entries.find((e) => e.event === "approved");
+    const approved = entries.filter((e) => e.event === "approved").pop();
     assert.deepEqual([approved?.repo, approved?.ref, approved?.commit], ["acme/widgets", "issue/12", commit], "the approval names what was pushed");
     assert.ok(entries.some((e) => e.event === "signed"), "each use of the write key is audited");
     assert.ok(entries.some((e) => e.event === "revoked"), "the approval did not outlive the push");
@@ -185,7 +218,42 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     // The mirror followed: every clone's origin/* now has the branch.
     assert.equal(inWs("dev/w1", "cd /workspaces/acme/widgets && git fetch -q origin && git rev-parse origin/issue/12").stdout.trim(), commit);
     // And the approval is spent: the same push again, by a script, is refused.
-    assert.notEqual(inRootClone(`git push --no-verify origin ${commit}:refs/heads/again 2>&1`).code, 0);
+    assert.notEqual(inRootClone(`git push --no-verify "$(git config lfs.pushurl)" ${commit}:refs/heads/again 2>&1`).code, 0);
+    assert.equal(forgeRefs("acme/widgets")["again"], undefined);
+  });
+
+  it("a raw git push in the root's terminal waits for `desolate approve` on the host", async () => {
+    stack.step("a raw git push, approved on the host");
+    assert.match(stack.desolate("approve").stdout, /nothing is waiting for approval/);
+    // The person's `git push` in the root shell, left running as it would be in their terminal.
+    inRootClone(`setsid nohup git push origin ${commit}:refs/heads/raw-push >/tmp/raw-push.log 2>&1 </dev/null & sleep 0.2`);
+    let waiting = false;
+    for (let i = 0; i < 40 && !waiting; i++) {
+      waiting = /waiting up to/.test(inRootClone("cat /tmp/raw-push.log").stdout);
+      if (!waiting) await sleep(250);
+    }
+    assert.ok(waiting, "the push is waiting for the host");
+    // A script on the host cannot answer it either: no terminal.
+    assert.equal(stack.desolate("approve").code, 78);
+    assert.equal(forgeRefs("acme/widgets")["raw-push"], undefined);
+    const approved = stack.person("Type the branch name", "raw-push", "approve");
+    assert.equal(approved.code, 0, approved.stdout);
+    assert.match(approved.stdout, /repository {2}acme\/widgets\s+branch {6}raw-push\s+commit {6}[0-9a-f]{40}\s+sends {7}a raw git push from the root's terminal/);
+    let landed = false;
+    for (let i = 0; i < 80 && !landed; i++) {
+      landed = forgeRefs("acme/widgets")["raw-push"] === commit;
+      if (!landed) await sleep(250);
+    }
+    assert.ok(landed, inRootClone("cat /tmp/raw-push.log").stdout);
+    const entries = audit();
+    const last = entries.filter((e) => e.event === "approved").pop();
+    assert.deepEqual([last?.repo, last?.ref, last?.commit], ["acme/widgets", "raw-push", commit]);
+    assert.equal(entries.pop()?.event, "revoked", "the approval did not outlive the push");
+    // The default branch is not pushed this way, approved or not; and nothing is deleted.
+    const def = inRootClone(`DESOLATE_APPROVAL_WAIT_MS=1500 git push origin ${commit}:refs/heads/main 2>&1`);
+    assert.match(def.stdout, /main is the default branch/);
+    assert.match(inRootClone("DESOLATE_APPROVAL_WAIT_MS=1500 git push origin :refs/heads/raw-push 2>&1").stdout, /deleting a branch on the remote is not something desolate does/);
+    assert.equal(forgeRefs("acme/widgets")["raw-push"], commit);
   });
 
   it("a repository cloned --no-push is never written: there is no key to write it with", () => {

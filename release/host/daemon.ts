@@ -20,7 +20,8 @@ import type { Server, Socket } from "node:net";
 import * as path from "node:path";
 import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { devHostname, editorHostname } from "../shared/names.ts";
+import { accept as acceptLink } from "../shared/link.ts";
+import { devHostname, EDITOR, editorHostname, editorHostPort } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { sleep, waitFor } from "../shared/run.ts";
 import { sniffSocket } from "../shared/sniff.ts";
@@ -110,6 +111,28 @@ const serve = async () => {
     pipe(client, b.dial(entry.vm, port), head);
   };
 
+  // Every workspace's editor, on one host port, by the editor's own hostname and no other.
+  // What it reaches is the gate in that workspace's VM (workspace/editor-gate.ts), never
+  // the editor's server itself.
+  let editorError = "";
+  const editors = createServer((client) => {
+    client.on("error", () => client.destroy());
+    void sniffSocket(client, 400).then(({ sniffed, head }) => {
+      const target = sniffed.kind === "http" && sniffed.name ? byName(sniffed.name) : null;
+      if (!target || target.surface !== "editor") {
+        if (sniffed.kind === "http") refuseHttp(client, "421 Misdirected Request", "desolate: this port answers to a workspace's editor hostname only. `desolate editor <domain>/<workspace>` prints it.\n");
+        else client.destroy();
+        return;
+      }
+      pipe(client, b.dial(target.entry.vm, EDITOR.gate), head);
+    });
+  });
+  editors.on("error", (error: NodeJS.ErrnoException) => {
+    editorError = error.code === "EADDRINUSE" ? `a program on this machine holds port ${editorHostPort()}` : error.message;
+    log(`editors on port ${editorHostPort()}: ${error.message}`);
+  });
+  editors.listen({ port: editorHostPort(), host: "127.0.0.1", exclusive: true });
+
   const reconcile = () => {
     const wanted = new Set<number>();
     for (const entry of entries.values()) for (const port of entry.listeners) wanted.add(port);
@@ -154,7 +177,9 @@ const serve = async () => {
       const reply = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}") as { ok?: boolean; listeners?: number[]; error?: string };
       if (!reply.ok || !Array.isArray(reply.listeners)) throw new Error(reply.error ?? `exit ${result.code}`);
       // Fail closed on what the VM says: integers, 1024 and up, and a sane number of them.
-      entry.listeners = new Set(reply.listeners.filter((port) => Number.isInteger(port) && port >= 1024 && port <= 65535).slice(0, 256));
+      // The editor's two in-VM ports are never dev-server ports: a dev hostname must not
+      // reach the editor, and nothing may reach its server around its gate.
+      entry.listeners = new Set(reply.listeners.filter((port) => Number.isInteger(port) && port >= 1024 && port <= 65535 && port !== EDITOR.server && port !== EDITOR.gate && port !== editorHostPort()).slice(0, 256));
       entry.lastError = "";
     } catch (error) {
       // A workspace that cannot be asked forwards nothing new, and what it had is dropped.
@@ -180,9 +205,18 @@ const serve = async () => {
     entry.link = server;
     // vz: the guest reaches its link through one loopback port on the host, the only one
     // its confinement allows it.
-    const hostPort = b.link(entry.vm).hostPort;
+    const { hostPort, token } = b.link(entry.vm);
     if (hostPort) {
-      const tcp = createServer(carry);
+      // Every process on this machine can connect to a loopback port. Only a connection
+      // that opens with this workspace's token is carried; without a token, none is.
+      const tcp = createServer((client) => {
+        client.on("error", () => client.destroy());
+        if (!token || entry.proxyPort === null) return client.destroy();
+        void acceptLink(client, token).then((rest) => {
+          if (rest === null || entry.proxyPort === null) return client.destroy();
+          pipe(client, b.dial(ROOT_VM, entry.proxyPort), rest);
+        });
+      });
       tcp.on("error", (error) => log(`link ${entry.vm} on port ${hostPort}: ${error.message}`));
       tcp.listen({ port: hostPort, host: "127.0.0.1", exclusive: true });
       server.on("close", () => tcp.close());
@@ -246,9 +280,10 @@ const serve = async () => {
           await sleep(50);
           reconcile();
           await Promise.all([...entries.values()].map(sync));
-          reply = { ok: true, ports: view() };
+          reply = { ok: true, ports: view(), editor: { port: editorHostPort(), error: editorError } };
         } else if (request.op === "stop") {
           connection.end(JSON.stringify({ ok: true }) + "\n");
+          editors.close();
           for (const server of forwards.values()) server.close();
           for (const entry of entries.values()) entry.link?.close();
           fs.rmSync(SOCKET, { force: true });
@@ -338,6 +373,14 @@ export const ports = async (): Promise<PortView[]> => {
   const reply = await ask({ op: "ports" });
   if (reply.ok !== true) throw new Error(String(reply.error));
   return reply.ports as PortView[];
+};
+
+/** The host port every editor is on, and why it is not, if it is not. */
+export const editorPort = async (): Promise<{ port: number; error: string }> => {
+  await ensureDaemon();
+  const reply = await ask({ op: "ports" });
+  if (reply.ok !== true) throw new Error(String(reply.error));
+  return reply.editor as { port: number; error: string };
 };
 
 export const stopForwarder = async () => {

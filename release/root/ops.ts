@@ -1,14 +1,17 @@
 // Every operation the host can ask of the root. A fixed table: the CLI channel carries an
 // operation's name and JSON arguments, never a command line.
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { writeJson } from "../shared/json.ts";
 import { repoOf, writeKnownHosts } from "./git.ts";
 import type { Forge } from "./git.ts";
 import { ask } from "./keyring-client.ts";
-import { FORGE, KEYRING } from "./layout.ts";
+import { parseApproval } from "../shared/approval.ts";
+import { APPROVALS, FORGE, KEYRING } from "./layout.ts";
 import * as domains from "./domains.ts";
 import * as offers from "./offers.ts";
 import * as proxy from "./proxy/manage.ts";
+import * as secrets from "./proxy/secrets.ts";
 import * as repos from "./repos.ts";
 
 type Log = (line: string) => void;
@@ -72,7 +75,20 @@ export const ops: Record<string, Op> = {
   },
 
   async "proxy.start"(args) {
+    // The domain's secrets proxy first (if it has secrets): after a restart of the root it
+    // is not running, and a workspace must not start without it.
+    await secrets.ensure(domains.domain(domains.slugOf(args.domain, "domain")).slug);
     return proxy.start(String(args.vm), domains.slugOf(args.domain, "domain"), domains.slugOf(args.workspace, "workspace"));
+  },
+  /** Names, hosts and headers. No operation returns a secret's value. */
+  async "secret.list"(args) {
+    return secrets.list(domains.domain(domains.slugOf(args.domain, "domain")).slug);
+  },
+  async "secret.set"(args) {
+    return secrets.set(domains.domain(domains.slugOf(args.domain, "domain")).slug, args);
+  },
+  async "secret.remove"(args) {
+    return secrets.remove(domains.domain(domains.slugOf(args.domain, "domain")).slug, args.name);
   },
   async "proxy.stop"(args) {
     proxy.stop(String(args.vm));
@@ -91,6 +107,27 @@ export const ops: Record<string, Op> = {
   },
   async "review"(args) {
     return offers.review(domains.slugOf(args.domain, "domain"), args.repo, args.branch);
+  },
+
+  /** Raw pushes in the root's terminal that are waiting for `desolate approve`. What the
+   *  person is shown comes from the message the host parses itself, not from this list. */
+  async "approvals.pending"() {
+    const pending: { message: string; summary: string; at: string }[] = [];
+    for (const file of fs.existsSync(APPROVALS) ? fs.readdirSync(APPROVALS).sort() : []) {
+      try {
+        const entry = JSON.parse(fs.readFileSync(`${APPROVALS}/${file}`, "utf8")) as { message: string; summary: string; at: string };
+        if (!parseApproval(entry.message) || Date.now() - Date.parse(entry.at) > 120_000) fs.rmSync(`${APPROVALS}/${file}`, { force: true });
+        else pending.push({ message: entry.message, summary: String(entry.summary).slice(0, 200), at: entry.at });
+      } catch {
+        fs.rmSync(`${APPROVALS}/${file}`, { force: true });
+      }
+    }
+    return pending;
+  },
+  async "approvals.answer"(args) {
+    const reply = await ask(KEYRING.control, { op: "approve", message: args.message, signature: args.signature });
+    if (reply.ok !== true) throw new Error(`the keyring did not accept the approval: ${String(reply.error)}`);
+    return { id: reply.id };
   },
 
   async "keys.list"() {
@@ -117,7 +154,7 @@ export const ops: Record<string, Op> = {
     } catch {
       /* refused, as it must be */
     }
-    add("root: approvals socket is closed to the root's own user", internal === "refused", internal === "refused" ? "only the keyring's user can file an approval" : "the root's user can open the internal socket", "desolate bootstrap");
+    add("root: the write agent's askpass socket is closed to the root's own user", internal === "refused", internal === "refused" ? "only the keyring's user can answer for a signature" : "the root's user can open the internal socket", "desolate bootstrap");
     let keys = "unreadable";
     try {
       fs.readdirSync(KEYRING.keys);
@@ -126,6 +163,14 @@ export const ops: Record<string, Op> = {
       /* unreadable, as it must be */
     }
     add("root: private keys are unreadable to the root's own user", keys === "unreadable", keys === "unreadable" ? `${KEYRING.keys} is the keyring user's alone` : `${KEYRING.keys} can be listed`, "desolate bootstrap");
+    let approver = "";
+    try {
+      const stat = fs.statSync(KEYRING.approver);
+      approver = stat.uid === 0 && (stat.mode & 0o022) === 0 ? createHash("sha256").update(fs.readFileSync(KEYRING.approver)).digest("hex") : "";
+    } catch {
+      /* not installed */
+    }
+    add("root: approver key installed", approver !== "", approver !== "" ? `sha256 ${approver}` : `${KEYRING.approver} is missing, or not root's alone to write`, "desolate bootstrap");
     add("root: forge configured", fs.existsSync(FORGE), fs.existsSync(FORGE) ? "yes" : "no forge.json", "desolate bootstrap");
     return checks;
   },

@@ -4,18 +4,23 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
     base image desolate/base:latest present (<id>)
   = base image
   + config: backend fake, forge stand-in (<forge>:22)
+    approver: a software key in <home>/approver; every push will ask on your terminal
+  + approver (terminal): the key that approves pushes, held on this host
   + root VM dsl-<instance>-root created
   + root VM running
   + root services: keyring
-bootstrap: 5 step(s) done.
+  + root: the approver's public key
+bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
   ok   docker daemon: docker 29.9.3
   ok   base image: desolate/base:latest <id>
   ok   root VM running: dsl-<instance>-root
+  ok   approver: terminal; pushes are approved on this host
   ok   root: keyring answers: 0 key(s) held
-  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: the write agent's askpass socket is closed to the root's own user: only the keyring's user can answer for a signature
   ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
 doctor: all checks passed.
 [exit 0]
@@ -57,9 +62,9 @@ to push exactly this: desolate push dev acme/widgets issue/12 --expect <commit>
 ## automation tries to push
 
 $ desolate push dev acme/widgets issue/12 --expect <commit>
-desolate: a push needs a person's confirmation, and there is no terminal to ask on. Run `desolate push` from a terminal of your own, or `git push` inside `desolate root shell`.
+desolate: a push needs a person's confirmation, and there is no terminal to ask on
 desolate: no person confirmed the push, so nothing was pushed
-  fix: run `desolate push` from a terminal of your own, and type the branch name when it asks
+  fix: run it from a terminal of your own, on the host
 [exit 78]
 
 ## refusals before and at the prompt
@@ -86,9 +91,9 @@ desolate: this push needs your confirmation.
   commit      <commit>
   sends       1 commit(s), 2 files changed, 4 insertions(+), 1 LFS object(s)
 Type the branch name (issue/12) to push, or anything else to refuse: yes
-desolate: not confirmed; nothing was pushed.
+desolate: not confirmed
 desolate: no person confirmed the push, so nothing was pushed
-  fix: run `desolate push` from a terminal of your own, and type the branch name when it asks
+  fix: run the push again, and type the branch name when it asks
 [exit 78]
 
 ## a person pushes
@@ -106,6 +111,28 @@ pushed acme/widgets issue/12 at <commit> (1 commit(s), 1 LFS object(s) first).
 
 $ desolate offers
 no offers. In a workspace, `desolate offer` marks a branch ready for you.
+[exit 0]
+
+## a raw git push, approved on the host
+
+$ desolate approve
+nothing is waiting for approval. (`desolate push` asks by itself; this is for a raw `git push` in `desolate root shell`.)
+[exit 0]
+
+$ desolate approve
+desolate: a push needs a person's confirmation, and there is no terminal to ask on
+desolate: no person confirmed the push, so nothing was pushed
+  fix: run it from a terminal of your own, on the host
+[exit 78]
+
+$ desolate approve    # at a terminal; the person types: raw-push
+desolate: this push needs your confirmation.
+  repository  acme/widgets
+  branch      raw-push
+  commit      <commit>
+  sends       a raw git push from the root's terminal
+Type the branch name (raw-push) to push, or anything else to refuse: raw-push
+approved; the push waiting in the root continues.
 [exit 0]
 
 ## a repository the root cannot push

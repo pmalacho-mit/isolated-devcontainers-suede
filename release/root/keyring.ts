@@ -10,16 +10,24 @@
 //   read-agent   holds each repository's read key. Signs freely.
 //   write-agent  holds each pushable repository's write key, added with `ssh-add -c`: for
 //                every signature ssh-agent runs keyring-askpass, which allows it only if an
-//                unexpired approval for that repository is on file. Approvals are filed
-//                through the internal socket, which only this user can open; the one program
-//                that does so is keyring-confirm, which asks a person on a terminal.
-//                A caller with no terminal therefore cannot push, whatever it runs.
+//                unexpired approval for that repository is on file.
+//
+// AN APPROVAL IS A SIGNATURE MADE OUTSIDE THIS VM. The keyring issues a challenge naming
+// the repository, branch and commit (shared/approval.ts); the approver on the HOST shows it
+// to the person and signs it (Touch ID on a Mac; see host/approver.ts); the keyring files
+// the approval only if that signature verifies against the approver's public key, which
+// root installed at /etc/desolate/approver.pub. Nothing in this VM holds the approver's
+// private key, so nothing in this VM can approve a push: not a script, not a fabricated
+// terminal, not the root's own user. Anyone may ASK (challenge, approve); only the host's
+// approver can answer.
 /// <reference types="node" />
 import { execFileSync, spawn } from "node:child_process";
+import { createPublicKey, randomBytes, verify } from "node:crypto";
 import * as fs from "node:fs";
 import { connect, createServer } from "node:net";
 import type { Socket } from "node:net";
 import * as path from "node:path";
+import { formatApproval, parseApproval } from "../shared/approval.ts";
 import { parseRepo, repoId, isBranch, isCommit } from "../shared/names.ts";
 import type { Repo } from "../shared/names.ts";
 import { KEYRING } from "./layout.ts";
@@ -101,15 +109,70 @@ const approvals = new Map<string, Approval>();
  *  signature. An approval covers that one push: a short life and a small number of uses. */
 export const APPROVAL = { lifeMs: 120_000, uses: 8 } as const;
 
-const approve = (request: Record<string, unknown>): Record<string, unknown> => {
+/** Challenges this keyring issued and nobody has answered yet. Short-lived and few: a
+ *  process that asks in a loop gets the oldest ones dropped, not memory. */
+const challenges = new Map<string, { message: string; expires: number }>();
+const CHALLENGE = { lifeMs: 120_000, outstanding: 32 } as const;
+
+const challenge = (request: Record<string, unknown>): Record<string, unknown> => {
   const repo = parseRepo(request.repo);
-  if (!repo || !isBranch(request.ref) || !isCommit(request.commit)) return { ok: false, error: "an approval names a repository, a branch and a 40-hex commit" };
+  if (!repo || !isBranch(request.ref) || !isCommit(request.commit)) return { ok: false, error: "a challenge names a repository, a branch and a 40-hex commit" };
   if (!fs.existsSync(keyFile(repo, "write"))) return { ok: false, error: `${repoId(repo)} has no write key: it is not pushable` };
-  const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  const approval: Approval = { id, repo: repoId(repo), ref: request.ref, commit: request.commit, expires: Date.now() + APPROVAL.lifeMs, uses: APPROVAL.uses, by: String(request.by ?? "terminal").slice(0, 80) };
+  for (const [nonce, entry] of challenges) if (entry.expires < Date.now()) challenges.delete(nonce);
+  while (challenges.size >= CHALLENGE.outstanding) challenges.delete(challenges.keys().next().value!);
+  const nonce = randomBytes(16).toString("hex");
+  const message = formatApproval({ repo: repoId(repo), branch: request.ref, commit: request.commit, nonce });
+  challenges.set(nonce, { message, expires: Date.now() + CHALLENGE.lifeMs });
+  return { ok: true, message };
+};
+
+/** The approver's public key. Trusted only as root installed it: a file this VM's ordinary
+ *  users could have replaced is no key at all (P6). */
+const approverKey = (): { key: ReturnType<typeof createPublicKey> } | { error: string } => {
+  try {
+    for (const file of [path.dirname(KEYRING.approver), KEYRING.approver]) {
+      const stat = fs.statSync(file);
+      if (stat.uid !== 0 || (stat.mode & 0o022) !== 0) return { error: `${file} is not root's alone to write, so it is not trusted` };
+    }
+    return { key: createPublicKey(fs.readFileSync(KEYRING.approver, "utf8")) };
+  } catch (error) {
+    return { error: `no approver key is installed at ${KEYRING.approver} (${(error as Error).message}); run \`desolate bootstrap\` on the host` };
+  }
+};
+
+const approve = (request: Record<string, unknown>): Record<string, unknown> => {
+  const parsed = parseApproval(request.message);
+  if (!parsed) return { ok: false, error: "that is not an approval message" };
+  const refused = (reason: string) => {
+    audit({ event: "refused", repo: parsed.repo, ref: parsed.branch, commit: parsed.commit, reason });
+    return { ok: false, error: reason };
+  };
+  const issued = challenges.get(parsed.nonce);
+  if (!issued || issued.expires < Date.now() || issued.message !== request.message) return refused("that challenge is not outstanding: each lasts two minutes and approves once");
+  const approver = approverKey();
+  if ("error" in approver) return refused(approver.error);
+  let valid = false;
+  try {
+    valid = typeof request.signature === "string" && verify("sha256", Buffer.from(issued.message), approver.key, Buffer.from(request.signature, "base64"));
+  } catch {
+    valid = false;
+  }
+  if (!valid) return refused("the approval's signature is not the host approver's");
+  challenges.delete(parsed.nonce);
+  const repo = parseRepo(parsed.repo)!;
+  if (!fs.existsSync(keyFile(repo, "write"))) return refused(`${parsed.repo} has no write key: it is not pushable`);
+  const id = `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
+  const approval: Approval = { id, repo: parsed.repo, ref: parsed.branch, commit: parsed.commit, expires: Date.now() + APPROVAL.lifeMs, uses: APPROVAL.uses, by: "host approver" };
   approvals.set(id, approval);
   audit({ event: "approved", ...approval, expires: new Date(approval.expires).toISOString() });
   return { ok: true, id };
+};
+
+/** Whether a live approval names exactly this push. The pre-push hook's question. */
+const approved = (request: Record<string, unknown>): Record<string, unknown> => {
+  for (const approval of approvals.values())
+    if (approval.expires >= Date.now() && approval.uses > 0 && approval.repo === request.repo && approval.ref === request.ref && approval.commit === request.commit) return { ok: true, id: approval.id };
+  return { ok: false, error: "no approval on file for that push" };
 };
 
 /** ssh-agent is about to sign with a write key. Allowed only against a live approval. */
@@ -149,6 +212,12 @@ const publicOps = (request: Record<string, unknown>): Record<string, unknown> =>
     const last = Math.min(Number(request.last) || 50, 500);
     return { ok: true, entries: lines.slice(-last).map((line) => JSON.parse(line)) };
   }
+  // Asking for an approval is open to every root process; granting one takes the host
+  // approver's signature. Revoking only ever takes capability away.
+  if (op === "challenge") return challenge(request);
+  if (op === "approve") return approve(request);
+  if (op === "approved") return approved(request);
+  if (op === "revoke") return revoke(request);
   if (op === "create" || op === "pubkey" || op === "remove") {
     const repo = parseRepo(request.repo);
     if (!repo) return { ok: false, error: `not a repository: ${String(request.repo)}` };
@@ -166,9 +235,8 @@ const publicOps = (request: Record<string, unknown>): Record<string, unknown> =>
 };
 
 const internalOps = (request: Record<string, unknown>): Record<string, unknown> => {
-  if (request.op === "approve") return approve(request);
+  // The askpass's question, and nothing else: ssh-agent runs it as this user.
   if (request.op === "consume") return consume(request);
-  if (request.op === "revoke") return revoke(request);
   return { ok: false, error: `unknown op '${String(request.op)}'` };
 };
 

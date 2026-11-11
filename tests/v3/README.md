@@ -30,13 +30,17 @@ How the tests are built (move-to-vms.md section 13):
   for a dependency's Action; and a web server standing in for "a host on the internet". No
   test talks to GitHub.
 - **`lib/person.py` plays the person**: it runs a command on a pseudo-terminal and types the
-  answer to a prompt. It is the fabricated terminal `docs/v3/decisions.md` says the push
-  confirmation cannot tell from a real one.
+  answer to a prompt. The tests' stacks use the `terminal` approver, whose prompt is on the
+  host; `docs/v3/decisions.md` says why that approver cannot tell this from a real person,
+  and why the Mac's (Touch ID) can.
+- **The editor is the real one**: the pinned VSCodium server in the base image. `t2/06`
+  drives it over HTTP and WebSocket, and from headless Chrome.
 
 ## What a machine needs
 
 - **T1:** node >= 22.18, `npm install` (for TypeScript). `shellcheck` if you have it.
-- **T2:** also Docker, an ordinary user who can use it (not root), `git-lfs`, `python3`, and
+- **T2:** also Docker, an ordinary user who can use it (not root), `git-lfs`, `python3`,
+  Chrome or Chromium (`DESOLATE_CHROME=<path>` if it is not in a usual place), and
   the base image `desolate/base:latest`:
   - on Linux: `sudo release/image/build.sh --out <dir>` (from the Ubuntu archive; imports it);
   - where Docker Hub is reachable: `docker build -t desolate/base:latest -f release/image/Dockerfile release` (untested).

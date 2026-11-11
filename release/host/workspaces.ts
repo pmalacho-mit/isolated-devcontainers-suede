@@ -1,7 +1,7 @@
 // Workspaces, from the host: up, list, stop, rm, exec.
 import * as fs from "node:fs";
 import { EXIT, refuse } from "../shared/exit.ts";
-import { devHostname, editorHostname, parseRepo } from "../shared/names.ts";
+import { devHostname, editorHostname, editorHostPort, parseRepo } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
 import { backend, rootctl } from "./stack.ts";
@@ -49,14 +49,36 @@ const startServices = async (plan: WorkspacePlan) => {
   const proxy = await rootctl<{ port: number }>("proxy.start", { vm: plan.vm, domain: plan.domain, workspace: plan.workspace }, { quiet: true });
   const { connectWorkspace } = await import("./daemon.ts");
   await connectWorkspace({ ...plan, proxyPort: proxy.port });
-  const services = await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest], { root: true, timeoutMs: 300_000 });
+  const services = await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest, editorHostname(INSTANCE, plan.domain, plan.workspace)], { root: true, timeoutMs: 300_000 });
   if (services.code !== 0) throw new Error(`the workspace's services did not start: ${(services.stderr || services.stdout).trim().slice(-600)}`);
+  const editorDown = /^editor: NOT RUNNING: (.*)$/m.exec(services.stdout);
   const init = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/init.ts`, plan.workspace], { timeoutMs: 900_000 });
   if (init.code !== 0) throw new Error(`the workspace could not make its checkouts: ${(init.stderr || init.stdout).trim().slice(-800)}`);
+  return { editorDown: editorDown ? editorDown[1]!.trim().slice(0, 300) : null };
+};
+
+/** The address a person opens for a workspace's editor: its own hostname, the stack's
+ *  editor port, the token the VM made, and the first checkout as the folder. */
+export const editorUrl = async (w: Workspace): Promise<{ url: string } | { error: string }> => {
+  const token = await backend().exec(w.vm, ["bash", "-lc", "cat ~/.desolate-editor/token"], { timeoutMs: 60_000 });
+  if (token.code !== 0 || !/^[0-9a-f]{48}$/.test(token.stdout.trim())) return { error: "the editor is not running in this workspace (its image may have none: desolate doctor)" };
+  const { editorPort } = await import("./daemon.ts");
+  const { port, error } = await editorPort();
+  if (error) return { error: `the editor's port is not available on this machine: ${error}. Free it, or set DESOLATE_EDITOR_PORT, then: desolate bootstrap` };
+  const folder = w.checkouts[0]?.path;
+  return { url: `http://${editorHostname(INSTANCE, w.domain, w.workspace)}:${port}/?tkn=${token.stdout.trim()}${folder ? `&folder=${encodeURIComponent(folder)}` : ""}` };
+};
+
+export const editor = async (target: string | undefined, out: Out, json: boolean) => {
+  const w = await find(target);
+  if ((await backend().info(w.vm)).status !== "running") refuse(`${w.domain}/${w.workspace} is not running`, `desolate start ${w.domain}/${w.workspace}`);
+  const result = await editorUrl(w);
+  if ("error" in result) refuse(result.error, `desolate start ${w.domain}/${w.workspace}`);
+  out(json ? JSON.stringify(result) : (result as { url: string }).url);
 };
 
 export const urlsOf = (plan: { domain: string; workspace: string }) => ({
-  editor: `http://${editorHostname(INSTANCE, plan.domain, plan.workspace)}`,
+  editor: `http://${editorHostname(INSTANCE, plan.domain, plan.workspace)}:${editorHostPort()}`,
   dev: `http://${devHostname(INSTANCE, plan.domain, plan.workspace)}`,
 });
 
@@ -70,6 +92,7 @@ export const up = async (domain: string | undefined, options: { name?: string; c
   };
   const started = Date.now();
   const b = backend();
+  let editorDown: string | null = null;
   const view = await rootctl<DomainView>("domain.show", { slug: domain }, { quiet: true });
   if (options.fetch) for (const repo of view.repos) await rootctl("repo.fetch", { repo }, { quiet: json });
   if (options.fetch) phase("mirrors refreshed");
@@ -79,8 +102,8 @@ export const up = async (domain: string | undefined, options: { name?: string; c
     await b.create(specOf(plan, view.repos));
     await b.start(plan.vm);
     phase("VM booted");
-    await startServices(plan);
-    phase("services and checkouts");
+    editorDown = (await startServices(plan)).editorDown;
+    phase("services, editor and checkouts");
   } catch (error) {
     // A workspace that did not come up holds no checkout, and leaves no proxy or link.
     const { disconnectWorkspace } = await import("./daemon.ts");
@@ -93,10 +116,12 @@ export const up = async (domain: string | undefined, options: { name?: string; c
   await rootctl("workspace.state", { domain, name: plan.workspace, state: "up" }, { quiet: true });
   const seconds = (ms: number) => (ms / 1000).toFixed(1);
   const breakdown = `the start took ${seconds(Date.now() - started)} s: ${phases.map(([name, ms]) => `${name} ${seconds(ms)} s`).join(", ")}`;
-  const urls = urlsOf(plan);
+  const opened = editorDown ? { error: editorDown } : await editorUrl(plan);
+  const urls = { ...urlsOf(plan), ...("url" in opened ? { editorWithToken: opened.url } : { editorError: opened.error }) };
   if (json) return out(JSON.stringify({ domain, workspace: plan.workspace, vm: plan.vm, isolated: b.isolated, checkouts: plan.checkouts, urls, tookMs: Date.now() - started, phases: Object.fromEntries(phases) }));
   out(`workspace ${domain}/${plan.workspace} is up${b.isolated ? "" : "  [NOT ISOLATED: fake backend]"}`);
   for (const c of plan.checkouts) out(`  ${c.repo}  ${c.kind === "main" ? `main checkout (${c.branch})` : `worktree ${c.branch} from ${c.base}`}  ${c.path}`);
+  out("url" in opened ? `  editor       ${opened.url}` : `  editor       NOT AVAILABLE: ${opened.error}`);
   out(`  dev servers  ${urls.dev}:<port>   (the port it listens on inside, nothing to declare)`);
   out(breakdown);
 };

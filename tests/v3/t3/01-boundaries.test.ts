@@ -7,12 +7,13 @@
 // Run: tests/v3/run.sh t3   (tens of minutes under TCG: each VM takes minutes to boot)
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { bootstrap, git, newStack } from "../lib/harness.ts";
+import { bootstrap, git, newStack, REPO_ROOT } from "../lib/harness.ts";
 import type { Stack } from "../lib/harness.ts";
 
 let stack: Stack;
@@ -131,6 +132,46 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     assert.match(reached.stdout, /loop\.example\.test resolves to an internal address \(127\.0\.0\.1\)/);
     const log = JSON.parse(stack.quiet("net", "log", "a", "--json").stdout) as { domain: string; workspace: string; host: string; verdict: string }[];
     assert.ok(log.some((e) => e.domain === "a" && e.workspace === "w1" && e.host === "api.example.test" && e.verdict === "allowed"));
+  });
+
+  it("T3 the editor runs inside the workspace's VM and answers at its own hostname", async () => {
+    stack.step("the editor, in a real VM");
+    const shown = stack.desolate("editor", "a/w1");
+    assert.equal(shown.code, 0, shown.stderr);
+    const url = new URL(shown.stdout.trim());
+    const ask = (host: string, cookie: string): Promise<string> =>
+      new Promise((resolve) => {
+        const socket = net.connect(Number(url.port), "127.0.0.1");
+        let data = "";
+        socket.setTimeout(120_000, () => socket.destroy());
+        socket.on("connect", () => socket.write(`GET / HTTP/1.1\r\nHost: ${host}:${url.port}\r\nCookie: vscode-tkn=${cookie}\r\nConnection: close\r\n\r\n`));
+        socket.on("data", (chunk) => (data += chunk));
+        socket.on("close", () => resolve(data));
+        socket.on("error", () => resolve(data || "ERROR"));
+      });
+    const token = url.searchParams.get("tkn")!;
+    const page = await ask(url.hostname, token);
+    assert.match(page, /^HTTP\/1\.1 200 /, page.slice(0, 300));
+    assert.match(page, /vs\/code\/browser\/workbench\/workbench\.js/, "VSCodium's workbench, served from inside the VM through the forwarder and the gate");
+    assert.match(await ask(url.hostname, "0".repeat(48)), /^HTTP\/1\.1 403 /, "control: the editor itself refuses a wrong token");
+    assert.match(await ask(url.hostname.replace("-editor-", "-"), token), /^HTTP\/1\.1 421 /, "the dev-server name does not reach the editor");
+    const inside = asRoot("a/w1", "ss -ltnH | grep -E ':(31580|31581) ' | awk '{print $4}' | sort");
+    assert.deepEqual(inside.stdout.trim().split("\n"), ["127.0.0.1:31580", "127.0.0.1:31581"], "both on the VM's loopback only");
+  });
+
+  it("T3 a secret is substituted on the way out of a real VM, and its value stays in the root", () => {
+    stack.step("a secret, in a real VM");
+    const crt = fs.readFileSync(path.join(stack.work, "forge-state", "upstream.crt"), "utf8");
+    assert.equal(stack.inRoot(["bash", "-c", "cat > /usr/local/share/ca-certificates/test-upstream.crt && update-ca-certificates >/dev/null 2>&1"], { root: true, input: crt }).code, 0);
+    const set = spawnSync(path.join(REPO_ROOT, "release", "cli.sh"), ["domain", "a", "secret", "set", "T3-SECRET-NAME", "--hosts", "api.example.test", "--headers", "authorization"], { env: stack.env, input: "t3-secret-value-41\n", encoding: "utf8" });
+    assert.equal(set.status, 0, set.stderr);
+    const sent = stack.inVm(vmOf("a/w1"), ["bash", "-lc", "curl -sS -m 120 https://api.example.test/t3-secret -H 'Authorization: Bearer T3-SECRET-NAME' 2>&1"]);
+    assert.match(sent.stdout, /upstream https host=api\.example\.test path=\/t3-secret/, sent.stdout);
+    const seen = (JSON.parse(stack.forge("upstream")) as { path: string; authorization: string | null }[]).filter((entry) => entry.path === "/t3-secret");
+    assert.deepEqual(seen.map((entry) => entry.authorization), ["Bearer t3-secret-value-41"], "the upstream received the value");
+    const found = asRoot("a/w1", "grep -rIl t3-secret-value /desolate /workspaces /etc /run /var/lib/desolate /home 2>/dev/null | head -3; echo searched");
+    assert.equal(found.stdout.trim(), "searched", "root inside the workspace VM finds the value nowhere");
+    assert.equal(stack.quiet("domain", "a", "secret", "rm", "T3-SECRET-NAME").code, 0);
   });
 
   it("T3 forced egress: root inside the VM reaches nothing", () => {

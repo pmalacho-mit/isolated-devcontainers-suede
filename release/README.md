@@ -58,13 +58,17 @@ desolate domain create dev --title "widgets work"
 desolate domain dev add --repo acme/widgets
 desolate up dev --name issue-12 --fetch \
     --checkout acme/widgets=worktree:issue/12 --base origin/main
+desolate editor dev/issue-12                         # the address of its editor, for your browser
 desolate exec dev/issue-12 -- <an agent, or any command>
+desolate domain dev secret set MYAPP-OPENAI-KEY --hosts api.openai.com --headers authorization
+                                                     # the value on stdin; workspaces send the name
 desolate ports                                       # each dev server's URL, at the port it has inside
 desolate status dev/issue-12 --json                  # what the agent says of its work
 desolate offers                                      # what workspaces have offered: needs you
 desolate review dev acme/widgets issue/12            # what a push would send
-desolate push dev acme/widgets issue/12 --expect <commit>   # asks you, on a terminal
+desolate push dev acme/widgets issue/12 --expect <commit>   # asks you: Touch ID on a Mac
 desolate root shell                                  # ordinary git on your clones: fetch --all, diff, push
+desolate approve                                     # ... and this approves a `git push origin` made there
 ```
 
 Inside a workspace: `git fetch` (from the mirror: no key, no network), `desolate fetch`
@@ -74,7 +78,21 @@ agent in a workspace should read.
 
 Everything up to a push can be scripted (`--json` on what a harness reads; exit codes 75 busy,
 77 default branch, 78 no person confirmed, 79 `--expect` did not match). The one step a script
-cannot take is the write key's confirmation, so a script's work ends at an offer.
+cannot take is approving a push, so a script's work ends at an offer.
+
+**Approving a push happens on the host, outside every VM.** The root's keyring lets a write
+key sign only for a push whose description (repository, branch, commit) was signed by the
+host's approver key. On a Mac that key is in the Secure Enclave and signs only with Touch ID
+or your login password, so no program running as you can approve a push: not a script, not
+an agent harness, not anything in a VM. Elsewhere it is a key file and a prompt on your
+terminal (`DESOLATE_APPROVER=terminal`), which stops everything in the VMs but not a program
+running as you on the host. `desolate approve --selftest` checks it without pushing anything.
+
+**Secrets.** A workspace never holds a secret's value. It holds the name
+(`export OPENAI_API_KEY=MYAPP-OPENAI-KEY`), and the root puts the value in its place on the
+way out, only over TLS, only toward the hosts the secret names, only in the headers it names.
+Connections to those hosts are the only ones whose TLS the root terminates (the workspace
+trusts its domain's CA for that); everything else stays end to end.
 
 ## What works today, and what does not
 
@@ -86,16 +104,18 @@ everything but the hypervisor boundary. "T3" is real VMs on Linux (QEMU through 
 |---|---|---|---|
 | bootstrap, doctor, destroy | yes | T2, T3 | installing the host's own tools (it checks for them and says what to install) |
 | Root VM: keyring, read and write keys, mirrors with LFS, root clones | yes | T2, T3 | |
-| P2: pushes only by a person (`--expect`, exit codes, LFS first, audit) | yes | T2 | the root editor's Push button; see the residual in `docs/v3/decisions.md` |
-| P3: keys never leave the keyring | yes | T2 | secrets: none are stored or substituted yet |
+| P2: pushes only by a person (`--expect`, exit codes, LFS first, audit) | yes | T2 | the root editor's Push button |
+| P2: the approval is given on the host, outside every VM (a signed challenge; `desolate approve` for a raw `git push origin`) | yes | T2 with the `terminal` approver | **the Touch ID approver (`host/approver/touchid.swift`) has never been compiled or run**: T4 |
+| P3: keys never leave the keyring; a secret's value never leaves the root | yes | T2 | |
 | P4: the root never runs git in a domain's clone | yes | T2 (a booby-trapped clone, a lying outbox) | |
 | Domains, workspaces, checkouts, worktrees, locks, `--base`, `--fetch` | yes | T2, T3 | a domain's environment, templates, package caches |
 | Offers, the root's view (`git fetch --all`), deliveries between domains | yes | T2 | `desolate upstream` (suede) |
 | Ports: same number, routed by name, reservations | yes | T2 | forwarded connections on real VMs are untested |
 | P5: read-only shares against root in the VM | yes | **T3** (and measured on an M1 for the Mac) | |
 | P5: forced egress against root in the VM | yes | **T3**; Mac: measured for TCP, UDP, DNS; ICMP unverified | |
-| Egress through each workspace's own proxy, per-domain rules, audit by link | yes | T2, T3 | **TLS is not terminated, so no secret is substituted** (Phase 4) |
-| **P1: the editor** | **no** | | no workspace has an editor yet; nor is the project's devcontainer started |
+| Egress through each workspace's own proxy, per-domain rules, audit by link | yes | T2, T3 | |
+| Secrets: per domain, substituted for the hosts and headers they name, proven by the upstream's certificate, scrubbed from responses | yes | T2 | switching a secret off for a while (v2's `off`/`until`); the CA inside a project's devcontainer |
+| **P1: the editor**: VSCodium's server in every workspace VM, its own hostname, v2's gate | yes | T2 (HTTP, WebSocket, a real browser), T3 | the project's devcontainer is not started (the editor's terminal is the VM's); desolate's extension (`carryover/editor/extension`) is not ported; no root editor |
 | The root UI (dashboard), the state service | no | | |
 | The Mac backend (`vz`) | written from the M1's measurements | **never run** | `docs/v3/HANDOFF.md` says how to bring it up |
 
@@ -106,8 +126,10 @@ cli.sh             the launcher: finds node >= 22.18, runs host/cli.ts
 pins.env           every tool desolate downloads, by version and sha256
 host/              runs on the host: the CLI, the daemon (forwarder, links), the VM layer
   vm/              one interface, three backends: fake, qemu, vz
+  approver.ts      the key that approves pushes (approver/touchid.swift: the Mac's Secure Enclave)
 root/              runs in the root VM: keyring, mirrors, clones, offers, push, proxies
-workspace/         runs in each workspace VM: its init, its daemon, its network, `desolate`
+  proxy/           each workspace's proxy; each domain's secrets and its secrets proxy
+workspace/         runs in each workspace VM: its init, its daemon, its network, its editor
 shared/            names, exit codes, the name sniffer: used on more than one side
 image/             what a VM image contains (provision.sh) and how it is built
 docs/incidents.md  ways desolate has been wrong, and what each taught

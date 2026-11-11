@@ -4,18 +4,23 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
     base image desolate/base:latest present (<id>)
   = base image
   + config: backend fake, forge stand-in (<forge>:22)
+    approver: a software key in <home>/approver; every push will ask on your terminal
+  + approver (terminal): the key that approves pushes, held on this host
   + root VM dsl-<instance>-root created
   + root VM running
   + root services: keyring
-bootstrap: 5 step(s) done.
+  + root: the approver's public key
+bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
   ok   docker daemon: docker 29.9.3
   ok   base image: desolate/base:latest <id>
   ok   root VM running: dsl-<instance>-root
+  ok   approver: terminal; pushes are approved on this host
   ok   root: keyring answers: 0 key(s) held
-  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: the write agent's askpass socket is closed to the root's own user: only the keyring's user can answer for a signature
   ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
 doctor: all checks passed.
 [exit 0]

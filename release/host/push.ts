@@ -1,7 +1,14 @@
-// offers, review, push, and the root's shell: the host's part. The push itself runs in the
-// root VM, attached to this terminal if there is one. With no terminal nobody can be asked,
-// and the push is refused there (P2): this file cannot make it happen.
+// offers, review, push, approve, and the root's shell: the host's part.
+//
+// A push is three steps, and the middle one happens here, outside every VM (P2):
+//   1. the root checks the push and its keyring issues a challenge naming it;
+//   2. the approver on this host shows the challenge to the person and signs it
+//      (approver.ts: Touch ID on a Mac);
+//   3. the root hands the signature to its keyring, which lets the write key sign for
+//      that one push.
+// Nothing in a VM can do step 2, so nothing in a VM can push.
 import { EXIT, refuse } from "../shared/exit.ts";
+import { sign } from "./approver.ts";
 import { guest } from "./paths.ts";
 import { backend, ROOT_VM, rootctl } from "./stack.ts";
 
@@ -38,7 +45,35 @@ export const review = async (args: string[], out: Out, json: boolean) => {
   else out(`to push exactly this: desolate push ${domain} ${r.repo} ${plain(r.branch)} --expect ${r.commit}${r.isDefault ? " --allow-default" : ""}`);
 };
 
-export const push = (args: string[]): Promise<number> =>
-  backend().attach(ROOT_VM, ["node", "--disable-warning=ExperimentalWarning", `${guest.release}/root/push.ts`, ...args], { cwd: guest.rootClones });
+const PUSH = ["node", "--disable-warning=ExperimentalWarning", `${guest.release}/root/push.ts`];
+
+export const push = async (args: string[]): Promise<number> => {
+  const prepared = await backend().exec(ROOT_VM, [...PUSH, "prepare", ...args], { cwd: guest.rootClones, inheritStderr: true, timeoutMs: 300_000 });
+  if (prepared.code !== 0) return prepared.code;
+  let plan: { summary: string; warnings: string[]; message: string };
+  try {
+    plan = JSON.parse(prepared.stdout.trim().split("\n").pop() ?? "");
+  } catch {
+    return refuse("the root did not describe the push", "desolate doctor");
+  }
+  for (const warning of plan.warnings) process.stderr.write(`desolate: WARNING: this push ${plain(warning)}\n`);
+  const signature = await sign(plan.message, plan.summary);
+  return backend().attach(ROOT_VM, [...PUSH, "run", ...args, "--message", Buffer.from(plan.message).toString("base64"), "--signature", signature], { cwd: guest.rootClones });
+};
+
+/** `desolate approve`: answer the raw `git push` that is waiting in the root's terminal. */
+export const approve = async (out: Out): Promise<number> => {
+  const pending = await rootctl<{ message: string; summary: string }[]>("approvals.pending", {}, { quiet: true });
+  if (pending.length === 0) {
+    out("nothing is waiting for approval. (`desolate push` asks by itself; this is for a raw `git push` in `desolate root shell`.)");
+    return 0;
+  }
+  for (const request of pending) {
+    const signature = await sign(request.message, request.summary);
+    await rootctl("approvals.answer", { message: request.message, signature }, { quiet: true });
+    out("approved; the push waiting in the root continues.");
+  }
+  return 0;
+};
 
 export const rootShell = (): Promise<number> => backend().attach(ROOT_VM, ["bash", "-l"], { cwd: guest.rootClones });

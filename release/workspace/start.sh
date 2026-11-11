@@ -2,7 +2,8 @@
 # Bring a workspace VM's own services up. Run as root in the VM, by the host, on every start.
 # Idempotent. Nothing here is a boundary: the VM's shares, link and forwarded ports are
 # decided outside it (P5); this only makes the inside convenient.
-#   start.sh <uid of the workspace user> <link>     link: unix:/path or tcp:host:port
+#   start.sh <uid of the workspace user> <link> [<editor hostname>]
+#                                                  link: unix:/path or tcp:host:port
 set -euo pipefail
 USER_UID=${1:?usage: start.sh <uid> <link>}
 LINK=${2:?usage: start.sh <uid> <link>}
@@ -12,6 +13,7 @@ install -d -m 0755 /run/desolate /var/lib/desolate
 # `desolate` and `/desolate/status` inside a workspace: its own small CLI.
 ln -sf "$HERE/desolate" /usr/local/bin/desolate
 "$HERE/net/up.sh" "$LINK"
+"$HERE/net/trust-ca.sh"
 # /desolate/status: say how the work is going (v2's, unchanged).
 ln -sf "$HERE/status" /desolate/status
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
@@ -23,3 +25,12 @@ fi
 for _ in $(seq 1 100); do [ -S /run/desolate/wsd.sock ] && break; sleep 0.1; done
 [ -S /run/desolate/wsd.sock ] || { echo "start.sh: the workspace daemon did not start; see /var/lib/desolate/wsd.log" >&2; tail -5 /var/lib/desolate/wsd.log >&2; exit 1; }
 echo "workspace services: up"
+# The editor (P1). A workspace without one still works from `desolate exec`; the host says
+# which it is, from this line.
+if [ -n "${3:-}" ]; then
+  if runuser -l "$USER_NAME" -c "bash '$HERE/editor.sh' '$3'" >>/var/lib/desolate/editor.log 2>&1; then
+    echo "editor: up"
+  else
+    echo "editor: NOT RUNNING: $(tail -2 /var/lib/desolate/editor.log | tr '\n' ' ')"
+  fi
+fi

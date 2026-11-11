@@ -154,7 +154,9 @@ export const ensureClone = async (repo: Repo, defaultBranch: string | null): Pro
   if (record.pushable) {
     const url = remoteUrl(repo);
     await config(clone, {
-      "remote.origin.pushurl": url,
+      // `git push origin <branch>` goes to desolate's helper, which asks the person (on the
+      // host) before anything leaves: see git-remote-desolate-push.ts.
+      "remote.origin.pushurl": `desolate-push::${repoId(repo)}`,
       // `lfs.pushurl`, not remote.origin.lfspushurl: git-lfs lets `lfs.url` outrank the
       // per-remote setting, and an upload would then go into the mirror (measured).
       "lfs.pushurl": url,

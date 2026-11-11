@@ -84,6 +84,8 @@ export const newStack = (label: string): Stack => {
     DESOLATE_INSTANCE: instance,
     DESOLATE_BACKEND: backend,
     DESOLATE_TEST_RUN: "1",
+    // Beside a real stack on the same machine: the tests' editors are on a port of their own.
+    DESOLATE_EDITOR_PORT: process.env.DESOLATE_EDITOR_PORT ?? "31591",
     DESOLATE_FORGE_ADMIN: admin,
     DESOLATE_FORGE_SPEC: `stand-in:ssh://git@${ip}:22`,
     DESOLATE_FORGE_KNOWN_HOSTS: path.join(forgeState, "known_hosts"),
@@ -99,6 +101,7 @@ export const newStack = (label: string): Stack => {
       .split(home).join("<home>").split(work).join("<work>").split(REPO_ROOT).join("<repo>")
       .split(instance).join("<instance>").split(ip).join("<forge>")
       .replace(/ssh-ed25519 [A-Za-z0-9+/=]+/g, "ssh-ed25519 <key>")
+      .replace(/tkn=[0-9a-f]{48}/g, "tkn=<token>")
       .replace(/\b[0-9a-f]{40}\b/g, "<commit>").replace(/\b[0-9a-f]{64}\b/g, "<oid>")
       .replace(/sha256:[0-9a-f]{12}|\b[0-9a-f]{12}\b/g, "<id>")
       .replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, "<time>")

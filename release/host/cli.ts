@@ -24,6 +24,7 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate list [<domain>] [--json]
   desolate status | board <domain>[/<workspace>] [--json]        how each checkout says its work is going
   desolate ports [<domain>/<workspace>] [--json]                 what is forwarded, at which URL; what is reserved
+  desolate editor <domain>/<workspace> [--json]                  the address of its editor, for your browser
   desolate exec <domain>/<workspace> [--checkout <repo>] -- <cmd>  a command, or an agent, inside it
   desolate stop | start | rm <domain>/<workspace>
   desolate rm <domain>                                           the domain and its clones; not the root's
@@ -31,7 +32,9 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate offers [<domain>] [--json]                            what workspaces have offered: needs you
   desolate review <domain> <owner/repo> <branch> [--json]        what a push would send
   desolate push <domain> <owner/repo> <branch> --expect <commit> [--allow-default]
-                                                                 to the remote; asks you, on a terminal
+                                                                 to the remote; you approve it here, on the
+                                                                 host: Touch ID on a Mac, else your terminal
+  desolate approve [--selftest]                                  approve a raw git push waiting in the root shell
   desolate root shell                                            the root's terminal: git on the root clones
 
   desolate help                                                  this text
@@ -98,7 +101,7 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "domain") {
-    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string" } });
+    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string" }, hosts: { type: "string" }, headers: { type: "string" } });
     const { domainCommand } = await import("./domains.ts");
     await domainCommand(positionals, values, out);
     return EXIT.ok;
@@ -106,9 +109,9 @@ const main = async (argv: string[]): Promise<number> => {
   if (verb === "net" && rest[0] === "log") {
     const { values, positionals } = flags(rest.slice(1), {});
     const { rootctl } = await import("./stack.ts");
-    const entries = await rootctl<{ time: string; domain: string; workspace: string; host: string; port: number; verdict: string; reason?: string }[]>("net.log", { domain: positionals[0] }, { quiet: true });
+    const entries = await rootctl<{ time: string; domain: string; workspace: string; host: string; port: number; verdict: string; reason?: string; secrets?: string[] }[]>("net.log", { domain: positionals[0] }, { quiet: true });
     if (values.json === true) out(JSON.stringify(entries));
-    else for (const e of entries) out(`${e.time}  domain=${e.domain} workspace=${e.workspace}  ${e.verdict}  ${String(e.host).replace(/[^\x21-\x7e]/g, "?")}:${e.port}${e.reason ? `  (${e.reason})` : ""}`);
+    else for (const e of entries) out(`${e.time}  domain=${e.domain} workspace=${e.workspace}  ${e.verdict}  ${String(e.host).replace(/[^\x21-\x7e]/g, "?")}:${e.port}${Array.isArray(e.secrets) ? `  [${e.secrets.join(", ").replace(/[^\x21-\x7e ]/g, "?")}]` : ""}${e.reason ? `  (${e.reason})` : ""}`);
     return EXIT.ok;
   }
   if (verb === "up") {
@@ -151,6 +154,17 @@ const main = async (argv: string[]): Promise<number> => {
     flags(rest, { expect: { type: "string" }, "allow-default": { type: "boolean" } });
     const { push } = await import("./push.ts");
     return push(rest);
+  }
+  if (verb === "editor") {
+    const { values, positionals } = flags(rest, {});
+    const { editor } = await import("./workspaces.ts");
+    await editor(positionals[0], out, values.json === true);
+    return 0;
+  }
+  if (verb === "approve") {
+    if (rest.includes("--selftest")) return (await import("./approver.ts")).selftest(out);
+    const { approve } = await import("./push.ts");
+    return approve(out);
   }
   if (verb === "root" && rest[0] === "shell") {
     const { rootShell } = await import("./push.ts");

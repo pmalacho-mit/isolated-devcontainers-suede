@@ -80,7 +80,7 @@ export interface Backend {
   /** A workspace's link to its proxy: the address the guest connects to, and, where the
    *  backend carries it over a loopback port on the host, that port (the host daemon then
    *  listens there as well as on the socket). */
-  link(name: string): { guest: string; hostPort?: number };
+  link(name: string): { guest: string; hostPort?: number; token?: string };
   /** TCP listeners inside the VM right now. */
   listeners(name: string): Promise<Listener[]>;
   logs(name: string): Promise<string>;

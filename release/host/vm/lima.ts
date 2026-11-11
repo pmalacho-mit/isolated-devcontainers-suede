@@ -14,6 +14,7 @@
 // desolate keeps its own Lima home under ~/.desolate, so it never touches a VM it did not
 // make, and refuses Lima's user-wide _config overrides, which could add a network.
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -34,7 +35,7 @@ const BASE = `${PREFIX}base`;
 /** What the guest connects to for its link, per backend. */
 const QEMU_LINK = "tcp:192.168.5.100:15000";
 
-type Meta = { spec: VmSpec; sshPort: number; linkPort: number };
+type Meta = { spec: VmSpec; sshPort: number; linkPort: number; linkToken: string };
 const metaFile = (name: string) => path.join(LIMA_HOME, name, "desolate.json");
 const meta = (name: string) => readJson<Meta | null>(metaFile(name), null);
 
@@ -202,7 +203,7 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
     async clone(from, spec) {
       for (const share of spec.shares) fs.mkdirSync(share.host, { recursive: true });
       for (const socket of spec.sockets) fs.mkdirSync(path.dirname(socket.host), { recursive: true });
-      const m: Meta = { spec, sshPort: await freePort(), linkPort: await freePort() };
+      const m: Meta = { spec, sshPort: await freePort(), linkPort: await freePort(), linkToken: randomBytes(16).toString("hex") };
       const args = ["clone", ...settings(spec, m.sshPort).flatMap((assignment) => ["--set", assignment]), from, spec.name];
       await limaOk(args, { timeoutMs: 600_000 });
       writeJson(metaFile(spec.name), m);
@@ -286,8 +287,11 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       // qemu: QEMU carries connections to this address to the link's socket (qemu-wrapper.sh).
       // vz: the Mac's loopback, where the sandbox allows this VM one port.
       if (kind === "qemu") return { guest: QEMU_LINK };
-      const port = meta(name)?.linkPort ?? 0;
-      return { guest: `tcp:192.168.5.2:${port}`, hostPort: port };
+      // A loopback port is open to every process on the Mac, so the link opens with a token
+      // that only this host and this VM are given (shared/link.ts). No token, no link.
+      const m = meta(name);
+      if (!m || !/^[0-9a-f]{32}$/.test(m.linkToken ?? "")) throw new Error(`${name} has no link token: it was made by an older desolate. Remove the workspace and make it again.`);
+      return { guest: `tcp:192.168.5.2:${m.linkPort}#${m.linkToken}`, hostPort: m.linkPort, token: m.linkToken };
     },
 
     async listeners(name): Promise<Listener[]> {

@@ -75,12 +75,23 @@ The exact URL is what the person's `desolate ports` shows; tell them the port. I
 wanted is already taken here, something else needs that number on their machine: let your
 server move to the next one.
 
+## Secrets: you hold names, not values
+
+If your task needs an API key, the person has stored it for this domain under a NAME such as
+`MYAPP-OPENAI-KEY`. `/desolate/inbox/secrets.json` lists the names, the hosts each may be
+sent to, and the headers it is substituted in. Use the name wherever the key would go
+(`export OPENAI_API_KEY=MYAPP-OPENAI-KEY`): on the way out, over HTTPS, toward those hosts
+only, the name is replaced by the value. You never see the value, responses that echo it
+are scrubbed back to the name, and looking for it is wasted effort. A name sent anywhere
+else arrives as a name. If the name you need is not in the list, set `orange` and ask.
+
 ## What is not here yet
 
-desolate v3 is being built. In this workspace today: **no editor**, and **the project's
-`devcontainer.json` is not started** (you are in the VM itself, with what its base image has:
-git, git-lfs, node, python3, curl, jq, docker's binaries). **No API secret is available**:
-placeholders are not substituted yet. If your task needs one of these, say so and stop.
+desolate v3 is being built. In this workspace today: **the project's `devcontainer.json` is
+not started** (you are in the VM itself, with what its base image has: git, git-lfs, node,
+python3, curl, jq, docker's binaries). The person may be watching in the workspace's editor
+(VSCodium in a browser tab); it is the same VM and the same files. If your task needs the
+project's own container, say so and stop.
 
 ## When to stop and ask
 

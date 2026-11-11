@@ -4,18 +4,23 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
     base image desolate/base:latest present (<id>)
   = base image
   + config: backend fake, forge stand-in (<forge>:22)
+    approver: a software key in <home>/approver; every push will ask on your terminal
+  + approver (terminal): the key that approves pushes, held on this host
   + root VM dsl-<instance>-root created
   + root VM running
   + root services: keyring
-bootstrap: 5 step(s) done.
+  + root: the approver's public key
+bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
   ok   docker daemon: docker 29.9.3
   ok   base image: desolate/base:latest <id>
   ok   root VM running: dsl-<instance>-root
+  ok   approver: terminal; pushes are approved on this host
   ok   root: keyring answers: 0 key(s) held
-  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: the write agent's askpass socket is closed to the root's own user: only the keyring's user can answer for a signature
   ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
 doctor: all checks passed.
 [exit 0]
@@ -41,8 +46,9 @@ $ desolate up nests-dev
 workspace nests-dev/w1 is up  [NOT ISOLATED: fake backend]
   acme/consumer  main checkout (main)  /workspaces/acme/consumer
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  editor       http://nests-dev-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fconsumer
   dev servers  http://nests-dev-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+the start took <duration>: planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
 [exit 0]
 
 ## a second workspace in the domain
@@ -56,8 +62,9 @@ $ desolate up nests-dev --name issue-12 --checkout acme/widgets=worktree:issue/1
 workspace nests-dev/issue-12 is up  [NOT ISOLATED: fake backend]
   acme/consumer  worktree issue-12 from main  /workspaces/acme/consumer/.worktrees/issue-12
   acme/widgets  worktree issue/12 from main  /workspaces/acme/widgets/.worktrees/issue-12
+  editor       http://nests-dev-issue-12-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fconsumer%2F.worktrees%2Fissue-12
   dev servers  http://nests-dev-issue-12-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+the start took <duration>: planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
 [exit 0]
 
 ## fetch, then start from the remote's main
@@ -66,8 +73,9 @@ $ desolate up nests-dev --name fresh --fetch --base origin/main --checkout acme/
 workspace nests-dev/fresh is up  [NOT ISOLATED: fake backend]
   acme/consumer  worktree fresh from origin/main  /workspaces/acme/consumer/.worktrees/fresh
   acme/widgets  worktree issue/13 from origin/main  /workspaces/acme/widgets/.worktrees/issue-13
+  editor       http://nests-dev-fresh-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fconsumer%2F.worktrees%2Ffresh
   dev servers  http://nests-dev-fresh-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: mirrors refreshed <duration>, planned <duration>, VM booted <duration>, services and checkouts <duration>
+the start took <duration>: mirrors refreshed <duration>, planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
 fetching acme/consumer with the read key
 fetching acme/widgets with the read key
 [exit 0]
@@ -93,8 +101,9 @@ $ desolate up other
 workspace other/w1 is up  [NOT ISOLATED: fake backend]
   acme/private  main checkout (main)  /workspaces/acme/private
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  editor       http://other-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fprivate
   dev servers  http://other-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+the start took <duration>: planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
 [exit 0]
 
 ## exec and list
@@ -136,8 +145,9 @@ $ desolate up nests-dev --name taker --checkout acme/widgets=main
 workspace nests-dev/taker is up  [NOT ISOLATED: fake backend]
   acme/consumer  main checkout (main)  /workspaces/acme/consumer
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  editor       http://nests-dev-taker-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fconsumer
   dev servers  http://nests-dev-taker-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services and checkouts <duration>
+the start took <duration>: planned <duration>, VM booted <duration>, services, editor and checkouts <duration>
 [exit 0]
 
 ## remove a domain
