@@ -46,8 +46,11 @@ export type PortView = {
 const serve = async () => {
   const b = backend();
   const entries = new Map<string, Entry>();
-  /** A host listener per forwarded port, or why there is none. */
-  const forwards = new Map<number, Server | "held-by-host">();
+  /** A host listener per forwarded port. */
+  const forwards = new Map<number, Server>();
+  /** Ports a workspace listens on that a program on the host already holds: they cannot be
+   *  published. Tried again now and then, in case the program has gone. */
+  const hostHeld = new Map<number, number>();
   /** For a port spoken without a name: the one workspace it reaches. */
   const rawOwner = new Map<number, string>();
   const knownRaw = new Set(RAW_PORTS);
@@ -112,33 +115,35 @@ const serve = async () => {
     for (const entry of entries.values()) for (const port of entry.listeners) wanted.add(port);
     for (const [port, server] of forwards)
       if (!wanted.has(port)) {
-        if (server !== "held-by-host") server.close();
+        server.close();
         forwards.delete(port);
         rawOwner.delete(port);
       }
+    for (const port of hostHeld.keys()) if (!wanted.has(port)) hostHeld.delete(port);
     for (const port of wanted) {
       const holders = [...entries.values()].filter((entry) => entry.listeners.has(port));
       const owner = rawOwner.get(port);
       if (!owner || !holders.some((entry) => entry.vm === owner)) rawOwner.set(port, holders[0]!.vm);
-      if (forwards.has(port) && forwards.get(port) !== "held-by-host") continue;
+      if (forwards.has(port)) continue;
+      if (Date.now() - (hostHeld.get(port) ?? 0) < 10_000) continue;
       const server = createServer((client) => void onInbound(port, client));
       server.on("error", (error: NodeJS.ErrnoException) => {
         // Something on the host has this port. It cannot be published; every workspace is
         // asked to keep the number taken instead.
-        if (forwards.get(port) === server) forwards.set(port, "held-by-host");
+        if (forwards.get(port) === server) forwards.delete(port);
+        hostHeld.set(port, Date.now());
         if (error.code !== "EADDRINUSE") log(`port ${port}: ${error.message}`);
       });
+      server.on("listening", () => hostHeld.delete(port));
       forwards.set(port, server);
       // 127.0.0.1 only, never a wildcard: nothing on the LAN reaches a workspace.
       server.listen({ port, host: "127.0.0.1", exclusive: true });
     }
     for (const entry of entries.values()) {
       const reserve = new Set<number>();
-      for (const [port, server] of forwards) {
-        if (entry.listeners.has(port)) continue;
-        if (server === "held-by-host") reserve.add(port);
-        else if (knownRaw.has(port) && rawOwner.get(port) !== entry.vm) reserve.add(port);
-      }
+      for (const port of hostHeld.keys()) if (!entry.listeners.has(port)) reserve.add(port);
+      for (const port of forwards.keys())
+        if (!entry.listeners.has(port) && knownRaw.has(port) && rawOwner.get(port) !== entry.vm) reserve.add(port);
       entry.reserved = reserve;
     }
   };
@@ -195,10 +200,10 @@ const serve = async () => {
   const view = (): PortView[] =>
     [...entries.values()].map((entry) => ({
       workspace: `${entry.domain}/${entry.workspace}`,
-      forwarded: [...entry.listeners].sort((a, b) => a - b).filter((port) => forwards.get(port) !== "held-by-host").map((port) => ({ port, url: `http://${devHostname(INSTANCE, entry.domain, entry.workspace)}:${port}` })),
+      forwarded: [...entry.listeners].sort((a, b) => a - b).filter((port) => !hostHeld.has(port)).map((port) => ({ port, url: `http://${devHostname(INSTANCE, entry.domain, entry.workspace)}:${port}` })),
       reserved: [
-        ...[...entry.reserved].sort((a, b) => a - b).map((port) => ({ port, why: forwards.get(port) === "held-by-host" ? "a program on this machine holds it" : `no name in its protocol, and ${entries.get(rawOwner.get(port) ?? "")?.workspace ?? "another workspace"} had it first` })),
-        ...[...entry.listeners].filter((port) => forwards.get(port) === "held-by-host").map((port) => ({ port, why: "listening in the workspace, but a program on this machine holds that port: not forwarded" })),
+        ...[...entry.reserved].sort((a, b) => a - b).map((port) => ({ port, why: hostHeld.has(port) ? "a program on this machine holds it" : `no name in its protocol, and ${entries.get(rawOwner.get(port) ?? "")?.workspace ?? "another workspace"} had it first` })),
+        ...[...entry.listeners].filter((port) => hostHeld.has(port)).map((port) => ({ port, why: "listening in the workspace, but a program on this machine holds that port: not forwarded" })),
       ],
     })).sort((a, b) => a.workspace.localeCompare(b.workspace));
 
@@ -226,12 +231,15 @@ const serve = async () => {
         } else if (request.op === "ports") {
           await Promise.all([...entries.values()].map(sync));
           reconcile();
-          // One more round, so reservations decided just now are in place before the answer.
+          // A listen that fails says so a moment later; then one more round, so that the
+          // reservations decided just now are in place inside the VMs before the answer.
+          await sleep(50);
+          reconcile();
           await Promise.all([...entries.values()].map(sync));
           reply = { ok: true, ports: view() };
         } else if (request.op === "stop") {
           connection.end(JSON.stringify({ ok: true }) + "\n");
-          for (const server of forwards.values()) if (server !== "held-by-host") server.close();
+          for (const server of forwards.values()) server.close();
           for (const entry of entries.values()) entry.link?.close();
           fs.rmSync(SOCKET, { force: true });
           fs.rmSync(PIDFILE, { force: true });

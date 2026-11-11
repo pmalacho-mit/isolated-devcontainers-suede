@@ -1,0 +1,56 @@
+$ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
+desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; tests only), instance <instance>
+  + home <home>
+    base image desolate/base:latest present (<id>)
+  = base image
+  + config: backend fake, forge stand-in (<forge>:22)
+  + root VM dsl-<instance>-root created
+  + root VM running
+  + root services: keyring
+bootstrap: 5 step(s) done.
+  ok   home: <home>
+  ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
+  ok   docker daemon: docker 29.9.3
+  ok   base image: desolate/base:latest <id>
+  ok   root VM running: dsl-<instance>-root
+  ok   root: keyring answers: 0 key(s) held
+  ok   root: approvals socket is closed to the root's own user: only the keyring's user can file an approval
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: forge configured: yes
+doctor: all checks passed.
+[exit 0]
+
+## a dev server appears on its own
+
+$ desolate ports
+web/one
+  http://web-one-<hex>.localhost:5173
+web/two
+  nothing is listening yet: start a dev server in it and its URL appears here
+[exit 0]
+
+## names that are not a workspace's
+
+## a raw TCP port
+
+$ desolate ports web/two
+web/two
+  http://web-two-<hex>.localhost:5173
+  port 5432 is kept taken here: no name in its protocol, and one had it first
+[exit 0]
+
+## a port a program on the host holds
+
+## stop
+
+$ desolate stop web/two
+stopped web/two. Its checkouts stay held; start it again with: desolate start web/two
+[exit 0]
+
+$ desolate destroy --all
+  - VM dsl-<instance>-<vm> (web/two)
+  - VM dsl-<instance>-<vm> (web/one)
+  - VM dsl-<instance>-root (root)
+  - <home>
+destroy: nothing of this stack is left.
+[exit 0]
