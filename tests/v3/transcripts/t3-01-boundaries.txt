@@ -21,6 +21,7 @@ bootstrap: 8 step(s) done.
   ok   socat (carries a workspace's link): present
   ok   acceleration: none: software emulation (TCG). A real VM boundary, and slow: minutes to boot
   ok   socket paths fit: the longest fits in 107 bytes
+  ok   VMs forward nothing by themselves: every running VM refuses Lima's own forwarding
   ok   base image: the base VM dsl-<instance>-base
   ok   root VM running: dsl-<instance>-root
   ok   approver: terminal; pushes are approved on this host

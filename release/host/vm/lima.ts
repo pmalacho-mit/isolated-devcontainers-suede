@@ -106,6 +106,13 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
   };
 
   const yq = (value: unknown) => JSON.stringify(value);
+  /** Lima forwards a guest's listeners onto the Mac by itself. Every one is refused, for TCP
+   *  and UDP: on 0.0.0.0 (Lima published a guest's port 80 on *:80, measured in Phase 0) and
+   *  on loopback, which the first rule did not cover: a workspace's 127.0.0.1 and ::1
+   *  listeners appeared on the Mac's 127.0.0.1, around desolate's forwarder, the per-
+   *  workspace hostnames and the editor's gate (measured on the M1, 2026-11-12: the editor
+   *  server's own port, 31580, among them). desolate's forwarder is the only way in. */
+  const NO_FORWARDS = ["0.0.0.0", "127.0.0.1"].flatMap((guestIP) => ["tcp", "udp"].map((proto) => ({ guestIP, guestPortRange: [1, 65535], proto, ignore: true })));
   /** The settings every desolate VM has, as yq assignments for `limactl clone --set`. */
   const settings = (spec: VmSpec, sshPort: number): string[] => [
     `.mounts = ${yq(spec.shares.map((share) => ({ location: share.host, mountPoint: share.guest, writable: share.writable })))}`,
@@ -114,7 +121,7 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
     `.ssh.localPort = ${sshPort}`,
     // No automatic forwards of guest ports onto the host: Lima publishes a guest's port 80
     // on every interface (measured). desolate's forwarder is the only way in.
-    `.portForwards = [{"guestIP": "0.0.0.0", "guestPortRange": [1, 65535], "ignore": true}]`,
+    `.portForwards = ${yq(NO_FORWARDS)}`,
     // A second network would be a way around the proxy.
     `.networks = []`,
   ];
@@ -126,7 +133,7 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       `mountType: ${kind === "qemu" ? "9p" : "virtiofs"}`,
       "cpus: 2", "memory: 2GiB", "disk: 30GiB", "mounts: []",
       "containerd:\n  system: false\n  user: false",
-      'portForwards:\n- guestIP: "0.0.0.0"\n  guestPortRange: [1, 65535]\n  ignore: true',
+      `portForwards: ${yq(NO_FORWARDS)}`,
       "networks: []",
     ];
     if (kind === "qemu")
@@ -193,6 +200,16 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
     return ["shell", "--workdir", options.cwd ?? "/", name, ...command];
   };
 
+  /** Whether a VM's Lima configuration refuses every forward NO_FORWARDS refuses. */
+  const forwardsClosed = (name: string) => {
+    try {
+      const text = fs.readFileSync(path.join(LIMA_HOME, name, "lima.yaml"), "utf8");
+      return /guestIP: ?"?127\.0\.0\.1"?[\s\S]{0,120}?ignore: true/.test(text) && /proto: ?"?udp"?/.test(text);
+    } catch {
+      return false;
+    }
+  };
+
   /** Wait for every share to be mounted as the spec says; stop the VM and refuse if one
    *  is mounted the wrong way, or is still missing after a minute. */
   const sharesReady = async (name: string, m: Meta) => {
@@ -251,6 +268,11 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       const longest = path.join(LIMA_HOME, `${PREFIX}0123456789`, "ssh-root.sock.0123456789012345");
       const limit = process.platform === "darwin" ? 103 : 107;
       checks.push({ name: "socket paths fit", ok: Buffer.byteLength(longest) <= limit, detail: Buffer.byteLength(longest) <= limit ? `the longest fits in ${limit} bytes` : `the longest is ${Buffer.byteLength(longest)} bytes, over ${limit}: ${LIMA_HOME}`, fix: "set DESOLATE_HOME to a shorter path (the default, ~/.desolate, fits unless your home's path is very long)" });
+      // Every running VM refuses Lima's own forwarding (NO_FORWARDS): one made before the
+      // loopback rules forwarded its 127.0.0.1 listeners onto this Mac.
+      const open: string[] = [];
+      for (const vm of await backend.list()) if (vm.status === "running" && !forwardsClosed(vm.name)) open.push(vm.labels.title ?? vm.name);
+      checks.push({ name: "VMs forward nothing by themselves", ok: open.length === 0, detail: open.length === 0 ? "every running VM refuses Lima's own forwarding" : `${open.join(", ")} still forward their loopback listeners onto this Mac`, fix: "restart each: desolate stop <domain>/<workspace> && desolate start <domain>/<workspace> (the root VM: desolate down, then desolate bootstrap)" });
       const haveBase = fs.existsSync(path.join(LIMA_HOME, BASE, "lima.yaml"));
       checks.push({ name: "base image", ok: haveBase, detail: haveBase ? `the base VM ${BASE}` : "no base VM yet", fix: `desolate bootstrap --backend ${kind}` });
       return checks;
@@ -300,6 +322,8 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       const m = meta(name);
       if (!m) throw new Error(`${name} is not a VM desolate made`);
       const cut = m.spec.egress === "none";
+      // A VM made by an older desolate gets today's forwarding rules before it boots.
+      if (!forwardsClosed(name)) await limaOk(["edit", "--set", `.portForwards = ${yq(NO_FORWARDS)}`, name], { timeoutMs: 120_000 });
       const args = ["start", "--timeout", "30m", name];
       if (kind === "vz" && cut) {
         const file = path.join(LIMA_HOME, name, "confine.sb");

@@ -291,6 +291,23 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     assert.equal(stack.quiet("domain", "a", "secret", "rm", "T3-HANDOFF-NAME").code, 0);
   });
 
+  it("T3 the VM layer forwards nothing onto the host by itself: not a loopback listener, not a wildcard one", async () => {
+    // Lima forwards a guest's listeners onto the host unless told not to. A workspace's
+    // 127.0.0.1 listeners once appeared on the host's 127.0.0.1, around desolate's forwarder
+    // and the editor's gate (release/docs/incidents.md).
+    const ports = [47611, 47612, 47613];
+    const started = asRoot("a/w1", `for spec in "127.0.0.1 ${ports[0]}" "0.0.0.0 ${ports[1]}" ":: ${ports[2]}"; do set -- $spec; (nohup python3 -c "import socket,sys,time; fam=socket.AF_INET6 if ':' in sys.argv[1] else socket.AF_INET; s=socket.socket(fam); s.bind((sys.argv[1], int(sys.argv[2]))); s.listen(); time.sleep(20)" $1 $2 >/dev/null 2>&1 &); done; sleep 1; ss -ltnH | grep -c ':4761'`);
+    assert.equal(started.stdout.trim(), "3", "control: the three listeners are there, in the VM");
+    await new Promise((resolve) => setTimeout(resolve, 6000));
+    // desolate's own forwarder may publish them (that is how a dev server is reached, by the
+    // workspace's name); what must not is the VM layer itself.
+    const holders = (port: number) =>
+      process.platform === "darwin"
+        ? spawnSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fc"], { encoding: "utf8" }).stdout.split("\n").filter((l) => l.startsWith("c")).map((l) => l.slice(1))
+        : (spawnSync("ss", ["-ltnpH", `sport = :${port}`], { encoding: "utf8" }).stdout.match(/\(\("([^"]+)"/g) ?? []).map((m) => m.slice(3, -1));
+    for (const port of ports) assert.deepEqual(holders(port).filter((name) => /limactl|qemu/.test(name)), [], `nothing of the VM layer listens on the host's port ${port}`);
+  });
+
   it("T3 forced egress: root inside the VM reaches nothing", () => {
     stack.step("root in the VM against the network");
     // The domain's rules now allow nothing, so what is refused below is refused by the proxy

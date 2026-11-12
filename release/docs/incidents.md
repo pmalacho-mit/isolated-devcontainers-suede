@@ -186,6 +186,16 @@ page is about, and because three of them were mistakes in the *tests*.
   session's groups are not the user's. Found with the first real project on the M1
   (microsoft/vscode-remote-try-node: image pulled through the workspace's proxy, its
   `npm install` too, its dev server at the workspace's own hostname).
+- **Lima forwarded a workspace's loopback listeners onto the Mac.** desolate told Lima to
+  forward nothing from a guest's `0.0.0.0`, and that was all it told it: Lima's own rule for
+  `127.0.0.1` (and `::1`) still applied, so whatever a workspace ran on its own loopback
+  appeared on the Mac's `127.0.0.1`, the editor server's port among them, around
+  desolate's forwarder, its hostnames and the editor's gate; and a workspace could take any
+  free loopback port of the Mac. Found while working out which `limactl` had made macOS's
+  firewall ask about incoming connections (it was not this: these are loopback). Now every
+  forward is refused, on every address, TCP and UDP; an older VM gets the rules at its next
+  start; `doctor` names a running VM that still has the old ones; T4 tries all three kinds
+  of listener against the host.
 - **What an independent audit found after all of the above** (a reviewer given the code and
   the threat model, not these notes; 2026-11-12). Each was then checked on the live stack:
   - *One domain's proxies could use another's secrets through that domain's workspace

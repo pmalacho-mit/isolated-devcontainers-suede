@@ -21,6 +21,7 @@ bootstrap: 8 step(s) done.
   ok   sandbox-exec (cuts a workspace's egress from outside it): present
   ok   vz: ICMP from a workspace: closed by the same confinement as TCP, UDP and DNS (measured on Lima 2.3.0: a confined guest's echo gets no reply; the unconfined control's does)
   ok   socket paths fit: the longest fits in 103 bytes
+  ok   VMs forward nothing by themselves: every running VM refuses Lima's own forwarding
   ok   base image: the base VM dsl-<instance>-base
   ok   root VM running: dsl-<instance>-root
   ok   approver: terminal; pushes are approved on this host
