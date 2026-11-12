@@ -50,7 +50,8 @@ T2 `03-ports`, `06-editor`, `09-ui`).
 | 4.6 The root has an editor, in Restricted Mode, for review | **Reversed, on purpose** | There is no editor in the root (`decisions.md`, "The root has no editor"). Review is the dashboard's diff, `desolate review --diff`, or git in the root's terminal. T2 `09-ui` checks that nothing listens where it was. |
 | 4.7 The start-up breakdown line | **Done** | Every `up` prints it; the dashboard shows the phases live. |
 | 4.7 C1 base image, CoW clones | **Done on Linux by copy; unrun on the Mac** | The M1 measured `limactl clone` at 0.0 s by hand. |
-| 4.7 C2 pull-through registry; C3 domain templates; C4 package caches; C7 | **Not done** | Every workspace builds its environment itself. This is the largest gap against the start-up targets for projects with real toolchains. |
+| 4.7 C3 domain templates | **Done (images and editor extensions)** | `host/templates.ts`: built once per published spec in a workspace-shaped VM of the domain, cloned for every later workspace. On the M1: 18.8 s per workspace with a real devcontainer, against 54.0 s from the base (`decisions.md`, "A domain's template"). `onCreateCommand` results are not carried. Tested by hand and T1 (key, name); no tier has a registry to build one. |
+| 4.7 C2 pull-through registry; C4 package caches; C7 | **Not done** | A template's first build and each workspace's package installs go to the network. |
 | 4.7 C5 mirrors; C6 the editor server | **Done** | C6 differs: the server is in the base image, not a host share. |
 | 4.7 Resume a stopped workspace; the targets (15 s, 5 s) | **Not done / unmeasured** | No suspend; no measurement on the Mac. On the fake backend a start is 2 to 3 s. |
 | 4.7 Where checkouts live (question 14) | **Decided: on the share** | From the M1's Phase 0 numbers (`decisions.md`). |

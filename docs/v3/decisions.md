@@ -393,6 +393,40 @@ holds the keys, 0700) separated nothing from a bug in any of those.
   domain's secrets, and write root clones. The next step is a user for the proxies, with
   each domain's secrets readable by that domain's secrets proxy only.
 
+## A domain's template (C3): built in a workspace-shaped VM, cloned for the rest (measured)
+
+`release/host/templates.ts`. On `up`, before the workspace takes its checkouts, the host asks
+the root for the domain's environment as published (`domain.env-key`: the git id of
+`.devcontainer/` or `.devcontainer.json` on the environment repository's default branch,
+read in the mirror). If no template has that key, one is built: a VM made exactly like a
+workspace of the domain (its shares, its proxy, its rules), which runs the spec, then has
+what is one workspace's removed (its editor's token, its identity, logs, containers) and is
+stopped. Every workspace of the domain is then a `limactl clone` of it.
+
+Measured on the M1 with microsoft/vscode-remote-try-node (an mcr.microsoft.com image, an
+npm install after create):
+
+| | total | of which |
+|---|---|---|
+| a workspace from the base, no template | 54.0 s | VM 9.0 s; pull, build, install, editor 44.4 s |
+| the first workspace with a template (built now) | 71.6 s | template 53.8 s; VM 9.3 s; the rest 8.2 s |
+| every later workspace | **18.8 s** | template 0.5 s; VM 9.4 s; the rest 8.5 s |
+
+The spec's target is 15 s: the VM's boot is now half of it, and has no cache (vz has no
+suspend). Two clones' editors had different tokens.
+
+Why this is safe (section 4.7's rule): the template is the domain's code's output, built
+with the domain's trust and nothing more, and cloned only for that domain. The key covers
+the spec and what made the VM (`provision.sh`, `pins.env`, `devcontainer.ts`, `editor.sh`), so
+a change to either builds a new one; a domain's other templates are removed then.
+
+Not done: `onCreateCommand`'s results are not carried (each workspace makes its own
+container from the template's images); C2 (a pull-through registry) and C4 (package
+caches) are not built, so a template's first build and each workspace's `npm install`
+still go to the network. Not on the fake backend (its clone carries no docker images).
+Not covered by a test that builds one: the tiers have no registry. T1 covers the key and
+the name.
+
 ## The proxies run as a user of their own (decided on the Mac; measured)
 
 Each workspace's `proxy.ts` and each domain's mitmproxy parse everything a workspace sends.
