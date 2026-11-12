@@ -240,7 +240,7 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     // (for names) or by the VM's confinement (for everything else): never by luck.
     assert.equal(stack.quiet("domain", "a", "net", "enforce").code, 0);
     const hostAddresses = Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === "IPv4" && !a.internal).map((a) => a!.address);
-    const forge = stack.env.DESOLATE_FORGE_SPEC!.replace(/^.*@/, "").replace(/:\d+$/, "");
+    const forge = stack.env.DESOLATE_FORGE_SPEC!.replace(/^.*@/, "");
     const probe = (targets: string) => `
       # REACHED only if the destination itself answered. A 403 whose body begins "desolate:"
       # is desolate's own relay or proxy refusing, which is a refusal.
@@ -254,7 +254,7 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     const targets = [
       `try gateway http://192.168.5.2:${port}/`,
       ...hostAddresses.map((address, index) => `try host${index} http://${address}:${port}/`),
-      `try forge_ssh telnet://${forge}:22`,
+      `try forge_ssh telnet://${forge}`,
       "try internet_ip http://1.1.1.1/",
       "try internet_name http://example.com/",
     ].join("\n");
