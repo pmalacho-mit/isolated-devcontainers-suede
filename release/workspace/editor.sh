@@ -79,13 +79,14 @@ if [ -n "$EXTENSIONS" ]; then
     done >"$DATA/extensions.log" 2>&1 </dev/null &
   )
 fi
-# The gate is restarted if the name it answers to has changed.
-if ! listening "$GATE_PORT" || [ "$(cat "$DATA/gate.host" 2>/dev/null)" != "$NAME" ]; then
+# The gate is restarted if the name it answers to, or its own code, has changed.
+GATE_ID="$NAME $(sha256sum "$HERE/editor-gate.ts" | cut -c1-16)"
+if ! listening "$GATE_PORT" || [ "$(cat "$DATA/gate.host" 2>/dev/null)" != "$GATE_ID" ]; then
   [ -s "$DATA/gate.pid" ] && kill "$(cat "$DATA/gate.pid")" 2>/dev/null || true
   for _ in $(seq 1 20); do listening "$GATE_PORT" || break; sleep 0.1; done
-  setsid nohup node --disable-warning=ExperimentalWarning "$HERE/editor-gate.ts" "$NAME" "$GATE_PORT" "$SERVER_PORT" >"$DATA/gate.log" 2>&1 </dev/null &
+  setsid nohup node --disable-warning=ExperimentalWarning "$HERE/editor-gate.ts" "$NAME" "$GATE_PORT" "$SERVER_PORT" "$DATA/token" >"$DATA/gate.log" 2>&1 </dev/null &
   echo $! >"$DATA/gate.pid"
-  printf '%s' "$NAME" >"$DATA/gate.host"
+  printf '%s' "$GATE_ID" >"$DATA/gate.host"
 fi
 for _ in $(seq 1 300); do
   if listening "$SERVER_PORT" && listening "$GATE_PORT"; then exit 0; fi

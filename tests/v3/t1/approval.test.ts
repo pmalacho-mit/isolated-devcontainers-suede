@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { formatApproval, parseApproval } from "../../../release/shared/approval.ts";
-import { refusal, sandboxes } from "../../../release/workspace/editor-gate.ts";
+import { openedWithToken, refusal, sandboxes } from "../../../release/workspace/editor-gate.ts";
 import { hold, HELD } from "../../../release/workspace/editor-settings.ts";
 
 const good = { repo: "acme/widgets", branch: "issue/12", commit: "a".repeat(40), nonce: "0123456789abcdef".repeat(2) };
@@ -46,6 +46,27 @@ describe("T1 the editor gate", () => {
     for (const site of ["cross-site", "same-site", "anything-else"]) assert.equal(refusal(host, { ...ok, "sec-fetch-site": site })?.status, 403, site);
     assert.equal(refusal(host, { ...ok, origin: "http://web-one-abc123.localhost:3000" })?.status, 403);
     assert.equal(refusal(host, { ...ok, origin: "null" })?.status, 403);
+  });
+  it("lets in one kind of request another site started: a navigation to the page that carries the editor's token", () => {
+    const token = "a".repeat(48);
+    const nav = { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" };
+    const opened = (url: string, headers: Record<string, string> = nav, method = "GET") => openedWithToken({ method, url, headers }, token);
+    // The dashboard's "Open editor", followed in a real browser: another site, with the token.
+    assert.equal(opened(`/?tkn=${token}&folder=%2Fworkspaces%2Fa`), true);
+    assert.equal(refusal(host, { ...ok, ...nav }, true), undefined);
+    // Without the token, with another, elsewhere than the page, not a navigation, not a GET.
+    assert.equal(opened("/?folder=%2Fworkspaces%2Fa"), false);
+    assert.equal(opened(`/?tkn=${"b".repeat(48)}`), false);
+    assert.equal(opened(`/?tkn=${token.slice(1)}`), false);
+    assert.equal(opened(`/stable-x/vscode-remote-resource?path=/etc/passwd&tkn=${token}`), false);
+    assert.equal(opened(`/?tkn=${token}`, { ...nav, "sec-fetch-dest": "iframe" }), false);
+    assert.equal(opened(`/?tkn=${token}`, { ...nav, "sec-fetch-mode": "cors" }), false);
+    assert.equal(opened(`/?tkn=${token}`, nav, "POST"), false);
+    assert.equal(openedWithToken({ method: "GET", url: `/?tkn=${token}`, headers: nav }, null), false, "an editor whose token cannot be read lets nothing in this way");
+    // The exception is for the site check only: the name and the origin still hold.
+    assert.equal(refusal("other-editor-abc123.localhost", { ...ok, ...nav }, true)?.status, 421);
+    assert.equal(refusal(host, { ...ok, ...nav, origin: "http://evil.example" }, true)?.status, 403);
+    assert.equal(refusal(host, { ...ok, ...nav })?.status, 403, "control: the same request, not opened with the token, is refused");
   });
   it("sandboxes a remote resource opened as a document, and only that", () => {
     assert.equal(sandboxes("/stable-x/vscode-remote-resource?path=/workspaces/a/x.html", { "sec-fetch-dest": "document" }), true);

@@ -4,7 +4,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { refuse } from "../shared/exit.ts";
 import { waitFor } from "../shared/run.ts";
-import { editorHostPort, ROOT_HOSTNAME } from "../shared/names.ts";
 import * as approver from "./approver.ts";
 import { INSTANCE, paths, RELEASE_DIR, guest } from "./paths.ts";
 import { backend, backendKind, config, ensureHome, ROOT_VM, rootctl, rootSpec, saveConfig } from "./stack.ts";
@@ -42,15 +41,21 @@ const startRootServices = async () => {
 const installApprover = async (): Promise<boolean> => {
   const pem = approver.publicKey();
   if (!pem) refuse("this stack has no approver key", "desolate bootstrap");
-  const tokenFile = path.join(paths.state, "host-token");
-  if (!fs.existsSync(tokenFile)) fs.writeFileSync(tokenFile, randomBytes(24).toString("hex") + "\n", { mode: 0o600 });
-  const token = fs.readFileSync(tokenFile, "utf8").trim();
+  const made = (name: string) => {
+    const file = path.join(paths.state, name);
+    if (!fs.existsSync(file)) fs.writeFileSync(file, randomBytes(24).toString("hex") + "\n", { mode: 0o600 });
+    return fs.readFileSync(file, "utf8").trim();
+  };
+  const token = made("host-token");
+  // The dashboard's credential: the person's browser gets it from `desolate ui`'s address.
+  const uiToken = made("ui-token");
   const put = 'put() { new=$(cat); if [ "$new" = "$(cat "$1" 2>/dev/null)" ]; then echo same; else printf "%s\\n" "$new" >"$1.new" && chown "root:$3" "$1.new" && chmod "$2" "$1.new" && mv "$1.new" "$1" && echo changed; fi; }; install -d -m 0755 -o root -g root /etc/desolate; ';
   const group = `$(id -gn "$(getent passwd ${process.getuid!()} | cut -d: -f1)")`;
   const key = await backend().exec(ROOT_VM, ["bash", "-c", `${put}put /etc/desolate/approver.pub 0644 root`], { root: true, input: pem!.trim(), timeoutMs: 60_000 });
   const tok = await backend().exec(ROOT_VM, ["bash", "-c", `${put}put /etc/desolate/host-token 0640 ${group}`], { root: true, input: token, timeoutMs: 60_000 });
-  for (const result of [key, tok]) if (result.code !== 0) throw new Error(`the host's keys were not installed in the root: ${(result.stderr || result.stdout).trim().slice(-300)}`);
-  return key.stdout.trim() === "changed" || tok.stdout.trim() === "changed";
+  const ui = await backend().exec(ROOT_VM, ["bash", "-c", `${put}put /etc/desolate/ui-token 0640 ${group}`], { root: true, input: uiToken, timeoutMs: 60_000 });
+  for (const result of [key, tok, ui]) if (result.code !== 0) throw new Error(`the host's keys were not installed in the root: ${(result.stderr || result.stdout).trim().slice(-300)}`);
+  return [key, tok, ui].some((result) => result.stdout.trim() === "changed");
 };
 
 /** From a clean machine to a working stack. Idempotent: run twice, the second run changes
@@ -112,7 +117,8 @@ export const bootstrap = async (options: { forge?: string; forgeKnownHosts?: str
   const { reconnectRunning } = await import("./workspaces.ts");
   const reconnected = await reconnectRunning();
   if (reconnected > 0) out(`  = running workspaces: ${reconnected}, each with its proxy and link`);
-  out(`  dashboard    http://${ROOT_HOSTNAME}:${editorHostPort()}/   (and: desolate ui)`);
+  const { ui } = await import("./daemon.ts");
+  out(`  dashboard    ${(await ui()).dashboard}   (and: desolate ui)`);
 
   out(changed.length === 0 ? "bootstrap: nothing changed; the stack was already up." : `bootstrap: ${changed.length} step(s) done.`);
   const failed = await doctor(out);

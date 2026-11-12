@@ -211,8 +211,9 @@ the security findings, open and closed.
    - ends with `doctor`. Every failure names a fix.
    desolate keeps its own Lima home: `LIMA_HOME=~/.desolate/lima limactl list` shows its VMs,
    and `~/.desolate/lima/<vm>/ha.stderr.log` is where a VM that will not start says why.
-   Bootstrap ends by printing the dashboard's address (`http://desolate.localhost:31581/`):
-   open it. It should say "host connected" and walk through the first steps; if it says
+   Bootstrap ends by printing the dashboard's address (`http://desolate.localhost:31581/?tkn=...`;
+   `desolate ui` prints it again): open it. Without its token the dashboard answers 401,
+   to any program on the Mac. It should say "host connected" and walk through the first steps; if it says
    the host is not connected, `~/.desolate/logs/daemon.log` says why.
    Then: `release/cli.sh clone <a test repository>`, a domain, `up` (open the editor address
    it prints in a browser), and the checks of `tests/v3/t3/01-boundaries.test.ts` by hand.

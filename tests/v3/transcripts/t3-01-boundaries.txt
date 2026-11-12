@@ -12,7 +12,7 @@ desolate bootstrap: backend qemu, instance <instance>
   + root VM running
   + root services: keyring
   + root: the approver's public key and the host daemon's token
-  dashboard    http://desolate.localhost:31591/   (and: desolate ui)
+  dashboard    http://desolate.localhost:31591/?tkn=<token>   (and: desolate ui)
 bootstrap: 8 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: qemu

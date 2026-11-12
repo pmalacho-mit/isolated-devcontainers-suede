@@ -25,12 +25,14 @@
 //
 // WHO MAY TALK TO IT
 //   a browser   only as desolate.localhost, only same-origin (the editor gate's rules),
-//               and for actions only with a header a cross-site page cannot send.
+//               only with the cookie it got for the address `desolate ui` prints (so no
+//               other program on the machine), and for actions only with a header a
+//               cross-site page cannot send.
 //   the host    with the token the host installed as root at bootstrap.
 // Repository content (branch names, commit subjects, statuses, notes) leaves here as JSON
 // strings and is put on the page as text, never as HTML.
 import { spawn } from "node:child_process";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -50,14 +52,27 @@ import * as repos from "./repos.ts";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const TOKEN_FILE = "/etc/desolate/host-token";
-const hostToken = (): string | null => {
+const readToken = (file: string): string | null => {
   try {
-    const token = fs.readFileSync(TOKEN_FILE, "utf8").trim();
+    const token = fs.readFileSync(file, "utf8").trim();
     return /^[0-9a-f]{48}$/.test(token) ? token : null;
   } catch {
     return null;
   }
 };
+const hostToken = () => readToken(TOKEN_FILE);
+/** The person's browser's credential for the dashboard. The host made it and installed it
+ *  as root; `desolate ui` prints the dashboard's address with it. The name and the origin
+ *  checks keep other web pages out; they do not keep out another program on the machine,
+ *  which can connect to the loopback port and send any Host and no Origin. Without this,
+ *  any user of the Mac, or a sandboxed app allowed to reach localhost, read every
+ *  workspace's editor address with its token (found on the M1; release/docs/incidents.md). */
+const UI_TOKEN_FILE = "/etc/desolate/ui-token";
+const uiToken = () => readToken(UI_TOKEN_FILE);
+const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+/** A cookie's name of this stack's own: cookies are kept per host name, not per port, and
+ *  two stacks on one machine (a test beside the real one) share `desolate.localhost`. */
+const cookieName = (token: string) => `desolate_ui_${createHash("sha256").update(token).digest("hex").slice(0, 12)}`;
 
 // ------------------------------------------------------------------ state
 type HostFacts = {
@@ -275,6 +290,20 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
   // A browser. The gate's rules: this name only, this origin only.
   const refused = refusal(ROOT_HOSTNAME, req.headers);
   if (refused) return send(res, refused.status, "text/plain; charset=utf-8", `desolate: refused ${refused.why.replace("this is the editor of", "this is the dashboard at")}\n`);
+  const ui = uiToken();
+  if (!ui) return send(res, 503, "text/plain; charset=utf-8", "desolate: the dashboard has no credential installed yet; run `desolate bootstrap` on the host\n");
+  const name = cookieName(ui);
+  const given = url.searchParams.get("tkn");
+  if (req.method === "GET" && url.pathname === "/" && given !== null) {
+    if (!same(given, ui)) return send(res, 403, "text/plain; charset=utf-8", "desolate: refused: that is not this dashboard's address; `desolate ui` prints it\n");
+    // Exchanged for a cookie the page's own script cannot read, sent to this name only,
+    // and never on a request another site starts; the token leaves the address bar.
+    const rest = url.search.slice(1).split("&").filter((part) => part !== "" && !part.startsWith("tkn=")).join("&");
+    res.writeHead(303, { location: `/${rest ? `?${rest}` : ""}`, "set-cookie": `${name}=${ui}; HttpOnly; SameSite=Strict; Path=/`, "content-length": 0, ...SECURITY });
+    return res.end();
+  }
+  const cookie = new RegExp(`(?:^|;\\s*)${name}=([0-9a-f]{48})(?:;|$)`).exec(String(req.headers.cookie ?? ""))?.[1];
+  if (!cookie || !same(cookie, ui)) return send(res, 401, "text/plain; charset=utf-8", "desolate: open the dashboard at the address `desolate ui` prints: it carries this dashboard's token\n");
   if (req.method === "GET" && STATIC[url.pathname]) {
     const [file, type] = STATIC[url.pathname]!;
     return send(res, 200, type, fs.readFileSync(path.join(HERE, "ui", file), "utf8"));

@@ -161,6 +161,22 @@ page is about, and because three of them were mistakes in the *tests*.
   VM saw the old link for about a second. The root now looks again for about three
   seconds before refusing (`root/offers.ts`; `docs/v3/decisions.md`, "On vz, a share is
   the host's files seen through each guest's own cache").
+- **The dashboard answered any program on the machine, and handed it every editor's
+  token.** It checked the name and the origin, which keeps other web pages out; a local
+  program (another user of the Mac, a sandboxed app allowed to reach localhost) sends any
+  Host and no Origin. `curl -H 'Host: desolate.localhost:31581' .../state` returned each
+  workspace's editor address with its token: a terminal in that workspace. Now the
+  dashboard takes a cookie it gives only for the address `desolate ui` prints.
+  (T2 `09-ui`: every surface without it.)
+- **A fix that did not take effect.** After that change and a bootstrap, the dashboard
+  still answered without the cookie: start.sh leaves running services alone, so the root
+  ran the old code until the VM restarted. Services (and proxies) are now restarted when
+  the code they run has changed; the editor's gate likewise.
+- **"Open editor" could never open the editor.** Each `*.localhost` name is a site of its
+  own, so the dashboard's link arrived at the editor's gate as a request another site
+  started, and was refused. The test read the link's address and never followed it; a
+  real browser on the M1 did. The gate now lets in that one navigation when it carries
+  the editor's own token.
 - **A deploy key named its owner.** A key's title carried the Mac's hostname, which on a
   Mac is usually its owner's name, and a deploy key's title is shown to everyone who
   administers the repository. It is a hash of the hostname now.
