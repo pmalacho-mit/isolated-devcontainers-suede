@@ -89,6 +89,7 @@ desolate review dev acme/widgets issue/12 --diff     # what a push would send, a
 desolate push dev acme/widgets issue/12 --expect <commit>   # asks you, on your terminal
 desolate root shell                                  # ordinary git on your clones: fetch --all, diff, push
 desolate approve                                     # ... and this approves a `git push origin` made there
+desolate approve --web                               # or: the approval page's address, for one click
 ```
 
 Inside a workspace: `git fetch` (from the mirror: no key, no network), `desolate fetch`
@@ -110,6 +111,22 @@ hostile code on your Mac (see the rule above). If you want that as well, on a Ma
 `DESOLATE_APPROVER=touchid desolate bootstrap` keeps the approver key in the Secure Enclave
 behind Touch ID; that path is written and has never been run. `desolate approve --selftest`
 checks whichever you have without pushing anything.
+
+**Or approve with one click.** `desolate approve --web` (and `desolate ui`) prints the
+approval page's address, `http://desolate-approve.localhost:<port>/?tkn=...`: open it once in
+your browser, keep the tab, and every push waiting for you shows there, with what it would
+send, as desolate's reviewer in the root worked it out (its commits and files, and whether
+it builds on the remote's branch or replaces it). The page is the host's, not a VM's, and it
+signs only for a request from its own tab: a cookie only that address gives, its own origin
+(a page an agent wrote, on a workspace's name, is another), a token per push, a JSON body.
+It cannot be framed, and its Approve button arms only after the tab has had your attention
+for a second and the pointer then moves onto it, so a click aimed at something else when a
+window opened under it lands on nothing. Treat the address like a password: anyone with it,
+on your Mac, can approve.
+
+**What a push is, exactly.** The push goes out through the root's pusher, the one program
+that can use a write key, and it asks the remote for one change: the branch moves from the
+commit it was at when you approved (`onto`) to the commit you approved, or nothing happens.
 
 **The dashboard** (`desolate ui`) is served by the root VM: every domain as a card, each
 workspace with its status colour, "Needs you" on top, one click to open a workspace's

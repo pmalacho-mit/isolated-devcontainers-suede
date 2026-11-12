@@ -346,6 +346,9 @@ release/root/git-remote-desolate-push.ts  `git push origin` in the root shell: w
 release/root/send.ts           hands a push to the pusher: the approval's id, a pack, LFS objects
 release/root/pusher.ts         the only user with the write agent: one ref update, onto -> commit; parses nothing
 release/root/forge-pin.ts      root's copy of the forge's address, for the pusher
+release/root/reviewer.ts       a user of its own: what a push would send, for the approval page
+release/root/review-client.ts  the root's user's side: sends the reviewer the objects; review-ask.ts is the host's question
+release/host/approve-web.ts    the approval page: one click, served by the host daemon (approve-ui/ is the page)
 release/root/pre-push.ts       a hand-made push to the remote's address is refused (it has no key either)
 release/root/rootd.ts          the request channel
 release/root/stated.ts         the state service: holds the state, pushes it; ui/ is the dashboard

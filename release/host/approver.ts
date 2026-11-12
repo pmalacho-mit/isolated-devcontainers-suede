@@ -123,6 +123,22 @@ export const sign = async (message: string, summary?: string): Promise<string> =
   return signWith("sha256", Buffer.from(message), createPrivateKey(fs.readFileSync(FILES.key, "utf8"))).toString("base64");
 };
 
+/** The approval page's signature (host/approve-web.ts): the person's click on that page, on
+ *  this Mac, is the confirmation; the page is what checks it was theirs. With the Touch ID
+ *  approver the Secure Enclave asks as well. */
+export const signClicked = (message: string): string => {
+  const push = parseApproval(message);
+  const which = kind();
+  if (!push) throw new Error("not a push approval; nothing was signed");
+  if (which === "touchid") {
+    const signed = spawnSync(FILES.helper, ["sign", FILES.key, `approve pushing ${push.branch} of ${push.repo} to ${push.commit.slice(0, 12)}, from ${push.onto ? push.onto.slice(0, 12) : "nothing (a new branch)"}`], { input: message, encoding: "utf8", timeout: 120_000 });
+    if (signed.status !== 0 || !signed.stdout.trim()) throw new Error(`the Touch ID prompt was not confirmed${signed.stderr ? ` (${signed.stderr.trim()})` : ""}`);
+    return signed.stdout.trim();
+  }
+  if (which !== "terminal") throw new Error("this stack has no approver");
+  return signWith("sha256", Buffer.from(message), createPrivateKey(fs.readFileSync(FILES.key, "utf8"))).toString("base64");
+};
+
 /** `desolate approve --selftest`: one signature over a text that approves nothing, checked
  *  against the public key the root was given. Proves the person can approve before the
  *  first real push needs it. */

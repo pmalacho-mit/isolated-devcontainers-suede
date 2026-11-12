@@ -59,6 +59,10 @@ export const devHostname = (instance: string, domain: string, workspace: string)
 export const editorHostname = (instance: string, domain: string, workspace: string) =>
   `${domain}-${workspace}-editor-${surfaceHex(instance, domain, workspace)}.localhost`;
 export const ROOT_HOSTNAME = "desolate.localhost";
+/** The approval page (host/approve-web.ts), served by the host daemon itself on the editors'
+ *  port. A name of its own, not under ROOT_HOSTNAME: the dashboard's content comes from the
+ *  root, and a cookie it set for its own domain would be sent to names under it. */
+export const APPROVE_HOSTNAME = "desolate-approve.localhost";
 
 /** A workspace's editor (P1: it runs in the workspace VM). In the VM, the editor's server
  *  listens on loopback at `server`, and editor-gate.ts in front of it at `gate`; the host's
