@@ -71,6 +71,7 @@ printf '#!/bin/sh\nexit 101\n' >"$R/usr/sbin/policy-rc.d"; chmod +x "$R/usr/sbin
 mkdir -p "$R/opt/desolate-build/image" "$R/opt/desolate-stage"
 cp "$HERE/../pins.env" "$R/opt/desolate-build/pins.env"
 cp "$HERE/provision.sh" "$R/opt/desolate-build/image/provision.sh"
+cp -a "$HERE/locks" "$R/opt/desolate-build/image/locks"
 [ -z "$NODE_FROM" ] || { mkdir -p "$R/opt/desolate-stage/node/bin" "$R/opt/desolate-stage/node/lib/node_modules"
   cp -aL "$NODE_FROM/bin/node" "$R/opt/desolate-stage/node/bin/node"
   cp -a "$NODE_FROM/lib/node_modules/npm" "$R/opt/desolate-stage/node/lib/node_modules/npm"; }

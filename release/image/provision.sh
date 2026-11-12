@@ -62,16 +62,32 @@ if ! /usr/local/bin/node --version 2>/dev/null | grep -qx "v$NODE_VERSION"; then
 fi
 node --version
 
+# The two tools below come from package registries. Each is installed from a lock in
+# image/locks that names every package it needs by its hash, so what the registry serves
+# today must be what was locked (P6); a version number alone left every dependency to be
+# whatever was newest at build time. Re-lock deliberately: image/locks/README.md.
 say "devcontainer CLI $DEVCONTAINERS_CLI_VERSION"
+grep -q "\"@devcontainers/cli\": \"$DEVCONTAINERS_CLI_VERSION\"" "$HERE/locks/devcontainer-cli/package.json" \
+  || { echo "provision: image/locks/devcontainer-cli is not for the pinned version $DEVCONTAINERS_CLI_VERSION" >&2; exit 1; }
 if ! devcontainer --version 2>/dev/null | grep -qx "$DEVCONTAINERS_CLI_VERSION"; then
-  npm install -g --loglevel=error --no-fund --no-audit "@devcontainers/cli@$DEVCONTAINERS_CLI_VERSION"
+  rm -rf /opt/desolate/devcontainer-cli && mkdir -p /opt/desolate/devcontainer-cli
+  cp "$HERE/locks/devcontainer-cli/package.json" "$HERE/locks/devcontainer-cli/package-lock.json" /opt/desolate/devcontainer-cli/
+  # ci: only what the lock says, each checked against its integrity; no install scripts.
+  npm ci --prefix /opt/desolate/devcontainer-cli --ignore-scripts --loglevel=error --no-fund --no-audit
+  rm -f /usr/local/bin/devcontainer
+  npm uninstall -g --loglevel=error @devcontainers/cli >/dev/null 2>&1 || true
+  ln -sf /opt/desolate/devcontainer-cli/node_modules/@devcontainers/cli/devcontainer.js /usr/local/bin/devcontainer
 fi
 
 say "mitmproxy $MITMPROXY_VERSION (the root's proxies)"
 if ! /opt/desolate/proxy-venv/bin/mitmdump --version 2>/dev/null | grep -q "Mitmproxy: $MITMPROXY_VERSION"; then
   mkdir -p /opt/desolate
+  grep -qx "mitmproxy==$MITMPROXY_VERSION \\\\" "$HERE/locks/mitmproxy.txt" \
+    || { echo "provision: image/locks/mitmproxy.txt is not for the pinned version $MITMPROXY_VERSION" >&2; exit 1; }
+  rm -rf /opt/desolate/proxy-venv
   python3 -m venv /opt/desolate/proxy-venv
-  /opt/desolate/proxy-venv/bin/pip install --quiet --disable-pip-version-check "mitmproxy==$MITMPROXY_VERSION"
+  # Every package, mitmproxy's dependencies included, by hash. Wheels where there are any.
+  /opt/desolate/proxy-venv/bin/pip install --quiet --disable-pip-version-check --no-deps --require-hashes --prefer-binary -r "$HERE/locks/mitmproxy.txt"
 fi
 
 say "git-subrepo $GIT_SUBREPO_VERSION (for desolate upstream)"

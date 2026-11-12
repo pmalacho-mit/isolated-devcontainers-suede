@@ -1,0 +1,8 @@
+{
+  "name": "desolate-devcontainer-cli",
+  "private": true,
+  "description": "The devcontainer CLI as desolate installs it in its image: by this lockfile, every package by its integrity hash (image/provision.sh).",
+  "dependencies": {
+    "@devcontainers/cli": "0.88.0"
+  }
+}
