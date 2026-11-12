@@ -56,13 +56,21 @@ done
 # (a keyring that went on making keys in the user's directory): stopped here, and started
 # again below.
 LAYOUT=2
-if [ "$(cat "$SYS/layout" 2>/dev/null)" != "$LAYOUT" ]; then
+# And services started from other code: desolate was updated under them, and a fix (to the
+# state service's checks, say) means nothing until what runs is the fixed code. The code is
+# the release's, which only the host can change (a read-only share).
+CODE=$(cd "$HERE/.." && find root shared -type f \( -name '*.ts' -o -name '*.py' -o -name '*.sh' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
+if [ "$(cat "$SYS/layout" 2>/dev/null)" != "$LAYOUT" ] || [ "$(cat "$SYS/code" 2>/dev/null)" != "$CODE" ]; then
   for svc in rootd stated; do
     [ -f "$RUN/$svc.pid" ] && kill -- "-$(cat "$RUN/$svc.pid")" 2>/dev/null
     rm -f "$RUN/$svc.pid"
   done
   pkill -u desolate-keyring 2>/dev/null || true
   rm -rf "$RUN/keyring" "$RUN/keyring.pid"
+  # The proxies too (rootd started them; bootstrap gives each running workspace a new one).
+  pkill -f "$HERE/proxy/proxy.ts" 2>/dev/null || true
+  pkill -f /opt/desolate/proxy-venv/bin/mitmdump 2>/dev/null || true
+  [ -d "$STATE" ] && as_user bash -c 'rm -f "$1"/proxy/running/*.json "$1"/proxy/secrets/*.json' _ "$STATE" 2>/dev/null || true
   sleep 1
 fi
 install -d -m 0755 -o "$USER_NAME" -g "$USER_GROUP" "$STATE"
@@ -184,4 +192,5 @@ alive "$RUN/rootd.pid" || kept rootd rootd.ts
 # The state service: what the dashboard draws from (stated.ts).
 alive "$RUN/stated.pid" || kept stated stated.ts
 echo "$LAYOUT" >"$SYS/layout"
+echo "$CODE" >"$SYS/code"
 echo "root services: keyring, rootd and the state service up"
