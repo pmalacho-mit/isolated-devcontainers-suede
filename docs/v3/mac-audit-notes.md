@@ -47,10 +47,11 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
    update the approval names (`decisions.md`, "The pusher"). Reviewed twice: the first
    design (git on a bundle, as the pusher) left a git bug reusable across the two users,
    took the forge's address from the root's user, and could stall; all three fixed.
-   **Still open:** that user still chooses which commit to ask a person to approve, and the
-   terminal prompt shows only repository, branch, commit and onto (step 2: an approval page
-   with a reviewer's account of the commit); it still reads every share and holds every
-   editor's token (steps 3 and 4 of the plan narrow what it is for).
+   **Choosing what to ask: narrowed** (`mac/approve-page`): the approval page shows the
+   reviewer's account of the commit (a user of its own, from ids the host gives it), not the
+   root's user's; the terminal prompt still shows that user's summary. **Still open:** it
+   reads every share and holds every editor's token (steps 3 and 4 of the plan narrow what
+   it is for).
 
 11. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
 12. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted

@@ -43,7 +43,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate push <domain> <owner/repo> <branch> --expect <commit> [--allow-default]
                                                                  to the remote; you approve it here, on the
                                                                  host, on your terminal
-  desolate approve [--selftest]                                  approve a raw git push waiting in the root shell
+  desolate approve [--web | --selftest]                          approve a raw git push waiting in the root shell
+                                                                 (--web: the approval page's address, for one click)
   desolate ui [--json]                                           the dashboard's address, for your browser
   desolate root shell                                            the root's terminal: git on the root clones
 
@@ -170,7 +171,7 @@ const main = async (argv: string[]): Promise<number> => {
     const { ui } = await import("./daemon.ts");
     const shown = await ui();
     if (values.json === true) out(JSON.stringify(shown));
-    else out(`dashboard    ${shown.dashboard}`);
+    else out(`dashboard    ${shown.dashboard}\napprovals    ${shown.approvals}`);
     return EXIT.ok;
   }
   if (verb === "down") {
@@ -192,6 +193,14 @@ const main = async (argv: string[]): Promise<number> => {
   }
   if (verb === "approve") {
     if (rest.includes("--selftest")) return (await import("./approver.ts")).selftest(out);
+    if (rest.includes("--web")) {
+      // The page's address carries this stack's token: it is the person's to open in a
+      // browser on this Mac, and not to paste anywhere else.
+      const { ensureDaemon } = await import("./daemon.ts");
+      await ensureDaemon();
+      out(`approvals    ${(await import("./approve-web.ts")).approveAddress()}`);
+      return EXIT.ok;
+    }
     const { approve } = await import("./push.ts");
     return approve(out);
   }

@@ -267,6 +267,19 @@ const pusherOps = (request: Record<string, unknown>): Record<string, unknown> =>
   return { ok: false, error: `unknown op '${String(request.op)}'` };
 };
 
+/** The reviewer's one question (root/reviewer.ts), on a socket only it reaches: a read key's
+ *  public half, which names the key in the read agent. */
+const reviewerOps = (request: Record<string, unknown>): Record<string, unknown> => {
+  if (request.op !== "readkey") return { ok: false, error: `unknown op '${String(request.op)}'` };
+  const repo = parseRepo(request.repo);
+  if (!repo) return { ok: false, error: "not a repository" };
+  try {
+    return { ok: true, pubkey: fs.readFileSync(`${keyFile(repo, "read")}.pub`, "utf8").trim() };
+  } catch {
+    return { ok: false, error: `${repoId(repo)} has no read key` };
+  }
+};
+
 const internalOps = (request: Record<string, unknown>): Record<string, unknown> => {
   // The askpass's question, and nothing else: ssh-agent runs it as this user.
   if (request.op === "consume") return consume(request);
@@ -411,7 +424,7 @@ const main = async () => {
   fs.mkdirSync(KEYRING.pub, { recursive: true, mode: 0o755 });
   fs.mkdirSync(KEYRING.private, { recursive: true, mode: 0o700 });
   fs.chmodSync(KEYRING.private, 0o700);
-  for (const stale of [KEYRING.readAgent, KEYRING.writeAgent, KEYRING.pusher, KEYRING.control, KEYRING.internal, agentOf("read"), agentOf("write")]) fs.rmSync(stale, { force: true });
+  for (const stale of [KEYRING.readAgent, KEYRING.writeAgent, KEYRING.pusher, KEYRING.reviewerReadAgent, KEYRING.reviewer, KEYRING.control, KEYRING.internal, agentOf("read"), agentOf("write")]) fs.rmSync(stale, { force: true });
 
   const here = path.dirname(new URL(import.meta.url).pathname);
   startAgent(agentOf("read"), { ...process.env });
@@ -433,6 +446,9 @@ const main = async () => {
   // (root/start.sh): the directory is the gate, so the socket itself is open within it.
   await relay(KEYRING.writeAgent, agentOf("write"), 0o666);
   await serve(KEYRING.pusher, 0o666, pusherOps);
+  // The reviewer's: in a directory only it and the keyring enter, like the pusher's.
+  await relay(KEYRING.reviewerReadAgent, agentOf("read"), 0o666);
+  await serve(KEYRING.reviewer, 0o666, reviewerOps);
   for (const { repo, role } of held())
     try {
       publish(repo, role);

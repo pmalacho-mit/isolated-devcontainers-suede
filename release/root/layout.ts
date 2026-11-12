@@ -38,6 +38,11 @@ export const KEYRING = {
   writeAgent: `${ROOT.run}/keyring-write/write-agent.sock`,
   /** The pusher's questions to the keyring: what an approval names, and revoking it. */
   pusher: `${ROOT.run}/keyring-write/pusher.sock`,
+  /** The reviewer's way to the read agent and its one question (a read key's public half):
+   *  a directory only the keyring and the reviewer enter (root/start.sh). */
+  reviewRun: `${ROOT.run}/keyring-review`,
+  reviewerReadAgent: `${ROOT.run}/keyring-review/read-agent.sock`,
+  reviewer: `${ROOT.run}/keyring-review/reviewer.sock`,
   /** Where ssh-agent itself listens: the keyring user's alone. The two sockets above are
    *  the keyring's filtering relays in front of these. */
   private: `${ROOT.run}/keyring/private`,
@@ -66,6 +71,14 @@ export const PINNED_FORGE = { config: `${ROOT.sys}/forge.json`, knownHosts: `${R
 /** Raw `git push` in the root's terminal waits here for `desolate approve` on the host. */
 export const APPROVALS = `${ROOT.state}/approvals`;
 export const FORGE = `${ROOT.state}/forge.json`;
+
+/** The reviewer (root/reviewer.ts): a user of its own, that says what a push would send. */
+export const REVIEWER = {
+  user: "desolate-reviewer",
+  home: process.env.DESOLATE_REVIEWER_HOME ?? "/var/lib/desolate-reviewer",
+  run: `${ROOT.run}/reviewer`,
+  control: `${ROOT.run}/reviewer/control.sock`,
+} as const;
 
 /** The pusher (root/pusher.ts): the one process that can use a write key, as its own user. */
 export const PUSHER = {

@@ -282,7 +282,7 @@ describe("T2 section 4.8: the root UI", () => {
     assert.ok(await until(async () => (await http("GET", "/state").catch(() => ({ status: 0 }))).status === 200), "the dashboard answers again");
     assert.match(stack.inRoot(["bash", "-c", "tail -3 /var/lib/desolate/stated.log"]).stdout, /stated: ended with \d+ at .*; starting it again\n/);
     // There is one surface in the root, and it is the dashboard.
-    assert.equal(stack.desolate("ui").stdout.trim(), `dashboard    http://${HOST}:${port}/?tkn=${token}`);
+    assert.match(stack.desolate("ui").stdout, new RegExp(`^dashboard    http://${HOST}:${port}/\\?tkn=${token}\napprovals    http://desolate-approve\\.localhost:${port}/\\?tkn=[0-9a-f]{48}\n$`));
     assert.equal((await http("GET", "/", { host: "desolate-editor.localhost" })).status, 421, "the name the root's editor had answers nothing");
     assert.equal(stack.inRoot(["bash", "-c", "ss -ltnH | grep -cE ':(31580|31581) '; pgrep -fc 'codium-serve[r]|server-mai[n].js'; true"]).stdout.replace(/\s+/g, " ").trim(), "0 0", "no editor's server runs in the root VM");
   });

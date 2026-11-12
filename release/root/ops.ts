@@ -7,8 +7,9 @@ import { writeJson } from "../shared/json.ts";
 import { repoOf, writeKnownHosts } from "./git.ts";
 import type { Forge } from "./git.ts";
 import { ask } from "./keyring-client.ts";
+import { withReviewer } from "./review-client.ts";
 import { parseApproval } from "../shared/approval.ts";
-import { APPROVALS, FORGE, GITCONFIG, KEYRING, PINNED_FORGE, PUSHER, ROOT } from "./layout.ts";
+import { APPROVALS, FORGE, GITCONFIG, KEYRING, PINNED_FORGE, PUSHER, REVIEWER, ROOT } from "./layout.ts";
 import { proxyUserOf } from "./proxy/as-proxy.ts";
 import { SECRETS_DIR } from "./proxy/secret-store.ts";
 import * as domains from "./domains.ts";
@@ -132,7 +133,7 @@ export const ops: Record<string, Op> = {
    *  person is shown comes from the message the host parses itself, not from this list. */
   async "approvals.pending"() {
     const pending: { message: string; summary: string; at: string }[] = [];
-    for (const file of fs.existsSync(APPROVALS) ? fs.readdirSync(APPROVALS).sort() : []) {
+    for (const file of fs.existsSync(APPROVALS) ? fs.readdirSync(APPROVALS).filter((name) => name.endsWith(".json")).sort() : []) {
       try {
         const entry = JSON.parse(fs.readFileSync(`${APPROVALS}/${file}`, "utf8")) as { message: string; summary: string; at: string };
         if (!parseApproval(entry.message) || Date.now() - Date.parse(entry.at) > 120_000) fs.rmSync(`${APPROVALS}/${file}`, { force: true });
@@ -142,6 +143,14 @@ export const ops: Record<string, Op> = {
       }
     }
     return pending;
+  },
+  /** The approval page's Refuse: the waiting push is taken off the list, and the `git push`
+   *  that asked gives up (git-remote-desolate-push.ts watches for it). */
+  async "approvals.refuse"(args) {
+    const nonce = parseApproval(args.message)?.nonce;
+    if (!nonce) throw new Error("not a push approval");
+    fs.rmSync(`${APPROVALS}/${nonce}.json`, { force: true });
+    return { refused: nonce };
   },
   async "approvals.answer"(args) {
     const reply = await ask(KEYRING.control, { op: "approve", message: args.message, signature: args.signature });
@@ -278,6 +287,18 @@ export const ops: Record<string, Op> = {
         return false;
       }
     });
+    // The reviewer: its own user, which this one cannot be, with a read relay this one
+    // cannot reach.
+    let review = "";
+    try {
+      fs.readdirSync(KEYRING.reviewRun);
+      review = `it can enter ${KEYRING.reviewRun}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EACCES") review = `${KEYRING.reviewRun}: ${(error as Error).message}`;
+    }
+    // (One connection per reviewer process: between two, the next one is starting.)
+    const reviewer = review ? { ok: false, error: review } : await withReviewer(() => ask(REVIEWER.control, { op: "ping" }, 5_000)).catch((error: Error) => ({ ok: false, error: error.message }));
+    add("root: the reviewer answers", reviewer.ok === true, reviewer.ok === true ? `${REVIEWER.control}; it is not this user, and its read relay is closed to it` : String(reviewer.error), "desolate bootstrap; its log is /var/lib/desolate-root/reviewer.log");
     add("root: the pusher answers", pusher.ok === true && pinned, pusher.ok !== true ? String(pusher.error) : pinned ? `${PUSHER.control}; the forge it pushes to is root's copy` : `${PINNED_FORGE.config} or its host keys are missing, or not root's alone`, "desolate bootstrap; its log is /var/lib/desolate-root/pusher.log");
     return checks;
   },

@@ -24,7 +24,11 @@ import { fileURLToPath } from "node:url";
 import { refuse } from "../shared/exit.ts";
 import { accept as acceptLink } from "../shared/link.ts";
 import { hostArgv } from "../shared/actions.ts";
-import { devHostname, EDITOR, editorHostname, editorHostPort, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
+import { createServer as createHttpServer } from "node:http";
+import { parseApproval } from "../shared/approval.ts";
+import { APPROVE_HOSTNAME, devHostname, EDITOR, editorHostname, editorHostPort, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
+import { handler as approvePage } from "./approve-web.ts";
+import type { Backend as ApprovalBackend, Summary } from "./approve-web.ts";
 import { statusDir } from "../shared/status.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { sleep, waitFor } from "../shared/run.ts";
@@ -61,6 +65,31 @@ const CODE = codeOf();
 
 /** How many connections one workspace's link may have open at once. */
 const LINK_CONNECTIONS = 64;
+
+/** What the approval page needs of the stack. The list of waiting pushes is the root's
+ *  user's (only each one's message is used, parsed on the host); what a push would send is
+ *  the reviewer's, asked as root; the signature is this host's. */
+const approvalBackend = (): ApprovalBackend => {
+  return {
+    pending: async () => (await rootctl<{ message: string; at: string }[]>("approvals.pending", {}, { quiet: true, timeoutMs: 30_000 })).map((p) => ({ message: p.message, at: p.at })),
+    summary: async (push) => {
+      const result = await backend().exec(ROOT_VM, [...NODE, `${guest.release}/root/review-ask.ts`], { root: true, input: JSON.stringify({ repo: push.repo, branch: push.branch, commit: push.commit, onto: push.onto }), timeoutMs: 120_000 });
+      try {
+        return JSON.parse(result.stdout.trim().split("\n").pop() ?? "") as Summary;
+      } catch {
+        return { ok: false, error: `the reviewer could not be asked: ${(result.stderr || result.stdout).trim().slice(-200)}` };
+      }
+    },
+    approve: async (message) => {
+      if (!parseApproval(message)) throw new Error("not a push approval");
+      const { signClicked } = await import("./approver.ts");
+      await rootctl("approvals.answer", { message, signature: signClicked(message) }, { quiet: true, timeoutMs: 60_000 });
+    },
+    refuse: async (message) => {
+      await rootctl("approvals.refuse", { message }, { quiet: true, timeoutMs: 30_000 });
+    },
+  };
+};
 
 const serve = async () => {
   const b = backend();
@@ -133,9 +162,19 @@ const serve = async () => {
   // What it reaches is the gate in that workspace's VM (workspace/editor-gate.ts), never
   // the editor's server itself.
   let editorError = "";
+  // The approval page (approve-web.ts): served here, by the host, never by a VM.
+  const approvals = createHttpServer(approvePage(approvalBackend(), log));
   const editors = createServer((client) => {
     client.on("error", () => client.destroy());
     void sniffSocket(client, 400).then(({ sniffed, head }) => {
+      if (sniffed.kind === "http" && sniffed.name === APPROVE_HOSTNAME) {
+        // (Emitted, not listened: node's own slow-client timeouts are not set up, so this is.)
+        client.setTimeout(120_000, () => client.destroy());
+        client.unshift(head);
+        approvals.emit("connection", client);
+        client.resume();
+        return;
+      }
       // The root's one surface: the dashboard. The state service checks the name and the
       // origin of every request itself.
       if (sniffed.kind === "http" && sniffed.name === ROOT_HOSTNAME) {
@@ -636,7 +675,7 @@ export const editorPort = async (): Promise<{ port: number; error: string }> => 
 /** The dashboard's address, with the token that lets a browser in (the root's state
  *  service exchanges it for a cookie). Like an editor's address, it is the person's to
  *  open, and not to paste anywhere else. */
-export const ui = async (): Promise<{ dashboard: string }> => {
+export const ui = async (): Promise<{ dashboard: string; approvals: string }> => {
   await ensureDaemon();
   let token = "";
   try {
@@ -645,7 +684,8 @@ export const ui = async (): Promise<{ dashboard: string }> => {
     /* not bootstrapped */
   }
   if (!/^[0-9a-f]{48}$/.test(token)) refuse("this stack has no dashboard credential yet", "desolate bootstrap");
-  return { dashboard: `http://${ROOT_HOSTNAME}:${editorHostPort()}/?tkn=${token}` };
+  const { approveAddress } = await import("./approve-web.ts");
+  return { dashboard: `http://${ROOT_HOSTNAME}:${editorHostPort()}/?tkn=${token}`, approvals: approveAddress() };
 };
 
 export const stopForwarder = async () => {

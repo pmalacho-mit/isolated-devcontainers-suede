@@ -2,7 +2,9 @@
 // Exit criteria of move-to-vms.md section 13.4, phase 5 (all but `upstream`).
 import assert from "node:assert/strict";
 import { createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import { request as httpRequest } from "node:http";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { bootstrap, git, newStack } from "../lib/harness.ts";
@@ -271,6 +273,85 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     assert.match(def.stdout, /main is the default branch/);
     assert.match(inRootClone("DESOLATE_APPROVAL_WAIT_MS=1500 git push origin :refs/heads/raw-push 2>&1").stdout, /deleting a branch on the remote is not something desolate does/);
     assert.equal(forgeRefs("acme/widgets")["raw-push"], commit);
+  });
+
+  it("the approval page: a raw push, described by the reviewer, approved with one click; another refused", async () => {
+    stack.step("a raw git push, approved on the approval page");
+    const address = /approvals {4}(http:\/\/desolate-approve\.localhost:(\d+)\/\?tkn=[0-9a-f]{48})/.exec(stack.desolate("approve", "--web").stdout);
+    assert.ok(address, "the page's address");
+    const port = Number(address![2]);
+    const ORIGIN = `http://desolate-approve.localhost:${port}`;
+    const call = (method: string, url: string, headers: Record<string, string>, body?: string): Promise<{ status: number; headers: Record<string, unknown>; body: string }> =>
+      new Promise((resolve, reject) => {
+        const req = httpRequest({ host: "127.0.0.1", port, method, path: url, headers: { host: `desolate-approve.localhost:${port}`, ...headers } }, (res) => {
+          let text = "";
+          res.on("data", (chunk) => (text += chunk));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: text }));
+        });
+        req.on("error", reject);
+        req.end(body);
+      });
+    const at = new URL(address![1]!);
+    const login = await call("GET", at.pathname + at.search, {});
+    assert.equal(login.status, 303);
+    const cookie = String(login.headers["set-cookie"]).split(";")[0]!;
+    const asPage = { cookie, "sec-fetch-site": "same-origin" };
+    type Waiting = { nonce: string; token: string; branch: string; commit: string; onto: string | null; summary: { ok: boolean; error?: string; commits?: { commit: string; subject: string }[]; files?: { path: string }[] } };
+    const waitingFor = async (branch: string) => {
+      for (let i = 0; i < 120; i++) {
+        const answer = await call("GET", "/pending", asPage);
+        const found = (JSON.parse(answer.body) as { pending?: Waiting[] }).pending?.find((p) => p.branch === branch);
+        // (The reviewer's account comes in the background: the page says it is coming.)
+        if (found && !(found.summary as { waiting?: boolean }).waiting) return found;
+        await sleep(250);
+      }
+      return null;
+    };
+    const act = (what: string, push: Waiting) => call("POST", `/${what}`, { ...asPage, origin: ORIGIN, "content-type": "application/json" }, JSON.stringify({ nonce: push.nonce, token: push.token, commit: push.commit }));
+
+    inRootClone(`setsid nohup git push origin ${commit}:refs/heads/web-push >/tmp/web-push.log 2>&1 </dev/null & sleep 0.2`);
+    const push = await waitingFor("web-push");
+    assert.ok(push, inRootClone("cat /tmp/web-push.log").stdout);
+    assert.equal(push!.commit, commit);
+    assert.equal(push!.onto, null, "a new branch");
+    // What the reviewer says the push is: from commit ids the host gave it, and the forge.
+    assert.equal(push!.summary.ok, true, String(push!.summary.error));
+    // The commit reached the remote above (issue/12): nothing new to list, from the forge's
+    // own account; the files are against the remote's default branch.
+    assert.deepEqual(push!.summary.commits, [], "the remote has every commit already, and the reviewer says so");
+    assert.ok(push!.summary.files!.some((f) => f.path === "big.bin" || f.path === "README.md"), "the files it changes against the default branch");
+    // In a real browser: the card is drawn as text, and Approve waits for a person.
+    const chrome = [process.env.DESOLATE_CHROME, "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"].find((file) => file && fs.existsSync(file));
+    assert.ok(chrome, "this check needs Chrome or Chromium: install one, or set DESOLATE_CHROME to its path");
+    const profile = fs.mkdtempSync(path.join(stack.work, "chrome-"));
+    const dom = spawnSync(chrome!, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", `--user-data-dir=${profile}`, "--host-resolver-rules=MAP *.localhost 127.0.0.1", "--virtual-time-budget=6000", "--dump-dom", address![1]!], { encoding: "utf8", timeout: 60_000 });
+    assert.match(dom.stdout, /<dd class="branch">web-push<\/dd>/, dom.stdout.slice(0, 600));
+    assert.match(dom.stdout, /<button type="button" class="approve" disabled="">Approve push<\/button>/, "Approve is not armed by loading the page");
+    assert.equal(forgeRefs("acme/widgets")["web-push"], undefined, "and loading it approved nothing");
+    // Not from another origin, and not without the push's own token.
+    assert.equal((await call("POST", "/approve", { ...asPage, origin: "http://dev-w1-abc123.localhost:1", "content-type": "application/json" }, JSON.stringify({ nonce: push!.nonce, token: push!.token, commit }))).status, 403);
+    assert.equal(forgeRefs("acme/widgets")["web-push"], undefined);
+    const approved = await act("approve", push!);
+    assert.equal(approved.status, 200, approved.body);
+    let landed = false;
+    for (let i = 0; i < 80 && !landed; i++) {
+      landed = forgeRefs("acme/widgets")["web-push"] === commit;
+      if (!landed) await sleep(250);
+    }
+    assert.ok(landed, inRootClone("cat /tmp/web-push.log").stdout);
+
+    // Refused on the page: the push that asked gives up, and nothing reaches the remote.
+    inRootClone(`setsid nohup git push origin ${commit}:refs/heads/web-refused >/tmp/web-refused.log 2>&1 </dev/null & sleep 0.2`);
+    const other = await waitingFor("web-refused");
+    assert.ok(other);
+    assert.equal((await act("refuse", other!)).status, 200);
+    let gaveUp = false;
+    for (let i = 0; i < 40 && !gaveUp; i++) {
+      gaveUp = /refused on the host, so nothing was pushed/.test(inRootClone("cat /tmp/web-refused.log").stdout);
+      if (!gaveUp) await sleep(250);
+    }
+    assert.ok(gaveUp, inRootClone("cat /tmp/web-refused.log").stdout);
+    assert.equal(forgeRefs("acme/widgets")["web-refused"], undefined);
   });
 
   it("a repository cloned --no-push is never written: there is no key to write it with", () => {

@@ -519,6 +519,54 @@ those parsers could push another branch of that repository, or another commit, i
   (step 2). Revoking an approval is open to it too, which only cancels. The pusher reads one
   JSON line it is sent (at most 1 MiB, node's parser), and nothing else.
 
+## One click to approve, on a page the host serves (decided on the Mac; tested on T1 and T2)
+
+The person works at a monitor away from the Mac, so Touch ID is out, and typing the branch
+name in a terminal is friction that a script on the Mac can fake anyway (the terminal
+approver's documented limit). What the page has to be is: something only the person's own
+browser tab can make sign, and something that shows what is being approved truthfully.
+
+- **Who can make it sign.** The host daemon serves it at `desolate-approve.localhost` on the
+  editors' port, in-process (host/approve-web.ts): never a VM. It signs only for a request
+  that has all of: a cookie (HttpOnly, SameSite=Strict, a name of this stack's own) that only
+  the address `desolate approve --web` prints gives, and nothing in a VM has that address's
+  token; `Sec-Fetch-Site: same-origin` and the exact Origin (the browser says these, and a
+  workspace's page, on its own name, cannot say them as this page); a JSON body (so no other
+  origin's form can send it); a token per push that only the page's script can read (it is
+  in a JSON answer no other origin can read), computed over the very text the page showed;
+  and the commit the person was shown. The list of waiting pushes is the root's user's, and
+  the review of this page found it could show a decoy and then list the real text under the
+  same nonce at the click: the token over the text makes that sign nothing (T1 tries it).
+  T1 tries each missing; T2 approves and refuses through the real daemon, and loads the page
+  in Chrome.
+- **What it cannot be tricked into.** No framing (`frame-ancestors 'none'`, X-Frame-Options),
+  no inline script, no opener (COOP), no referrer. A page an agent wrote could open it in a
+  window timed to land under a click; its Approve button arms only after a second of the
+  tab's visibility and focus, a second in which that card has not changed, and a pointer
+  that then moves over it, and takes a click only a third of a second after that, and no key
+  press. Any change to the page disarms every button, and a push no longer waiting keeps
+  its place, greyed, so nothing shifts under a still pointer.
+- **Why this is not theatre.** Nothing an agent controls can reach the cookie, read the
+  page, send the headers, or click inside it; the only path is the person's own click, in
+  a tab on their Mac, on a card that says what it approves. What it does not stop is a
+  program on the Mac running as the person, which could read the token file: the same
+  limit as the terminal approver, and the rule (nothing untrusted runs on the Mac) covers it.
+- **What it shows.** Repository, branch, commit and onto are parsed on the host from the text
+  that is signed. What the push would send (the commits the remote lacks, the files, whether
+  it builds on `onto`) is the reviewer's (root/reviewer.ts): a user of its own, with no write
+  key, asked by the host as root about those ids only. Its objects come from the root's user,
+  but a commit id is the hash of its content; the remote's branches it reads from the forge
+  with the read key, not from the root's user. Each summary is a process of its own, started
+  by root for the host (the root's user can neither ask for one nor hold one up), and it
+  comes in the background, with a deadline, so a slow reviewer never holds up the list.
+  What runs on the forge (`.github/`, `.gitmodules`, `.gitattributes`, ...) is listed first,
+  however many files change; binary files and LFS objects are marked. So a root's user
+  compromised through anything but git itself cannot make the page lie. One compromised
+  through a bug in git's own parsing could send the reviewer the same bug, and a reviewer
+  compromised once could leave objects in its store that later summaries trust (git does not
+  re-hash a pack it already indexed): the reviewer's account is as good as git's parsing, and
+  it has nothing to push with. The root's user's own words about a push are not shown.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the

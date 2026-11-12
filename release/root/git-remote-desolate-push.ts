@@ -23,6 +23,7 @@ import { ask } from "./keyring-client.ts";
 import { APPROVALS, KEYRING, mirrorPath } from "./layout.ts";
 import { registry } from "./repos.ts";
 import * as repos from "./repos.ts";
+import { submitForReview } from "./review-client.ts";
 import { send } from "./send.ts";
 
 const fail = (message: string): never => {
@@ -62,20 +63,32 @@ const pushOne = async (spec: string): Promise<string> => {
   const push = { repo: name, ref: branch, commit, onto };
   let approval = await approvedId(push);
   if (!approval) {
+    // What the approval page shows of this push is the reviewer's (reviewer.ts): it gets the
+    // objects first, before the challenge's two minutes start. A reviewer that cannot be
+    // reached does not stop the push; the page says it could not say what the push is.
+    const unreviewed = await submitForReview(repo, commit);
+    if (unreviewed) process.stderr.write(`desolate: the reviewer was not sent this push (${unreviewed}); the approval page will say it cannot describe it\n`);
     const challenge = await ask(KEYRING.control, { op: "challenge", ...push });
     const nonce = parseApproval(challenge.message)?.nonce;
     if (challenge.ok !== true || !nonce) return `error ${target} ${String(challenge.error ?? "the keyring gave no challenge")}`;
     const request = path.join(APPROVALS, `${nonce}.json`);
-    fs.writeFileSync(request, JSON.stringify({ message: challenge.message, summary: "a raw git push from the root's terminal", at: new Date().toISOString() }), { mode: 0o600 });
-    process.stderr.write(`desolate: this push needs your approval, given on the host, outside this VM.\n  ${name}  ${branch}  ${commit}\n  In a terminal on the host, run:  desolate approve\n  waiting up to ${Math.round(WAIT_MS / 1000)} s ...\n`);
+    // Whole or not at all: a half-written request read as broken would be thrown away, and
+    // this push would take that for a refusal.
+    fs.writeFileSync(`${request}.tmp`, JSON.stringify({ message: challenge.message, summary: "a raw git push from the root's terminal", at: new Date().toISOString() }), { mode: 0o600 });
+    fs.renameSync(`${request}.tmp`, request);
+    process.stderr.write(`desolate: this push needs your approval, given on the host, outside this VM.\n  ${name}  ${branch}  ${commit}\n  On the host: the approval page (desolate approve --web prints it), or run  desolate approve\n  waiting up to ${Math.round(WAIT_MS / 1000)} s ...\n`);
+    let refused = false;
     try {
-      for (const until = Date.now() + WAIT_MS; Date.now() < until && !approval; ) {
+      for (const until = Date.now() + WAIT_MS; Date.now() < until && !approval && !refused; ) {
         await new Promise((resolve) => setTimeout(resolve, 500));
         approval = await approvedId(push);
+        // Refused on the page: the request is gone, and no approval came.
+        refused = !approval && !fs.existsSync(request);
       }
     } finally {
       fs.rmSync(request, { force: true });
     }
+    if (refused) return `error ${target} refused on the host, so nothing was pushed`;
     if (!approval) return `error ${target} no person approved the push on the host, so nothing was pushed`;
   }
   try {
