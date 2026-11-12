@@ -55,11 +55,11 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
   });
 
   it("T3 bootstrap on real VMs: isolated, and doctor passes", () => {
-    stack.step("bootstrap on the qemu backend");
+    stack.step(`bootstrap on the ${stack.backend} backend`);
     const result = bootstrap(stack);
     assert.equal(result.code, 0, result.stderr + result.stdout.slice(-1500));
     assert.doesNotMatch(result.stdout, /NOT ISOLATED/);
-    assert.match(result.stdout, /ok {3}backend gives isolation: qemu/);
+    assert.match(result.stdout, new RegExp(`ok {3}backend gives isolation: ${stack.backend}`));
     assert.match(result.stdout, /doctor: all checks passed/);
   });
 
@@ -215,7 +215,7 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
       if (!/"status":"running"/.test(seen)) await new Promise((resolve) => setTimeout(resolve, 3000));
     }
     assert.match(seen, /^HTTP\/1\.1 200 /, seen.slice(0, 200));
-    assert.match(seen, /"stack":\{[^}]*"backend":"qemu","isolated":true/);
+    assert.match(seen, new RegExp(`"stack":\\{[^}]*"backend":"${stack.backend}","isolated":true`));
     assert.match(seen, new RegExp(`"workspace":"w1"[^\\]]*\\][^{]*\\{[\\s\\S]*"status":"running"[\\s\\S]*"editor":"http://${url.hostname}:${url.port}/\\?tkn=${token}`), "the dashboard knows the workspace is running, and its editor's address");
   });
 
@@ -327,6 +327,6 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
   });
 
   it("the transcript reads as reviewed", () => {
-    stack.checkTranscript("t3-01-boundaries");
+    stack.checkTranscript(`${stack.tier.toLowerCase()}-01-boundaries`);
   });
 });

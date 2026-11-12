@@ -244,6 +244,12 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
         // (tests/v3/t3/01-boundaries): docs/v3/decisions.md, section 4.3.
         checks.push({ name: "vz: ICMP from a workspace", ok: true, detail: "closed by the same confinement as TCP, UDP and DNS (measured on Lima 2.3.0: a confined guest's echo gets no reply; the unconfined control's does)" });
       }
+      // macOS keeps a unix socket's path under 104 bytes, and Lima's ssh control socket (and
+      // desolate's own, for root in the root VM) is under each VM's directory. The longest
+      // is a workspace VM's (found on the M1, where a long home made Lima refuse to start).
+      const longest = path.join(LIMA_HOME, `${PREFIX}0123456789`, "ssh-root.sock.0123456789012345");
+      const limit = process.platform === "darwin" ? 103 : 107;
+      checks.push({ name: "socket paths fit", ok: Buffer.byteLength(longest) <= limit, detail: Buffer.byteLength(longest) <= limit ? `the longest fits in ${limit} bytes` : `the longest is ${Buffer.byteLength(longest)} bytes, over ${limit}: ${LIMA_HOME}`, fix: "set DESOLATE_HOME to a shorter path (the default, ~/.desolate, fits unless your home's path is very long)" });
       const haveBase = fs.existsSync(path.join(LIMA_HOME, BASE, "lima.yaml"));
       checks.push({ name: "base image", ok: haveBase, detail: haveBase ? `the base VM ${BASE}` : "no base VM yet", fix: `desolate bootstrap --backend ${kind}` });
       return checks;

@@ -114,6 +114,30 @@ T2 takes about 9 minutes. T3 takes about 27 minutes under software emulation.
 - **A refused bundle is said out loud**: to the workspace that offered, on the dashboard,
   and in `desolate offers`, with what to do.
 
+### 2d. What the Mac bring-up found (2026-11-12, an agent on the M1)
+
+The branches `mac/*` and their pull requests into `v3`; `docs/v3/mac-audit-notes.md` keeps
+the security findings, open and closed.
+
+- **The vz backend runs.** Bootstrap passed on first contact; the first workspace was up in
+  13 s (VM boot 10 s). **Tier T4 passes, 11 of 11** (`TMPDIR=~/t tests/v3/run.sh t4`,
+  3 min 15 s including a base VM provisioned from nothing): read-only shares and forced
+  egress against root in the VM, ICMP included, no path between domains, an offer and
+  hostile content over a real share, the editor, a secret.
+- **ICMP** is closed on Lima 2.3.0 (measured); vz requires 2.3.
+- **First-contact bugs**, each in `release/docs/incidents.md`: a `safe.directory` pattern
+  git 2.43 ignores; a VM used before its shares were mounted; vz's per-guest view of
+  ownership and its ~1 s of staleness between VMs (`decisions.md`, "On vz, a share is the
+  host's files seen through each guest's own cache").
+- **Security, fixed:** the root VM's login user had `NOPASSWD: ALL` (it runs the proxies
+  and the git that reads a domain's packs); start-up followed links that user could
+  plant; node and `/usr/local/bin` belonged to uid 1001; the dashboard answered any local
+  program and handed it every editor's token; mitmproxy's dependencies were unpinned.
+- **Security, open:** the proxies run as the same user as rootd, and a domain's secrets are
+  that user's files (`mac-audit-notes.md`).
+- **T2 on a Mac is partial** (the fake backend's link is a host socket Colima cannot reach):
+  `tests/v3/README.md`.
+
 ### What has never been run
 
 - **The `vz` backend.** `release/host/vm/lima.ts` was written from the M1's Phase 0 results

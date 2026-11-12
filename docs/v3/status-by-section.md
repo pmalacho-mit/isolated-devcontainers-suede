@@ -6,7 +6,7 @@ which part. **Not done** says so, and where to start. "Unrun" means written and 
 executed (everything that needs a Mac).
 
 Tiers: T1 unit, T2 the fake backend (containers standing in for VMs; not isolated), T3 real
-VMs under QEMU on Linux, T4 the Mac (`vz`), which has never run.
+VMs under QEMU on Linux, T4 the Mac (`vz`): 11 of 11 on the M1 since 2026-11-12 (`HANDOFF.md`, 2d).
 
 ## 1. Principles
 
@@ -16,7 +16,7 @@ VMs under QEMU on Linux, T4 the Mac (`vz`), which has never run.
 | P2. Every push goes through a human | **Done** | An approval is a signature by a key on the host, over a challenge naming repository, branch and commit, asked for on the host's terminal (the default approver everywhere). T2 `04-offers` tries every automation path from inside the VMs. The opt-in Touch ID approver is written and unrun. What the gate is for, and what is left, is in `decisions.md` section 5.3 (the write key is a file in the root VM; code running as you on the Mac is trusted, by the rule in the README). |
 | P3. No credential in a workspace | **Done** | Deploy keys never leave the keyring (T2 `01-root`); a secret's value never leaves the root (T2 `07-secrets`, T3). |
 | P4. One owner per `.git`; the root never runs git in a domain clone | **Done** | `root/git.ts` refuses; T2 `04-offers` plants a booby-trapped clone and a lying outbox. **What crosses as data is checked before it is the root's** (`decisions.md`, "What the root takes from a domain"): T2 `10-hostile-content`, T1 `outbox`, `status`, and on real VMs T3 (an offer, a tree with `.git` in it, an outbox linked into the root's state). That audit found two holes in the previous cut (bundles were not fsck'd on git 2.43; the root removed a file through a link in an outbox); both are closed and in `release/docs/incidents.md`. |
-| P5. Boundaries enforced outside the VM | **Done on Linux; unrun on the Mac** | Read-only shares and forced egress against root in the VM: T3. On the Mac both were measured by hand in Phase 0; the backend that applies them is unrun; ICMP was measured closed on Lima 2.3.0 (`decisions.md`, 4.3), and vz now requires that version. |
+| P5. Boundaries enforced outside the VM | **Done** | Read-only shares and forced egress against root in the VM: T3 on Linux, T4 on the Mac (vz), ICMP included (vz requires Lima 2.3.0, where ICMP was measured closed: `decisions.md`, 4.3). |
 | P6. Fail closed; a control beside every negative check | **Done, as a practice** | `doctor` fails what it could not ask; a secrets proxy that is down refuses its hosts; every negative test has a control. Not a thing that finishes. |
 
 ## 2 and 3. Vocabulary and trust model
@@ -33,7 +33,7 @@ T2 `03-ports`, `06-editor`, `09-ui`).
 | 4.1 Storage on the host, shared; the host never runs git there | **Done** | `~/.desolate/`; the CLI reads status files and plans as data. The root VM can be destroyed and rebuilt without losing mirrors, clones or domain work: not tested as such (`destroy` without `--all` keeps the home; a test that rebuilds the root over an existing home is missing). |
 | 4.2 Shape A: the devcontainer CLI runs in the VM, on the project's own spec | **Done for single-container specs; partly for compose** | T2 `08-devcontainer`: an image spec, a Dockerfile spec built from the project's context, a failing spec, no spec, a changed spec. `privileged` and anything else in a spec is allowed: there is no spec policy. **Compose specs** are started as written, but their services' ports are not forwarded and the editor stays in the VM; untested. **Features** need a registry, which the sandbox does not have: untested. |
 | 4.2 The base image carries git's `safe.directory` and git-lfs | **Done** | `image/provision.sh`. |
-| 4.3 One link per workspace, reaching only its proxy; enforced outside | **Done on Linux; unrun on the Mac** | T3 (`restrict=on`, `guestfwd`). The request channel is a file spool in the shares, not a socket (`decisions.md`). |
+| 4.3 One link per workspace, reaching only its proxy; enforced outside | **Done** | T3 (`restrict=on`, `guestfwd`); T4 (`sandbox-exec`, a loopback port opened by token). The request channel is a file spool in the shares, not a socket (`decisions.md`). |
 | 4.3 The proxy: domain's rules, audit by link | **Done** | T2 `05-egress`, T3. |
 | 4.3 Everything `addon.py` did | **Mostly** | Done: internal-address refusal, SNI-proven destinations, header confinement, scrubbing, on/off and TTL, per-workspace attribution (T2 `07-secrets`). **Missing:** the self-test fixture; "learn then enforce" as a timed mode (there is `open`, `net recommend`, `enforce`); a kernel backstop under the internal-address refusal (the proxies run in the root VM, whose own egress is open). |
 | 4.3 A proxy per workspace | **Done** | `root/proxy/manage.ts`. The secrets proxy is per domain. |
@@ -146,7 +146,7 @@ Migration (v3 beside v2, re-clone): nothing to build; not exercised. Non-goals: 
 
 13.1 One command from nothing to a working stack, ending in doctor; idempotent: **done**
 (every end-to-end test starts there). It installs none of the host's own tools.
-13.2 Backends and tiers: `fake`, `qemu` done; `vz` unrun; T4 not written beyond the wiring.
+13.2 Backends and tiers: `fake`, `qemu`, `vz` done; T4 is `t3/` on vz and passes on the M1.
 13.3 Ergonomics: transcripts for every tier, reviewed as diffs: done. A fresh-eyes run and
 budgets as tests: the dashboard's three budgets only.
 

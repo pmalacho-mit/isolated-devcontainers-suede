@@ -111,9 +111,11 @@ page is about, and because three of them were mistakes in the *tests*.
   the `<dir>/*` form arrived in git 2.46: the line was accepted and did nothing. It had
   never mattered because on Linux the mirror's owner and the guest user agree. On vz, a
   virtiofs share's root can report uid 0 for a while after it is mounted, and the first
-  workspace failed with "dubious ownership". Each mirror mounted in a workspace is now
-  listed by exact path (`workspace/start.sh`), and the dead line is gone from
-  `image/provision.sh`. (Measured in the root VM: `/tmp/sd/*` refused, the exact path and
+  workspace failed with "dubious ownership". The dead line is gone from
+  `image/provision.sh`. (First each mirror was listed by exact path; then T4 showed that on
+  vz a file root makes or chowns in a share reports uid 0 in the guest from then on, so a
+  devcontainer running as root turns the user's own clone "dubious" too. A workspace VM
+  has no second user for the check to protect, so it is `*` there: `workspace/start.sh`.) (Measured in the root VM: `/tmp/sd/*` refused, the exact path and
   `*` accepted.)
 - **A VM used before its shares were there.** `limactl start` returns when ssh answers, not
   when the last virtiofs share is mounted. Nothing checked, so a command could see a
@@ -153,6 +155,12 @@ page is about, and because three of them were mistakes in the *tests*.
   services' `exec >>log` fail, and bash carried on with output to `/dev/null`: the
   services ran, and said nothing. The log open is now fatal, and the leftovers are taken
   over by the user.
+- **An honest offer refused right after its outbox changed.** T4's control at the end of
+  the outbox test: the workspace put its sync directory back (a link it had planted
+  became a directory again) and offered, and the root "received nothing". On vz the root
+  VM saw the old link for about a second. The root now looks again for about three
+  seconds before refusing (`root/offers.ts`; `docs/v3/decisions.md`, "On vz, a share is
+  the host's files seen through each guest's own cache").
 - **A deploy key named its owner.** A key's title carried the Mac's hostname, which on a
   Mac is usually its owner's name, and a deploy key's title is shown to everyone who
   administers the repository. It is a hash of the hostname now.
