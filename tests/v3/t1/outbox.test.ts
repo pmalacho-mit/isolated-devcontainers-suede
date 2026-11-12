@@ -15,7 +15,32 @@ process.env.DESOLATE_ROOT_DOMAINS = path.join(work, "domains");
 let outbox: typeof import("../../../release/root/outbox.ts");
 const domains = process.env.DESOLATE_ROOT_DOMAINS;
 
-describe("T1 outbox", () => {
+// outbox.ts runs only in the root VM, which is Linux everywhere: it asks /proc/self/fd where
+// an open directory really is. Off Linux there is no such question to ask, and it must then
+// refuse everything rather than guess. The suite proper needs Linux; the one below it proves
+// the refusal, so a Mac running T1 shows a skip and a pass, never a silent hole.
+const ON_LINUX = process.platform === "linux";
+const NEEDS_LINUX = "outbox.ts runs in the root VM (Linux) and needs /proc/self/fd; run T1 on Linux, or in the root VM";
+
+describe("T1 outbox, off Linux: fails closed", { skip: ON_LINUX ? "this is Linux: the suite below runs instead" : false }, () => {
+  it("a real directory with honest files in it is refused, not read by some weaker route", async () => {
+    const mod = await import("../../../release/root/outbox.ts");
+    const dir = `${domains}/t1-dom/outbox/sync/acme/widgets`;
+    fs.mkdirSync(`${domains}/t1-dom/outbox/requests`, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(`${dir}/refs.json`, JSON.stringify({ refs: { main: "a".repeat(40) } }));
+    fs.writeFileSync(`${dir}/a.bundle`, "x");
+    fs.writeFileSync(`${domains}/t1-dom/outbox/requests/r.json`, JSON.stringify({ op: "fetch" }));
+    assert.equal(mod.openDir(dir), null);
+    assert.deepEqual(mod.listedRefs("t1-dom", "acme/widgets"), {});
+    assert.deepEqual(mod.takeBundles("t1-dom", "acme/widgets"), { copies: [], dropped: 0, more: false });
+    assert.deepEqual(mod.drain(`${domains}/t1-dom/outbox/requests`, /\.json$/, 50), []);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["a.bundle", "refs.json"], "and nothing was removed");
+    fs.rmSync(work, { recursive: true, force: true });
+  });
+});
+
+describe("T1 outbox", { skip: ON_LINUX ? false : NEEDS_LINUX }, () => {
   const sync = `${domains}/t1-dom/outbox/sync/acme/widgets`;
   const lfs = `${domains}/t1-dom/outbox/lfs/acme/widgets`;
   before(async () => {
