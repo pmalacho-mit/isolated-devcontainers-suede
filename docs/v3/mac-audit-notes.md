@@ -45,18 +45,25 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
 
 ## Open
 
-0. **The root's ordinary user both parses what domains send and pushes** (the audit's F6).
-   **Pushing: fixed** (`mac/pusher`): the pusher, a user of its own, is the only one that
-   reaches the write agent; it parses nothing it is sent and asks the forge for the one
-   update the approval names (`decisions.md`, "The pusher"). Reviewed twice: the first
-   design (git on a bundle, as the pusher) left a git bug reusable across the two users,
-   took the forge's address from the root's user, and could stall; all three fixed.
-   **Choosing what to ask: narrowed** (`mac/approve-page`): the approval page shows the
-   reviewer's account of the commit (a user of its own, from ids the host gives it), not the
-   root's user's; the terminal prompt still shows that user's summary. **Still open:** it
-   reads every share and holds every editor's token (steps 3 and 4 of the plan narrow what
-   it is for). **The person's git: moved out of the root** (`mac/git-vm`): `desolate git`
-   is a shell in a VM of its own, with no network and no way to write what the root reads.
+0. **The root's ordinary user both parses what domains send and pushes** (the audit's F6),
+   worked through in five steps, each reviewed by an independent agent before it merged:
+   - **Pushing: fixed** (#81): the pusher, a user of its own, is the only one that reaches
+     the write agent; it parses nothing it is sent and asks the forge for the one update the
+     approval names, from the `onto` it names (`decisions.md`, "The pusher").
+   - **What a person is asked to approve: narrowed** (#82): the approval page shows the
+     text that is signed, parsed on the host, and the reviewer's account of the commit (a
+     user of its own, told commit ids by the host, reading the remote from the forge).
+   - **The person's git: moved out of the root** (#83): `desolate git` is a shell in a VM of
+     its own, with no network and no way to write what the root reads.
+   - **The Mac's loopback: walled off from the root** (#84).
+   - **What happened, from whom** (#85): `desolate events`.
+   **Still open:** that user still reads every share and holds every editor's token; a bug
+   in git's own parsing that compromises it could mislead the reviewer (not the pusher); the
+   terminal prompt (`desolate push`) shows that user's summary, not the reviewer's;
+   approvals given at the terminal are not events; an offered branch's new LFS objects check
+   out as pointers in the git VM. None has been tried against github.com itself: the pusher
+   speaks receive-pack, tested against a stand-in forge and a local git; the first real push
+   is a person's to approve.
 
 11. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
 12. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted
