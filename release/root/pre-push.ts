@@ -3,14 +3,10 @@
 //
 // Pushes through desolate's own helpers (to a domain; to `origin`, whose push address is
 // git-remote-desolate-push) are gated there. What is left for this hook is a push straight
-// to the remote's address: by send.ts, after an approval, or by hand. It lets through only
-// the exact commit a person approved on the host, so an approval for one commit cannot
-// carry another. (`--no-verify` skips this file; then only a live approval for the
-// repository stands between the push and the remote. See docs/v3/decisions.md.)
+// to the remote's address, by hand. That cannot reach the remote: this user has no way to a
+// write key (only the pusher does, root/pusher.ts). The hook refuses it first, and says why.
 import { spawnSync } from "node:child_process";
-import { isBranch, isCommit, parseRepo } from "../shared/names.ts";
-import { ask } from "./keyring-client.ts";
-import { KEYRING } from "./layout.ts";
+import { parseRepo } from "../shared/names.ts";
 
 const [, , , url] = process.argv;
 if ((url ?? "").startsWith("desolate::") || (url ?? "").startsWith("desolate-push::")) process.exit(0);
@@ -20,13 +16,6 @@ const fail = (message: string, fix: string): never => {
 };
 const repoName = spawnSync("git", ["config", "--get", "desolate.repo"], { encoding: "utf8" }).stdout.trim();
 if (!parseRepo(repoName)) fail("this is not one of the root's clones", "push from a clone under /desolate/root");
-let input = "";
-for await (const chunk of process.stdin) input += chunk;
-for (const line of input.split("\n").filter(Boolean)) {
-  const [, local, target] = line.split(" ");
-  const branch = (target ?? "").replace(/^refs\/heads\//, "");
-  if (!target?.startsWith("refs/heads/") || !isBranch(branch)) fail(`desolate pushes branches, not ${target}`, "push a branch");
-  if (!isCommit(local) || /^0+$/.test(local!)) fail(`deleting ${branch} on the remote is not something desolate does`, "delete it on the forge");
-  const approved = await ask(KEYRING.control, { op: "approved", repo: repoName, ref: branch, commit: local });
-  if (approved.ok !== true) fail(`no person approved pushing ${local!.slice(0, 12)} to ${branch} of ${repoName}`, "git push origin <branch> (it asks, and you approve on the host), or `desolate push` on the host");
-}
+// No push from here reaches the remote's address with a key: this user has none. Said
+// plainly, before git tries.
+fail(`a push straight to the remote's address is not something ${repoName}'s root clone can make: the write key is the pusher's alone`, "git push origin <branch> (it asks, and you approve on the host), or `desolate push` on the host");

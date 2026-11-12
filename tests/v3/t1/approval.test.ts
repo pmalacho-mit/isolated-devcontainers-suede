@@ -6,24 +6,41 @@ import { formatApproval, parseApproval } from "../../../release/shared/approval.
 import { openedWithToken, refusal, sandboxes } from "../../../release/workspace/editor-gate.ts";
 import { hold, HELD } from "../../../release/workspace/editor-settings.ts";
 
-const good = { repo: "acme/widgets", branch: "issue/12", commit: "a".repeat(40), nonce: "0123456789abcdef".repeat(2) };
+const good = { repo: "acme/widgets", branch: "issue/12", commit: "a".repeat(40), onto: "b".repeat(40), nonce: "0123456789abcdef".repeat(2) };
 
 describe("T1 the approval message", () => {
   it("round-trips, and says exactly what is approved", () => {
     const text = formatApproval(good);
-    assert.equal(text, `desolate push approval v1\nrepo: acme/widgets\nbranch: issue/12\ncommit: ${"a".repeat(40)}\nnonce: ${good.nonce}\n`);
+    assert.equal(text, `desolate push approval v2\nrepo: acme/widgets\nbranch: issue/12\ncommit: ${"a".repeat(40)}\nonto: ${"b".repeat(40)}\nnonce: ${good.nonce}\n`);
     assert.deepEqual(parseApproval(text), good);
   });
   it("anything that is not that exact text is not an approval", () => {
     const text = formatApproval(good);
     for (const [name, bad] of [
       ["not a string", 7], ["empty", ""], ["a trailing line", text + "extra: 1\n"], ["no final newline", text.slice(0, -1)],
-      ["another version", text.replace("v1", "v2")], ["a short commit", text.replace("a".repeat(40), "a".repeat(39))],
+      ["another version", text.replace("v2", "v1")], ["a short commit", text.replace("a".repeat(40), "a".repeat(39))],
       ["a branch that climbs", text.replace("issue/12", "../../etc")], ["a branch with an escape", text.replace("issue/12", "x\x1b[2J")],
       ["a repository that is a path", text.replace("acme/widgets", "acme/widgets/extra")], ["an uppercase nonce", text.replace(good.nonce, good.nonce.toUpperCase())],
       ["a second branch line", text.replace("branch: issue/12\n", "branch: issue/12\nbranch: main\n")], ["CRLF", text.replace(/\n/g, "\r\n")],
       ["fields in another order", text.replace(`repo: acme/widgets\nbranch: issue/12`, `branch: issue/12\nrepo: acme/widgets`)], ["too long", text + " ".repeat(2000)],
     ] as [string, unknown][])
+      assert.equal(parseApproval(bad), null, name);
+  });
+  it("names what the remote's branch moves from: a commit, or none for a new branch", () => {
+    const fresh = { ...good, onto: null };
+    const text = formatApproval(fresh);
+    assert.match(text, /\ncommit: a{40}\nonto: none\nnonce: /);
+    assert.deepEqual(parseApproval(text), fresh);
+    const full = formatApproval(good);
+    for (const [name, bad] of [
+      ["no onto line", full.replace(`onto: ${"b".repeat(40)}\n`, "")],
+      ["a short onto", full.replace("b".repeat(40), "b".repeat(39))],
+      ["the protocol's zero id for onto", full.replace("b".repeat(40), "0".repeat(40))],
+      ["the zero id as the commit (a delete)", full.replace("a".repeat(40), "0".repeat(40))],
+      ["onto before commit", full.replace(`commit: ${"a".repeat(40)}\nonto: ${"b".repeat(40)}`, `onto: ${"b".repeat(40)}\ncommit: ${"a".repeat(40)}`)],
+      ["two onto lines", full.replace(`onto: ${"b".repeat(40)}\n`, `onto: ${"b".repeat(40)}\nonto: none\n`)],
+      ["v1's text, which named no onto", `desolate push approval v1\nrepo: acme/widgets\nbranch: issue/12\ncommit: ${"a".repeat(40)}\nnonce: ${good.nonce}\n`],
+    ] as [string, string][])
       assert.equal(parseApproval(bad), null, name);
   });
 });

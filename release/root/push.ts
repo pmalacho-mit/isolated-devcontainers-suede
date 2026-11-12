@@ -20,6 +20,7 @@ import { ask } from "./keyring-client.ts";
 import { KEYRING, ROOT } from "./layout.ts";
 import { review, withdraw } from "./offers.ts";
 import * as repos from "./repos.ts";
+import { remoteTip } from "./repos.ts";
 import { send } from "./send.ts";
 
 const main = async () => {
@@ -41,7 +42,9 @@ const main = async () => {
   if (r.commits.length === 0) refuse(`${branch} has nothing the remote lacks`, again);
 
   if (mode === "prepare") {
-    const reply = await ask(KEYRING.control, { op: "challenge", repo: r.repo, ref: branch, commit: r.commit });
+    // What the remote's branch is now, as the mirror last saw it: the push moves it from
+    // exactly this (pusher.ts). If the remote moved since, the push is refused, not forced.
+    const reply = await ask(KEYRING.control, { op: "challenge", repo: r.repo, ref: branch, commit: r.commit, onto: await remoteTip(repo, branch!) });
     if (reply.ok !== true) refuse(String(reply.error ?? "the keyring gave no challenge"), "desolate doctor");
     const summary = `${r.commits.length} commit(s), ${r.stat || "no file changes"}${r.lfsObjects ? `, ${r.lfsObjects} LFS object(s)` : ""}`;
     process.stdout.write(JSON.stringify({ repo: r.repo, branch, commit: r.commit, summary, warnings: r.warnings, message: reply.message }) + "\n");
@@ -68,7 +71,7 @@ const main = async () => {
     const filed = await ask(KEYRING.control, { op: "approve", message, signature: value("--signature") ?? "" });
     if (filed.ok !== true) throw new Refusal(`the keyring did not accept the approval (${String(filed.error)}), so nothing was pushed`, "desolate doctor, then push again", EXIT.unconfirmed);
     approval = String(filed.id);
-    const failed = await send(repo, branch!, r.commit);
+    const failed = await send(repo, approval, r.commit);
     if (failed) throw new Refusal(failed.error, failed.moved ? `the remote's ${branch} has moved: desolate fetch ${r.repo}, then rebase in the workspace and offer again` : "try the push again; desolate doctor");
   } finally {
     if (approval) await ask(KEYRING.control, { op: "revoke", id: approval }).catch(() => {});

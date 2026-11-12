@@ -21,7 +21,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign as signWith, verify } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { parseApproval } from "../shared/approval.ts";
+import { formatApproval, parseApproval } from "../shared/approval.ts";
 import { EXIT, Refusal, refuse } from "../shared/exit.ts";
 import { paths, RELEASE_DIR } from "./paths.ts";
 
@@ -85,12 +85,12 @@ export const sign = async (message: string, summary?: string): Promise<string> =
   const which = kind();
   if (!push) throw new Refusal("the root sent something that is not a push approval; nothing was signed", "desolate doctor", EXIT.unconfirmed);
   if (!which) throw new Refusal("this stack has no approver, so no push can be approved", "desolate bootstrap", EXIT.unconfirmed);
-  const shown = ["", "desolate: this push needs your confirmation.", `  repository  ${push.repo}`, `  branch      ${push.branch}`, `  commit      ${push.commit}`, ...(summary ? [`  sends       ${clean(summary)}`] : []), ""];
+  const shown = ["", "desolate: this push needs your confirmation.", `  repository  ${push.repo}`, `  branch      ${push.branch}`, `  commit      ${push.commit}`, push.onto ? `  onto        ${push.onto}  (the remote's ${push.branch} now: it moves from this to the commit, or not at all)` : `  onto        none: the remote has no ${push.branch} yet`, ...(summary ? [`  sends       ${clean(summary)}`] : []), ""];
   const unconfirmed = (why: string, fix: string) => new Refusal(`${why}\ndesolate: no person confirmed the push, so nothing was pushed`, fix, EXIT.unconfirmed);
 
   if (which === "touchid") {
     process.stderr.write(shown.join("\n") + "\nConfirm with Touch ID (or your login password) in the dialog macOS is showing.\n");
-    const reason = `approve pushing ${push.branch} of ${push.repo} at ${push.commit.slice(0, 12)}`;
+    const reason = `approve pushing ${push.branch} of ${push.repo} to ${push.commit.slice(0, 12)}, from ${push.onto ? push.onto.slice(0, 12) : "nothing (a new branch)"}`;
     const signed = spawnSync(FILES.helper, ["sign", FILES.key, reason], { input: message, encoding: "utf8", timeout: 120_000 });
     if (signed.status !== 0 || !signed.stdout.trim()) throw unconfirmed(`the Touch ID prompt was not confirmed${signed.stderr ? ` (${signed.stderr.trim()})` : ""}`, "run the push again and confirm it");
     return signed.stdout.trim();
@@ -127,7 +127,8 @@ export const sign = async (message: string, summary?: string): Promise<string> =
  *  against the public key the root was given. Proves the person can approve before the
  *  first real push needs it. */
 export const selftest = async (out: (line: string) => void): Promise<number> => {
-  const message = ["desolate push approval v1", "repo: desolate/selftest", "branch: selftest", `commit: ${"0".repeat(40)}`, `nonce: ${"0".repeat(32)}`, ""].join("\n");
+  // A commit no repository has (every digit 1), on a repository that is not one of yours.
+  const message = formatApproval({ repo: "desolate/selftest", branch: "selftest", commit: "1".repeat(40), onto: null, nonce: "0".repeat(32) });
   const signature = await sign(message, "nothing: this is the approver's self-test");
   const pem = publicKey();
   const ok = pem !== null && verify("sha256", Buffer.from(message), createPublicKey(pem), Buffer.from(signature, "base64"));

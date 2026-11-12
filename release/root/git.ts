@@ -81,6 +81,14 @@ export const git = (dir: string, args: string[], options: RunOptions = {}): Prom
   return run("git", [...safeIn(real), ...where, ...args], { ...options, env: { ...baseEnv(), ...(options.env ?? {}) } });
 };
 
+/** For a git whose output is bytes (a pack): its leading arguments and environment, with
+ *  the same check as `git`. */
+export const gitInvocation = (dir: string): { args: string[]; env: NodeJS.ProcessEnv } => {
+  if (!ownedByRoot(dir)) throw new Error(`the root does not run git in ${dir}: it is not a mirror or a root clone (P4)`);
+  const real = fs.realpathSync(dir);
+  return { args: [...safeIn(real), ...(real.startsWith(`${ROOT.mirrors}/`) ? ["--git-dir", dir] : ["-C", dir])], env: baseEnv() };
+};
+
 export const gitOk = async (dir: string, args: string[], options: RunOptions = {}): Promise<string> => {
   const result = await git(dir, args, options);
   if (result.code !== 0) throw new Error(`git ${args.join(" ")} failed in ${dir}: ${(result.stderr || result.stdout).trim().slice(-1500)}`);

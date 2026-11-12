@@ -53,7 +53,13 @@ const pushOne = async (spec: string): Promise<string> => {
   const commit = (await here(["rev-parse", "--verify", "--quiet", `${source}^{commit}`])).stdout.trim();
   if (!commit) return `error ${target} no such commit`;
   if (registry().repos[name]?.defaultBranch === branch) return `error ${target} ${branch} is the default branch: push a branch; or, on the host: desolate push <domain> ${name} ${branch} --expect ${commit} --allow-default`;
-  const push = { repo: name, ref: branch, commit };
+  // The approval names what the remote's branch is now, as the mirror last saw it: the push
+  // moves it from exactly that, or not at all (pusher.ts). Like git, an update that does
+  // not build on it needs a `+`; the person approving sees which it is.
+  const onto = await repos.remoteTip(repo, branch);
+  if (onto && !forced && (await here(["merge-base", "--is-ancestor", onto, commit])).code !== 0)
+    return `error ${target} the remote's ${branch} has commits this does not (non-fast-forward): fetch and rebase, or push with + to replace it`;
+  const push = { repo: name, ref: branch, commit, onto };
   let approval = await approvedId(push);
   if (!approval) {
     const challenge = await ask(KEYRING.control, { op: "challenge", ...push });
@@ -73,9 +79,7 @@ const pushOne = async (spec: string): Promise<string> => {
     if (!approval) return `error ${target} no person approved the push on the host, so nothing was pushed`;
   }
   try {
-    // A forced update goes only if the remote's branch is still what the mirror last saw.
-    const lease = forced ? ((await remoteRefs()).find((line) => line.endsWith(` refs/heads/${branch}`))?.split(" ")[0] ?? "") : undefined;
-    const failed = await send(repo, branch, commit, { lease });
+    const failed = await send(repo, approval, commit);
     if (failed) return `error ${target} ${failed.error.replace(/\n/g, " ")}`;
   } finally {
     await ask(KEYRING.control, { op: "revoke", id: approval }).catch(() => {});

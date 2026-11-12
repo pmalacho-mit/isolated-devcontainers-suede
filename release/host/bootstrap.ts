@@ -6,7 +6,7 @@ import { refuse } from "../shared/exit.ts";
 import { waitFor } from "../shared/run.ts";
 import * as approver from "./approver.ts";
 import { INSTANCE, paths, RELEASE_DIR, guest } from "./paths.ts";
-import { backend, backendKind, config, ensureHome, ROOT_VM, rootctl, rootSpec, saveConfig } from "./stack.ts";
+import { backend, backendKind, config, ensureHome, pinForge, ROOT_VM, rootctl, rootSpec, saveConfig } from "./stack.ts";
 import type { Config, ForgeConfig } from "./stack.ts";
 import type { Check } from "./vm/types.ts";
 
@@ -112,6 +112,8 @@ export const bootstrap = async (options: { forge?: string; forgeKnownHosts?: str
   }
   step(!wasUp, "root services: keyring");
   if (configChanged || !wasUp) await rootctl("forge.set", { forge }, { quiet: true });
+  // Every time: the pusher's copy is root's, and the host's word (stack.ts, pinForge).
+  await pinForge(forge);
   step(await installApprover(), "root: the approver's public key and the host daemon's token");
   // The host daemon carries the dashboard, and tells the root's state service what only
   // the host knows.
@@ -155,7 +157,7 @@ export const doctor = async (out: Out, json = false): Promise<number> => {
   }
   // What only the root can say. If it cannot be asked, each of these is a failure: a probe
   // that did not run is not a probe that found nothing (P6).
-  const rootChecks = ["root: keyring answers", "root: the write agent's askpass socket is closed to the root's own user", "root: private keys are unreadable to the root's own user", "root: the root's own user cannot become root", "root: the programs root runs are root's", "root: each domain's proxies run as that domain's own user", "root: secret values are unreadable to the root's own user", "root: git's settings are root's", "root: approver key installed", "root: forge configured"];
+  const rootChecks = ["root: keyring answers", "root: the write agent's askpass socket is closed to the root's own user", "root: private keys are unreadable to the root's own user", "root: the root's own user cannot become root", "root: the programs root runs are root's", "root: each domain's proxies run as that domain's own user", "root: secret values are unreadable to the root's own user", "root: git's settings are root's", "root: approver key installed", "root: forge configured", "root: only the pusher reaches the write agent", "root: the pusher answers"];
   let asked: Check[] | null = null;
   if (rootUp)
     try {

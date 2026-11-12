@@ -102,6 +102,14 @@ export const ensureProxyUser = async (domain: string) => {
   proxyUsers.add(domain);
 };
 
+/** The forge's address and host key, for the pusher: written by root in root's own
+ *  directory (root/forge-pin.ts), through the host's own way in, never through the root's
+ *  ordinary user (which could rewrite its own copy, and so aim a push elsewhere). */
+export const pinForge = async (forge: unknown) => {
+  const result = await backend().exec(ROOT_VM, [...NODE, `${guest.release}/root/forge-pin.ts`], { root: true, input: JSON.stringify(forge), timeoutMs: 60_000 });
+  if (result.code !== 0) refuse(`the root could not pin the forge's address: ${(result.stdout || result.stderr).trim().slice(-300)}`, "desolate doctor");
+};
+
 /** Change a domain's secrets: as root in the root VM, through the host's own way in, with
  *  the request (a value among it) on stdin (root/proxy/secret-store.ts). Then the root's
  *  user, which never sees a value, starts or stops the domain's secrets proxy and tells its

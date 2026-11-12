@@ -41,18 +41,16 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
 
 ## Open
 
-0. **The root's ordinary user both parses what domains send and pushes** (the audit's F6;
-   the most important open item). rootd runs `git index-pack`, `fetch` and `diff` on
-   agent-written packs, reads outbox JSON, and serves the dashboard, all as the user that
-   asks the keyring for signatures and runs `git push`. If any of those parsers is
-   compromised: during an approval window (2 minutes, 8 signatures) it can push other refs
-   of that repository; it can file a challenge for another commit on the same branch,
-   which a person approving by branch name may not notice; it reads every domain's
-   secrets and writes every share; it holds every editor's token. What would close it: the
-   parsing runs as a user that cannot ask for signatures and cannot write the root clones'
-   config, and the final push of the approved commit is done by the keyring (or a user of
-   its own) from a commit id, not by the user that parsed it. Not done: it changes how
-   offers enter the root clones and how pushes leave.
+0. **The root's ordinary user both parses what domains send and pushes** (the audit's F6).
+   **Pushing: fixed** (`mac/pusher`): the pusher, a user of its own, is the only one that
+   reaches the write agent; it parses nothing it is sent and asks the forge for the one
+   update the approval names (`decisions.md`, "The pusher"). Reviewed twice: the first
+   design (git on a bundle, as the pusher) left a git bug reusable across the two users,
+   took the forge's address from the root's user, and could stall; all three fixed.
+   **Still open:** that user still chooses which commit to ask a person to approve, and the
+   terminal prompt shows only repository, branch, commit and onto (step 2: an approval page
+   with a reviewer's account of the commit); it still reads every share and holds every
+   editor's token (steps 3 and 4 of the plan narrow what it is for).
 
 11. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
 12. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted

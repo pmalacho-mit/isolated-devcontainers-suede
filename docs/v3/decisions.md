@@ -463,6 +463,62 @@ reached from one domain read every domain's secrets. Now:
   secrets; a bug in them reached from that domain's own workspace can leak that domain's
   secrets. That domain's workspaces can already use them.
 
+## The pusher: the one user that reaches a write key, and it parses nothing (decided on the Mac; tested on T1 and T2)
+
+The independent audit's F6: the root's ordinary user parses everything a domain sends (git on
+agent-written packs, outbox JSON, the dashboard's state) and it also pushed, with the write
+agent open to it for the two minutes and eight signatures an approval lasts. A bug in any of
+those parsers could push another branch of that repository, or another commit, in the window.
+
+- **A user of its own.** `desolate-pusher` (root/pusher.ts) is the only user that can enter
+  `/run/desolate/keyring-write`, where the write agent's relay is (the keyring's directory,
+  the pusher's group, 0750). The root's user cannot open it (doctor asks, by trying), and
+  is not in the pusher's group; the pusher is not in the root's user's group, so `/desolate`
+  (every share) is closed to it. Its code is root's copy in `/opt/desolate/proxy-code`.
+- **It is told an id, and it parses nothing it is sent.** The root's user hands it the
+  approval's id, a pack and the LFS objects. The pusher asks the keyring what the id names:
+  repository, branch, commit, and `onto`, what the remote's branch is now (or none). Then
+  it speaks git's push protocol to the forge itself: it reads the forge's ref list, stops if
+  the branch is not exactly `onto`, asks for the one update `<onto> <commit>
+  refs/heads/<branch>`, and forwards the pack as bytes, counted and never read. The forge
+  applies the update atomically or not at all, and cannot point the branch at a commit the
+  pack does not hold. LFS objects are hashed as they arrive and uploaded from a repository
+  with no git object in it. T1 runs this code against a real `git receive-pack`: a pack of
+  another commit, a stale `onto`, and bytes that are not a pack all move nothing; T2
+  `04-offers` hands it a live approval's id with another commit's pack: no ref moved.
+- **Why it parses nothing.** The first version fetched a bundle from the root's user and
+  ran git on it, as the pusher. The audit of that version: a bug in git's pack parsing that
+  compromised the root's user could be sent straight on to the pusher, which would then
+  hold any live approval's signatures for that repository. No other user in between fixes
+  that, since the same bug works again on each. A process that never parses those bytes does.
+- **`onto` instead of a force flag.** Every approval says what the branch moves from, so a
+  push is a compare-and-swap whether it builds on the remote's branch or replaces it, and a
+  remote that moved since the approval refuses it. Whether the commit builds on `onto` is
+  for the person to see, from the reviewer (step 2 of this plan), not for the pusher to
+  decide; the raw `git push` helper still wants a `+` for one that does not.
+- **Where it pushes is root's word.** The forge's address and host key are read from
+  `/var/lib/desolate-root/forge.json` and `known_hosts`, written by root from what the host
+  sends at every bootstrap (root/forge-pin.ts), not from the root's user's copies.
+- **One push per process, one push per approval.** The pusher exits after each push, and
+  root's supervisor kills every process of its user before starting the next, which empties
+  the user's home first. Asking the keyring what an approval names claims it: only a claimed
+  approval lets the write key sign, a claim lasts as long as a push may take (so LFS objects
+  first do not run the two minutes out), and an approval is claimed once.
+- **It says what it knows.** Once the ref update is asked for, the forge may take it as soon
+  as the pack is whole; a failure after that (the root's user stops sending, say) is
+  reported as "may have reached the remote", with the forge's report used if it came, and
+  never as "nothing was pushed" (the second review measured the update landing during such a
+  stall). Asked for a push that already landed, the pusher answers that it is done.
+- **What is left.** Inside one approved push, the root's user can add objects the commit
+  does not need to the pack, and LFS objects it does not name: both reach the forge,
+  unreferenced (on a public repository, readable by anyone who knows their hash). That is a
+  way out for data only for a user that has no other, and this one has the network. It can
+  withhold a push, or ask a person to approve a commit of its choosing, from an `onto` of its
+  choosing: the terminal prompt shows both ids, and whether the commit builds on `onto` comes
+  from that user's own review there; the approval page shows the reviewer's account instead
+  (step 2). Revoking an approval is open to it too, which only cancels. The pusher reads one
+  JSON line it is sent (at most 1 MiB, node's parser), and nothing else.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the
