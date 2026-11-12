@@ -144,7 +144,10 @@ const submit = async (socket: Socket, repo: Repo, size: number, rest: Buffer) =>
       return { ok: false, error: "a review bundle carries the clone's review ref and its origin/* refs, and nothing else" };
     // Every object arrives checked (root's git settings: fsckObjects), and is the reviewer's
     // only under a ref named by its own id.
-    await gitOk(dir, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", file, ...heads.map(([id, ref]) => `+${ref}:refs/seen/${id}`)], { timeoutMs: 1_800_000 });
+    // One ref per commit: two refs at one commit (origin/HEAD and origin/main, say) would
+    // both be refs/seen/<that commit>, and git refuses to fetch two into one.
+    const once = [...new Map(heads.map(([id, ref]) => [id, ref])).entries()];
+    await gitOk(dir, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", file, ...once.map(([id, ref]) => `+${ref}:refs/seen/${id}`)], { timeoutMs: 1_800_000 });
     return { ok: true };
   } finally {
     clearTimeout(timer);
