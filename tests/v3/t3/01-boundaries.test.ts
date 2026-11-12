@@ -55,11 +55,11 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
   });
 
   it("T3 bootstrap on real VMs: isolated, and doctor passes", () => {
-    stack.step("bootstrap on the qemu backend");
+    stack.step(`bootstrap on the ${stack.backend} backend`);
     const result = bootstrap(stack);
     assert.equal(result.code, 0, result.stderr + result.stdout.slice(-1500));
     assert.doesNotMatch(result.stdout, /NOT ISOLATED/);
-    assert.match(result.stdout, /ok {3}backend gives isolation: qemu/);
+    assert.match(result.stdout, new RegExp(`ok {3}backend gives isolation: ${stack.backend}`));
     assert.match(result.stdout, /doctor: all checks passed/);
   });
 
@@ -215,7 +215,7 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
       if (!/"status":"running"/.test(seen)) await new Promise((resolve) => setTimeout(resolve, 3000));
     }
     assert.match(seen, /^HTTP\/1\.1 200 /, seen.slice(0, 200));
-    assert.match(seen, /"stack":\{[^}]*"backend":"qemu","isolated":true/);
+    assert.match(seen, new RegExp(`"stack":\\{[^}]*"backend":"${stack.backend}","isolated":true`));
     assert.match(seen, new RegExp(`"workspace":"w1"[^\\]]*\\][^{]*\\{[\\s\\S]*"status":"running"[\\s\\S]*"editor":"http://${url.hostname}:${url.port}/\\?tkn=${token}`), "the dashboard knows the workspace is running, and its editor's address");
   });
 
@@ -240,7 +240,7 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     // (for names) or by the VM's confinement (for everything else): never by luck.
     assert.equal(stack.quiet("domain", "a", "net", "enforce").code, 0);
     const hostAddresses = Object.values(os.networkInterfaces()).flat().filter((a) => a && a.family === "IPv4" && !a.internal).map((a) => a!.address);
-    const forge = stack.env.DESOLATE_FORGE_SPEC!.replace(/^.*@/, "").replace(/:\d+$/, "");
+    const forge = stack.env.DESOLATE_FORGE_SPEC!.replace(/^.*@/, "");
     const probe = (targets: string) => `
       # REACHED only if the destination itself answered. A 403 whose body begins "desolate:"
       # is desolate's own relay or proxy refusing, which is a refusal.
@@ -254,7 +254,7 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     const targets = [
       `try gateway http://192.168.5.2:${port}/`,
       ...hostAddresses.map((address, index) => `try host${index} http://${address}:${port}/`),
-      `try forge_ssh telnet://${forge}:22`,
+      `try forge_ssh telnet://${forge}`,
       "try internet_ip http://1.1.1.1/",
       "try internet_name http://example.com/",
     ].join("\n");
@@ -327,6 +327,6 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
   });
 
   it("the transcript reads as reviewed", () => {
-    stack.checkTranscript("t3-01-boundaries");
+    stack.checkTranscript(`${stack.tier.toLowerCase()}-01-boundaries`);
   });
 });

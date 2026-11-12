@@ -33,9 +33,18 @@ export const take = async (domain: string, request: Record<string, unknown>): Pr
   if (!repo || !d.repos.includes(String(request.repo))) return { ok: false, error: "that repository is not in this domain" };
   if (!isBranch(request.branch) || !isCommit(request.commit)) return { ok: false, error: "an offer names a branch and a commit" };
   const id = String(request.repo);
-  await fetchDomain(domain, repo);
   const clone = clonePath(repo);
-  const have = (await git(clone, ["rev-parse", "--verify", "--quiet", `refs/remotes/${domain}/${request.branch}`])).stdout.trim();
+  // Two VMs see a share each through its own cache, and nothing makes them agree at once:
+  // on vz an entry a workspace has just replaced (a link turned back into a directory, a
+  // refs list renamed over) can look as it was to the root for about a second (measured).
+  // So what the workspace says it sent is looked for again, briefly, before it is refused.
+  let have = "";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 700));
+    await fetchDomain(domain, repo);
+    have = (await git(clone, ["rev-parse", "--verify", "--quiet", `refs/remotes/${domain}/${request.branch}`])).stdout.trim();
+    if (have === request.commit || refusalsOf(domain).some((r) => r.repo === id)) break;
+  }
   if (have !== request.commit) {
     const refusal = refusalsOf(domain).find((r) => r.repo === id);
     if (refusal) return { ok: false, error: `the root refused this domain's bundle of ${id}: ${refusal.why}`, fix: "a branch in this domain holds an object git calls dangerous (a .git inside a tree, a .gitmodules that is a symlink or names an option, a malformed object). Nothing new is taken until that branch is deleted here; then offer again" };

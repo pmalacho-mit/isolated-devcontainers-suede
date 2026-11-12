@@ -10,6 +10,8 @@
 #                                      builder with no route to nodejs.org or GitHub
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive LC_ALL=C
+# Quiet and repeatable: no service restarts offered after each apt step, no npm notices.
+export NEEDRESTART_SUSPEND=1 NPM_CONFIG_UPDATE_NOTIFIER=false
 KIND=${DESOLATE_IMAGE_KIND:-vm}
 HERE=$(cd "$(dirname "$0")" && pwd)
 # shellcheck disable=SC1091

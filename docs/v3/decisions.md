@@ -435,6 +435,31 @@ package archive). On a Mac, the Lima backend runs the same script on the first b
 digest-pinned Ubuntu cloud image and clones the result. Root and workspace VMs boot the same
 image.
 
+## On vz, a share is the host's files seen through each guest's own cache (measured on the M1)
+
+Three things the first workspaces on the Mac showed, each measured by hand on Lima 2.3.0:
+
+1. **Ownership as a guest sees it is not the host's.** A share's root can report uid 0 for
+   a moment after it is mounted. A file root in the guest creates, or `chown`s, reports uid
+   0 in that guest from then on, while on the Mac it stays the user's (the host writes as
+   the Mac user whatever the guest asked). Mounting a share's tag a second time, as root,
+   left parts of the first mount reporting uid 0.
+2. **Two guests do not agree at once.** A workspace replaced a symlink in its outbox with a
+   directory; the root VM went on seeing the symlink for about a second (reading through
+   it gave "Invalid argument"), then saw the directory. A file replaced by rename (a refs
+   list) can likewise look as it was.
+3. **What does not follow from (2):** a stale entry cannot lead the root anywhere new. A
+   link is resolved by the root VM's own kernel, and only when that kernel sees a link,
+   which `outbox.ts` then refuses (`O_NOFOLLOW`, and the descriptor's own path). An entry
+   the root still thinks is the old directory is operated on as that old directory by the
+   host, never through a link made since. Staleness costs a refusal, not a boundary.
+
+What changed because of them: a workspace VM's git trusts every directory (`safe.directory
+*`: its user, root and its devcontainer are all the domain's, and a devcontainer running as
+root makes "root-owned" files in the checkouts); the root looks for an offered commit again
+for about three seconds before saying it received nothing (`root/offers.ts`); a VM is used
+only once every share in its spec is mounted as the spec says (`host/vm/lima.ts`).
+
 ## The qemu backend uses 9p, because Lima's virtiofs on Linux is not read-only (measured)
 
 In the sandbox, a Lima VM on QEMU with `mountType: virtiofs` and a share marked

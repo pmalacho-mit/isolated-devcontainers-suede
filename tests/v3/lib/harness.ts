@@ -66,11 +66,20 @@ export const newStack = (label: string): Stack => {
   const forgeName = `dsl-forge-${instance}`;
 
   // The forge: a container of the base image, on the default bridge, where the root reaches it.
+  // On a Mac (T4) the container's bridge is inside Docker's own VM, which a vz VM cannot
+  // reach: the forge publishes its two ports on the Mac's loopback instead, and is named
+  // by the address a Lima VM reaches the Mac's loopback at.
+  const published = backend === "vz";
+  const freePort = () => Number(execFileSync(process.execPath, ["-e", "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"], { encoding: "utf8" }).trim());
+  const [sshPort, lfsPort] = published ? [freePort(), freePort()] : [22, 8080];
   execFileSync("docker", ["run", "-d", "--name", forgeName, "--label", `desolate.forge=${instance}`,
+    // (Its stand-in for the internet answers on 80 and 443, the only ports a workspace may
+    // leave by, so those are published as they are.)
+    ...(published ? ["-p", `127.0.0.1:${sshPort}:${sshPort}`, "-p", `127.0.0.1:${lfsPort}:${lfsPort}`, "-p", "127.0.0.1:80:80", "-p", "127.0.0.1:443:443"] : []),
     "-v", `${FORGE_SRC}:/forge:ro`, "-v", `${forgeState}:/forge-state`, "-v", `${seeds}:/seeds:ro`,
     process.env.DESOLATE_FAKE_IMAGE ?? "desolate/base:latest", "sleep", "infinity"], { stdio: "ignore" });
-  const ip = execFileSync("docker", ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", forgeName], { encoding: "utf8" }).trim();
-  execFileSync("docker", ["exec", "-d", forgeName, "bash", "/forge/serve.sh", "/forge-state", ip, "22", "8080"]);
+  const ip = published ? "192.168.5.2" : execFileSync("docker", ["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", forgeName], { encoding: "utf8" }).trim();
+  execFileSync("docker", ["exec", "-d", forgeName, "bash", "/forge/serve.sh", "/forge-state", ip, String(sshPort), String(lfsPort)]);
   for (let waited = 0; !fs.existsSync(path.join(forgeState, "sshd.pid")); waited += 100) {
     if (waited > 20_000) throw new Error("the stand-in forge did not start");
     spawnSync("sleep", ["0.1"]);
@@ -87,7 +96,7 @@ export const newStack = (label: string): Stack => {
     // Beside a real stack on the same machine: the tests' editors are on a port of their own.
     DESOLATE_EDITOR_PORT: process.env.DESOLATE_EDITOR_PORT ?? "31591",
     DESOLATE_FORGE_ADMIN: admin,
-    DESOLATE_FORGE_SPEC: `stand-in:ssh://git@${ip}:22`,
+    DESOLATE_FORGE_SPEC: `stand-in:ssh://git@${ip}:${sshPort}`,
     DESOLATE_FORGE_KNOWN_HOSTS: path.join(forgeState, "known_hosts"),
     LIMA_HOME: path.join(home, "lima"),
     NO_COLOR: "1",
@@ -99,7 +108,7 @@ export const newStack = (label: string): Stack => {
   const scrub = (text: string) =>
     text
       .split(home).join("<home>").split(work).join("<work>").split(REPO_ROOT).join("<repo>")
-      .split(instance).join("<instance>").split(ip).join("<forge>")
+      .split(instance).join("<instance>").split(`${ip}:${sshPort}`).join(`${ip}:22`).split(ip).join("<forge>")
       .replace(/ssh-ed25519 [A-Za-z0-9+/=]+/g, "ssh-ed25519 <key>")
       .replace(/tkn=[0-9a-f]{48}/g, "tkn=<token>")
       .replace(/docker daemon: docker \d+\.\d+\.\d+/g, "docker daemon: docker <version>")
