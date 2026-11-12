@@ -137,7 +137,7 @@ export const up = async (domain: string | undefined, options: { name?: string; c
     const { ensure } = await import("./templates.ts");
     const say = (line: string) => (json ? process.stderr.write(`${line}\n`) : out(line));
     template = await ensure(domain, view.repos, { specOf, startServices }, say);
-    phase(template ? "template" : "no template");
+    if (template) phase("template");
   }
   const plan = await rootctl<Workspace>("workspace.plan", { instance: INSTANCE, domain, name: options.name, checkouts: options.checkouts, base: options.base, fetch: options.fetch }, { quiet: true });
   phase("planned");

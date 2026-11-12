@@ -66,6 +66,17 @@ sync`;
  *  null when the domain has no spec, or the build did not come up (the workspace is then made
  *  from desolate's base, as before, and `say` says why). */
 export const ensure = async (domain: string, repos: string[], build: Builder, say: (line: string) => void): Promise<string | null> => {
+  // A template only makes a start faster: nothing about one may stop a workspace being made
+  // (two `up`s at once in a domain: the second finds the first's build under way).
+  try {
+    return await ensureOrThrow(domain, repos, build, say);
+  } catch (error) {
+    say(`  no template: ${(error as Error).message.replace(/[\x00-\x1f\x7f-\x9f]/g, "?").slice(0, 300)}. This workspace is made from desolate's base.`);
+    return null;
+  }
+};
+
+const ensureOrThrow = async (domain: string, repos: string[], build: Builder, say: (line: string) => void): Promise<string | null> => {
   const b = backend();
   const env = await rootctl<EnvKey | null>("domain.env-key", { slug: domain }, { quiet: true });
   if (!env) return null;
