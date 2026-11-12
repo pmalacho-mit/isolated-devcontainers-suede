@@ -10,7 +10,7 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
   + root VM running
   + root services: keyring
   + root: the approver's public key and the host daemon's token
-  dashboard    http://desolate.localhost:31591/   (and: desolate ui)
+  dashboard    http://desolate.localhost:31591/?tkn=<token>   (and: desolate ui)
 bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
@@ -30,6 +30,8 @@ doctor: all checks passed.
 [exit 0]
 
 ## an empty stack
+
+## the dashboard's credential
 
 ## who may talk to the state service
 
@@ -54,5 +56,5 @@ approved; the push waiting in the root continues.
 ## the diff, and no root editor
 
 $ desolate ui
-dashboard    http://desolate.localhost:31591/
+dashboard    http://desolate.localhost:31591/?tkn=<token>
 [exit 0]
