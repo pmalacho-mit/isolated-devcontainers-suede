@@ -350,9 +350,30 @@ const startAgent = (socketPath: string, env: NodeJS.ProcessEnv) => {
   return agent;
 };
 
+/** Where the keys are must be the keyring's alone, all the way up: a directory of its own
+ *  (not a link), mode 0700, in directories only root can change. Otherwise whoever could
+ *  rename an entry on the way could have put a directory of theirs there before a key was
+ *  made, and read the key. (start.sh makes it so; this does not take that on trust.) */
+export const keysDirRefusal = (dir: string, uid: number): string | null => {
+  const stat = fs.lstatSync(dir);
+  if (!stat.isDirectory()) return `${dir} is not a directory`;
+  if (stat.uid !== uid) return `${dir} is not the keyring's (owner ${stat.uid})`;
+  if ((stat.mode & 0o077) !== 0) return `${dir} is open to others (mode ${(stat.mode & 0o777).toString(8)})`;
+  for (let up = path.dirname(dir); ; up = path.dirname(up)) {
+    const parent = fs.lstatSync(up);
+    if (parent.isSymbolicLink() || parent.uid !== 0 || (parent.mode & 0o022) !== 0) return `${up} could be changed by someone other than root`;
+    if (up === path.dirname(up)) return null;
+  }
+};
+
 const main = async () => {
   fs.mkdirSync(KEYRING.keys, { recursive: true, mode: 0o700 });
   fs.chmodSync(KEYRING.keys, 0o700);
+  const unsafe = keysDirRefusal(KEYRING.keys, process.getuid!());
+  if (unsafe) {
+    log(`refusing to start: ${unsafe}`);
+    process.exit(1);
+  }
   fs.mkdirSync(KEYRING.run, { recursive: true, mode: 0o755 });
   fs.mkdirSync(KEYRING.pub, { recursive: true, mode: 0o755 });
   fs.mkdirSync(KEYRING.private, { recursive: true, mode: 0o700 });

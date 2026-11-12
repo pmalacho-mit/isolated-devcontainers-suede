@@ -56,7 +56,10 @@ if ! /usr/local/bin/node --version 2>/dev/null | grep -qx "v$NODE_VERSION"; then
     ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
   else
     fetch "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-$ARCH.tar.xz" "$(pin NODE_SHA256)" /tmp/node.tar.xz
-    tar -xJ -C /usr/local --strip-components=1 -f /tmp/node.tar.xz
+    # --no-same-owner: as root, tar keeps the archive's owner (uid 1001 for node's), and
+    # /usr/local/bin and node itself, which root runs, would belong to a uid anyone made
+    # later could be given (release/docs/incidents.md).
+    tar -xJ -C /usr/local --strip-components=1 --no-same-owner -f /tmp/node.tar.xz
     rm -f /tmp/node.tar.xz
   fi
 fi

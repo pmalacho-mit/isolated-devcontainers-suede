@@ -10,7 +10,7 @@ import { isBranch, isCommit, isLfsOid, parseRepo } from "../shared/names.ts";
 import type { Repo } from "../shared/names.ts";
 import { domain as domainOf, domains } from "./domains.ts";
 import { git, gitOk, ownedByRoot } from "./git.ts";
-import { clonePath, domainPath, mirrorPath, ROOT } from "./layout.ts";
+import { clonePath, domainPath, GITCONFIG, mirrorPath, ROOT } from "./layout.ts";
 import { dropLfs, refusalsOf, takeLfs } from "./outbox.ts";
 import { recordOf } from "./repos.ts";
 
@@ -137,7 +137,7 @@ export const diff = async (domain: string, repoArg: unknown, branch: unknown): P
   const clone = clonePath(parseRepo(r.repo)!);
   if (!ownedByRoot(clone)) throw new Error("not a root clone");
   const child = spawn("git", ["-C", clone, "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--unified=3", r.base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", r.commit, "--"],
-    { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: "C.UTF-8", GIT_CONFIG_GLOBAL: `${ROOT.state}/gitconfig`, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", GIT_EXTERNAL_DIFF: "" } });
+    { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: "C.UTF-8", GIT_CONFIG_GLOBAL: GITCONFIG, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", GIT_EXTERNAL_DIFF: "" } });
   const chunks: Buffer[] = [];
   let size = 0;
   let truncated = false;

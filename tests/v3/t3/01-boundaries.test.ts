@@ -162,7 +162,7 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     assert.equal(stack.inRoot(["bash", "-c", "echo the-roots-own > /var/lib/desolate/canary.bundle"]).code, 0);
     const planted = ws("git branch -D hostile >/dev/null; cd /desolate/outbox && rm -rf sync/acme/widgets && ln -s /var/lib/desolate sync/acme/widgets && readlink sync/acme/widgets", true);
     assert.equal(planted.stdout.trim(), "/var/lib/desolate", planted.stderr);
-    stack.inRoot(["bash", "-c", "export GIT_CONFIG_GLOBAL=/var/lib/desolate/gitconfig; cd /desolate/root/acme/widgets && git fetch a 2>&1; true"]);
+    stack.inRoot(["bash", "-c", "export GIT_CONFIG_GLOBAL=/var/lib/desolate-root/gitconfig; cd /desolate/root/acme/widgets && git fetch a 2>&1; true"]);
     assert.equal(stack.inRoot(["cat", "/var/lib/desolate/canary.bundle"]).stdout, "the-roots-own\n", "nothing of the root's was removed through the domain's link");
     // Put back, and with the dangerous branch gone, the domain's work flows again.
     ws("rm -f /desolate/outbox/sync/acme/widgets", true);

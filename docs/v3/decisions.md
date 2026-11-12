@@ -231,7 +231,8 @@ commit goes where.
   key file or fabricate the terminal. It stops everything in the VMs; it does not stop the
   host's own processes.
 - With either approver, a program running as the person on the host controls the VMs: it
-  can enter the root VM as root (`limactl shell ... sudo`) and read the write key itself.
+  can enter the root VM as root (by ssh as root with Lima's key, which is a file in
+  `~/.desolate/lima/_config`) and read the write key itself.
   The approval gate is then beside the point. Closing that means the write key must not be
   in a file anywhere: the next step is a write key that is itself a Secure Enclave key (GitHub
   accepts `ecdsa-sha2-nistp256` deploy keys), served to the root's ssh by an agent on the
@@ -360,6 +361,37 @@ command.
   and inode. A domain that wins that race (a directory swapped for a link and back within
   one read) gets text from a file the person can read shown to that same person. It is
   never acted on, and never returned to a domain.
+
+## The root VM's ordinary user is not root (decided on the Mac; measured)
+
+Lima's cloud-init gives its login user `NOPASSWD: ALL`, and writes that rule again at every
+boot (measured: removed, rebooted, back). In the root VM that user runs everything that
+parses what a domain wrote: git on its packs (rootd), each workspace's proxy and each
+domain's secrets proxy, and the state service. With sudo, the keyring's own user (which
+holds the keys, 0700) separated nothing from a bug in any of those.
+
+- **The rule.** `root/start.sh` writes `/etc/sudoers.d/99-desolate` (`<user> ALL=(ALL)
+  !ALL`). It sorts after cloud-init's `90-cloud-init-users`, and in sudoers the last match
+  wins, so it holds across boots without fighting cloud-init (measured: after a reboot
+  `sudo -n true` is refused, and Lima still starts the VM, in 9 s). `start.sh` tries sudo as
+  the user and refuses to start any service if it works; `doctor` asks the same.
+- **The host's way in** is ssh as root with Lima's key for desolate's home, on a control
+  socket of its own (`host/vm/lima.ts`, `rootSshArgs`). The key goes into root's
+  `authorized_keys` once, through the login user's sudo, at the first bootstrap, before
+  `start.sh` has ever run. It is taken from the host's own copy of the public key, never
+  from the user's `~/.ssh` in the VM (which that user could add a key of its own to).
+- **What root and the keyring rely on is root's.** `/var/lib/desolate` belongs to the user
+  (rootd writes its registry there by rename). Anything in it, the user can replace with a
+  link, so the keys, the hooks, the mirrors' hooks and git's settings moved to
+  `/var/lib/desolate-root`, and `start.sh` makes the user's directories as the user. Before,
+  `install -d -o <user> /var/lib/desolate/secrets` as root followed a link the user
+  planted there and handed it the directory the link named (T2 `01-root` plants three).
+- **Workspaces are unchanged**: their login user keeps sudo, because root in a workspace is
+  already the workspace's (P5: nothing inside a workspace VM is a boundary).
+- **Not yet:** the proxies run as the same user as rootd, and a domain's secret values are
+  that user's files. A bug in mitmproxy reached through one workspace could read every
+  domain's secrets, and write root clones. The next step is a user for the proxies, with
+  each domain's secrets readable by that domain's secrets proxy only.
 
 ## ssh-agent needs a relay in front of it (measured)
 

@@ -248,9 +248,13 @@ Things that are true of the code as it is, that the next person should not have 
   against hostile code on the Mac: a program running as you there can read the approver's
   key file, and can reach the write key through the VM layer (`decisions.md` section 5.3).
   The rule is that no such program is run.
-- **Keys and `sudo`:** in a Lima VM the login user can `sudo`. Keys and secrets are safe
-  from the root's unprivileged processes and from every workspace; not from a person, or a
-  program, that runs `sudo` in the root VM.
+- **Keys and `sudo`:** the root VM's login user has **no sudo** (it was Lima's
+  `NOPASSWD: ALL` until the Mac bring-up; `release/docs/incidents.md`). That user runs
+  rootd, the state service, git on a domain's packs and every proxy, so the write keys are
+  now safe from a bug in any of those. The host reaches root by ssh as root with Lima's
+  key. **Secrets are not yet**: a domain's secret values are files of that same user,
+  because the proxies that substitute them run as it. Giving the proxies a user of their
+  own is the next step (`docs/v3/mac-audit-notes.md`).
 - **A secret can be USED by whatever can reach its domain's proxy**, though never read:
   every workspace of the domain (by design), and anything on the host that can run
   `desolate exec` in one.

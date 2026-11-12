@@ -121,16 +121,16 @@ describe("T2 phase 1: the root VM", () => {
   it("keys are never readable from outside the keyring: a test that tries", () => {
     stack.step("try to read a private key");
     // Control: the key files exist, and root in the VM can see them, so the paths are right.
-    const control = stack.inRoot(["bash", "-c", "ls /var/lib/desolate/keyring/acme/widgets/"], { root: true });
+    const control = stack.inRoot(["bash", "-c", "ls /var/lib/desolate-root/keyring/acme/widgets/"], { root: true });
     assert.match(control.stdout, /^read$/m, "control: the read key is where the test looks");
     assert.match(control.stdout, /^write$/m);
     const attempts: [string, string[]][] = [
-      ["cat the key", ["cat", "/var/lib/desolate/keyring/acme/widgets/write"]],
-      ["list the key directory", ["ls", "/var/lib/desolate/keyring"]],
-      ["copy it", ["cp", "/var/lib/desolate/keyring/acme/widgets/read", "/tmp/stolen"]],
+      ["cat the key", ["cat", "/var/lib/desolate-root/keyring/acme/widgets/write"]],
+      ["list the key directory", ["ls", "/var/lib/desolate-root/keyring"]],
+      ["copy it", ["cp", "/var/lib/desolate-root/keyring/acme/widgets/read", "/tmp/stolen"]],
       ["connect to the approvals socket", ["bash", "-c", "echo '{\"op\":\"approve\",\"repo\":\"acme/widgets\",\"ref\":\"main\",\"commit\":\"0000000000000000000000000000000000000000\"}' | socat - UNIX-CONNECT:/run/desolate/keyring/internal.sock"]],
-      ["sudo to the keyring's user", ["sudo", "-n", "-u", "desolate-keyring", "cat", "/var/lib/desolate/keyring/acme/widgets/write"]],
-      ["sudo to root", ["sudo", "-n", "cat", "/var/lib/desolate/keyring/acme/widgets/write"]],
+      ["sudo to the keyring's user", ["sudo", "-n", "-u", "desolate-keyring", "cat", "/var/lib/desolate-root/keyring/acme/widgets/write"]],
+      ["sudo to root", ["sudo", "-n", "cat", "/var/lib/desolate-root/keyring/acme/widgets/write"]],
     ];
     for (const [what, argv] of attempts) {
       const result = stack.inRoot(argv);
@@ -153,10 +153,33 @@ describe("T2 phase 1: the root VM", () => {
     }
   });
 
+  it("the root's own user cannot become root: no sudo, and no link in its directory that root's start-up follows", () => {
+    stack.step("the root's own user against root");
+    // It runs everything that reads a domain's data, so this is what a bug in a proxy or in
+    // git would have. Control: root itself can do what the user is refused.
+    assert.equal(stack.inRoot(["sudo", "-n", "true"]).code === 0, false, "sudo is refused to the root's own user");
+    assert.equal(stack.inRoot(["stat", "-c", "%U", "/usr/local/bin"], { root: true }).stdout.trim(), "root", "control: /usr/local/bin is root's");
+    // The user owns /var/lib/desolate, so it can replace any name there with a link. Before,
+    // root's start-up ran `install -d -o <user>` on such names and gave the user what the
+    // link named. Plant links where start-up looks, run it again, and see what moved.
+    const planted = stack.inRoot(["bash", "-c", "cd /var/lib/desolate && mv secrets secrets.kept && ln -s /usr/local/bin secrets && rm -rf push-locks && ln -s /etc/desolate push-locks && ln -s /etc/profile.d hooks && echo planted"]);
+    assert.match(planted.stdout, /planted/, planted.stderr);
+    // Start-up may refuse (the user broke its own directory): that is failing closed.
+    // What it must not do is act on root's directories.
+    bootstrap(stack);
+    const after = stack.inRoot(["stat", "-c", "%U %a %n", "/usr/local/bin", "/etc/desolate", "/etc/profile.d"], { root: true }).stdout;
+    stack.inRoot(["bash", "-c", "cd /var/lib/desolate && rm -f secrets push-locks hooks && mv secrets.kept secrets && mkdir -p push-locks"]);
+    assert.match(after, /^root 755 \/usr\/local\/bin\nroot 755 \/etc\/desolate\nroot 755 \/etc\/profile\.d\n$/, "root's directories stayed root's");
+    const again = bootstrap(stack);
+    assert.equal(again.code, 0, again.stderr + again.stdout.slice(-800));
+    assert.match(again.stdout, /ok {3}root: the root's own user cannot become root/);
+    assert.match(again.stdout, /ok {3}root: git's settings are root's/);
+  });
+
   it("the root's git on a root clone ignores a hostile .lfsconfig and a hostile hooks directory", () => {
     stack.step("hostile content in the root clone");
     const clone = "/desolate/root/acme/widgets";
-    const run = (script: string) => stack.inRoot(["bash", "-c", `cd ${clone} && export GIT_CONFIG_GLOBAL=/var/lib/desolate/gitconfig && ${script}`]);
+    const run = (script: string) => stack.inRoot(["bash", "-c", `cd ${clone} && export GIT_CONFIG_GLOBAL=/var/lib/desolate-root/gitconfig && ${script}`]);
     // Control: the hostile files are really in the checkout.
     assert.equal(run("test -f .lfsconfig && test -x hooks/pre-commit").code, 0, "control: the hostile content is checked out");
     // .lfsconfig: content says elsewhere.invalid; git-lfs must use the mirror.
@@ -170,12 +193,12 @@ describe("T2 phase 1: the root VM", () => {
     // Hooks: commit, checkout and a refused push; none of the content's hooks may run.
     const work = run("git checkout -q -b probe && echo x >> README.md && git commit -q -am probe && git checkout -q main && git checkout -q probe; test ! -e /tmp/hostile-hook-ran");
     assert.equal(work.code, 0, `a hook from the repository's content ran: ${work.stderr}`);
-    assert.equal(run("git config core.hooksPath").stdout.trim(), "/var/lib/desolate/hooks");
+    assert.equal(run("git config core.hooksPath").stdout.trim(), "/var/lib/desolate-root/hooks");
     // Control for that: the same hooks DO run when a clone points core.hooksPath at them.
     const controlRun = run("cd /tmp/unpinned && git config core.hooksPath hooks && echo y >> README.md && git commit -q -am control; test -e /tmp/hostile-hook-ran");
     assert.equal(controlRun.code, 0, "control: the hostile hooks do fire when a clone is configured to run them");
     // The hooks directory itself is not writable by the root's user.
-    assert.notEqual(run("touch /var/lib/desolate/hooks/post-checkout").code, 0);
+    assert.notEqual(run("touch /var/lib/desolate-root/hooks/post-checkout").code, 0);
   });
 
   it("clone --no-push makes no write key", () => {
@@ -190,7 +213,7 @@ describe("T2 phase 1: the root VM", () => {
     assert.doesNotMatch(result.stdout, /write key: registered/);
     const list = JSON.parse(stack.desolate("repos", "--json").stdout) as { repo: string; pushable: boolean }[];
     assert.deepEqual(list.map((r) => [r.repo, r.pushable]), [["acme/consumer", false], ["acme/widgets", true]]);
-    const keys = stack.inRoot(["bash", "-c", "ls /var/lib/desolate/keyring/acme/consumer/"], { root: true });
+    const keys = stack.inRoot(["bash", "-c", "ls /var/lib/desolate-root/keyring/acme/consumer/"], { root: true });
     assert.doesNotMatch(keys.stdout, /write/, "no write key exists for it anywhere");
   });
 

@@ -1,5 +1,6 @@
 // Every operation the host can ask of the root. A fixed table: the CLI channel carries an
 // operation's name and JSON arguments, never a command line.
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { writeJson } from "../shared/json.ts";
@@ -7,7 +8,7 @@ import { repoOf, writeKnownHosts } from "./git.ts";
 import type { Forge } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { parseApproval } from "../shared/approval.ts";
-import { APPROVALS, FORGE, KEYRING } from "./layout.ts";
+import { APPROVALS, FORGE, GITCONFIG, KEYRING } from "./layout.ts";
 import * as domains from "./domains.ts";
 import { refusalsOf } from "./outbox.ts";
 import * as offers from "./offers.ts";
@@ -179,6 +180,27 @@ export const ops: Record<string, Op> = {
       /* unreadable, as it must be */
     }
     add("root: private keys are unreadable to the root's own user", keys === "unreadable", keys === "unreadable" ? `${KEYRING.keys} is the keyring user's alone` : `${KEYRING.keys} can be listed`, "desolate bootstrap");
+    // Asked, not assumed (P6): this user runs everything here that reads a domain's data.
+    const sudo = spawnSync("sudo", ["-n", "true"], { stdio: "ignore", timeout: 10_000 });
+    add("root: the root's own user cannot become root", sudo.status !== 0, sudo.status !== 0 ? "sudo refuses it" : "`sudo -n true` succeeds: a bug in a proxy or in git would reach the write keys", "desolate bootstrap (root/start.sh removes the rule)");
+    // What root (start.sh) and the keyring run: node, and every directory on root's PATH.
+    const notRoots = ["/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/usr/sbin", "/bin", "/sbin", process.execPath].filter((file) => {
+      try {
+        const stat = fs.statSync(file);
+        return stat.uid !== 0 || (stat.mode & 0o022) !== 0;
+      } catch {
+        return false;
+      }
+    });
+    add("root: the programs root runs are root's", notRoots.length === 0, notRoots.length === 0 ? `node (${process.execPath}) and root's PATH` : `${notRoots.join(", ")} could be changed by someone other than root`, "desolate bootstrap (root/start.sh gives them back)");
+    let gitconfig = "";
+    try {
+      const stat = fs.lstatSync(GITCONFIG);
+      gitconfig = stat.isFile() && stat.uid === 0 && (stat.mode & 0o022) === 0 ? "root's" : "";
+    } catch {
+      /* missing */
+    }
+    add("root: git's settings are root's", gitconfig !== "", gitconfig !== "" ? GITCONFIG : `${GITCONFIG} is missing, or could be changed by the root's own user`, "desolate bootstrap");
     let approver = "";
     try {
       const stat = fs.statSync(KEYRING.approver);

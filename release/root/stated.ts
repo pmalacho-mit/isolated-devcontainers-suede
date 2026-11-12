@@ -42,7 +42,7 @@ import { statusView } from "../shared/status.ts";
 import { refusal } from "../workspace/editor-gate.ts";
 import * as domains from "./domains.ts";
 import { refusalsOf } from "./outbox.ts";
-import { APPROVALS, clonePath, domainPath, ROOT } from "./layout.ts";
+import { APPROVALS, clonePath, domainPath, GITCONFIG, ROOT } from "./layout.ts";
 import * as offers from "./offers.ts";
 import * as proxy from "./proxy/manage.ts";
 import * as secrets from "./proxy/secrets.ts";
@@ -171,7 +171,7 @@ const push = (args: Record<string, string>, record: (command: string) => Action)
   const action = record(`desolate push ${args.domain} ${args.repo} ${args.branch} --expect ${args.commit}`);
   action.state = "running";
   action.lines.push("waiting for your approval on the host: run `desolate approve` in a terminal there");
-  const child = spawn("git", ["-C", clonePath(repo), "push", "--porcelain", "origin", `${args.commit}:refs/heads/${args.branch}`], { env: { ...process.env, GIT_CONFIG_GLOBAL: `${ROOT.state}/gitconfig`, GIT_TERMINAL_PROMPT: "0" }, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn("git", ["-C", clonePath(repo), "push", "--porcelain", "origin", `${args.commit}:refs/heads/${args.branch}`], { env: { ...process.env, GIT_CONFIG_GLOBAL: GITCONFIG, GIT_TERMINAL_PROMPT: "0" }, stdio: ["ignore", "pipe", "pipe"] });
   const take = (chunk: Buffer) => {
     for (const line of chunk.toString().split("\n").map((l) => l.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").trim()).filter(Boolean)) action.lines.push(line.slice(0, 300));
     if (action.lines.length > 60) action.lines.splice(0, action.lines.length - 60);

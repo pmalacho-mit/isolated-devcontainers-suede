@@ -22,7 +22,7 @@ const vmOf = (target: string) => {
 };
 const inWs = (script: string, root = false) => stack.inVm(vmOf("dev/w1"), ["bash", "-lc", `cd /workspaces/acme/widgets && ${script}`], { root });
 const ROOT_CLONE = "/desolate/root/acme/widgets";
-const inRootClone = (script: string) => stack.inRoot(["bash", "-c", `export GIT_CONFIG_GLOBAL=/var/lib/desolate/gitconfig; cd ${ROOT_CLONE} && ${script}`]);
+const inRootClone = (script: string) => stack.inRoot(["bash", "-c", `export GIT_CONFIG_GLOBAL=/var/lib/desolate-root/gitconfig; cd ${ROOT_CLONE} && ${script}`]);
 const marker = "/tmp/desolate-pwned";
 const pwned = () => stack.inRoot(["bash", "-c", `ls ${marker}* 2>/dev/null | wc -l`], { root: true }).stdout.trim();
 const offers = () => JSON.parse(stack.quiet("offers", "--json").stdout) as { branch: string; commit: string }[];
@@ -113,7 +113,7 @@ describe("T2: what a hostile domain sends, the root takes as data", () => {
       `printf '* diff=evil filter=evil merge=evil\\n*.md textconv=evil\\n' > .gitattributes`,
       `printf '[diff "evil"]\\n\\tcommand = touch ${marker}-diffdriver\\n\\ttextconv = touch ${marker}-textconv\\n[filter "evil"]\\n\\tsmudge = touch ${marker}-smudge\\n\\tclean = touch ${marker}-clean\\n' > .gitconfig`,
       `printf '#!/bin/sh\\ntouch ${marker}-hook\\n' > hooks/post-checkout && chmod +x hooks/post-checkout`,
-      `ln -s /var/lib/desolate/keyring out-of-tree`,
+      `ln -s /var/lib/desolate-root/keyring out-of-tree`,
       `echo changed >> README.md && git add -A && git ${ME} commit -qm 'planted'`,
     ].join(" && "));
     assert.equal(made.code, 0, made.stdout);

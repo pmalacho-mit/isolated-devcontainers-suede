@@ -4,9 +4,10 @@ Working notes from the agent on the M1, kept as the vz backend came up. Each ite
 **open**, **fixed** (with where), or **accepted** (with why). Items move into
 `decisions.md` or `release/docs/incidents.md` when they are settled.
 
-## Open
+## Fixed
 
-1. **The root VM's ordinary user may have passwordless sudo.** rootd, the state service and
+1. **The root VM's ordinary user had passwordless sudo** (branch `mac/root-no-sudo`; also
+   the links root's start-up followed, and the keyring's directory in the user's own). rootd, the state service and
    the git that parses agent-written packs run as Lima's login user. Lima gives that user
    `NOPASSWD: ALL` by default. If it does here, the keyring's own user protects nothing
    against a compromise of those processes: `sudo cat` reads the write keys.
@@ -15,8 +16,16 @@ Working notes from the agent on the M1, kept as the vz backend came up. Each ite
    is cloned from): `(ALL) NOPASSWD: ALL`. Worse than the git surface: each workspace's
    proxy (`proxy.ts`) and each domain's secrets proxy (mitmproxy) are spawned by rootd as
    this user, and they parse what workspaces send. A memory or logic bug in either is
-   one `sudo` from every write key and every domain's secrets. Fix planned: the root VM's
-   login user gets no sudo; the host reaches root by ssh as root with Lima's key.
+   one `sudo` from every write key and every domain's secrets. Fixed: no sudo for that user;
+   the host reaches root by ssh as root with Lima's key; root's things in a root-owned
+   directory. `decisions.md`, "The root VM's ordinary user is not root".
+
+## Open
+
+2. **The proxies run as rootd's user, and secrets are that user's files.** A bug in
+   mitmproxy or in `proxy.ts`, reached from any workspace, reads every domain's secret
+   values and can write root clones and the registry. Fix: a user for the proxies; each
+   domain's secrets readable by its secrets proxy only.
 3. **The dashboard answers any local client, and hands out editor tokens.** The forwarder
    carries `desolate.localhost:31581` to the state service on its name alone; the service
    checks Host and Origin, which stops other web pages, not a local process (any user of
