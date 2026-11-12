@@ -14,6 +14,7 @@
 // daemon owns the host end of it and carries each connection to that workspace's proxy and
 // nowhere else: which link a connection arrived on is what attributes it.
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { connect, createServer } from "node:net";
 import type { Server, Socket } from "node:net";
@@ -38,7 +39,7 @@ const NODE = ["node", "--disable-warning=ExperimentalWarning"];
 /** Protocols with no name in them, known by their port before any connection is seen. */
 const RAW_PORTS = new Set([3306, 5432, 6379, 27017, 11211, 5672, 9092, 1433, 26257]);
 
-type Registered = { vm: string; domain: string; workspace: string; proxyPort: number | null };
+type Registered = { vm: string; domain: string; workspace: string; proxy: string | null };
 type Checkouts = { repo: string; kind: string; name: string; path?: string }[];
 type Entry = Registered & { listeners: Set<number>; reserved: Set<number>; link: Server | null; lastError: string; editorToken: string; devcontainer: string; folder: string; watchers: fs.FSWatcher[] };
 export type PortView = {
@@ -48,6 +49,19 @@ export type PortView = {
 };
 
 // ------------------------------------------------------------------ the daemon itself
+/** What code this daemon runs: the host's and the shared files. An updated desolate means
+ *  nothing to a daemon still running the old (a fix to the link's handshake, say). */
+const codeOf = () => {
+  const hash = createHash("sha256");
+  for (const dir of ["host", "host/vm", "shared"])
+    for (const name of fs.readdirSync(path.join(RELEASE_DIR, dir)).filter((n) => n.endsWith(".ts")).sort()) hash.update(name).update(fs.readFileSync(path.join(RELEASE_DIR, dir, name)));
+  return hash.digest("hex").slice(0, 16);
+};
+const CODE = codeOf();
+
+/** How many connections one workspace's link may have open at once. */
+const LINK_CONNECTIONS = 64;
+
 const serve = async () => {
   const b = backend();
   const entries = new Map<string, Entry>();
@@ -194,7 +208,10 @@ const serve = async () => {
       // Fail closed on what the VM says: integers, 1024 and up, and a sane number of them.
       // The editor's two in-VM ports are never dev-server ports: a dev hostname must not
       // reach the editor, and nothing may reach its server around its gate.
-      entry.listeners = new Set(reply.listeners.filter((port) => Number.isInteger(port) && port >= 1024 && port <= 65535 && port !== EDITOR.server && port !== EDITOR.gate && port !== editorHostPort()).slice(0, 256));
+      // Nor any port desolate itself uses on this machine (a VM's ssh, a link): a workspace
+      // listening there must not get the host to bind it.
+      const ours = b.hostPorts?.() ?? new Set<number>();
+      entry.listeners = new Set(reply.listeners.filter((port) => Number.isInteger(port) && port >= 1024 && port <= 65535 && port !== EDITOR.server && port !== EDITOR.gate && port !== editorHostPort() && !ours.has(port)).slice(0, 256));
       entry.lastError = "";
     } catch (error) {
       // A workspace that cannot be asked forwards nothing new, and what it had is dropped.
@@ -210,9 +227,9 @@ const serve = async () => {
     fs.rmSync(socket, { force: true });
     const carry = (client: Socket) => {
       client.on("error", () => client.destroy());
-      if (entry.proxyPort === null) return client.destroy();
+      if (entry.proxy === null) return client.destroy();
       // To this workspace's proxy in the root, and nowhere else.
-      pipe(client, b.dial(ROOT_VM, entry.proxyPort), Buffer.alloc(0));
+      pipe(client, b.dial(ROOT_VM, entry.proxy), Buffer.alloc(0));
     };
     const server = createServer(carry);
     server.on("error", (error) => log(`link ${entry.vm}: ${error.message}`));
@@ -224,27 +241,42 @@ const serve = async () => {
     if (hostPort) {
       // Every process on this machine can connect to a loopback port. Only a connection
       // that opens with this workspace's token is carried; without a token, none is.
+      // Each connection costs a session into the root VM and processes here: a workspace
+      // gets this many at once, and no more.
+      let open = 0;
       const tcp = createServer((client) => {
         client.on("error", () => client.destroy());
-        if (!token || entry.proxyPort === null) return client.destroy();
+        if (!token || entry.proxy === null || open >= LINK_CONNECTIONS) return client.destroy();
+        open += 1;
+        client.once("close", () => (open -= 1));
         void acceptLink(client, token).then((rest) => {
-          if (rest === null || entry.proxyPort === null) return client.destroy();
-          pipe(client, b.dial(ROOT_VM, entry.proxyPort), rest);
+          if (rest === null || entry.proxy === null) return client.destroy();
+          pipe(client, b.dial(ROOT_VM, entry.proxy), rest);
         });
       });
-      tcp.on("error", (error) => log(`link ${entry.vm} on port ${hostPort}: ${error.message}`));
+      // If something else holds the port (it was free a moment, and another program took
+      // it), keep trying while the workspace is ours: the guest will not talk to what does
+      // not prove it knows the token (shared/link.ts), but it needs its own host to talk to.
+      let closed = false;
+      tcp.on("error", (error: NodeJS.ErrnoException) => {
+        log(`link ${entry.vm} on port ${hostPort}: ${error.message}`);
+        if (error.code === "EADDRINUSE" && !closed) setTimeout(() => !closed && tcp.listen({ port: hostPort, host: "127.0.0.1", exclusive: true }), 2000);
+      });
       tcp.listen({ port: hostPort, host: "127.0.0.1", exclusive: true });
-      server.on("close", () => tcp.close());
+      server.on("close", () => {
+        closed = true;
+        tcp.close();
+      });
     }
   };
 
   const register = (r: Registered) => {
     const existing = entries.get(r.vm);
     if (existing) {
-      existing.proxyPort = r.proxyPort;
+      existing.proxy = r.proxy;
       return;
     }
-    const entry: Entry = { vm: r.vm, domain: r.domain, workspace: r.workspace, proxyPort: r.proxyPort, listeners: new Set(), reserved: new Set(), link: null, lastError: "", editorToken: "", devcontainer: "", folder: "", watchers: [] };
+    const entry: Entry = { vm: r.vm, domain: r.domain, workspace: r.workspace, proxy: r.proxy, listeners: new Set(), reserved: new Set(), link: null, lastError: "", editorToken: "", devcontainer: "", folder: "", watchers: [] };
     entries.set(r.vm, entry);
     // A status set in the workspace is a file changing in a share. A VM gets no events for
     // a share, so the host watches (the directory, for a change: it reads nothing) and
@@ -488,6 +520,8 @@ const serve = async () => {
           reconcile();
           await Promise.all([...entries.values()].map(sync));
           reply = { ok: true, ports: view(), editor: { port: editorHostPort(), error: editorError } };
+        } else if (request.op === "code") {
+          reply = { ok: true, code: CODE };
         } else if (request.op === "stop") {
           connection.end(JSON.stringify({ ok: true }) + "\n");
           editors.close();
@@ -508,13 +542,13 @@ const serve = async () => {
 
   // After a restart of the host: take up every workspace whose VM is running.
   try {
-    const domains = await rootctl<{ slug: string; workspaces: (WorkspacePlan & { proxyPort?: number })[] }[]>("domain.list", {}, { quiet: true, timeoutMs: 30_000 });
+    const domains = await rootctl<{ slug: string; workspaces: (WorkspacePlan & { proxy?: string })[] }[]>("domain.list", {}, { quiet: true, timeoutMs: 30_000 });
     const running = new Set((await b.list()).filter((vm) => vm.status === "running").map((vm) => vm.name));
     for (const d of domains)
       for (const w of d.workspaces)
         if (running.has(w.vm)) {
-          const proxy = await rootctl<{ port: number }>("proxy.start", { vm: w.vm, domain: w.domain, workspace: w.workspace }, { quiet: true, timeoutMs: 60_000 });
-          register({ vm: w.vm, domain: w.domain, workspace: w.workspace, proxyPort: proxy.port, checkouts: w.checkouts } as Registered);
+          const proxy = await rootctl<{ socket: string }>("proxy.start", { vm: w.vm, domain: w.domain, workspace: w.workspace }, { quiet: true, timeoutMs: 60_000 });
+          register({ vm: w.vm, domain: w.domain, workspace: w.workspace, proxy: proxy.socket, checkouts: w.checkouts } as Registered);
         }
   } catch (error) {
     log(`could not list workspaces at start: ${String(error)}`);
@@ -558,7 +592,14 @@ const ask = (request: Record<string, unknown>, timeoutMs = 60_000): Promise<Reco
 const alive = () => ask({ op: "ping" }, 3000).then(() => true, () => false);
 
 export const ensureDaemon = async () => {
-  if (await alive()) return;
+  if (await alive()) {
+    const running = await ask({ op: "code" }).catch(() => ({}) as Record<string, unknown>);
+    if (running.code === CODE) return;
+    // Started from other code: stopped, and started again below (it registers every
+    // running workspace again as it starts).
+    await stopForwarder();
+    await waitFor(async () => !(await alive()), 10_000, 100);
+  }
   fs.mkdirSync(paths.logs, { recursive: true });
   const log = fs.openSync(LOG, "a");
   const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", fileURLToPath(import.meta.url), "serve"], { detached: true, stdio: ["ignore", log, log], env: process.env });
@@ -566,9 +607,9 @@ export const ensureDaemon = async () => {
   if (!(await waitFor(alive, 20_000, 100))) throw new Error(`the host daemon did not start; see ${LOG}`);
 };
 
-export const connectWorkspace = async (plan: WorkspacePlan & { proxyPort?: number | null }) => {
+export const connectWorkspace = async (plan: WorkspacePlan & { proxy?: string | null }) => {
   await ensureDaemon();
-  const reply = await ask({ op: "register", vm: plan.vm, domain: plan.domain, workspace: plan.workspace, proxyPort: plan.proxyPort ?? null, checkouts: plan.checkouts });
+  const reply = await ask({ op: "register", vm: plan.vm, domain: plan.domain, workspace: plan.workspace, proxy: plan.proxy ?? null, checkouts: plan.checkouts });
   if (reply.ok !== true) throw new Error(`the host daemon refused the workspace: ${String(reply.error)}`);
 };
 

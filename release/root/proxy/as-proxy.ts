@@ -76,3 +76,27 @@ export const ensureLinkToken = (domain: string) => {
   fs.writeFileSync(temp, randomBytes(32).toString("hex") + "\n", { mode: 0o640 });
   fs.renameSync(temp, file);
 };
+
+/** The uid that owns the socket listening on 127.0.0.1:<port> in this VM, from the kernel's
+ *  own table; null if none. A port is anyone's to take first: a secrets proxy is believed to
+ *  be on its port only if its domain's proxies' user is what listens there (an audit on the
+ *  M1 found the race: another domain's proxies binding the port before mitmproxy did). */
+export const listenerUid = (port: number): number | null => {
+  let table = "";
+  try {
+    table = fs.readFileSync("/proc/net/tcp", "utf8");
+  } catch {
+    return null;
+  }
+  const want = `0100007F:${port.toString(16).toUpperCase().padStart(4, "0")}`;
+  for (const row of table.split("\n").slice(1)) {
+    const cols = row.trim().split(/\s+/);
+    if (cols[1] === want && cols[3] === "0A") return Number(cols[7]);
+  }
+  return null;
+};
+/** The uid of a domain's proxies' user; null if root has not made it. */
+export const proxyUid = (domain: string): number | null => {
+  const found = spawnSync("id", ["-u", proxyUserOf(domain)], { encoding: "utf8" });
+  return found.status === 0 ? Number(found.stdout.trim()) : null;
+};

@@ -33,7 +33,7 @@ const startRootServices = async () => {
   const result = await backend().exec(ROOT_VM, ["bash", `${guest.release}/root/start.sh`, String(uid)], { root: true, timeoutMs: 120_000 });
   // start.sh changes the root's user's groups (in desolate-proxy's, out of any that could
   // become root): what the host runs as that user next must have the groups it now has.
-  if (result.code === 0) await backend().refreshSessions?.(ROOT_VM);
+  if (result.code === 0) await backend().refreshSessions?.(ROOT_VM, result.stdout.includes("desolate: sessions raised"));
   if (result.code !== 0) refuse(`the root's services did not start: ${(result.stderr || result.stdout).trim().slice(-600)}`, "desolate doctor; the root's own logs are in /var/lib/desolate-root and /var/lib/desolate (desolate root shell)");
 };
 

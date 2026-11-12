@@ -273,10 +273,16 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
       sudo -n -u ${other} cat /var/lib/desolate-proxies/domains/a/secrets.json >/dev/null 2>&1 && echo other_reads_secrets=REACHED || echo other_reads_secrets=refused
       echo "other_uses_secrets_proxy=$(sudo -n -u ${other} python3 /tmp/handoff.py "$address" none "$port" 2>/dev/null || echo refused)"
       echo "control_own=$(sudo -n -u ${a} python3 /tmp/handoff.py "$address" token "$port" 2>&1 | tail -1)"
+      # A workspace's own proxy is a socket only its domain's proxies and the root's user
+      # reach: another domain's proxies cannot ask it for this domain's secret hosts.
+      sock=$(ls /var/lib/desolate-proxies/out/a/*.sock | head -1)
+      sudo -n -u ${other} socat -u /dev/null "UNIX-CONNECT:$sock" 2>/dev/null && echo other_reaches_workspace_proxy=REACHED || echo other_reaches_workspace_proxy=refused
+      sudo -n -u "$(stat -c %U /var/lib/desolate)" socat -u /dev/null "UNIX-CONNECT:$sock" 2>/dev/null && echo control_user_reaches_workspace_proxy=REACHED || echo control_user_reaches_workspace_proxy=refused
       touch /desolate/root/user-tried && echo control_share=WROTE && rm -f /desolate/root/user-tried /tmp/handoff.py`], { root: true });
     const got = lines(tried.stdout);
     assert.equal(got.control_share, "WROTE", "control: the root writes the share, so a refusal above is the closed directory");
     assert.equal(got.control_own, "200", "control: domain a's own proxies, with its token, are let into its secrets proxy");
+    assert.equal(got.control_user_reaches_workspace_proxy, "REACHED", "control: the root's user (the host daemon's way in) reaches a's workspace proxy");
     assert.equal(got.other_uses_secrets_proxy, "403", "another domain's proxies reach it (given the port), and are refused for want of the token");
     for (const [name, verdict] of Object.entries(got)) if (!name.startsWith("control") && name !== "other_uses_secrets_proxy") assert.match(verdict, /^refused/, name);
     assert.equal(stack.quiet("domain", "a", "secret", "rm", "T3-HANDOFF-NAME").code, 0);

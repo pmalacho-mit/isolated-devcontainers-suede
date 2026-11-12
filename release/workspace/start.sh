@@ -11,6 +11,16 @@ LINK=${2:?usage: start.sh <uid> <link>}
 HERE=$(cd "$(dirname "$0")" && pwd)
 USER_NAME=$(getent passwd "$USER_UID" | cut -d: -f1)
 install -d -m 0755 /run/desolate /var/lib/desolate
+# Lima runs every command from the host over one ssh connection per VM, and sshd allows ten
+# sessions on a connection by default: a workspace's link, the dashboard and desolate's own
+# commands are each one, and the eleventh was refused (an audit on the M1). Raised; a
+# connection made before keeps the old number, so the host makes a new one when this says so.
+mkdir -p /etc/ssh/sshd_config.d
+if [ "$(cat /etc/ssh/sshd_config.d/50-desolate.conf 2>/dev/null)" != "MaxSessions 1000" ]; then
+  echo "MaxSessions 1000" >/etc/ssh/sshd_config.d/50-desolate.conf
+  systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || true
+  echo "desolate: sessions raised"
+fi
 # git's safe.directory guards one user against a repository another user planted. In a
 # workspace VM there is no such other user: the VM's user, root and the devcontainer are
 # all the domain's, and the VM is the boundary (P5). And on vz, ownership as the guest sees

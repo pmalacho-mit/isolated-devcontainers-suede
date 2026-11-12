@@ -52,9 +52,12 @@ table ip desolate {
 }
 N
 
-if ! alive /run/desolate/egress.pid || [ "$(cat /run/desolate/link 2>/dev/null)" != "$LINK" ]; then
+# Started again when its link, or its code (the link's handshake lives in shared/link.ts),
+# has changed.
+RELAY="$LINK $(cat "$HERE/egress.ts" "$HERE/../../shared/link.ts" "$HERE/../../shared/sniff.ts" | sha256sum | cut -c1-16)"
+if ! alive /run/desolate/egress.pid || [ "$(cat /run/desolate/link 2>/dev/null)" != "$RELAY" ]; then
   alive /run/desolate/egress.pid && kill "$(cat /run/desolate/egress.pid)" 2>/dev/null || true
   setsid node --disable-warning=ExperimentalWarning "$HERE/egress.ts" "$LINK" >>/var/lib/desolate/egress.log 2>&1 </dev/null &
   echo $! >/run/desolate/egress.pid
-  echo "$LINK" >/run/desolate/link
+  echo "$RELAY" >/run/desolate/link
 fi

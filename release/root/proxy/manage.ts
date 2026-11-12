@@ -1,6 +1,6 @@
 // Starting and stopping each workspace's proxy, and a domain's network rules.
 import * as fs from "node:fs";
-import { createServer } from "node:net";
+import { connect } from "node:net";
 import * as path from "node:path";
 import { refuse } from "../../shared/exit.ts";
 import { readJson, writeJson } from "../../shared/json.ts";
@@ -10,33 +10,36 @@ import { alive, hasProxyUser, PROXY_CODE, proxyDomainDir, proxyOutDir, spawnAsPr
 import type { Policy } from "./proxy.ts";
 
 const DIR = `${ROOT.state}/proxy`;
-type Running = { port: number; pid: number; domain: string; workspace: string };
+type Running = { socket: string; pid: number; domain: string; workspace: string };
 const notMade = (domain: string) => refuse(`the domain ${domain} has no proxies' user yet`, "desolate bootstrap (the host makes it: root/proxy-user.sh)");
 const file = (vm: string) => path.join(DIR, "running", `${vm}.json`);
-const free = (port: number) =>
+
+/** Can the root's user connect to it yet? (It is the proxy's socket only once it answers.) */
+const answers = (socket: string) =>
   new Promise<boolean>((resolve) => {
-    const probe = createServer();
+    const probe = connect(socket);
+    probe.once("connect", () => {
+      probe.destroy();
+      resolve(true);
+    });
     probe.once("error", () => resolve(false));
-    probe.listen(port, "127.0.0.1", () => probe.close(() => resolve(true)));
   });
 
-export const start = async (vm: string, domain: string, workspace: string): Promise<{ port: number }> => {
+export const start = async (vm: string, domain: string, workspace: string): Promise<{ socket: string }> => {
   if (!/^[a-z0-9-]{1,60}$/.test(vm)) throw new Error("not a VM name");
   const existing = readJson<Running | null>(file(vm), null);
-  if (existing && alive(existing.pid)) return { port: existing.port };
+  if (existing && alive(existing.pid) && typeof existing.socket === "string") return { socket: existing.socket };
   if (!hasProxyUser(domain)) notMade(domain);
   fs.mkdirSync(path.join(DIR, "running"), { recursive: true });
-  let port = 0;
-  for (let candidate = 21000; candidate < 22000 && port === 0; candidate++) if (await free(candidate)) port = candidate;
-  if (port === 0) throw new Error("no free port for a proxy in the root");
+  const socket = path.join(proxyOutDir(domain), `${vm}.sock`);
   const log = fs.openSync(path.join(DIR, "proxy.log"), "a");
   const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
   for (const key of ["DESOLATE_ROOT_STATE", "DESOLATE_ROOT_DOMAINS", "DESOLATE_ROOT_SYS"]) if (process.env[key]) env[key] = process.env[key]!;
-  const child = spawnAsProxy(domain, process.execPath, ["--disable-warning=ExperimentalWarning", path.join(PROXY_CODE, "root", "proxy", "proxy.ts"), String(port), domain, workspace], env, log);
+  const child = spawnAsProxy(domain, process.execPath, ["--disable-warning=ExperimentalWarning", path.join(PROXY_CODE, "root", "proxy", "proxy.ts"), socket, domain, workspace], env, log);
   fs.closeSync(log);
-  for (let waited = 0; (await free(port)) && waited < 5000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
-  writeJson(file(vm), { port, pid: child.pid, domain, workspace });
-  return { port };
+  for (let waited = 0; !(await answers(socket)) && waited < 5000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  writeJson(file(vm), { socket, pid: child.pid, domain, workspace });
+  return { socket };
 };
 
 export const stop = (vm: string) => {

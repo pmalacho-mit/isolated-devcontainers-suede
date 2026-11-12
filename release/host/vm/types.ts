@@ -75,8 +75,10 @@ export interface Backend {
   /** Run a command with this process's own stdin, stdout and stderr, and a terminal if this
    *  process has one: a person's shell, or a prompt only a person can answer. */
   attach(name: string, argv: string[], options?: { cwd?: string }): Promise<number>;
-  /** Open a TCP connection to a port on the VM's loopback, from the host. */
-  dial(name: string, port: number): Duplex;
+  /** Open a connection, from the host, to a port on the VM's loopback or to a unix socket in
+   *  the VM (an absolute path: a workspace's proxy, which listens where only its domain's
+   *  proxies and the root's user can reach it). */
+  dial(name: string, target: number | string): Duplex;
   /** A workspace's link to its proxy: the address the guest connects to, and, where the
    *  backend carries it over a loopback port on the host, that port (the host daemon then
    *  listens there as well as on the socket). */
@@ -88,7 +90,21 @@ export interface Backend {
    *  proxies' group in the root): make the next commands run with them. Lima's sessions
    *  share one ssh connection, and a session keeps the groups that connection logged in
    *  with (found on the M1: `docker` refused every command the host ran). */
-  refreshSessions?(name: string): Promise<void>;
+  refreshSessions?(name: string, force?: boolean): Promise<void>;
+  /** The host's loopback ports this backend's VMs use (ssh, links). Never published for a
+   *  workspace: a workspace listening on one must not get the host to bind it, in front of
+   *  another VM's ssh or link (found by an audit on the M1). */
+  hostPorts?(): Set<number>;
 }
 
 export const GUEST_USER = "desolate";
+
+/** socat's address for a dial target; a port, or a socket path made only of plain names. */
+export const socatAddress = (target: number | string): string => {
+  if (typeof target === "number") {
+    if (!Number.isInteger(target) || target < 1 || target > 65535) throw new Error(`bad port ${target}`);
+    return `TCP:127.0.0.1:${target}`;
+  }
+  if (!/^(\/[A-Za-z0-9._-]+)+$/.test(target) || target.includes("/../") || target.length > 200) throw new Error("bad socket path");
+  return `UNIX-CONNECT:${target}`;
+};

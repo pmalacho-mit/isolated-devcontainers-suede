@@ -33,12 +33,31 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
    domain's secrets proxy** (`mac/proxy-per-domain`). A user per domain, its secrets in a
    directory only its group reads, and a handoff token every secrets proxy requires.
 
+10. **What the independent audit found** (`mac/audit-fixes`): a workspace proxy as a confused
+    deputy for another domain's secrets; a secrets proxy's port taken first; the vz link's
+    token sent to whatever held the port; workspaces making the host bind desolate's own
+    ports; ten ssh sessions per VM; proxies, the daemon and relays keeping old code. Each in
+    `release/docs/incidents.md`.
+
 ## Open
 
-10. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
-11. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted
+0. **The root's ordinary user both parses what domains send and pushes** (the audit's F6;
+   the most important open item). rootd runs `git index-pack`, `fetch` and `diff` on
+   agent-written packs, reads outbox JSON, and serves the dashboard, all as the user that
+   asks the keyring for signatures and runs `git push`. If any of those parsers is
+   compromised: during an approval window (2 minutes, 8 signatures) it can push other refs
+   of that repository; it can file a challenge for another commit on the same branch,
+   which a person approving by branch name may not notice; it reads every domain's
+   secrets and writes every share; it holds every editor's token. What would close it: the
+   parsing runs as a user that cannot ask for signatures and cannot write the root clones'
+   config, and the final push of the approved commit is done by the keyring (or a user of
+   its own) from a commit id, not by the user that parsed it. Not done: it changes how
+   offers enter the root clones and how pushes leave.
+
+11. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
+12. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted
     under the rule that nothing untrusted runs on the Mac or in the root.
-12. **The Touch ID approver has never been run.** Opt-in; the terminal approver is the
+13. **The Touch ID approver has never been run.** Opt-in; the terminal approver is the
     default. It compiles on the M1 (Swift 5.10, `swiftc -O`, 2026-11-12) and its key is
     `.privateKeyUsage` + `.userPresence`, this device only. Running it makes a Secure
     Enclave key and asks for Touch ID: a person's to do (`DESOLATE_APPROVER=touchid` at a

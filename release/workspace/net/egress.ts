@@ -11,19 +11,23 @@
 //   node egress.ts <link>      link: unix:/path  or  tcp:host:port[#token]  (shared/link.ts)
 import { connect, createServer } from "node:net";
 import type { Socket } from "node:net";
-import { hello, parseLink } from "../../shared/link.ts";
+import { open as openLink, parseLink } from "../../shared/link.ts";
 import { sniffSocket } from "../../shared/sniff.ts";
 
 const link = parseLink(process.argv[2] ?? "");
 if (!link) throw new Error(`egress: '${process.argv[2] ?? ""}' is not a link address`);
-const dial = (): Socket => {
-  if ("unix" in link) return connect(link.unix);
-  const socket = connect(link.port, link.host);
-  // A link carried over a port opens with this workspace's token; the host's end closes a
-  // connection that does not. Queued here, it goes out before anything else.
-  if (link.token) socket.write(hello(link.token));
-  return socket;
-};
+/** A connection to the proxy, ready for a CONNECT; null if there is none. A link carried
+ *  over a port is used only once the host at the other end has proved it holds this
+ *  workspace's token (shared/link.ts): nothing is sent to a program that took the port. */
+const dial = (): Promise<Socket | null> =>
+  new Promise((resolve) => {
+    const socket = "unix" in link ? connect(link.unix) : connect(link.port, link.host);
+    socket.once("error", () => resolve(null));
+    socket.once("connect", () => {
+      if ("unix" in link || !link.token) return resolve(socket);
+      void openLink(socket, link.token).then((ok) => resolve(ok ? socket : null));
+    });
+  });
 
 const refuse = (client: Socket, http: boolean, status: string, text: string) => {
   if (!http) return client.destroy();
@@ -39,12 +43,8 @@ const serve = (port: number, scheme: "http" | "https") =>
     if ((sniffed.kind !== "http" && sniffed.kind !== "tls") || !sniffed.name)
       return refuse(client, http, "403 Forbidden", "this connection names no host (no TLS server name, no Host header). Only named HTTP and TLS leave a workspace; an address alone does not.");
     const target = `${sniffed.name}:${scheme === "https" ? 443 : 80}`;
-    let upstream: Socket;
-    try {
-      upstream = dial();
-    } catch {
-      return refuse(client, http, "502 Bad Gateway", "this workspace has no link to its proxy.");
-    }
+    const upstream = await dial();
+    if (!upstream) return refuse(client, http, "502 Bad Gateway", "this workspace's proxy is not answering, or what answered was not it. On the host: desolate doctor");
     let answer = Buffer.alloc(0);
     let open = false;
     const close = () => {
@@ -54,7 +54,7 @@ const serve = (port: number, scheme: "http" | "https") =>
     upstream.on("error", () => (open ? close() : refuse(client, http, "502 Bad Gateway", "this workspace's proxy is not answering. On the host: desolate doctor")));
     upstream.on("close", close);
     client.on("close", close);
-    upstream.on("connect", () => upstream.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`));
+    upstream.write(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`);
     const onAnswer = (chunk: Buffer) => {
       answer = Buffer.concat([answer, chunk]);
       const end = answer.indexOf("\r\n\r\n");

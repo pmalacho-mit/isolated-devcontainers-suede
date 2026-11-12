@@ -18,6 +18,17 @@ NODE="node --disable-warning=ExperimentalWarning"
 # and gave the user any directory it named, /usr/local/bin included.)
 as_user() { runuser -u "$USER_NAME" -- "$@"; }
 
+# Lima runs every command from the host over one ssh connection per VM, and sshd allows ten
+# sessions on a connection by default: a workspace's link, the dashboard and desolate's own
+# commands are each one, and the eleventh was refused (an audit on the M1). Raised; a
+# connection made before keeps the old number, so the host makes a new one when this says so.
+mkdir -p /etc/ssh/sshd_config.d
+if [ "$(cat /etc/ssh/sshd_config.d/50-desolate.conf 2>/dev/null)" != "MaxSessions 1000" ]; then
+  echo "MaxSessions 1000" >/etc/ssh/sshd_config.d/50-desolate.conf
+  systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || true
+  echo "desolate: sessions raised"
+fi
+
 # THE ORDINARY USER IS NOT ROOT. Lima gives its login user `NOPASSWD: ALL` (cloud-init, at
 # boot). That user runs every program here that reads what a domain wrote: git on its
 # packs, the proxies on its traffic, the state service. With sudo, a bug in any of them was
@@ -99,6 +110,9 @@ if [ "$(cat "$SYS/layout" 2>/dev/null)" != "$LAYOUT" ] || [ "$(cat "$SYS/code" 2
   pkill -u desolate-keyring 2>/dev/null || true
   rm -rf "$RUN/keyring" "$RUN/keyring.pid"
   # The proxies too (rootd started them; bootstrap gives each running workspace a new one).
+  # (By where they run from now, root's copy, and where they once did: an audit found that
+  # matching only the old place left updated proxies running their old code.)
+  pkill -f "/opt/desolate/proxy-code/root/proxy/proxy.ts" 2>/dev/null || true
   pkill -f "$HERE/proxy/proxy.ts" 2>/dev/null || true
   pkill -f /opt/desolate/proxy-venv/bin/mitmdump 2>/dev/null || true
   [ -d "$STATE" ] && as_user bash -c 'rm -f "$1"/proxy/running/*.json "$1"/proxy/secrets/*.json' _ "$STATE" 2>/dev/null || true
