@@ -26,8 +26,10 @@ import { accept as acceptLink } from "../shared/link.ts";
 import { hostArgv } from "../shared/actions.ts";
 import { createServer as createHttpServer } from "node:http";
 import { parseApproval } from "../shared/approval.ts";
-import { APPROVE_HOSTNAME, devHostname, EDITOR, editorHostname, editorHostPort, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
+import { APPROVE_HOSTNAME, GIT_HOSTNAME, parseRepo, devHostname, EDITOR, editorHostname, editorHostPort, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
 import { handler as approvePage } from "./approve-web.ts";
+import { handler as gitPage } from "./git-web.ts";
+import { ensureGitClone, ensureGitVm, GIT_VM, watchGitOut } from "./git-vm.ts";
 import type { Backend as ApprovalBackend, Summary } from "./approve-web.ts";
 import { statusDir } from "../shared/status.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
@@ -164,9 +166,31 @@ const serve = async () => {
   let editorError = "";
   // The approval page (approve-web.ts): served here, by the host, never by a VM.
   const approvals = createHttpServer(approvePage(approvalBackend(), log));
+  // The git terminal (git-web.ts): a shell in the git VM, and what the git VM hands over.
+  const gitReady = new Set<string>();
+  const gitTerminals = createHttpServer(gitPage((argv) => b.spawn(GIT_VM, argv), log, async (repo) => {
+    // A shell asked for from a link (the dashboard's "Open in git"): the VM and the clone
+    // are made on the way, as `desolate git <repo>` would.
+    if (!gitReady.has("")) {
+      await ensureGitVm();
+      gitReady.add("");
+    }
+    if (repo && !gitReady.has(repo)) {
+      await ensureGitClone(parseRepo(repo)!);
+      gitReady.add(repo);
+    }
+  }));
+  watchGitOut(log);
   const editors = createServer((client) => {
     client.on("error", () => client.destroy());
     void sniffSocket(client, 400).then(({ sniffed, head }) => {
+      if (sniffed.kind === "http" && sniffed.name === GIT_HOSTNAME) {
+        client.setTimeout(30 * 60_000, () => client.destroy());
+        client.unshift(head);
+        gitTerminals.emit("connection", client);
+        client.resume();
+        return;
+      }
       if (sniffed.kind === "http" && sniffed.name === APPROVE_HOSTNAME) {
         // (Emitted, not listened: node's own slow-client timeouts are not set up, so this is.)
         client.setTimeout(120_000, () => client.destroy());

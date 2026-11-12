@@ -51,7 +51,8 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
    reviewer's account of the commit (a user of its own, from ids the host gives it), not the
    root's user's; the terminal prompt still shows that user's summary. **Still open:** it
    reads every share and holds every editor's token (steps 3 and 4 of the plan narrow what
-   it is for).
+   it is for). **The person's git: moved out of the root** (`mac/git-vm`): `desolate git`
+   is a shell in a VM of its own, with no network and no way to write what the root reads.
 
 11. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
 12. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted

@@ -29,6 +29,12 @@ export const paths = {
   images: path.join(HOME, "images"),
   tools: path.join(HOME, "tools"),
   logs: path.join(HOME, "logs"),
+  /** The git VM's clones, the person's own (host/git-vm.ts). */
+  git: path.join(HOME, "git"),
+  /** What the git VM hands the host: pushes, as bundles and requests. */
+  gitOut: path.join(HOME, "git-out"),
+  /** The host's answers to those: read-only to the git VM. */
+  gitAnswers: path.join(HOME, "git-answers"),
   mirror: (repo: Repo) => path.join(HOME, "mirrors", repo.owner, `${repo.name}.git`),
   domain: (domain: string) => path.join(HOME, "domains", domain),
   domainRepos: (domain: string) => path.join(HOME, "domains", domain, "repos"),
@@ -52,4 +58,7 @@ export const guest = {
   cache: "/desolate/cache",
   link: "/desolate/link",
   linkSocket: "/desolate/link/proxy.sock",
+  git: "/git",
+  gitOut: "/desolate/out",
+  gitAnswers: "/desolate/answers",
 } as const;

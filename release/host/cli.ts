@@ -1,7 +1,8 @@
 // The desolate command, on the host. It drives everything, holds no key, and runs no git on
 // desolate's repositories (P4).
 import { parseArgs } from "node:util";
-import { EXIT, Refusal } from "../shared/exit.ts";
+import { EXIT, Refusal, refuse } from "../shared/exit.ts";
+import { parseRepo } from "../shared/names.ts";
 
 const HELP = `desolate: a VM per workspace, an editor inside it, and every push through you.
 
@@ -43,6 +44,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate push <domain> <owner/repo> <branch> --expect <commit> [--allow-default]
                                                                  to the remote; you approve it here, on the
                                                                  host, on your terminal
+  desolate git [<owner/repo>]                                    a shell in the git VM, in your browser: your own
+                                                                 clones, git and nothing else; pushes wait for approval
   desolate approve [--web | --selftest]                          approve a raw git push waiting in the root shell
                                                                  (--web: the approval page's address, for one click)
   desolate ui [--json]                                           the dashboard's address, for your browser
@@ -203,6 +206,19 @@ const main = async (argv: string[]): Promise<number> => {
     }
     const { approve } = await import("./push.ts");
     return approve(out);
+  }
+  if (verb === "git") {
+    // A shell in the git VM, in a browser tab: the address carries this stack's token, and
+    // is the person's to open on this Mac.
+    const repo = rest.find((arg) => !arg.startsWith("--"));
+    if (repo !== undefined && !parseRepo(repo)) refuse(`'${repo}' is not a repository`, "desolate git <owner/repo>", EXIT.usage);
+    const { ensureGitVm, ensureGitClone } = await import("./git-vm.ts");
+    await ensureGitVm((line) => process.stderr.write(`${line}\n`));
+    if (repo) await ensureGitClone(parseRepo(repo)!);
+    const { ensureDaemon } = await import("./daemon.ts");
+    await ensureDaemon();
+    out(`git          ${(await import("./git-web.ts")).gitAddress(repo)}`);
+    return EXIT.ok;
   }
   if (verb === "root" && rest[0] === "shell") {
     const { rootShell } = await import("./push.ts");

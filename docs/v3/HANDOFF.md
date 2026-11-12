@@ -349,6 +349,11 @@ release/root/forge-pin.ts      root's copy of the forge's address, for the pushe
 release/root/reviewer.ts       a user of its own: what a push would send, for the approval page
 release/root/review-client.ts  the root's user's side: sends the reviewer the objects; review-ask.ts is the host's question
 release/host/approve-web.ts    the approval page: one click, served by the host daemon (approve-ui/ is the page)
+release/host/git-vm.ts         the git VM: the person's clones, no network; hands its pushes to the root
+release/host/git-web.ts        the git terminal in a browser tab (git-ui/, with xterm.js vendored by hash)
+release/git/                   inside the git VM: provision.sh, terminal.py, the push helper
+release/root/raw-push.ts       a push asked for with git (root terminal or git VM): review, approval, pusher
+release/root/intake.ts         every object of a bundle checked before a root clone takes it
 release/root/pre-push.ts       a hand-made push to the remote's address is refused (it has no key either)
 release/root/rootd.ts          the request channel
 release/root/stated.ts         the state service: holds the state, pushes it; ui/ is the dashboard

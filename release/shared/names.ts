@@ -47,6 +47,8 @@ const hex = (text: string, length: number) =>
  *  would not fit. The readable name travels as a label. `instance` separates stacks on one
  *  host (a test run beside the real one). */
 export const rootVmName = (instance: string) => `dsl-${instance}-root`;
+/** The git VM (host/git-vm.ts): where the person types git, in clones of their own. */
+export const gitVmName = (instance: string) => `dsl-${instance}-git`;
 export const workspaceVmName = (instance: string, domain: string, workspace: string) =>
   `dsl-${instance}-${hex(`${domain}\0${workspace}`, 10)}`;
 
@@ -63,6 +65,8 @@ export const ROOT_HOSTNAME = "desolate.localhost";
  *  port. A name of its own, not under ROOT_HOSTNAME: the dashboard's content comes from the
  *  root, and a cookie it set for its own domain would be sent to names under it. */
 export const APPROVE_HOSTNAME = "desolate-approve.localhost";
+/** The git terminal (host/git-web.ts): a bash in the git VM, in a browser tab. */
+export const GIT_HOSTNAME = "desolate-git.localhost";
 
 /** A workspace's editor (P1: it runs in the workspace VM). In the VM, the editor's server
  *  listens on loopback at `server`, and editor-gate.ts in front of it at `gate`; the host's

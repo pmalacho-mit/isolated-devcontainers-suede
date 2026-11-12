@@ -129,7 +129,7 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     // 2. Raw git in the root clone: it asks for an approval on the host, none comes, it gives up.
     const raw = inRootClone(`DESOLATE_APPROVAL_WAIT_MS=1500 git push origin ${commit}:refs/heads/issue/12 2>&1`);
     assert.notEqual(raw.code, 0);
-    assert.match(raw.stdout, /needs your approval, given on the host, outside this VM/);
+    assert.match(raw.stdout, /needs your approval, given on the host, outside every VM/);
     assert.match(raw.stdout, /no person approved the push on the host, so nothing was pushed/);
     // 3. Skipping desolate's hook: straight to the remote's own address, around desolate's
     //    helper and its hook. This user has no way to a write key at all (the pusher does).
