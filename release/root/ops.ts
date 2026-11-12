@@ -55,6 +55,9 @@ export const ops: Record<string, Op> = {
   async "domain.env"(args) {
     return domains.setEnv(args.slug, args.repo);
   },
+  async "domain.env-key"(args) {
+    return domains.envKey(args.slug);
+  },
   async "domain.list"() {
     return domains.domains().map((d) => ({ ...d, workspaces: domains.workspaces(d.slug) }));
   },

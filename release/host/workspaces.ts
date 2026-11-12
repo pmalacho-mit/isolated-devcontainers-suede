@@ -58,7 +58,7 @@ const sized = (name: string, fallback: number, min: number, max: number) => {
  *  clipboard. (`desolate exec` is different: there the person asked for the VM's output.) */
 const said = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "?");
 
-const startServices = async (plan: WorkspacePlan) => {
+export const startServices = async (plan: WorkspacePlan) => {
   const b = backend();
   // The workspace's own proxy, in the root; then its link, which leads there and nowhere else.
   const proxy = await rootctl<{ port: number }>("proxy.start", { vm: plan.vm, domain: plan.domain, workspace: plan.workspace }, { quiet: true });
@@ -129,10 +129,21 @@ export const up = async (domain: string | undefined, options: { name?: string; c
   const view = await rootctl<DomainView>("domain.show", { slug: domain }, { quiet: true });
   if (options.fetch) for (const repo of view.repos) await rootctl("repo.fetch", { repo }, { quiet: json });
   if (options.fetch) phase("mirrors refreshed");
+  // The domain's template (section 4.7, C3), before this workspace takes its checkouts:
+  // made once per environment, then cloned. Not on the fake backend, whose clone carries no
+  // docker images. DESOLATE_TEMPLATES=0 makes every workspace from the base.
+  let template: string | null = null;
+  if (b.kind !== "fake" && process.env.DESOLATE_TEMPLATES !== "0") {
+    const { ensure } = await import("./templates.ts");
+    const say = (line: string) => (json ? process.stderr.write(`${line}\n`) : out(line));
+    template = await ensure(domain, view.repos, { specOf, startServices }, say);
+    if (template) phase("template");
+  }
   const plan = await rootctl<Workspace>("workspace.plan", { instance: INSTANCE, domain, name: options.name, checkouts: options.checkouts, base: options.base, fetch: options.fetch }, { quiet: true });
   phase("planned");
   try {
-    await b.create(specOf(plan, view.repos));
+    if (template) await b.clone(template, specOf(plan, view.repos));
+    else await b.create(specOf(plan, view.repos));
     await b.start(plan.vm);
     phase("VM booted");
     ({ editorDown, devcontainer } = await startServices(plan));
@@ -231,6 +242,8 @@ export const start = async (target: string | undefined, out: Out) => {
 export const remove = async (target: string | undefined, out: Out) => {
   if (target && !target.includes("/")) {
     const result = await rootctl<{ domain: string; kept: string }>("domain.remove", { slug: target }, { quiet: true });
+    // Its template is its own and goes with it.
+    await (await import("./templates.ts")).removeAll(result.domain);
     fs.rmSync(paths.domain(result.domain), { recursive: true, force: true });
     return out(`removed the domain ${result.domain}; ${result.kept}.`);
   }

@@ -136,6 +136,8 @@ the security findings, open and closed.
 - **Security, also fixed:** the proxies ran as rootd's user; on vz any user of a guest who
   reaches a share can write it. The proxies now run as their own user, closed out of the
   shares. **Open:** one proxies' user reads every domain's secrets (`mac-audit-notes.md`).
+- **Templates (C3)**: a domain's environment is built once and cloned: 18.8 s per
+  workspace with a real devcontainer, from 54 s (`decisions.md`, "A domain's template").
 - **T2 on a Mac is partial** (the fake backend's link is a host socket Colima cannot reach):
   `tests/v3/README.md`.
 

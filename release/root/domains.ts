@@ -8,7 +8,7 @@ import { isBranch, isSlug, parseRepo, repoId, workspaceVmName } from "../shared/
 import { checkoutPath } from "../shared/plan.ts";
 import type { Checkout, WorkspacePlan } from "../shared/plan.ts";
 import { git, gitOk } from "./git.ts";
-import { clonePath, domainPath, ROOT } from "./layout.ts";
+import { clonePath, domainPath, mirrorPath, ROOT } from "./layout.ts";
 import { recordOf, registry } from "./repos.ts";
 
 /** `env`: the repository whose devcontainer.json is the domain's environment (section 4.5,
@@ -180,4 +180,27 @@ export const remove = async (slugArg: unknown) => {
   }
   fs.rmSync(domainPath(d.slug), { recursive: true, force: true });
   return { domain: d.slug, kept: "the root clones keep this domain's branches for as long as they are wanted" };
+};
+
+/** The domain's environment as the remote published it, for its template (section 4.7, C3):
+ *  the environment repository (the one `env --from` names, else the first whose default
+ *  branch has a spec) and the id git gives the spec there: the tree of `.devcontainer/`, or
+ *  the blob of `.devcontainer.json`. Two specs with the same id are the same files. Read in
+ *  the MIRROR, which holds only what the remote published (P4: never a domain's clone).
+ *  null: no repository of the domain has a spec. */
+export const envKey = async (slugArg: unknown): Promise<{ repo: string; spec: string; id: string } | null> => {
+  const d = domain(slugOf(slugArg, "domain"));
+  const candidates = d.env ? [d.env] : d.repos;
+  for (const id of candidates) {
+    const repo = parseRepo(id);
+    if (!repo) continue;
+    const branch = registry().repos[id]?.defaultBranch;
+    if (!branch || !isBranch(branch)) continue;
+    for (const spec of [".devcontainer", ".devcontainer.json"]) {
+      const found = await git(mirrorPath(repo), ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}:${spec}`]);
+      const object = found.stdout.trim();
+      if (found.code === 0 && /^[0-9a-f]{40}$/.test(object)) return { repo: id, spec, id: object };
+    }
+  }
+  return null;
 };
