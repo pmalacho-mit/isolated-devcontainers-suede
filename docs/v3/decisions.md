@@ -651,6 +651,34 @@ bug in one of those parsers should not be a connection to every local service of
   (the rule), and the root's user cannot become root (decided above). The Mac's public
   addresses, if it has any, are the internet's.
 
+## `desolate events`: what happened, and from whom (decided on the Mac; tested on T1 and T2)
+
+The person's own scripts on the Mac (a pull request on every push, a notification on an
+orange status) want to hear of things as they happen. The host daemon gathers them and
+streams JSON lines (host/events.ts); every event names its source, because that is how far
+it can be believed:
+
+- **`pusher`**: from the pusher's log, which only root writes, read as root by the host (the
+  root's user can neither write it nor stand between: a stream through that user's shell
+  could be its own). What it says is the keyring's record of the approval and the forge's
+  answer. `pushed` means the remote has that commit on that branch.
+- **`host`**: what the host did itself (an approval signed on the page, from the signed text;
+  a workspace started or stopped; a push the git VM handed it).
+- **`root`**: the root's state service, diffed (a long poll the host makes with its own
+  token). That user parses what domains send, and the text is an agent's: offered branches,
+  statuses, refusals, pushes waiting. Their strings have control characters and
+  bidirectional overrides taken out (a script that prints them prints no escape sequence),
+  and the docs say to act only on `pusher` and `host` events when it matters. A name it
+  reports (repository, branch, commit, domain) is one desolate would make, or `null`, so a
+  script can pass it on as an argument (no valid one starts with `-`).
+- **Bounded.** A listener that stops reading is let go with a `lagged` line rather than
+  piling lines up in the daemon (which also serves the approval page); the state is looked
+  at no more than four times a second and at most 16 MiB of it, and one change yields at
+  most 200 events. The pusher's log is read by bytes, by file identity and size, and only
+  while someone listens. (Its review found `--replay 0` replaying everything, unbounded
+  buffering, an offset that could drift and re-announce old pushes, and the unvalidated
+  names; all fixed.)
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the

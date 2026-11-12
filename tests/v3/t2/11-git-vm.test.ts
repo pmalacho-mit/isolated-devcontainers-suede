@@ -1,11 +1,12 @@
 // T2 (fake backend). The git VM: a shell in a browser tab, git in the person's own clones,
 // and a push from there that waits for the approval page like any other.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { request as httpRequest } from "node:http";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { bootstrap, git, newStack } from "../lib/harness.ts";
+import { bootstrap, git, newStack, REPO_ROOT } from "../lib/harness.ts";
 import type { Stack } from "../lib/harness.ts";
 
 let stack: Stack;
@@ -73,6 +74,19 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
 
   it("a shell in the browser tab, and a push from it that lands only after the approval page", async () => {
     const port = Number(stack.env.DESOLATE_EDITOR_PORT);
+    // A script on the Mac, listening: `desolate events`.
+    const heard: Record<string, unknown>[] = [];
+    const listener = spawn(path.join(REPO_ROOT, "release", "cli.sh"), ["events"], { env: { ...process.env, ...stack.env }, stdio: ["ignore", "pipe", "ignore"] });
+    let partial = "";
+    listener.stdout.on("data", (chunk: Buffer) => {
+      partial += chunk.toString();
+      for (let end = partial.indexOf("\n"); end >= 0; end = partial.indexOf("\n")) {
+        heard.push(JSON.parse(partial.slice(0, end)) as Record<string, unknown>);
+        partial = partial.slice(end + 1);
+      }
+    });
+    after(() => listener.kill());
+    await sleep(1500);
     const terminal = client("desolate-git.localhost", port);
     await terminal.login(/(http:\S+)/.exec(stack.desolate("git", "acme/widgets").stdout)![1]!);
     const opened = await terminal.post("/session", { repo: "acme/widgets" });
@@ -113,6 +127,20 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
     assert.equal((await approvals.post("/approve", { nonce: push!.nonce, token: push!.token, commit })).status, 200);
     await screen(/\* \[new branch\]\s+HEAD -> from-git/, 60_000);
     assert.equal(forgeRefs("acme/widgets")["from-git"], commit, "the remote has exactly that commit");
+    // What the script heard, and from whom.
+    const said = async (type: string, source: string) => {
+      for (let i = 0; i < 40; i++) {
+        const found = heard.find((e) => e.type === type && e.source === source && (e.commit === undefined || e.commit === commit));
+        if (found) return found;
+        await sleep(250);
+      }
+      assert.fail(`no ${type} from the ${source}: heard ${JSON.stringify(heard).slice(0, 800)}`);
+    };
+    assert.equal((await said("git-push-handed", "host")).branch, "from-git");
+    assert.equal((await said("approval-waiting", "root")).branch, "from-git");
+    assert.equal((await said("approved", "host")).branch, "from-git");
+    const pushed = await said("pushed", "pusher");
+    assert.deepEqual([pushed.repo, pushed.branch, pushed.commit, pushed.onto], ["acme/widgets", "from-git", commit, null], "the pusher says what the remote now has");
   });
 
   it("the terminal answers nothing to another origin, or without its cookie", async () => {

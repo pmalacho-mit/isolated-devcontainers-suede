@@ -145,7 +145,11 @@ const publish = () => {
   if (text === last) return;
   last = text;
   for (const subscriber of subscribers) subscriber.write(`data: ${text}\n\n`);
+  for (const wake of [...stateWaiters]) wake();
 };
+/** The host's `GET /host/state` (host/events.ts), held until the state changes. */
+const stateWaiters = new Set<() => void>();
+const stateTag = () => createHash("sha256").update(last).digest("hex").slice(0, 16);
 let scheduled: NodeJS.Timeout | null = null;
 /** Something changed, or may have: look, soon, once. */
 const changed = () => {
@@ -268,6 +272,24 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
         changed();
       }
       return json(res, 200, { ok: true });
+    }
+    if (req.method === "GET" && url.pathname === "/host/state") {
+      // The state, when it is not the one the host has (by its tag): for `desolate events`.
+      if (!last) publish();
+      const send = () => json(res, 200, { tag: stateTag(), state: JSON.parse(last || "{}") });
+      if (url.searchParams.get("since") !== stateTag()) return send();
+      const answer = () => {
+        clearTimeout(timer);
+        stateWaiters.delete(answer);
+        if (!res.writableEnded) send();
+      };
+      const timer = setTimeout(answer, 50_000);
+      stateWaiters.add(answer);
+      res.on("close", () => {
+        clearTimeout(timer);
+        stateWaiters.delete(answer);
+      });
+      return;
     }
     if (req.method === "GET" && url.pathname === "/host/requests") {
       // Held open until there is something to do: the host learns of a click at once.

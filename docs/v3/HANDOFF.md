@@ -355,6 +355,7 @@ release/git/                   inside the git VM: provision.sh, terminal.py, the
 release/root/raw-push.ts       a push asked for with git (root terminal or git VM): review, approval, pusher
 release/root/intake.ts         every object of a bundle checked before a root clone takes it
 release/root/wall.sh           the root VM does not reach the Mac's loopback (nftables)
+release/host/events.ts         `desolate events`: what happened, from whom (pusher, host, root)
 release/root/pre-push.ts       a hand-made push to the remote's address is refused (it has no key either)
 release/root/rootd.ts          the request channel
 release/root/stated.ts         the state service: holds the state, pushes it; ui/ is the dashboard

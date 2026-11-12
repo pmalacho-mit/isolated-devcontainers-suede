@@ -52,7 +52,18 @@ import { GITCONFIG, KEYRING, PINNED_FORGE, PUSHER } from "./layout.ts";
 
 const LIMIT = { header: 1024 * 1024, pack: 2 * 1024 ** 3, lfs: 5 * 1024 ** 3, objects: 2000, advertised: 64 * 1024 * 1024, idleMs: 60_000 } as const;
 const ZERO = "0".repeat(40);
-const log = (message: string) => console.error(`${new Date().toISOString()} pusher: ${message}`);
+// One line per message, always starting with the time: no log line can read as an event.
+const log = (message: string) => console.error(`${new Date().toISOString()} pusher: ${message.replace(/[\r\n]+/g, " ")}`);
+/** What happened, for `desolate events` on the host (host/events.ts): one line on stdout,
+ *  which root's supervisor keeps in a log of root's. Made of the keyring's record of the
+ *  approval and the forge's answer, nothing the root's user said. */
+let current: { repo: string; ref: string; commit: string; onto: string | null } | null = null;
+const emit = (result: Record<string, unknown>) => {
+  if (!current) return;
+  const base = { at: new Date().toISOString(), repo: current.repo, branch: current.ref, commit: current.commit, onto: current.onto };
+  const line = result.ok === true ? { type: "pushed", ...base } : { type: result.uncertain === true ? "push-uncertain" : "push-failed", ...base, error: String(result.error ?? "").slice(0, 300) };
+  process.stdout.write(`EVENT ${JSON.stringify(line)}\n`);
+};
 
 type Approved = { id: string; repo: string; ref: string; commit: string; onto: string | null; pubkey: string };
 
@@ -288,6 +299,7 @@ const push = async (socket: Socket, request: Record<string, unknown>, rest: Buff
   const reply = await ask(KEYRING.pusher, { op: "approval", id });
   if (reply.ok !== true) return { ok: false, error: `the keyring holds no live approval ${id.slice(0, 40)}: nothing was pushed` };
   const approved = reply.approval as Approved;
+  current = { repo: approved.repo, ref: approved.ref, commit: approved.commit, onto: approved.onto };
   const repo = parseRepo(approved.repo);
   if (!repo || !isBranch(approved.ref) || !isCommit(approved.commit) || (approved.onto !== null && !isCommit(approved.onto)) || typeof approved.pubkey !== "string")
     return { ok: false, error: "the keyring's approval is not well formed" };
@@ -389,7 +401,7 @@ const handle = (socket: Socket) => {
     server.close();
     const exit = () => process.exit(0);
     void push(socket, request, rest)
-      .then(answer, (error: Error) => answer({ ok: false, error: error.message }))
+      .then((result) => (emit(result), answer(result)), (error: Error) => (emit({ ok: false, error: error.message }), answer({ ok: false, error: error.message })))
       .finally(() => {
         socket.once("close", exit);
         setTimeout(exit, 5000).unref();

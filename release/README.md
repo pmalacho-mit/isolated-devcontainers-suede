@@ -88,6 +88,7 @@ desolate offers                                      # what workspaces have offe
 desolate review dev acme/widgets issue/12 --diff     # what a push would send, and its diff as text
 desolate push dev acme/widgets issue/12 --expect <commit>   # asks you, on your terminal
 desolate git acme/widgets                            # git in your browser: a shell in the git VM (below)
+desolate events                                      # what happens, as JSON lines, for your own scripts
 desolate root shell                                  # ordinary git on your clones: fetch --all, diff, push
 desolate approve                                     # ... and this approves a `git push origin` made there
 desolate approve --web                               # or: the approval page's address, for one click
@@ -138,6 +139,36 @@ this stack's token, like the approval page's: treat it like a password. Once you
 it, the dashboard's "Open in git" on an offer opens a shell at that repository's clone
 (made on the way if it is not there yet). (`desolate root
 shell` is still there, a shell in the root VM itself, for what only the root can do.)
+
+**Your own scripts: `desolate events`.** A JSON object per line, as things happen, until you
+stop it (`--replay <n>` first repeats the last ones the host holds). Each says where it comes
+from, which is how far to believe it:
+
+| `source` | types | believe it as |
+|---|---|---|
+| `pusher` | `pushed`, `push-failed`, `push-uncertain` | the remote's own answer: `pushed` means the branch is at that commit |
+| `host` | `approved`, `refused`, `workspace-up`, `workspace-down`, `git-push-handed` | the host's own doing |
+| `root` | `offered`, `offer-gone`, `bundle-refused`, `status`, `approval-waiting` | an agent's word, relayed: safe to print, not to trust |
+
+For example, a pull request for every branch pushed (the `gh` here is yours, on the Mac; no
+VM has it):
+
+```bash
+desolate events | while read -r line; do
+  [ "$(jq -r '.source + " " + .type' <<<"$line")" = "pusher pushed" ] || continue
+  repo=$(jq -r .repo <<<"$line"); branch=$(jq -r .branch <<<"$line")
+  gh pr create --repo "$repo" --head "$branch" --fill 2>/dev/null || true
+done
+```
+
+Act only on `pusher` and `host` events when what you do matters: a `root` event's fields
+(a status message, an offered branch's name) are what an agent wrote, with control
+characters taken out (and a name desolate would not make is `null`). Pass a field to a
+program as an argument, never into the text of a script: `osascript -e 'on run argv' -e
+'display notification (item 1 of argv)' -e 'end run' -- "$message"`, not
+`osascript -e "display notification \"$message\""`, which runs what the message says.
+Approvals given at the terminal (`desolate push`, `desolate approve`) are not events yet;
+the page's are.
 
 **What a push is, exactly.** The push goes out through the root's pusher, the one program
 that can use a write key, and it asks the remote for one change: the branch moves from the

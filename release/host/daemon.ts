@@ -29,6 +29,7 @@ import { parseApproval } from "../shared/approval.ts";
 import { APPROVE_HOSTNAME, GIT_HOSTNAME, parseRepo, devHostname, EDITOR, editorHostname, editorHostPort, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
 import { handler as approvePage } from "./approve-web.ts";
 import { handler as gitPage } from "./git-web.ts";
+import { hub, pusherEvent, stateEvents } from "./events.ts";
 import { ensureGitClone, ensureGitVm, GIT_VM, watchGitOut } from "./git-vm.ts";
 import type { Backend as ApprovalBackend, Summary } from "./approve-web.ts";
 import { statusDir } from "../shared/status.ts";
@@ -68,6 +69,9 @@ const CODE = codeOf();
 /** How many connections one workspace's link may have open at once. */
 const LINK_CONNECTIONS = 64;
 
+/** `desolate events` (events.ts): every event the daemon learns of, for whoever listens. */
+const events = hub();
+
 /** What the approval page needs of the stack. The list of waiting pushes is the root's
  *  user's (only each one's message is used, parsed on the host); what a push would send is
  *  the reviewer's, asked as root; the signature is this host's. */
@@ -86,9 +90,13 @@ const approvalBackend = (): ApprovalBackend => {
       if (!parseApproval(message)) throw new Error("not a push approval");
       const { signClicked } = await import("./approver.ts");
       await rootctl("approvals.answer", { message, signature: signClicked(message) }, { quiet: true, timeoutMs: 60_000 });
+      const push = parseApproval(message)!;
+      events.publish(events.host("approved", { repo: push.repo, branch: push.branch, commit: push.commit, onto: push.onto }));
     },
     refuse: async (message) => {
       await rootctl("approvals.refuse", { message }, { quiet: true, timeoutMs: 30_000 });
+      const push = parseApproval(message);
+      if (push) events.publish(events.host("refused", { repo: push.repo, branch: push.branch, commit: push.commit }));
     },
   };
 };
@@ -180,7 +188,7 @@ const serve = async () => {
       gitReady.add(repo);
     }
   }));
-  watchGitOut(log);
+  watchGitOut(log, (fields) => events.publish(events.host("git-push-handed", fields)));
   const editors = createServer((client) => {
     client.on("error", () => client.destroy());
     void sniffSocket(client, 400).then(({ sniffed, head }) => {
@@ -361,10 +369,12 @@ const serve = async () => {
         /* no such checkout yet: the state service's own slow look covers it */
       }
     openLink(entry);
+    events.publish(events.host("workspace-up", { domain: r.domain, workspace: r.workspace, vm: r.vm }));
   };
   const unregister = (vm: string) => {
     const entry = entries.get(vm);
     if (!entry) return;
+    events.publish(events.host("workspace-down", { domain: entry.domain, workspace: entry.workspace, vm }));
     entry.link?.close();
     for (const watcher of entry.watchers) watcher.close();
     entries.delete(vm);
@@ -458,6 +468,8 @@ const serve = async () => {
       };
       stream.on("data", (chunk: Buffer) => {
         data = Buffer.concat([data, chunk]);
+        // What the root's user's service says is bounded: it parses what domains send.
+        if (data.length > 16 * 1024 * 1024) return settle(new Error("the root's state service said too much"));
         complete();
       });
       stream.on("error", (error) => settle(error));
@@ -551,6 +563,72 @@ const serve = async () => {
   };
   void collect();
 
+  // `desolate events`: the root's state, as it changes (its word: events.ts), and the
+  // pusher's log, read as root (a log only root writes, of what the forge answered).
+  const followState = async () => {
+    let tag = "";
+    let before: Parameters<typeof stateEvents>[0] = null;
+    for (;;) {
+      try {
+        const reply = await rootHttp("GET", `/host/state?since=${tag}`, undefined, 70_000);
+        if (reply.status !== 200) throw new Error(`status ${reply.status}`);
+        const { tag: next, state } = JSON.parse(reply.body) as { tag: string; state: Parameters<typeof stateEvents>[1] };
+        // The first state is where things stand, not news.
+        if (before) for (const e of stateEvents(before, state)) events.publish(e);
+        before = state;
+        tag = /^[0-9a-f]{16}$/.test(next) ? next : "";
+        // At most four looks a second, whatever the root's user's service answers.
+        await sleep(250);
+      } catch {
+        await sleep(3000);
+      }
+    }
+  };
+  void followState();
+  const followPusher = async () => {
+    const file = "/var/lib/desolate-root/pusher.log";
+    let where: { inode: string; offset: number } | null = null;
+    for (;;) {
+      await sleep(2000);
+      // Asked only while someone listens: the log is read where it stands when they start.
+      if (!rootUp || !events.listening()) {
+        where = null;
+        continue;
+      }
+      try {
+        // One look: the file's identity and size, and up to a MiB of what is new, as base64
+        // (bytes, so an offset is never miscounted).
+        const from = where ? where.offset : -1;
+        const read = await b.exec(ROOT_VM, ["bash", "-c", `stat -c '%i %s' "$1"; if [ "$2" -ge 0 ]; then tail -c +$(( $2 + 1 )) "$1" | head -c 1048576 | base64 -w0; fi`, "_", file, String(from)], { root: true, timeoutMs: 20_000 });
+        const [head = "", body = ""] = read.stdout.split("\n");
+        const [inode = "", sizeText = ""] = head.split(" ");
+        const size = Number(sizeText);
+        if (!/^\d+$/.test(inode) || !Number.isInteger(size)) continue;
+        // A new file (rotated, recreated), or one cut shorter: from its start. First look:
+        // from where it is now.
+        if (!where) {
+          where = { inode, offset: size };
+          continue;
+        }
+        if (where.inode !== inode || size < where.offset) {
+          where = { inode, offset: 0 };
+          continue;
+        }
+        const bytes = Buffer.from(body, "base64");
+        const end = bytes.lastIndexOf(10);
+        if (end < 0) continue;
+        where.offset += end + 1;
+        for (const line of bytes.subarray(0, end).toString("utf8").split("\n")) {
+          const e = pusherEvent(line);
+          if (e) events.publish(e);
+        }
+      } catch {
+        /* the root is not answering: next time */
+      }
+    }
+  };
+  void followPusher();
+
   fs.mkdirSync(paths.state, { recursive: true });
   fs.rmSync(SOCKET, { force: true });
   createServer((connection) => {
@@ -583,6 +661,24 @@ const serve = async () => {
           reconcile();
           await Promise.all([...entries.values()].map(sync));
           reply = { ok: true, ports: view(), editor: { port: editorHostPort(), error: editorError } };
+        } else if (request.op === "events") {
+          // A stream, not an answer: the last ones asked for, then each as it comes.
+          // Once: nothing more the client sends is read. A listener that does not read is
+          // told it fell behind and let go (its lines would otherwise pile up here, beside
+          // the approval page and every forward).
+          connection.removeAllListeners("data");
+          const replay = Number((request as { replay?: unknown }).replay) || 0;
+          const stop = events.listen(replay, (line) => {
+            if (connection.writableLength > 1024 * 1024) {
+              stop();
+              connection.end(`${JSON.stringify({ v: 1, at: new Date().toISOString(), type: "lagged", source: "host" })}\n`);
+              return;
+            }
+            connection.write(`${line}\n`);
+          });
+          connection.on("close", stop);
+          connection.on("error", stop);
+          return;
         } else if (request.op === "code") {
           reply = { ok: true, code: CODE };
         } else if (request.op === "stop") {
@@ -710,6 +806,37 @@ export const ui = async (): Promise<{ dashboard: string; approvals: string }> =>
   if (!/^[0-9a-f]{48}$/.test(token)) refuse("this stack has no dashboard credential yet", "desolate bootstrap");
   const { approveAddress } = await import("./approve-web.ts");
   return { dashboard: `http://${ROOT_HOSTNAME}:${editorHostPort()}/?tkn=${token}`, approvals: approveAddress() };
+};
+
+/** `desolate events`: the daemon's events, as they come, to `onLine`, for as long as this
+ *  process runs (a daemon that restarts is connected to again; what it missed meanwhile is
+ *  not replayed, but `replay` asks for the last ones the daemon still holds). */
+export const followEvents = async (replay: number, onLine: (line: string) => boolean | void, drained?: (resume: () => void) => void): Promise<never> => {
+  for (let first = true; ; first = false) {
+    await ensureDaemon();
+    await new Promise<void>((resolve) => {
+      const connection = connect(SOCKET);
+      let buffer = "";
+      connection.setEncoding("utf8");
+      connection.on("connect", () => connection.write(JSON.stringify({ op: "events", replay: first ? replay : 0 }) + "\n"));
+      connection.on("data", (chunk: string) => {
+        buffer += chunk;
+        let full = false;
+        for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+          if (onLine(buffer.slice(0, end)) === false) full = true;
+          buffer = buffer.slice(end + 1);
+        }
+        // Where the lines go is full: read no more until it drains.
+        if (full && drained) {
+          connection.pause();
+          drained(() => connection.resume());
+        }
+      });
+      connection.on("close", () => resolve());
+      connection.on("error", () => resolve());
+    });
+    await sleep(1000);
+  }
 };
 
 export const stopForwarder = async () => {
