@@ -10,6 +10,7 @@ import { ask } from "./keyring-client.ts";
 import { parseApproval } from "../shared/approval.ts";
 import { APPROVALS, FORGE, GITCONFIG, KEYRING, ROOT } from "./layout.ts";
 import { proxyUserOf } from "./proxy/as-proxy.ts";
+import { SECRETS_DIR } from "./proxy/secret-store.ts";
 import * as domains from "./domains.ts";
 import { refusalsOf } from "./outbox.ts";
 import * as offers from "./offers.ts";
@@ -93,14 +94,11 @@ export const ops: Record<string, Op> = {
   async "secret.list"(args) {
     return secrets.list(domains.domain(domains.slugOf(args.domain, "domain")).slug);
   },
-  async "secret.set"(args) {
-    return secrets.set(domains.domain(domains.slugOf(args.domain, "domain")).slug, args);
-  },
-  async "secret.switch"(args) {
-    return secrets.switchSecret(domains.domain(domains.slugOf(args.domain, "domain")).slug, args);
-  },
-  async "secret.remove"(args) {
-    return secrets.remove(domains.domain(domains.slugOf(args.domain, "domain")).slug, args.name);
+  /** After root changed a domain's secrets (proxy/secret-store.ts, run by the host as root):
+   *  its secrets proxy and its workspaces' list of names follow. This user never receives
+   *  a value: there is no operation here that takes one. */
+  async "secret.apply"(args) {
+    return secrets.apply(domains.domain(domains.slugOf(args.domain, "domain")).slug);
   },
   async "proxy.stop"(args) {
     proxy.stop(String(args.vm));
@@ -229,6 +227,20 @@ export const ops: Record<string, Op> = {
     add("root: each domain's proxies run as that domain's own user", wrong.length === 0,
       wrong.length > 0 ? wrong.join("; ") : "none shares a group with the root's user, reaches the shares, or reaches another domain's secrets",
       "desolate bootstrap (root/start.sh, root/proxy-user.sh)");
+    // Secret values are root's, and their domain's proxies' to read (proxy/secret-store.ts).
+    const readable: string[] = [];
+    try {
+      for (const name of fs.readdirSync(SECRETS_DIR).filter((n) => n.endsWith(".json") && !n.endsWith(".index.json")))
+        try {
+          fs.accessSync(`${SECRETS_DIR}/${name}`, fs.constants.R_OK);
+          readable.push(name);
+        } catch {
+          /* refused, as it must be */
+        }
+    } catch {
+      /* no secrets yet */
+    }
+    add("root: secret values are unreadable to the root's own user", readable.length === 0, readable.length === 0 ? `${SECRETS_DIR}: root's, and each domain's proxies'` : `it can read ${readable.join(", ")}`, "desolate bootstrap");
     let gitconfig = "";
     try {
       const stat = fs.lstatSync(GITCONFIG);

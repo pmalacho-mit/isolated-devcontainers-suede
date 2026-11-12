@@ -270,7 +270,9 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
       port=$(python3 -c "import json; print(json.load(open('/var/lib/desolate-proxies/domains/a/secrets-proxy.json'))['port'])")
       for p in /desolate/root /desolate/mirrors /desolate/domains; do sudo -n -u ${a} touch $p/proxy-tried 2>/dev/null && echo "share_$p=WROTE" || echo "share_$p=refused"; done
       sudo -n -u ${a} bash -c 'echo "{\\"op\\":\\"list\\"}" | socat - UNIX-CONNECT:/run/desolate/keyring/control.sock' >/dev/null 2>&1 && echo keyring=REACHED || echo keyring=refused
-      sudo -n -u ${other} cat /var/lib/desolate-proxies/domains/a/secrets.json >/dev/null 2>&1 && echo other_reads_secrets=REACHED || echo other_reads_secrets=refused
+      sudo -n -u ${other} cat /var/lib/desolate-proxies/secrets/a.json >/dev/null 2>&1 && echo other_reads_secrets=REACHED || echo other_reads_secrets=refused
+      sudo -n -u "$(stat -c %U /var/lib/desolate)" cat /var/lib/desolate-proxies/secrets/a.json >/dev/null 2>&1 && echo root_user_reads_secrets=REACHED || echo root_user_reads_secrets=refused
+      sudo -n -u ${a} cat /var/lib/desolate-proxies/secrets/a.json >/dev/null 2>&1 && echo control_own_reads_secrets=REACHED || echo control_own_reads_secrets=refused
       echo "other_uses_secrets_proxy=$(sudo -n -u ${other} python3 /tmp/handoff.py "$address" none "$port" 2>/dev/null || echo refused)"
       echo "control_own=$(sudo -n -u ${a} python3 /tmp/handoff.py "$address" token "$port" 2>&1 | tail -1)"
       # A workspace's own proxy is a socket only its domain's proxies and the root's user
@@ -282,6 +284,7 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     const got = lines(tried.stdout);
     assert.equal(got.control_share, "WROTE", "control: the root writes the share, so a refusal above is the closed directory");
     assert.equal(got.control_own, "200", "control: domain a's own proxies, with its token, are let into its secrets proxy");
+    assert.equal(got.control_own_reads_secrets, "REACHED", "control: domain a's own proxies read its secrets");
     assert.equal(got.control_user_reaches_workspace_proxy, "REACHED", "control: the root's user (the host daemon's way in) reaches a's workspace proxy");
     assert.equal(got.other_uses_secrets_proxy, "403", "another domain's proxies reach it (given the port), and are refused for want of the token");
     for (const [name, verdict] of Object.entries(got)) if (!name.startsWith("control") && name !== "other_uses_secrets_proxy") assert.match(verdict, /^refused/, name);
