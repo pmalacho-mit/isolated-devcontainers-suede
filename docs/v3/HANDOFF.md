@@ -188,6 +188,12 @@ the security findings, open and closed.
 
 ## 4. First things to do on the M1, in order
 
+**Done, 2026-11-12, by an agent on the M1** (section 2d; pull requests #65 to #75 into `v3`,
+stacked in that order but for #65 and #68, which stand alone): steps 1 to 4 below, and T2 on
+the Mac as far as it can go there. What is left of this section: running the Touch ID
+approver (a person's), and the first bootstrap from a fresh home with the hash-locked image
+(#68). Section 5 is where the work is now; its item 1 is half done (C3 templates, C4 caches).
+
 1. **T1.** `npm install && make test`. Seconds. If this fails on macOS, fix it first: it is
    the one tier that should be identical everywhere.
 
