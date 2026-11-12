@@ -66,6 +66,8 @@ const startServices = async (plan: WorkspacePlan) => {
   await connectWorkspace({ ...plan, proxyPort: proxy.port });
   const services = await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest], { root: true, timeoutMs: 300_000 });
   if (services.code !== 0) throw new Error(`the workspace's services did not start: ${said((services.stderr || services.stdout).trim().slice(-600))}`);
+  // start.sh puts the user in the docker group; what the host runs next must have it.
+  await b.refreshSessions?.(plan.vm);
   const init = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/init.ts`, plan.workspace], { timeoutMs: 900_000 });
   if (init.code !== 0) throw new Error(`the workspace could not make its checkouts: ${said((init.stderr || init.stdout).trim().slice(-800))}`);
   // A docker daemon only where one is wanted: a checkout with a spec (start.sh says how).

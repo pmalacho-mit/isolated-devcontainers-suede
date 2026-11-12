@@ -84,6 +84,11 @@ export interface Backend {
   /** TCP listeners inside the VM right now. */
   listeners(name: string): Promise<Listener[]>;
   logs(name: string): Promise<string>;
+  /** After root in the VM changed the ordinary user's groups (docker in a workspace, the
+   *  proxies' group in the root): make the next commands run with them. Lima's sessions
+   *  share one ssh connection, and a session keeps the groups that connection logged in
+   *  with (found on the M1: `docker` refused every command the host ran). */
+  refreshSessions?(name: string): Promise<void>;
 }
 
 export const GUEST_USER = "desolate";
