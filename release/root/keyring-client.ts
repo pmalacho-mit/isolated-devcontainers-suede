@@ -24,6 +24,6 @@ export const ask = (socketPath: string, request: Record<string, unknown>, timeou
     });
     connection.on("error", (error) => {
       clearTimeout(timer);
-      reject(new Error(`cannot reach the keyring at ${socketPath}: ${error.message}`));
+      reject(Object.assign(new Error(`cannot reach ${socketPath}: ${error.message}`), { code: (error as NodeJS.ErrnoException).code }));
     });
   });

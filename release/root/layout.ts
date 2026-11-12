@@ -30,8 +30,14 @@ export const KEYRING = {
   run: `${ROOT.run}/keyring`,
   /** The agent for read keys: signs with no prompt, so fetches are automatic. */
   readAgent: `${ROOT.run}/keyring/read-agent.sock`,
+  /** Where the write agent is reached: a directory only the keyring and the pusher can enter
+   *  (root/start.sh). The root's ordinary user, which parses what domains send, cannot reach
+   *  a write key at all; it hands a push to the pusher (root/pusher.ts). */
+  writeRun: `${ROOT.run}/keyring-write`,
   /** The agent for write keys: every signature needs an approval a person gave (P2). */
-  writeAgent: `${ROOT.run}/keyring/write-agent.sock`,
+  writeAgent: `${ROOT.run}/keyring-write/write-agent.sock`,
+  /** The pusher's questions to the keyring: what an approval names, and revoking it. */
+  pusher: `${ROOT.run}/keyring-write/pusher.sock`,
   /** Where ssh-agent itself listens: the keyring user's alone. The two sockets above are
    *  the keyring's filtering relays in front of these. */
   private: `${ROOT.run}/keyring/private`,
@@ -53,6 +59,20 @@ export const MIRROR_HOOKS = `${ROOT.sys}/mirror-hooks`;
 /** The root's git settings (start.sh writes them): root's, so that what reads a domain's
  *  packs cannot weaken the checks that apply to them. */
 export const GITCONFIG = `${ROOT.sys}/gitconfig`;
+/** The forge's address and host key, as the host gave them, in root's own directory: what the
+ *  pusher reads (root/forge-pin.ts writes them). The root's user's copies (FORGE and its
+ *  known_hosts) are for fetching, and that user could rewrite them. */
+export const PINNED_FORGE = { config: `${ROOT.sys}/forge.json`, knownHosts: `${ROOT.sys}/known_hosts` } as const;
 /** Raw `git push` in the root's terminal waits here for `desolate approve` on the host. */
 export const APPROVALS = `${ROOT.state}/approvals`;
 export const FORGE = `${ROOT.state}/forge.json`;
+
+/** The pusher (root/pusher.ts): the one process that can use a write key, as its own user. */
+export const PUSHER = {
+  user: "desolate-pusher",
+  /** Its own repositories, one per remote: what it pushes is fetched into these. */
+  home: process.env.DESOLATE_PUSHER_HOME ?? "/var/lib/desolate-pusher",
+  run: `${ROOT.run}/pusher`,
+  /** Where the root's user hands it a push: an approval's id, a bundle, LFS objects. */
+  control: `${ROOT.run}/pusher/control.sock`,
+} as const;

@@ -343,8 +343,10 @@ release/root/git-remote-desolate.ts  a domain as a git remote: fetch (bundles, s
 release/root/offers.ts         taking an offer, LFS verification, review, the diff as text
 release/root/push.ts           `desolate push` in the root: prepare (refusals, challenge), run
 release/root/git-remote-desolate-push.ts  `git push origin` in the root shell: waits for `desolate approve`
-release/root/send.ts           LFS first, then the commit: the one place commits leave from
-release/root/pre-push.ts       only the commit that was approved goes to the remote's address
+release/root/send.ts           hands a push to the pusher: the approval's id, a pack, LFS objects
+release/root/pusher.ts         the only user with the write agent: one ref update, onto -> commit; parses nothing
+release/root/forge-pin.ts      root's copy of the forge's address, for the pusher
+release/root/pre-push.ts       a hand-made push to the remote's address is refused (it has no key either)
 release/root/rootd.ts          the request channel
 release/root/stated.ts         the state service: holds the state, pushes it; ui/ is the dashboard
 release/shared/actions.ts      what the dashboard may ask the host to do: a fixed list

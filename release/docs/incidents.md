@@ -222,8 +222,15 @@ page is about, and because three of them were mistakes in the *tests*.
   - *Updated proxies kept running old code*: start.sh matched them by a path they no longer
     run from. And the host daemon and each workspace's relay also kept old code after an
     update: both now restart when their code changes.
-  - Open, not fixed: the root's ordinary user both parses what domains send and performs
-    pushes (`docs/v3/mac-audit-notes.md`).
+  - *The root's ordinary user both parsed what domains send and pushed* (F6). It no
+    longer pushes: the pusher, a user of its own, is the only one that reaches the write
+    agent. Its first version ran git on a bundle the root's user made, and a second audit
+    pointed out that a git bug that compromised one could be replayed on the other. The
+    pusher now parses nothing it is sent: it speaks receive-pack itself, asks for the one
+    approved update from the approved `onto`, and forwards the pack unread. T1 runs it
+    against a real receive-pack; T2 `04-offers` hands it another commit's pack under a real
+    approval: nothing moved. It reads the forge's address from root's copy, not the root's
+    user's (`docs/v3/decisions.md`, "The pusher").
 - **A deploy key named its owner.** A key's title carried the Mac's hostname, which on a
   Mac is usually its owner's name, and a deploy key's title is shown to everyone who
   administers the repository. It is a hash of the hostname now.

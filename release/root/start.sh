@@ -57,6 +57,11 @@ if runuser -u "$USER_NAME" -- sudo -n true 2>/dev/null; then
 fi
 
 id desolate-keyring >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin desolate-keyring
+# The pusher (pusher.ts): the one user that reaches the write agent, and only to push what a
+# person approved. Not in the root's user's group, and that user is not in its group.
+PUSHER_HOME=/var/lib/desolate-pusher
+id desolate-pusher >/dev/null 2>&1 || useradd --system --user-group --no-create-home --home-dir "$PUSHER_HOME" --shell /usr/sbin/nologin desolate-pusher
+id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx desolate-pusher && gpasswd -d "$USER_NAME" desolate-pusher >/dev/null
 # Each domain's proxies' user (proxy/as-proxy.ts) is made by proxy-user.sh: for every domain
 # there is, here, and for a new one when the host first wants its proxies. None of them is
 # in a group of the root's user (the keyring's sockets are not theirs), and the root's user
@@ -73,14 +78,13 @@ done
 # VM from another's files there (measured: the proxies' user wrote into a root clone). What
 # keeps a user out is a directory that is NOT a share: /desolate, which holds every mount
 # point, is root's and the root's user's group's (the keyring is in that group, the proxies'
-# user is not). The proxies' code comes from a root-owned copy instead.
+# user is not). The proxies' and the pusher's code comes from a root-owned copy instead.
 chown root:"$USER_GROUP" /desolate
 chmod 0750 /desolate
 PROXY_CODE=/opt/desolate/proxy-code
 rm -rf "$PROXY_CODE.new"
 install -d -m 0755 -o root -g root "$PROXY_CODE.new/root"
-cp -R "$HERE/proxy" "$PROXY_CODE.new/root/proxy"
-cp "$HERE/layout.ts" "$PROXY_CODE.new/root/layout.ts"
+cp -R "$HERE/." "$PROXY_CODE.new/root/"
 cp -R "$HERE/../shared" "$PROXY_CODE.new/shared"
 chown -R root:root "$PROXY_CODE.new" && chmod -R u=rwX,go=rX "$PROXY_CODE.new"
 rm -rf "$PROXY_CODE" && mv "$PROXY_CODE.new" "$PROXY_CODE"
@@ -104,11 +108,14 @@ LAYOUT=2
 CODE=$(cd "$HERE/.." && find root shared -type f \( -name '*.ts' -o -name '*.py' -o -name '*.sh' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
 if [ "$(cat "$SYS/layout" 2>/dev/null)" != "$LAYOUT" ] || [ "$(cat "$SYS/code" 2>/dev/null)" != "$CODE" ]; then
   for svc in rootd stated; do
-    [ -f "$RUN/$svc.pid" ] && kill -- "-$(cat "$RUN/$svc.pid")" 2>/dev/null
+    [ -f "$RUN/$svc.pid" ] && { kill -- "-$(cat "$RUN/$svc.pid")" 2>/dev/null || true; }
     rm -f "$RUN/$svc.pid"
   done
   pkill -u desolate-keyring 2>/dev/null || true
-  rm -rf "$RUN/keyring" "$RUN/keyring.pid"
+  rm -rf "$RUN/keyring" "$RUN/keyring.pid" "$RUN/keyring-write"
+  [ -f "$RUN/pusher.pid" ] && { kill -- "-$(cat "$RUN/pusher.pid")" 2>/dev/null || true; }
+  pkill -KILL -u desolate-pusher 2>/dev/null || true
+  rm -rf "$RUN/pusher" "$RUN/pusher.pid"
   # The proxies too (rootd started them; bootstrap gives each running workspace a new one).
   # (By where they run from now, root's copy, and where they once did: an audit found that
   # matching only the old place left updated proxies running their old code.)
@@ -133,6 +140,12 @@ if [ ! -e "$SYS/keyring" ] && [ -d "$STATE/keyring" ] && [ ! -L "$STATE/keyring"
 fi
 install -d -m 0700 -o desolate-keyring -g "$USER_GROUP" "$SYS/keyring"
 install -d -m 0750 -o desolate-keyring -g "$USER_GROUP" "$RUN/keyring"
+# The write agent's relay and the pusher's questions to the keyring: a directory the root's
+# user cannot enter. The directory is the gate (the sockets in it are open within it).
+install -d -m 0750 -o desolate-keyring -g desolate-pusher "$RUN/keyring-write"
+# The pusher's own: its repositories, and its socket, which only the root's user may use.
+install -d -m 0700 -o desolate-pusher -g desolate-pusher "$PUSHER_HOME"
+install -d -m 0750 -o desolate-pusher -g "$USER_GROUP" "$RUN/pusher"
 # Hooks: a directory only root writes, holding desolate's own. Every root clone's
 # core.hooksPath points here, so no hook from a repository's content can run.
 install -d -m 0755 -o root -g root "$SYS/hooks"
@@ -268,6 +281,18 @@ if ! alive "$RUN/keyring.pid"; then
 fi
 for _ in $(seq 1 100); do [ -S "$RUN/keyring/control.sock" ] && break; sleep 0.1; done
 [ -S "$RUN/keyring/control.sock" ] || { echo "start.sh: the keyring did not start; see $SYS/keyring.log" >&2; tail -5 "$SYS/keyring.log" >&2; exit 1; }
+# The pusher, kept running by root: one push per process (pusher.ts), and before each start
+# every process of its user is killed, so nothing a push's git started outlives it. Its
+# log is root's file.
+if ! alive "$RUN/pusher.pid"; then
+  setsid bash -c 'exec >>"$1" 2>&1; while :; do pkill -KILL -u desolate-pusher 2>/dev/null; sleep 0.2
+      runuser -u desolate-pusher -- env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$2" \
+        node --disable-warning=ExperimentalWarning "$3/root/pusher.ts" </dev/null
+      sleep 0.5; done' _ "$SYS/pusher.log" "$PUSHER_HOME" "$PROXY_CODE" </dev/null >/dev/null 2>&1 &
+  echo $! >"$RUN/pusher.pid"
+fi
+for _ in $(seq 1 100); do [ -S "$RUN/pusher/control.sock" ] && break; sleep 0.1; done
+[ -S "$RUN/pusher/control.sock" ] || { echo "start.sh: the pusher did not start; see $SYS/pusher.log" >&2; tail -5 "$SYS/pusher.log" >&2; exit 1; }
 ln -sf "$HERE/git-remote-desolate" /usr/local/bin/git-remote-desolate
 ln -sf "$HERE/git-remote-desolate-push" /usr/local/bin/git-remote-desolate-push
 # rootd and the state service are kept running: if one ends, it is started again and its
@@ -285,4 +310,4 @@ alive "$RUN/rootd.pid" || kept rootd rootd.ts
 alive "$RUN/stated.pid" || kept stated stated.ts
 echo "$LAYOUT" >"$SYS/layout"
 echo "$CODE" >"$SYS/code"
-echo "root services: keyring, rootd and the state service up"
+echo "root services: keyring, pusher, rootd and the state service up"

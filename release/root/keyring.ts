@@ -103,7 +103,10 @@ const remove = (repo: Repo, role: Role) => {
 };
 
 // ---------------------------------------------------------------- approvals (P2)
-export type Approval = { id: string; repo: string; ref: string; commit: string; expires: number; uses: number; by: string };
+/** `claimed`: the pusher has begun the push (pusherOps). Only then may the write key sign,
+ *  and from then the approval lasts as long as a push may (CLAIMED_MS), for that one push. */
+export type Approval = { id: string; repo: string; ref: string; commit: string; onto: string | null; expires: number; uses: number; by: string; claimed: boolean };
+const CLAIMED_MS = 35 * 60_000;
 const approvals = new Map<string, Approval>();
 /** A push opens a few ssh connections (the push itself, LFS's authenticate calls), each one
  *  signature. An approval covers that one push: a short life and a small number of uses. */
@@ -116,12 +119,14 @@ const CHALLENGE = { lifeMs: 120_000, outstanding: 32 } as const;
 
 const challenge = (request: Record<string, unknown>): Record<string, unknown> => {
   const repo = parseRepo(request.repo);
-  if (!repo || !isBranch(request.ref) || !isCommit(request.commit)) return { ok: false, error: "a challenge names a repository, a branch and a 40-hex commit" };
+  if (!repo || !isBranch(request.ref) || !isCommit(request.commit) || /^0{40}$/.test(request.commit)) return { ok: false, error: "a challenge names a repository, a branch and a 40-hex commit" };
   if (!fs.existsSync(keyFile(repo, "write"))) return { ok: false, error: `${repoId(repo)} has no write key: it is not pushable` };
   for (const [nonce, entry] of challenges) if (entry.expires < Date.now()) challenges.delete(nonce);
   while (challenges.size >= CHALLENGE.outstanding) challenges.delete(challenges.keys().next().value!);
+  const onto = request.onto ?? null;
+  if (onto !== null && (!isCommit(onto) || /^0{40}$/.test(onto))) return { ok: false, error: "a push names what the remote's branch is now (a commit), or null for a new branch" };
   const nonce = randomBytes(16).toString("hex");
-  const message = formatApproval({ repo: repoId(repo), branch: request.ref, commit: request.commit, nonce });
+  const message = formatApproval({ repo: repoId(repo), branch: request.ref, commit: request.commit, onto: onto as string | null, nonce });
   challenges.set(nonce, { message, expires: Date.now() + CHALLENGE.lifeMs });
   return { ok: true, message };
 };
@@ -162,7 +167,7 @@ const approve = (request: Record<string, unknown>): Record<string, unknown> => {
   const repo = parseRepo(parsed.repo)!;
   if (!fs.existsSync(keyFile(repo, "write"))) return refused(`${parsed.repo} has no write key: it is not pushable`);
   const id = `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
-  const approval: Approval = { id, repo: parsed.repo, ref: parsed.branch, commit: parsed.commit, expires: Date.now() + APPROVAL.lifeMs, uses: APPROVAL.uses, by: "host approver" };
+  const approval: Approval = { id, repo: parsed.repo, ref: parsed.branch, commit: parsed.commit, onto: parsed.onto, expires: Date.now() + APPROVAL.lifeMs, uses: APPROVAL.uses, by: "host approver", claimed: false };
   approvals.set(id, approval);
   audit({ event: "approved", ...approval, expires: new Date(approval.expires).toISOString() });
   return { ok: true, id };
@@ -171,7 +176,7 @@ const approve = (request: Record<string, unknown>): Record<string, unknown> => {
 /** Whether a live approval names exactly this push. The pre-push hook's question. */
 const approved = (request: Record<string, unknown>): Record<string, unknown> => {
   for (const approval of approvals.values())
-    if (approval.expires >= Date.now() && approval.uses > 0 && approval.repo === request.repo && approval.ref === request.ref && approval.commit === request.commit) return { ok: true, id: approval.id };
+    if (approval.expires >= Date.now() && approval.uses > 0 && approval.repo === request.repo && approval.ref === request.ref && approval.commit === request.commit && approval.onto === (request.onto ?? null)) return { ok: true, id: approval.id };
   return { ok: false, error: "no approval on file for that push" };
 };
 
@@ -183,7 +188,7 @@ const consume = (request: Record<string, unknown>): Record<string, unknown> => {
       approvals.delete(approval.id);
       continue;
     }
-    if (approval.repo !== repo) continue;
+    if (approval.repo !== repo || !approval.claimed) continue;
     approval.uses -= 1;
     audit({ event: "signed", repo, approval: approval.id, ref: approval.ref, commit: approval.commit });
     return { ok: true, approval: approval.id };
@@ -232,6 +237,34 @@ const publicOps = (request: Record<string, unknown>): Record<string, unknown> =>
     return { ok: true };
   }
   return { ok: false, error: `unknown op '${String(op)}': this socket has no operation that returns private key material, by design (see keyring.ts)` };
+};
+
+/** The pusher's questions (root/pusher.ts), on a socket only it reaches: what approval <id>
+ *  names, exactly as the person approved it, and revoking it once the push is done. Asking
+ *  claims it: one pusher process makes the push it names, once (an approval is claimed at
+ *  most once), and only a claimed approval lets the write key sign. A claim lasts as long as
+ *  a push may take (LFS objects first can take a while); the pusher revokes it when done. */
+const pusherOps = (request: Record<string, unknown>): Record<string, unknown> => {
+  if (request.op === "approval") {
+    const approval = approvals.get(String(request.id ?? ""));
+    if (!approval || approval.expires < Date.now() || approval.uses <= 0) return { ok: false, error: "no live approval with that id" };
+    if (approval.claimed) return { ok: false, error: "that approval's push was begun already: each approval is pushed once" };
+    const repo = parseRepo(approval.repo)!;
+    // The write key's public half, which names the key in the agent: the pusher cannot read
+    // KEYRING.pub (the root's user's), and needs nothing else of the keyring's.
+    let pubkey = "";
+    try {
+      pubkey = fs.readFileSync(`${keyFile(repo, "write")}.pub`, "utf8").trim();
+    } catch {
+      return { ok: false, error: `${approval.repo} has no write key` };
+    }
+    approval.claimed = true;
+    approval.expires = Date.now() + CLAIMED_MS;
+    audit({ event: "claimed", approval: approval.id, repo: approval.repo, ref: approval.ref, commit: approval.commit });
+    return { ok: true, approval: { id: approval.id, repo: approval.repo, ref: approval.ref, commit: approval.commit, onto: approval.onto, pubkey } };
+  }
+  if (request.op === "revoke") return revoke(request);
+  return { ok: false, error: `unknown op '${String(request.op)}'` };
 };
 
 const internalOps = (request: Record<string, unknown>): Record<string, unknown> => {
@@ -297,7 +330,7 @@ const serve = (socketPath: string, mode: number, handle: (request: Record<string
  *     point of the write agent) add a key that skips confirmation.
  *  The agent protocol frames each message as a uint32 length and a type byte. */
 const AGENT = { requestIdentities: 11, signRequest: 13, failure: 5, maxFrame: 256 * 1024 } as const;
-const relay = (publicPath: string, agentPath: string): Promise<void> => {
+const relay = (publicPath: string, agentPath: string, mode = 0o660): Promise<void> => {
   const server = createServer((client) => {
     const agent = connect(agentPath);
     let pending = Buffer.alloc(0);
@@ -324,7 +357,7 @@ const relay = (publicPath: string, agentPath: string): Promise<void> => {
     });
   });
   return new Promise((resolve, reject) => {
-    const before = process.umask(0o117);
+    const before = process.umask(0o777 & ~mode);
     server.once("error", (error) => {
       process.umask(before);
       reject(error);
@@ -378,7 +411,7 @@ const main = async () => {
   fs.mkdirSync(KEYRING.pub, { recursive: true, mode: 0o755 });
   fs.mkdirSync(KEYRING.private, { recursive: true, mode: 0o700 });
   fs.chmodSync(KEYRING.private, 0o700);
-  for (const stale of [KEYRING.readAgent, KEYRING.writeAgent, KEYRING.control, KEYRING.internal, agentOf("read"), agentOf("write")]) fs.rmSync(stale, { force: true });
+  for (const stale of [KEYRING.readAgent, KEYRING.writeAgent, KEYRING.pusher, KEYRING.control, KEYRING.internal, agentOf("read"), agentOf("write")]) fs.rmSync(stale, { force: true });
 
   const here = path.dirname(new URL(import.meta.url).pathname);
   startAgent(agentOf("read"), { ...process.env });
@@ -396,7 +429,10 @@ const main = async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   await relay(KEYRING.readAgent, agentOf("read"));
-  await relay(KEYRING.writeAgent, agentOf("write"));
+  // The write agent's relay is in a directory only the keyring and the pusher can enter
+  // (root/start.sh): the directory is the gate, so the socket itself is open within it.
+  await relay(KEYRING.writeAgent, agentOf("write"), 0o666);
+  await serve(KEYRING.pusher, 0o666, pusherOps);
   for (const { repo, role } of held())
     try {
       publish(repo, role);

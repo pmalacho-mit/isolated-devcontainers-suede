@@ -28,6 +28,8 @@ bootstrap: 7 step(s) done.
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
+  ok   root: only the pusher reaches the write agent: /run/desolate/keyring-write is closed to the root's own user
+  ok   root: the pusher answers: /run/desolate/pusher/control.sock; the forge it pushes to is root's copy
 doctor: all checks passed.
 [exit 0]
 
@@ -50,6 +52,7 @@ desolate: this push needs your confirmation.
   repository  acme/app
   branch      fix
   commit      <commit>
+  onto        none: the remote has no fix yet
   sends       a raw git push from the root's terminal
 Type the branch name (fix) to push, or anything else to refuse: fix
 approved; the push waiting in the root continues.

@@ -30,6 +30,8 @@ bootstrap: 7 step(s) done.
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
+  ok   root: only the pusher reaches the write agent: /run/desolate/keyring-write is closed to the root's own user
+  ok   root: the pusher answers: /run/desolate/pusher/control.sock; the forge it pushes to is root's copy
 doctor: all checks passed.
 [exit 0]
 
@@ -64,6 +66,8 @@ bootstrap: nothing changed; the stack was already up.
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
+  ok   root: only the pusher reaches the write agent: /run/desolate/keyring-write is closed to the root's own user
+  ok   root: the pusher answers: /run/desolate/pusher/control.sock; the forge it pushes to is root's copy
 doctor: all checks passed.
 [exit 0]
 
@@ -87,7 +91,9 @@ $ desolate doctor
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
-doctor: 1 of 16 checks FAILED.
+  ok   root: only the pusher reaches the write agent: /run/desolate/keyring-write is closed to the root's own user
+  ok   root: the pusher answers: /run/desolate/pusher/control.sock; the forge it pushes to is root's copy
+doctor: 1 of 18 checks FAILED.
 [exit 1]
 
 ## the fake backend is never a default
@@ -160,6 +166,8 @@ bootstrap: nothing changed; the stack was already up.
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
+  ok   root: only the pusher reaches the write agent: /run/desolate/keyring-write is closed to the root's own user
+  ok   root: the pusher answers: /run/desolate/pusher/control.sock; the forge it pushes to is root's copy
 doctor: all checks passed.
 [exit 0]
 

@@ -129,19 +129,19 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     assert.notEqual(raw.code, 0);
     assert.match(raw.stdout, /needs your approval, given on the host, outside this VM/);
     assert.match(raw.stdout, /no person approved the push on the host, so nothing was pushed/);
-    // 3. Skipping desolate's hook: then the write key itself refuses to sign.
-    //    Straight to the remote's own address, around desolate's helper and its hook.
+    // 3. Skipping desolate's hook: straight to the remote's own address, around desolate's
+    //    helper and its hook. This user has no way to a write key at all (the pusher does).
     const noVerify = inRootClone(`git push --no-verify "$(git config lfs.pushurl)" ${commit}:refs/heads/issue/12 2>&1`);
     assert.notEqual(noVerify.code, 0);
     assert.match(inRootClone("git config remote.origin.pushurl; git config lfs.pushurl").stdout, /^desolate-push::acme\/widgets\nssh:\/\//, "control: that address is the remote's");
-    assert.match(noVerify.stdout, /Permission denied|agent refused|signing failed|Could not read from remote/i);
+    assert.match(noVerify.stdout, /Permission denied|agent refused|signing failed|Host key verification failed|Could not read from remote/i);
     // 4. Skipping the LFS-first rule changes nothing either.
     assert.notEqual(inRootClone(`git lfs push origin --object-id ${oid} 2>&1`).code, 0);
     // 5. Approving it from inside the root VM. Anyone there may ask the keyring for a
     //    challenge; answering takes the host approver's key, which is not in the VM.
     const challenge = keyring({ op: "challenge", repo: "acme/widgets", ref: "issue/12", commit });
     assert.equal(challenge.ok, true, String(challenge.error));
-    assert.match(challenge.message!, new RegExp(`^desolate push approval v1\\nrepo: acme/widgets\\nbranch: issue/12\\ncommit: ${commit}\\nnonce: [0-9a-f]{32}\\n$`));
+    assert.match(challenge.message!, new RegExp(`^desolate push approval v2\\nrepo: acme/widgets\\nbranch: issue/12\\ncommit: ${commit}\\nonto: none\\nnonce: [0-9a-f]{32}\\n$`));
     const own = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey;
     const forged = keyring({ op: "approve", message: challenge.message, signature: sign("sha256", Buffer.from(challenge.message!), own).toString("base64") });
     assert.equal(forged.ok, false);
@@ -154,12 +154,17 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     assert.match(swap.stdout, /^drwxr-xr-x \d+ root root .*\n-rw-r--r-- \d+ root root /);
     //    The write agent's own question ("is there an approval?") is not answerable from outside it.
     assert.notEqual(stack.inRoot(["bash", "-c", `echo '{"op":"consume","repo":"acme/widgets"}' | socat - UNIX-CONNECT:/run/desolate/keyring/internal.sock`]).code, 0);
-    // 6. Adding a key of its own to the write agent, or one that needs no confirmation.
-    const addKey = stack.inRoot(["bash", "-c", "ssh-keygen -q -t ed25519 -N '' -f /tmp/mine && SSH_AUTH_SOCK=/run/desolate/keyring/write-agent.sock ssh-add /tmp/mine 2>&1; SSH_AUTH_SOCK=/run/desolate/keyring/write-agent.sock ssh-add -D 2>&1; SSH_AUTH_SOCK=/run/desolate/keyring/write-agent.sock ssh-add -l"]);
-    assert.match(addKey.stdout, /desolate-write:acme\/widgets/, "the write agent still holds its key, and only its key");
-    assert.match(addKey.stdout, /Could not add identity .*agent refused operation/, "adding a key is refused by the relay");
-    assert.match(addKey.stdout, /Failed to remove all identities/, "so is removing them");
-    assert.equal(addKey.stdout.trim().split("\n").filter((line) => /^\d+ SHA256:/.test(line)).length, 1, "one identity is listed: the write key");
+    // 6. Reaching the write agent at all: its directory is the keyring's and the pusher's.
+    const agent = stack.inRoot(["bash", "-c", "ls /run/desolate/keyring-write 2>&1; SSH_AUTH_SOCK=/run/desolate/keyring-write/write-agent.sock ssh-add -l 2>&1; ls -ld /run/desolate/keyring-write"]);
+    assert.match(agent.stdout, /cannot open directory '\/run\/desolate\/keyring-write': Permission denied/);
+    assert.match(agent.stdout, /Error connecting to agent: Permission denied/);
+    assert.match(agent.stdout, /^drwxr-x--- \d+ desolate-keyring desolate-pusher /m, "control: it is there, and whose it is");
+    // 7. Asking the pusher to push with no approval, or with one made up.
+    const pusher = (request: Record<string, unknown>) =>
+      JSON.parse(stack.inRoot(["node", "--disable-warning=ExperimentalWarning", "--input-type=module", "-e", 'import { ask } from "/desolate/release/root/keyring-client.ts"; console.log(JSON.stringify(await ask("/run/desolate/pusher/control.sock", JSON.parse(process.argv[1]), 30000)));', JSON.stringify(request)]).stdout) as { ok: boolean; error?: string };
+    const madeUp = pusher({ op: "push", approval: "lzz-000000000000", bundle: 0, lfs: [] });
+    assert.equal(madeUp.ok, false);
+    assert.match(madeUp.error!, /holds no live approval/);
     // The outcome: the remote has nothing, and the audit shows refusals and no signature.
     assert.equal(forgeRefs("acme/widgets")["issue/12"], undefined, "nothing reached the remote");
     assert.equal(forgeHasLfs("acme/widgets", oid), false, "nor its LFS object");
@@ -177,6 +182,17 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     const replay = keyring({ op: "approve", message: challenge.message, signature });
     assert.equal(replay.ok, false);
     assert.match(replay.error!, /not outstanding/);
+    // The audit's F6, with a real approval live: the root's user, as if a bug in what it
+    // parses had given it to an attacker, hands the pusher that approval's id and ANOTHER
+    // commit's pack (the default branch's). The pusher reads none of it: it asks the forge
+    // for the approved update, and the forge, given no such commit, refuses it.
+    const before = forgeRefs("acme/widgets");
+    const other = inRootClone("git rev-parse main").stdout.trim();
+    const swapped = stack.inRoot(["node", "--disable-warning=ExperimentalWarning", "--input-type=module", "-e",
+      'import { send } from "/desolate/release/root/send.ts"; console.log(JSON.stringify(await send({ owner: "acme", name: "widgets" }, process.argv[1], process.argv[2])));', real.id!, other]);
+    assert.match(swapped.stdout, /the forge (refused the update|could not unpack)/, swapped.stdout + swapped.stderr);
+    assert.deepEqual(forgeRefs("acme/widgets"), before, "no ref of the remote moved, and none appeared");
+    assert.equal(audit().pop()?.event, "revoked", "and the approval it tried to use is spent");
     assert.equal(keyring({ op: "revoke", id: real.id }).ok, true);
   });
 
@@ -205,8 +221,9 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     assert.equal(forgeRefs("acme/widgets")["issue/12"], commit, "the remote has exactly the reviewed commit");
     assert.equal(forgeHasLfs("acme/widgets", oid), true, "the remote serves the new LFS object");
     const access = JSON.parse(stack.forge("access")) as { key?: string; command?: string; lfs?: string }[];
-    const upload = access.findIndex((e) => e.lfs === "upload");
-    const receive = access.findIndex((e) => /git-receive-pack/.test(e.command ?? ""));
+    // (The last of each: the refused attempt above also reached receive-pack.)
+    const upload = access.map((e) => e.lfs === "upload").lastIndexOf(true);
+    const receive = access.map((e) => /git-receive-pack/.test(e.command ?? "")).lastIndexOf(true);
     assert.ok(upload >= 0 && receive > upload, "the LFS object was uploaded before the commit was pushed");
     assert.ok(access.filter((e) => /receive-pack|upload$/.test(e.command ?? "")).every((e) => e.key === "write:acme/widgets"), "writes used the write key");
     const entries = audit();
@@ -238,7 +255,7 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     assert.equal(forgeRefs("acme/widgets")["raw-push"], undefined);
     const approved = stack.person("Type the branch name", "raw-push", "approve");
     assert.equal(approved.code, 0, approved.stdout);
-    assert.match(approved.stdout, /repository {2}acme\/widgets\s+branch {6}raw-push\s+commit {6}[0-9a-f]{40}\s+sends {7}a raw git push from the root's terminal/);
+    assert.match(approved.stdout, /repository {2}acme\/widgets\s+branch {6}raw-push\s+commit {6}[0-9a-f]{40}\s+onto {8}none: the remote has no raw-push yet\s+sends {7}a raw git push from the root's terminal/);
     let landed = false;
     for (let i = 0; i < 80 && !landed; i++) {
       landed = forgeRefs("acme/widgets")["raw-push"] === commit;

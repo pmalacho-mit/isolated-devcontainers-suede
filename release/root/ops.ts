@@ -8,7 +8,7 @@ import { repoOf, writeKnownHosts } from "./git.ts";
 import type { Forge } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { parseApproval } from "../shared/approval.ts";
-import { APPROVALS, FORGE, GITCONFIG, KEYRING, ROOT } from "./layout.ts";
+import { APPROVALS, FORGE, GITCONFIG, KEYRING, PINNED_FORGE, PUSHER, ROOT } from "./layout.ts";
 import { proxyUserOf } from "./proxy/as-proxy.ts";
 import { SECRETS_DIR } from "./proxy/secret-store.ts";
 import * as domains from "./domains.ts";
@@ -258,6 +258,27 @@ export const ops: Record<string, Op> = {
     }
     add("root: approver key installed", approver !== "", approver !== "" ? `sha256 ${approver}` : `${KEYRING.approver} is missing, or not root's alone to write`, "desolate bootstrap");
     add("root: forge configured", fs.existsSync(FORGE), fs.existsSync(FORGE) ? "yes" : "no forge.json", "desolate bootstrap");
+    // The write agent is the pusher's alone (pusher.ts): this user, which parses what domains
+    // send, cannot even open its directory. Asked by trying, as this user.
+    let reach = "";
+    try {
+      fs.readdirSync(KEYRING.writeRun);
+      reach = `it can enter ${KEYRING.writeRun}`;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EACCES") reach = `${KEYRING.writeRun}: ${(error as Error).message}`;
+    }
+    add("root: only the pusher reaches the write agent", reach === "", reach === "" ? `${KEYRING.writeRun} is closed to the root's own user` : reach, "desolate bootstrap");
+    const pusher = await ask(PUSHER.control, { op: "ping" }, 5_000).catch((error: Error) => ({ ok: false, error: error.message }));
+    // And where it pushes is root's word, not this user's (root/forge-pin.ts).
+    const pinned = [PINNED_FORGE.config, PINNED_FORGE.knownHosts].every((file) => {
+      try {
+        const stat = fs.lstatSync(file);
+        return stat.isFile() && stat.uid === 0 && (stat.mode & 0o022) === 0;
+      } catch {
+        return false;
+      }
+    });
+    add("root: the pusher answers", pusher.ok === true && pinned, pusher.ok !== true ? String(pusher.error) : pinned ? `${PUSHER.control}; the forge it pushes to is root's copy` : `${PINNED_FORGE.config} or its host keys are missing, or not root's alone`, "desolate bootstrap; its log is /var/lib/desolate-root/pusher.log");
     return checks;
   },
 };

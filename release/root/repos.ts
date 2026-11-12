@@ -67,6 +67,14 @@ const config = async (dir: string, pairs: Record<string, string>) => {
 };
 
 /** Remote -> mirror (section 6.4), with the read key alone. Then the root clone, if new. */
+/** What the remote's branch is, as the mirror last saw it (null: the remote has no such
+ *  branch). A push names it as the commit the branch moves from (shared/approval.ts). */
+export const remoteTip = async (repo: Repo, branch: string): Promise<string | null> => {
+  const found = await git(mirrorPath(repo), ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]);
+  const id = found.stdout.trim();
+  return found.code === 0 && /^[0-9a-f]{40}$/.test(id) ? id : null;
+};
+
 export const fetch = async (repo: Repo, log: (line: string) => void = () => {}) => {
   const record = recordOf(repo);
   const mirror = mirrorPath(repo);
@@ -160,10 +168,12 @@ export const ensureClone = async (repo: Repo, defaultBranch: string | null): Pro
       // host) before anything leaves: see git-remote-desolate-push.ts.
       "remote.origin.pushurl": `desolate-push::${repoId(repo)}`,
       // `lfs.pushurl`, not remote.origin.lfspushurl: git-lfs lets `lfs.url` outrank the
-      // per-remote setting, and an upload would then go into the mirror (measured).
+      // per-remote setting, and an upload would then go into the mirror (measured). (This
+      // user cannot reach a write key: an upload from here fails. The pusher uploads.)
       "lfs.pushurl": url,
-      "core.sshCommand": sshCommand(repo, "write"),
     });
+    // Clones made before the pusher named the write agent here.
+    await git(clone, ["config", "--unset-all", "core.sshCommand"]);
   } else {
     // Not pushable: a push, of commits or of LFS objects, has nowhere to go. Without these
     // it would land in the mirror, which the root can write.
