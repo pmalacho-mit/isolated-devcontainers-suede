@@ -96,7 +96,7 @@ describe("T2 phase 4: a domain's secrets", () => {
     const inbox = inWs("dev/w1", `cat /desolate/inbox/secrets.json; grep -rIl -e '${VALUE}' -e '${TOKEN}' /desolate /workspaces /etc /run 2>/dev/null | head -3; echo searched`, true);
     assert.deepEqual(JSON.parse(inbox.stdout.slice(0, inbox.stdout.lastIndexOf("]") + 1)), [{ name: "MYAPP-API-KEY", hosts: ["api.example.test"], headers: ["authorization"] }, { name: "MYAPP-TOKEN-TWO", hosts: ["*.example.test"], headers: null }], "a workspace is told the names, hosts and headers");
     assert.match(inbox.stdout, /\]\s*searched\s*$/, "no file a workspace can read holds a value");
-    assert.match(stack.inRoot(["bash", "-c", "stat -c '%a' /var/lib/desolate/secrets /var/lib/desolate/secrets/dev.json; grep -c s3cr3t /var/lib/desolate/secrets/dev.json"]).stdout, /^700\n600\n1\n$/, "control: the root does hold it, in a file that is its user's alone");
+    assert.match(stack.inRoot(["bash", "-c", "stat -c '%a %G' /var/lib/desolate/secrets /var/lib/desolate/secrets/dev.json; grep -c s3cr3t /var/lib/desolate/secrets/dev.json"]).stdout, /^2750 desolate-proxy\n640 desolate-proxy\n1\n$/, "control: the root does hold it, in a file the root's user and the proxies' user read, and nobody else");
   });
 
   it("the name becomes the value on the way to the secret's host, in its headers, and nowhere else", () => {
@@ -208,7 +208,9 @@ describe("T2 phase 4: a domain's secrets", () => {
   it("fail closed: with the secrets proxy down its hosts are refused, not passed around it; a removed secret is a name again", () => {
     stack.step("the secrets proxy stops; a secret is removed");
     const count = upstream().length;
-    assert.equal(stack.inRoot(["bash", "-c", "kill $(node -e 'console.log(JSON.parse(require(\"fs\").readFileSync(\"/var/lib/desolate/proxy/secrets/dev.json\")).pid)') && sleep 1"]).code, 0);
+    // (It runs as the proxies' user under sudo, whose pid is the one recorded: as root, end
+    // the proxy itself.)
+    assert.equal(stack.inRoot(["bash", "-c", "pkill -TERM -P $(node -e 'console.log(JSON.parse(require(\"fs\").readFileSync(\"/var/lib/desolate/proxy/secrets/dev.json\")).pid)') && sleep 1"], { root: true }).code, 0);
     const down = curl("dev/w1", "https://api.example.test/down -H 'Authorization: Bearer MYAPP-API-KEY'");
     assert.notEqual(down.code, 0);
     assert.ok(log("dev").some((e) => e.verdict === "refused" && /secrets proxy is not running/.test(e.reason ?? "")), "refused, with the reason on record");

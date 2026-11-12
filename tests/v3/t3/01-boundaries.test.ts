@@ -238,6 +238,21 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     assert.equal(stack.quiet("domain", "a", "secret", "rm", "T3-SECRET-NAME").code, 0);
   });
 
+  it("T3 the proxies run as their own user, which reaches no share and not the keyring", () => {
+    // What parses a workspace's traffic is the most exposed code in the root. On vz a share
+    // takes a write from any user that reaches it, so the shares are closed to that user by
+    // a directory that is not a share (root/start.sh, proxy/as-proxy.ts).
+    const users = stack.inRoot(["bash", "-c", "ps -eo user:20,args | grep -E 'proxy/proxy.ts|mitmdump' | grep -v -e grep -e '^root ' | awk '{print $1}' | sort -u"]).stdout.trim();
+    assert.equal(users, "desolate-proxy", "every proxy running is the proxies' user's");
+    const tried = stack.inRoot(["bash", "-c", `
+      for p in /desolate/root /desolate/mirrors /desolate/domains; do sudo -n -u desolate-proxy touch $p/proxy-tried 2>/dev/null && echo "$p=WROTE" || echo "$p=refused"; done
+      sudo -n -u desolate-proxy bash -c 'echo "{\"op\":\"list\"}" | socat - UNIX-CONNECT:/run/desolate/keyring/control.sock' >/dev/null 2>&1 && echo keyring=REACHED || echo keyring=refused
+      touch /desolate/root/user-tried && echo control=WROTE && rm -f /desolate/root/user-tried`]);
+    const got = lines(tried.stdout);
+    assert.equal(got.control, "WROTE", "control: the root's own user does write the share, so a refusal above is the closed directory");
+    for (const [name, verdict] of Object.entries(got)) if (name !== "control") assert.match(verdict, /^refused/, `${name}, as the proxies' user`);
+  });
+
   it("T3 forced egress: root inside the VM reaches nothing", () => {
     stack.step("root in the VM against the network");
     // The domain's rules now allow nothing, so what is refused below is refused by the proxy

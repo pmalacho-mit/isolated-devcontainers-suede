@@ -393,6 +393,33 @@ holds the keys, 0700) separated nothing from a bug in any of those.
   domain's secrets, and write root clones. The next step is a user for the proxies, with
   each domain's secrets readable by that domain's secrets proxy only.
 
+## The proxies run as a user of their own (decided on the Mac; measured)
+
+Each workspace's `proxy.ts` and each domain's mitmproxy parse everything a workspace sends.
+They ran as the root's ordinary user, so a bug in either reached what that user reaches:
+the keyring's sockets (every read key signs for it; write keys need an approval), the root
+clones and mirrors (a hook or an `fsmonitor` in a clone's config runs as the user at its
+next git command), and every domain's secrets.
+
+- **`desolate-proxy`**, a system user with a group of its own. The root's user may run
+  programs as it (`<user> ALL=(desolate-proxy) NOPASSWD: ALL`, the last line of
+  `99-desolate`): safe in that direction, since the root's user already holds all it holds.
+  It is in no group of the root's user, so the keyring's sockets (0660, that group) refuse
+  it.
+- **What it reads**, through its group, in set-group-ID directories the root's user makes:
+  the policies, each domain's secret values and where its secrets proxy listens. **What it
+  writes**: `/var/lib/desolate/proxy-out` (the audit log, each domain's CA). The root's
+  user copies a CA into a domain's inbox only if it is a plain file holding a certificate.
+- **The shares are closed to it** by `/desolate` (root, the root user's group, 0750), not a
+  share: on vz any user that reaches a share can write it (previous section). Its code is
+  a root-owned copy at `/opt/desolate/proxy-code`, made by `start.sh`.
+- `doctor` asks: it can be started, shares no group with the root's user, and cannot reach
+  `/desolate/root`. T4 tries, as it, to write each share and to ask the keyring, with the
+  root's user writing the same share as the control.
+- **Left:** the proxies' user reads every domain's secrets (one user for all domains), and
+  has the internet. A bug in a proxy can still leak secrets and the traffic it carries. A
+  user per domain would narrow that; not done.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the
@@ -448,7 +475,14 @@ Three things the first workspaces on the Mac showed, each measured by hand on Li
    directory; the root VM went on seeing the symlink for about a second (reading through
    it gave "Invalid argument"), then saw the directory. A file replaced by rename (a refs
    list) can likewise look as it was.
-3. **What does not follow from (2):** a stale entry cannot lead the root anywhere new. A
+3. **Any user of a guest that reaches a share can write it.** A file in a share reports as
+   owned by whichever user of the guest last asked about it, so the guest's permission
+   bits give that user the owner's rights: in the root VM the proxies' user (uid 995) saw
+   `/desolate/root` as its own, created a file there and appended to a root clone's file,
+   and both changes were on the Mac. Within a vz guest, Unix users separate nothing on a
+   share; what keeps a user out is a directory that is not a share. (Workspace VMs do not
+   care: everything in one is the domain's. The root VM does: next section.)
+4. **What does not follow from (2):** a stale entry cannot lead the root anywhere new. A
    link is resolved by the root VM's own kernel, and only when that kernel sees a link,
    which `outbox.ts` then refuses (`O_NOFOLLOW`, and the descriptor's own path). An entry
    the root still thinks is the old directory is operated on as that old directory by the

@@ -133,8 +133,9 @@ the security findings, open and closed.
   and the git that reads a domain's packs); start-up followed links that user could
   plant; node and `/usr/local/bin` belonged to uid 1001; the dashboard answered any local
   program and handed it every editor's token; mitmproxy's dependencies were unpinned.
-- **Security, open:** the proxies run as the same user as rootd, and a domain's secrets are
-  that user's files (`mac-audit-notes.md`).
+- **Security, also fixed:** the proxies ran as rootd's user; on vz any user of a guest who
+  reaches a share can write it. The proxies now run as their own user, closed out of the
+  shares. **Open:** one proxies' user reads every domain's secrets (`mac-audit-notes.md`).
 - **T2 on a Mac is partial** (the fake backend's link is a host socket Colima cannot reach):
   `tests/v3/README.md`.
 
@@ -277,9 +278,10 @@ Things that are true of the code as it is, that the next person should not have 
   `NOPASSWD: ALL` until the Mac bring-up; `release/docs/incidents.md`). That user runs
   rootd, the state service, git on a domain's packs and every proxy, so the write keys are
   now safe from a bug in any of those. The host reaches root by ssh as root with Lima's
-  key. **Secrets are not yet**: a domain's secret values are files of that same user,
-  because the proxies that substitute them run as it. Giving the proxies a user of their
-  own is the next step (`docs/v3/mac-audit-notes.md`).
+  key. The proxies run as `desolate-proxy`, which reads policies and secret values and
+  reaches neither the keyring nor any share (`decisions.md`, "The proxies run as a user of
+  their own"). Secrets are readable by the root's user and by that one proxies' user, for
+  every domain.
 - **A secret can be USED by whatever can reach its domain's proxy**, though never read:
   every workspace of the domain (by design), and anything on the host that can run
   `desolate exec` in one.

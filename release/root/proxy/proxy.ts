@@ -29,7 +29,8 @@ import { ROOT } from "../layout.ts";
 import type { Running } from "./secrets.ts";
 
 const [, , portArg, domain, workspace] = process.argv;
-const AUDIT = `${ROOT.state}/proxy/audit.log`;
+// Its own output is in proxy-out (as-proxy.ts): the only directory the proxies' user writes.
+const AUDIT = `${ROOT.state}/proxy-out/audit.log`;
 export type Policy = { mode: "open" | "enforce"; hosts: string[]; internal: string[] };
 const policy = (): Policy => ({ mode: "open", hosts: [], internal: [], ...readJson<Partial<Policy>>(`${ROOT.state}/proxy/policy/${domain}.json`, {}) });
 
@@ -116,7 +117,7 @@ const handle = async (client: Socket, head: string) => {
 };
 
 if (portArg) {
-  fs.mkdirSync(`${ROOT.state}/proxy`, { recursive: true });
+  fs.mkdirSync(`${ROOT.state}/proxy-out`, { recursive: true });
   createServer((client) => {
     client.on("error", () => client.destroy());
     let head = "";
