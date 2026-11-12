@@ -38,8 +38,11 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
 10. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
 11. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted
     under the rule that nothing untrusted runs on the Mac or in the root.
-12. **The Touch ID approver has never been compiled.** Opt-in; the terminal approver is the
-    default. Not run on the Mac yet.
+12. **The Touch ID approver has never been run.** Opt-in; the terminal approver is the
+    default. It compiles on the M1 (Swift 5.10, `swiftc -O`, 2026-11-12) and its key is
+    `.privateKeyUsage` + `.userPresence`, this device only. Running it makes a Secure
+    Enclave key and asks for Touch ID: a person's to do (`DESOLATE_APPROVER=touchid` at a
+    first bootstrap, then check that cancelling the dialog approves nothing).
 
 ## Accepted, with why
 
