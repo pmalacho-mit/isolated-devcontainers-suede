@@ -63,6 +63,17 @@ export const extensionsOf = (spec: Record<string, unknown>): string[] => {
 };
 
 const ENV_CA = "/desolate/ca/ca-certificates.crt";
+/** Where package managers keep their downloads, in the domain's cache (section 4.7, C4):
+ *  what one workspace of a domain fetched, the next finds. Only download caches, never where
+ *  a tool installs itself (CARGO_HOME, GOPATH's bin): those belong to the image. */
+export const CACHE_ENV: Record<string, string> = {
+  npm_config_cache: "/desolate/cache/npm",
+  npm_config_store_dir: "/desolate/cache/pnpm",
+  YARN_CACHE_FOLDER: "/desolate/cache/yarn",
+  PIP_CACHE_DIR: "/desolate/cache/pip",
+  UV_CACHE_DIR: "/desolate/cache/uv",
+  GOMODCACHE: "/desolate/cache/go-mod",
+};
 /** The spec desolate hands the CLI: the project's, plus what the header lists. */
 export const overrideOf = (spec: Record<string, unknown>, checkout: string, home: string): Record<string, unknown> => {
   const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
@@ -81,6 +92,7 @@ export const overrideOf = (spec: Record<string, unknown>, checkout: string, home
     bind("/usr/local/bin/node", "/desolate/bin/node", true),
     bind("/desolate/release/workspace/desolate", "/usr/local/bin/desolate", true),
     bind("/desolate/release/workspace/status", "/desolate/status", true),
+    bind("/desolate/cache", "/desolate/cache"),
   ];
   const containerEnv = {
     // git in the container: the mirror and the checkouts are owned by the VM's user, which
@@ -90,6 +102,9 @@ export const overrideOf = (spec: Record<string, unknown>, checkout: string, home
     // their roots from the environment are pointed at it.
     SSL_CERT_FILE: ENV_CA, NODE_EXTRA_CA_CERTS: ENV_CA, REQUESTS_CA_BUNDLE: ENV_CA, CURL_CA_BUNDLE: ENV_CA, GIT_SSL_CAINFO: ENV_CA,
     DESOLATE_WORKSPACE: "1",
+    // The domain's package caches (C4), where the container can see them: not for a compose
+    // spec, whose services are not given the mount.
+    ...(compose ? {} : CACHE_ENV),
     ...env(spec.containerEnv),
   };
   if (compose) return { ...spec, containerEnv };

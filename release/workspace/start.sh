@@ -20,6 +20,16 @@ install -d -m 0755 /run/desolate /var/lib/desolate
 # checkouts all the time, and git then refused the user its own clone. So: every directory.
 # (Not in the root VM, whose git has settings of its own: root/start.sh.)
 git config --system --replace-all safe.directory '*'
+# The domain's package caches (C4) for what runs in the VM itself (a devcontainer is given
+# them by devcontainer.ts): only where the share is there to hold them.
+if mountpoint -q /desolate/cache; then
+  cat >/etc/profile.d/desolate-cache.sh <<'C'
+export npm_config_cache=/desolate/cache/npm npm_config_store_dir=/desolate/cache/pnpm YARN_CACHE_FOLDER=/desolate/cache/yarn
+export PIP_CACHE_DIR=/desolate/cache/pip UV_CACHE_DIR=/desolate/cache/uv GOMODCACHE=/desolate/cache/go-mod
+C
+else
+  rm -f /etc/profile.d/desolate-cache.sh
+fi
 # `desolate` and `/desolate/status` inside a workspace: its own small CLI.
 ln -sf "$HERE/desolate" /usr/local/bin/desolate
 "$HERE/net/up.sh" "$LINK"
