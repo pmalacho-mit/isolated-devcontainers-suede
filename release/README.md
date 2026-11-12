@@ -114,6 +114,11 @@ hostile code on your Mac (see the rule above). If you want that as well, on a Ma
 behind Touch ID; that path is written and has never been run. `desolate approve --selftest`
 checks whichever you have without pushing anything.
 
+**Use Chrome or Firefox for desolate's pages** (the dashboard, the approval page, the git
+terminal, the editors): they are at names under `localhost`, which those browsers resolve
+themselves. Safari asks macOS, which resolves `localhost` alone, and says it cannot find
+the server.
+
 **Or approve with one click.** `desolate approve --web` (and `desolate ui`) prints the
 approval page's address, `http://desolate-approve.localhost:<port>/?tkn=...`: open it once in
 your browser, keep the tab, and every push waiting for you shows there, with what it would

@@ -61,9 +61,13 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
    in git's own parsing that compromises it could mislead the reviewer (not the pusher); the
    terminal prompt (`desolate push`) shows that user's summary, not the reviewer's;
    approvals given at the terminal are not events; an offered branch's new LFS objects check
-   out as pointers in the git VM. None has been tried against github.com itself: the pusher
-   speaks receive-pack, tested against a stand-in forge and a local git; the first real push
-   is a person's to approve.
+   out as pointers in the git VM. **Against github.com** (2026-11-12): a branch pushed from the git VM to
+   `mitdesolate/desolate-scratch`, approved by the person on the approval page in Chrome:
+   the pusher's own receive-pack and its compare-and-swap from `onto` (none: a new branch)
+   took, and the branch on GitHub is that commit. `desolate events` said `git-push-handed`,
+   `approval-waiting`, `approved`, `pushed`, in that order. Safari cannot open desolate's
+   pages: macOS resolves `localhost` but not names under it, which Chrome and Firefox do
+   themselves (README: open them in Chrome or Firefox).
 
 11. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
 12. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted
