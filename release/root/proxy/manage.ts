@@ -1,5 +1,4 @@
 // Starting and stopping each workspace's proxy, and a domain's network rules.
-import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { createServer } from "node:net";
 import * as path from "node:path";
@@ -7,20 +6,12 @@ import { refuse } from "../../shared/exit.ts";
 import { readJson, writeJson } from "../../shared/json.ts";
 import { normalizeName } from "../../shared/sniff.ts";
 import { ROOT } from "../layout.ts";
+import { alive, PROXY_CODE, PROXY_OUT, spawnAsProxy, stopProxy } from "./as-proxy.ts";
 import type { Policy } from "./proxy.ts";
 
 const DIR = `${ROOT.state}/proxy`;
-const HERE = path.dirname(new URL(import.meta.url).pathname);
 type Running = { port: number; pid: number; domain: string; workspace: string };
 const file = (vm: string) => path.join(DIR, "running", `${vm}.json`);
-const alive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-};
 const free = (port: number) =>
   new Promise<boolean>((resolve) => {
     const probe = createServer();
@@ -37,8 +28,10 @@ export const start = async (vm: string, domain: string, workspace: string): Prom
   for (let candidate = 21000; candidate < 22000 && port === 0; candidate++) if (await free(candidate)) port = candidate;
   if (port === 0) throw new Error("no free port for a proxy in the root");
   const log = fs.openSync(path.join(DIR, "proxy.log"), "a");
-  const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", path.join(HERE, "proxy.ts"), String(port), domain, workspace], { detached: true, stdio: ["ignore", log, log] });
-  child.unref();
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+  for (const key of ["DESOLATE_ROOT_STATE", "DESOLATE_ROOT_DOMAINS", "DESOLATE_ROOT_SYS"]) if (process.env[key]) env[key] = process.env[key]!;
+  const child = spawnAsProxy(process.execPath, ["--disable-warning=ExperimentalWarning", path.join(PROXY_CODE, "root", "proxy", "proxy.ts"), String(port), domain, workspace], env, log);
+  fs.closeSync(log);
   for (let waited = 0; (await free(port)) && waited < 5000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
   writeJson(file(vm), { port, pid: child.pid, domain, workspace });
   return { port };
@@ -46,7 +39,7 @@ export const start = async (vm: string, domain: string, workspace: string): Prom
 
 export const stop = (vm: string) => {
   const existing = readJson<Running | null>(file(vm), null);
-  if (existing && alive(existing.pid)) process.kill(existing.pid);
+  if (existing && alive(existing.pid)) stopProxy(existing.pid);
   fs.rmSync(file(vm), { force: true });
 };
 
@@ -70,7 +63,8 @@ export const setPolicy = (domain: string, change: { mode?: unknown; allow?: unkn
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(String(address))) refuse(`'${String(address)}' is not an IPv4 address`, "name the one internal address this domain may reach");
     if (!next.internal.includes(String(address))) next.internal.push(String(address));
   }
-  writeJson(policyFile(domain), next, 0o600);
+  // Readable by the proxies' user, through the directory's group (root/start.sh).
+  writeJson(policyFile(domain), next, 0o640);
   return next;
 };
 
@@ -95,7 +89,7 @@ export const recommend = (domain: string) => {
 export const auditLog = (filter: { domain?: string; last?: number }) => {
   let lines: string[] = [];
   try {
-    lines = fs.readFileSync(path.join(DIR, "audit.log"), "utf8").trim().split("\n").filter(Boolean);
+    lines = fs.readFileSync(path.join(PROXY_OUT, "audit.log"), "utf8").trim().split("\n").filter(Boolean);
   } catch {
     /* nothing audited yet */
   }

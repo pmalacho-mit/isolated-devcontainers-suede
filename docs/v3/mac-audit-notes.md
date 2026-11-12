@@ -1,43 +1,52 @@
-# Security audit notes from the Mac bring-up (2026-11-11 onward)
+# Security audit notes from the Mac bring-up (2026-11-11 and 12)
 
-Working notes from the agent on the M1, kept as the vz backend came up. Each item is
-**open**, **fixed** (with where), or **accepted** (with why). Items move into
-`decisions.md` or `release/docs/incidents.md` when they are settled.
+Kept by the agent on the M1 as the vz backend came up. Each item is **fixed** (with the
+branch and pull request), **open**, or **accepted** (with why). The settled ones are also
+in `decisions.md` and `release/docs/incidents.md`; this page is the index.
 
 ## Fixed
 
-1. **The root VM's ordinary user had passwordless sudo** (branch `mac/root-no-sudo`; also
-   the links root's start-up followed, and the keyring's directory in the user's own). rootd, the state service and
-   the git that parses agent-written packs run as Lima's login user. Lima gives that user
-   `NOPASSWD: ALL` by default. If it does here, the keyring's own user protects nothing
-   against a compromise of those processes: `sudo cat` reads the write keys.
-   HANDOFF section 6 says keys are "safe from the root's unprivileged processes"; that is
-   only true if those processes cannot sudo. **Confirmed** on the base VM (which the root
-   is cloned from): `(ALL) NOPASSWD: ALL`. Worse than the git surface: each workspace's
-   proxy (`proxy.ts`) and each domain's secrets proxy (mitmproxy) are spawned by rootd as
-   this user, and they parse what workspaces send. A memory or logic bug in either is
-   one `sudo` from every write key and every domain's secrets. Fixed: no sudo for that user;
-   the host reaches root by ssh as root with Lima's key; root's things in a root-owned
-   directory. `decisions.md`, "The root VM's ordinary user is not root".
+1. **The root VM's ordinary user had passwordless sudo** (`mac/root-no-sudo`, #69). Lima's
+   cloud-init gives its login user `NOPASSWD: ALL` at every boot, and that user runs
+   everything in the root VM that parses what a domain wrote. The keyring's own user
+   separated nothing. Now a sudoers rule of desolate's denies it, the host reaches root by
+   ssh as root, and doctor asks.
+2. **Root's start-up followed links its ordinary user could plant** (#69): `install -d -o
+   <user>` on names in that user's directory gave it any directory a link named. What root
+   and the keyring rely on moved to `/var/lib/desolate-root`; the user's directories are
+   made by the user.
+3. **node and `/usr/local/bin` belonged to uid 1001** (#69): `tar` as root kept the
+   archive's owner. `--no-same-owner`, a repair in start.sh, a doctor row.
+4. **The dashboard answered any local program and handed it every editor's token**
+   (`mac/dashboard-credential`, #71). Now a cookie given only for the address `desolate ui`
+   prints.
+5. **Fixes did not take effect until a reboot** (#71): services kept running old code.
+   start.sh now restarts them when their code changes.
+6. **mitmproxy's and the devcontainer CLI's dependencies were not pinned** (`mac/hashed-tools`,
+   #68): locks with every package's hash.
+7. **A deploy key's title carried the Mac's hostname** (often its owner's name) (#67).
+8. **The proxies ran as rootd's user, and on vz any user who reaches a share can write it**
+   (`mac/proxy-user`). The proxies run as `desolate-proxy`: no group of the root's user (so
+   not the keyring), and `/desolate` is closed to it (so no share). Measured before the
+   fix: the proxies' user appended to a root clone's file on the Mac.
 
 ## Open
 
-2. **The proxies run as rootd's user, and secrets are that user's files.** A bug in
-   mitmproxy or in `proxy.ts`, reached from any workspace, reads every domain's secret
-   values and can write root clones and the registry. Fix: a user for the proxies; each
-   domain's secrets readable by its secrets proxy only.
-3. **The dashboard answers any local client, and hands out editor tokens.** The forwarder
-   carries `desolate.localhost:31581` to the state service on its name alone; the service
-   checks Host and Origin, which stops other web pages, not a local process (any user of
-   the Mac, or a sandboxed app with network-client, can send any Host and no Origin).
-   Measured: `curl -H 'Host: desolate.localhost:31581' http://127.0.0.1:31581/state`
-   returns each workspace's editor address with its `tkn`, which is a terminal in that
-   workspace (its code, its domain's secrets by use). `/diff` and `/action` are open the
-   same way. The vz link was given a token precisely to keep other users and sandboxed
-   programs out (`shared/link.ts`). Fix planned: a dashboard credential only the person's
-   browser holds (an address with a token from `desolate ui`, exchanged for a cookie).
-4. **Tools installed by version, not by hash.** `provision.sh` runs `pip install
-   mitmproxy==11.0.2` and `npm install -g @devcontainers/cli@0.88.0`. The top-level version
-   is fixed, the transitive dependencies are resolved at install time, unhashed. mitmproxy
-   runs in the root VM, next to the domains' secrets. A lock with hashes for each
-   (pip `--require-hashes`, npm `ci` from a shipped lockfile) would close it.
+9. **One proxies' user reads every domain's secrets.** A bug in mitmproxy, reached from one
+   domain's workspace, can read every domain's secret values (and the proxies have the
+   internet). A user per domain, or a secrets proxy that is given only its domain's
+   values, would narrow it.
+10. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
+11. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted
+    under the rule that nothing untrusted runs on the Mac or in the root.
+12. **The Touch ID approver has never been compiled.** Opt-in; the terminal approver is the
+    default. Not run on the Mac yet.
+
+## Accepted, with why
+
+- **Workspace VMs keep sudo for their login user, and `safe.directory=*`.** Everything in a
+  workspace VM is the domain's; the VM is the boundary (P5).
+- **The root VM's egress is open.** It fetches from the remotes and runs the proxies; it
+  runs no untrusted code (the rule).
+- **The base image is `FROM ubuntu:24.04` by tag, not digest** (the fake backend's image
+  and the stand-in forge only; the vz base VM is Lima's digest-pinned Ubuntu image).

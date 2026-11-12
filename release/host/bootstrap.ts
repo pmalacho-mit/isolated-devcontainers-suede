@@ -31,7 +31,7 @@ export const parseForge = (spec: string | undefined, knownHostsFile: string | un
 const startRootServices = async () => {
   const uid = process.getuid!();
   const result = await backend().exec(ROOT_VM, ["bash", `${guest.release}/root/start.sh`, String(uid)], { root: true, timeoutMs: 120_000 });
-  if (result.code !== 0) throw new Error(`the root's services did not start: ${(result.stderr || result.stdout).trim().slice(-600)}`);
+  if (result.code !== 0) refuse(`the root's services did not start: ${(result.stderr || result.stdout).trim().slice(-600)}`, "desolate doctor; the root's own logs are in /var/lib/desolate-root and /var/lib/desolate (desolate root shell)");
 };
 
 /** Give the root the approver's PUBLIC key, and the token the host's daemon shows the
@@ -152,7 +152,7 @@ export const doctor = async (out: Out, json = false): Promise<number> => {
   }
   // What only the root can say. If it cannot be asked, each of these is a failure: a probe
   // that did not run is not a probe that found nothing (P6).
-  const rootChecks = ["root: keyring answers", "root: the write agent's askpass socket is closed to the root's own user", "root: private keys are unreadable to the root's own user", "root: the root's own user cannot become root", "root: the programs root runs are root's", "root: git's settings are root's", "root: approver key installed", "root: forge configured"];
+  const rootChecks = ["root: keyring answers", "root: the write agent's askpass socket is closed to the root's own user", "root: private keys are unreadable to the root's own user", "root: the root's own user cannot become root", "root: the programs root runs are root's", "root: the proxies run as their own user", "root: git's settings are root's", "root: approver key installed", "root: forge configured"];
   let asked: Check[] | null = null;
   if (rootUp)
     try {

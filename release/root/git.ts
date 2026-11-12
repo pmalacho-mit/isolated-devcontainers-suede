@@ -64,12 +64,21 @@ export const ownedByRoot = (dir: string): boolean => {
   return real.startsWith(`${ROOT.mirrors}/`) || real.startsWith(`${ROOT.clones}/`);
 };
 
+/** git's ownership check, answered for the one repository desolate is running git in (and
+ *  only that one; it reaches git's children through the environment). On vz a file in a
+ *  share reports as owned by whichever user last asked, so the check would refuse the
+ *  root's own clone whenever root had just looked at it (decisions.md, "On vz, a share is
+ *  the host's files..."). It never kept the root out of a domain's repository on vz either:
+ *  that is ownedByRoot's job, and the person's (P4). */
+export const safeIn = (real: string) => ["-c", `safe.directory=${real}`];
+
 export const git = (dir: string, args: string[], options: RunOptions = {}): Promise<RunResult> => {
   if (!ownedByRoot(dir)) throw new Error(`the root does not run git in ${dir}: it is not a mirror or a root clone (P4)`);
   // A mirror is a bare repository, named outright: the root's config (safe.bareRepository)
   // lets git use a bare repository only when it is told which one, never by finding one.
-  const where = fs.realpathSync(dir).startsWith(`${ROOT.mirrors}/`) ? ["--git-dir", dir] : ["-C", dir];
-  return run("git", [...where, ...args], { ...options, env: { ...baseEnv(), ...(options.env ?? {}) } });
+  const real = fs.realpathSync(dir);
+  const where = real.startsWith(`${ROOT.mirrors}/`) ? ["--git-dir", dir] : ["-C", dir];
+  return run("git", [...safeIn(real), ...where, ...args], { ...options, env: { ...baseEnv(), ...(options.env ?? {}) } });
 };
 
 export const gitOk = async (dir: string, args: string[], options: RunOptions = {}): Promise<string> => {

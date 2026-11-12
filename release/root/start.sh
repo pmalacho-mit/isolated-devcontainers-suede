@@ -30,7 +30,9 @@ for rule in /etc/sudoers.d/*; do
   case $rule in */99-desolate) continue ;; esac
   [ -f "$rule" ] && grep -qE "^[[:space:]]*\"?$USER_NAME\"?[[:space:]]" "$rule" && rm -f "$rule"
 done
-printf '# desolate (root/start.sh): this user runs what reads a domain'"'"'s data. It is never root.\n%s ALL=(ALL) !ALL\n' "$USER_NAME" >/etc/sudoers.d/99-desolate.new
+# The one thing it may do: run programs as the proxies' user (proxy/as-proxy.ts), which can
+# reach less than it can. That line comes last, so it is what matches for that user alone.
+printf '# desolate (root/start.sh): this user runs what reads a domain'"'"'s data. It is never root.\n%s ALL=(ALL) !ALL\n%s ALL=(desolate-proxy) NOPASSWD: ALL\n' "$USER_NAME" "$USER_NAME" >/etc/sudoers.d/99-desolate.new
 chmod 0440 /etc/sudoers.d/99-desolate.new
 visudo -qcf /etc/sudoers.d/99-desolate.new && mv /etc/sudoers.d/99-desolate.new /etc/sudoers.d/99-desolate
 for group in sudo admin wheel docker lxd; do
@@ -42,6 +44,30 @@ if runuser -u "$USER_NAME" -- sudo -n true 2>/dev/null; then
 fi
 
 id desolate-keyring >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin desolate-keyring
+# The proxies' user (proxy/as-proxy.ts). Its group is how it reads policies and secrets; the
+# root's user is in that group (to make files the proxies read, and read what they write).
+# The proxies' user is in no group of the root's user: the keyring's sockets are not its.
+id desolate-proxy >/dev/null 2>&1 || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin desolate-proxy
+id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx desolate-proxy || usermod -aG desolate-proxy "$USER_NAME"
+for group in $(id -nG desolate-proxy); do
+  [ "$group" = desolate-proxy ] || gpasswd -d desolate-proxy "$group" >/dev/null
+done
+# THE SHARES ARE CLOSED TO EVERY OTHER USER HERE. On vz, a file in a share reports as owned
+# by whichever user last asked about it, so the guest's permission bits keep no user of this
+# VM from another's files there (measured: the proxies' user wrote into a root clone). What
+# keeps a user out is a directory that is NOT a share: /desolate, which holds every mount
+# point, is root's and the root's user's group's (the keyring is in that group, the proxies'
+# user is not). The proxies' code comes from a root-owned copy instead.
+chown root:"$USER_GROUP" /desolate
+chmod 0750 /desolate
+PROXY_CODE=/opt/desolate/proxy-code
+rm -rf "$PROXY_CODE.new"
+install -d -m 0755 -o root -g root "$PROXY_CODE.new/root"
+cp -R "$HERE/proxy" "$PROXY_CODE.new/root/proxy"
+cp "$HERE/layout.ts" "$PROXY_CODE.new/root/layout.ts"
+cp -R "$HERE/../shared" "$PROXY_CODE.new/shared"
+chown -R root:root "$PROXY_CODE.new" && chmod -R u=rwX,go=rX "$PROXY_CODE.new"
+rm -rf "$PROXY_CODE" && mv "$PROXY_CODE.new" "$PROXY_CODE"
 # The keyring runs with the root user's GROUP, so the sockets it creates are connectable by
 # the root's user (which must be able to ask for signatures) at mode 0660. Its keys (0600 in
 # a 0700 directory) and its approvals socket (0600) are the keyring user's alone.
@@ -104,9 +130,20 @@ as_user bash -c '
   # Layout 1 left these: gitconfig is root'"'"'s now, and the logs were opened by root.
   rm -f gitconfig keyring.log
   for log in rootd.log stated.log; do [ -O "$log" ] || { [ -f "$log" ] && cat "$log" >"$log.mine" && mv -f "$log.mine" "$log"; } || rm -f "$log"; done
-  mkdir -p -m 0700 secrets proxy approvals
+  mkdir -p -m 0700 approvals proxy/running
   mkdir -p -m 0755 push-locks
-  chmod 0700 secrets proxy approvals' _ "$STATE"
+  chmod 0700 approvals proxy/running
+  # What the proxies read: the policies, each domain'"'"'s secrets and where its secrets proxy
+  # listens. Theirs to read, through the group (set-group-ID, so what is made in them is
+  # in the group too); nobody else'"'"'s.
+  mkdir -p secrets proxy/policy proxy/secrets
+  chgrp desolate-proxy proxy proxy/policy proxy/secrets secrets
+  chmod 0750 proxy && chmod 2750 proxy/policy proxy/secrets secrets
+  find proxy/policy proxy/secrets secrets -maxdepth 1 -type f -name "*.json" -exec chgrp desolate-proxy {} + -exec chmod 0640 {} +
+  # What the proxies write: proxy-out, theirs to write and anyone here to read.
+  mkdir -p proxy-out proxy-out/ca
+  chgrp desolate-proxy proxy-out proxy-out/ca
+  chmod 2775 proxy-out && chmod 2770 proxy-out/ca' _ "$STATE"
 # The root's git settings, for desolate's own commands and for the person's shell alike.
 # The root's clones hold commits that agents wrote. Nothing here trusts what a commit
 # contains:

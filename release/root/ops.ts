@@ -193,6 +193,16 @@ export const ops: Record<string, Op> = {
       }
     });
     add("root: the programs root runs are root's", notRoots.length === 0, notRoots.length === 0 ? `node (${process.execPath}) and root's PATH` : `${notRoots.join(", ")} could be changed by someone other than root`, "desolate bootstrap (root/start.sh gives them back)");
+    // The proxies run as a user of their own (proxy/as-proxy.ts): asked, both halves.
+    const asProxy = spawnSync("sudo", ["-n", "-u", "desolate-proxy", "id", "-G"], { encoding: "utf8", timeout: 10_000 });
+    const mine = new Set(spawnSync("id", ["-G"], { encoding: "utf8" }).stdout.trim().split(/\s+/));
+    const proxyGroups = asProxy.status === 0 ? asProxy.stdout.trim().split(/\s+/) : [];
+    const shared = proxyGroups.filter((group) => mine.has(group) && group !== spawnSync("id", ["-g", "desolate-proxy"], { encoding: "utf8" }).stdout.trim());
+    // And it cannot reach a share: on vz any user who reaches one can write it (start.sh).
+    const reaches = spawnSync("sudo", ["-n", "-u", "desolate-proxy", "test", "-x", "/desolate/root"], { timeout: 10_000 }).status === 0;
+    add("root: the proxies run as their own user", asProxy.status === 0 && shared.length === 0 && !reaches,
+      asProxy.status !== 0 ? "the root's user cannot start a program as desolate-proxy" : shared.length > 0 ? `desolate-proxy shares the root's user's group(s) ${shared.join(", ")}: it could reach the keyring` : reaches ? "desolate-proxy can reach the shares under /desolate" : "desolate-proxy: in none of the root's user's groups, and the shares are closed to it",
+      "desolate bootstrap (root/start.sh)");
     let gitconfig = "";
     try {
       const stat = fs.lstatSync(GITCONFIG);

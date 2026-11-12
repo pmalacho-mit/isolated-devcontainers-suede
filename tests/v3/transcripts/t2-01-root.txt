@@ -25,6 +25,7 @@ bootstrap: 7 step(s) done.
   ok   root: private keys are unreadable to the root's own user: /var/lib/desolate-root/keyring is the keyring user's alone
   ok   root: the root's own user cannot become root: sudo refuses it
   ok   root: the programs root runs are root's: node (/usr/local/bin/node) and root's PATH
+  ok   root: the proxies run as their own user: desolate-proxy: in none of the root's user's groups, and the shares are closed to it
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
@@ -57,6 +58,7 @@ bootstrap: nothing changed; the stack was already up.
   ok   root: private keys are unreadable to the root's own user: /var/lib/desolate-root/keyring is the keyring user's alone
   ok   root: the root's own user cannot become root: sudo refuses it
   ok   root: the programs root runs are root's: node (/usr/local/bin/node) and root's PATH
+  ok   root: the proxies run as their own user: desolate-proxy: in none of the root's user's groups, and the shares are closed to it
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
@@ -78,10 +80,11 @@ $ desolate doctor
   ok   root: private keys are unreadable to the root's own user: /var/lib/desolate-root/keyring is the keyring user's alone
   ok   root: the root's own user cannot become root: sudo refuses it
   ok   root: the programs root runs are root's: node (/usr/local/bin/node) and root's PATH
+  ok   root: the proxies run as their own user: desolate-proxy: in none of the root's user's groups, and the shares are closed to it
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
-doctor: 1 of 14 checks FAILED.
+doctor: 1 of 15 checks FAILED.
 [exit 1]
 
 ## the fake backend is never a default
@@ -121,12 +124,8 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
   = approver (terminal): the key that approves pushes, held on this host
   = root VM dsl-<instance>-root created
   = root VM running
-desolate: Error: the root's services did not start: chmod: changing permissions of 'secrets': Operation not permitted
-    at startRootServices (file://<repo>/release/host/bootstrap.ts:35:32)
-    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
-    at async bootstrap (file://<repo>/release/host/bootstrap.ts:101:5)
-    at async main (file://<repo>/release/host/cli.ts:76:5)
-    at async file://<repo>/release/host/cli.ts:226:22
+desolate: the root's services did not start: chgrp: changing group of 'secrets': Operation not permitted
+  fix: desolate doctor; the root's own logs are in /var/lib/desolate-root and /var/lib/desolate (desolate root shell)
 [exit 1]
 
 $ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
@@ -153,6 +152,7 @@ bootstrap: nothing changed; the stack was already up.
   ok   root: private keys are unreadable to the root's own user: /var/lib/desolate-root/keyring is the keyring user's alone
   ok   root: the root's own user cannot become root: sudo refuses it
   ok   root: the programs root runs are root's: node (/usr/local/bin/node) and root's PATH
+  ok   root: the proxies run as their own user: desolate-proxy: in none of the root's user's groups, and the shares are closed to it
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes

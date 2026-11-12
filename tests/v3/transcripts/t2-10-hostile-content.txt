@@ -23,6 +23,7 @@ bootstrap: 7 step(s) done.
   ok   root: private keys are unreadable to the root's own user: /var/lib/desolate-root/keyring is the keyring user's alone
   ok   root: the root's own user cannot become root: sudo refuses it
   ok   root: the programs root runs are root's: node (/usr/local/bin/node) and root's PATH
+  ok   root: the proxies run as their own user: desolate-proxy: in none of the root's user's groups, and the shares are closed to it
   ok   root: git's settings are root's: /var/lib/desolate-root/gitconfig
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
@@ -101,7 +102,7 @@ index 0000000..077ee00
 +touch /tmp/desolate-pwned-hook
 diff --git a/out-of-tree b/out-of-tree
 new file mode 120000
-index 0000000..5f03a98
+index 0000000..5fa3a12
 --- /dev/null
 +++ b/out-of-tree
 @@ -0,0 +1 @@
