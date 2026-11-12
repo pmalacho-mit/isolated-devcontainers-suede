@@ -620,6 +620,37 @@ proxies, and the dashboard.
   connection is routed by its first request's name, and each page refuses a request for
   another (found by T2: a kept-alive connection carried a second name).
 
+## The root VM does not reach the Mac's loopback (measured on the M1; tested on T4)
+
+Lima's network gives each VM the subnet 192.168.5.0/24, and in it addresses that are the
+Mac's loopback: the gateway, 192.168.5.2 (on QEMU's network, every address of the prefix but
+the resolver's, and IPv6 too). From the root VM (measured, 2026-11-12) the host daemon's port
+answered (the approval page: 200), and so did the Mac's own ssh. The root's user parses what
+domains send, and the host daemon is where approvals are signed and the git terminal runs: a
+bug in one of those parsers should not be a connection to every local service of the Mac.
+
+- **The wall** (root/wall.sh, nftables, root's). To Lima's subnet: replies in flows the host
+  opened (its ssh in, its dials to the root's proxies), DNS to the resolver, DHCP to the
+  gateway; nothing else, and not flows this VM opened before the wall either. No private
+  range (the Mac's LAN address, a VPN's: the Mac's sshd listens there too) and no IPv6 but
+  loopback: the root needs the internet only. Traffic through the gateway to the internet has
+  other addresses and is untouched (measured: GitHub over ssh and https, a fetch). What this
+  VM's sshd sends back is also allowed by its source port (22, root's to bind; the sysctl
+  that keeps it root's is set): on a fresh VM the last packets of the host's ssh session were
+  taken for new ones and refused, and bootstrap hung (T4 found it).
+- **Always there.** The host sets it at bootstrap before the root's services start; a boot
+  unit sets it again before the network and ssh come up, from root's own copy (measured: after
+  a reboot, before any bootstrap, it is in place); start.sh sets it at every start, and on a
+  real VM nothing that reads a domain's data starts without it (`--required`).
+- **Asked, not assumed.** `doctor` opens a listener of its own on the Mac's 127.0.0.1 and
+  tries it, as the root's own user, at 192.168.5.2 and .3, and checks the wall is there. T4
+  does the same, and IPv6, as that user and as root.
+- **Tests only:** a stand-in forge on the Mac's loopback or a private address is let through,
+  by port or address, when the host is in a test run (`DESOLATE_TEST_RUN`) and names it.
+- **What is left.** Root in the root VM can take the wall down: root runs nothing untrusted
+  (the rule), and the root's user cannot become root (decided above). The Mac's public
+  addresses, if it has any, are the internet's.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the

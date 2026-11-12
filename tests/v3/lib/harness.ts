@@ -97,6 +97,9 @@ export const newStack = (label: string): Stack => {
     DESOLATE_EDITOR_PORT: process.env.DESOLATE_EDITOR_PORT ?? "31591",
     DESOLATE_FORGE_ADMIN: admin,
     DESOLATE_FORGE_SPEC: `stand-in:ssh://git@${ip}:${sshPort}`,
+    // On vz the forge, and the upstream the egress tests use, are on the Mac's loopback,
+    // which the root is walled off from but for what the host names (root/wall.sh).
+    ...(published ? { DESOLATE_TEST_GATEWAY_PORTS: [lfsPort, 80, 443].join(",") } : {}),
     DESOLATE_FORGE_KNOWN_HOSTS: path.join(forgeState, "known_hosts"),
     LIMA_HOME: path.join(home, "lima"),
     NO_COLOR: "1",
