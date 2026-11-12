@@ -87,6 +87,7 @@ desolate status dev/issue-12 --json                  # what the agent says of it
 desolate offers                                      # what workspaces have offered: needs you
 desolate review dev acme/widgets issue/12 --diff     # what a push would send, and its diff as text
 desolate push dev acme/widgets issue/12 --expect <commit>   # asks you, on your terminal
+desolate git acme/widgets                            # git in your browser: a shell in the git VM (below)
 desolate root shell                                  # ordinary git on your clones: fetch --all, diff, push
 desolate approve                                     # ... and this approves a `git push origin` made there
 desolate approve --web                               # or: the approval page's address, for one click
@@ -123,6 +124,20 @@ It cannot be framed, and its Approve button arms only after the tab has had your
 for a second and the pointer then moves onto it, so a click aimed at something else when a
 window opened under it lands on nothing. Treat the address like a password: anyone with it,
 on your Mac, can approve.
+
+**Git in your browser.** `desolate git <owner/repo>` prints the address of a terminal the host
+serves in a browser tab: bash, in the git VM, in a clone of your own at `/git/<owner>/<repo>`.
+It is git as you use it anywhere: `git fetch` (from the mirror), `git fetch root` (what the
+domains offered, as `root/<domain>/<branch>`), diff, log, rebase, commit, and `git push origin
+<branch>`, which waits for you on the approval page and then goes out through the root. The
+git VM has no network, no key, and nothing of a project's that runs: no devcontainer, no
+direnv, no clone's hooks; `less` shows colour and nothing else raw, and vim reads no
+modelines. The root's clones and the mirrors are read-only to it. What it pushes, the root
+takes in like a domain's work: every object checked first. The terminal's address carries
+this stack's token, like the approval page's: treat it like a password. Once you have opened
+it, the dashboard's "Open in git" on an offer opens a shell at that repository's clone
+(made on the way if it is not there yet). (`desolate root
+shell` is still there, a shell in the root VM itself, for what only the root can do.)
 
 **What a push is, exactly.** The push goes out through the root's pusher, the one program
 that can use a write key, and it asks the remote for one change: the branch moves from the

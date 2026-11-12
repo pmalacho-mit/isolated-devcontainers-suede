@@ -567,6 +567,59 @@ browser tab can make sign, and something that shows what is being approved truth
   re-hash a pack it already indexed): the reviewer's account is as good as git's parsing, and
   it has nothing to push with. The root's user's own words about a push are not shown.
 
+## The git VM: the person's git, in a browser tab, beside nothing (decided on the Mac; tested on T2)
+
+The person wants to use git as they do anywhere, typed in a browser (the monitor is away from
+the Mac), without anything an agent wrote getting to run. `desolate root shell` was a bash in
+the root VM, as the root's user: beside the keyring's sockets, every domain's share, the
+proxies, and the dashboard.
+
+- **A VM of its own** (host/git-vm.ts): no network at all (the same confinement as a
+  workspace's, and no link), no key, no project tooling. Its shares: the person's own clones
+  (`~/.desolate/git`, read-write), the mirrors and the root's clones (read-only: `origin`
+  is the mirror, `root` the root's clone, whose `<domain>/*` are the offers), and an out-box
+  the host reads. Its git is set so that nothing a clone holds runs: no hooks but its own
+  empty directory, no fsmonitor, no submodule fetching, no transport but files and the push
+  helper, every object checked; `less` passes colour only (`-R`) and runs nothing
+  (`LESSSECURE`), vim reads no modelines.
+- **Why not the root's clones, read-write.** A clone's `.git/config` can name programs
+  (`core.fsmonitor`, `core.pager`, a diff driver, ...), and the root's user runs git in its
+  clones. A git VM that could write them could make the root's user run what it named. So
+  the person's clones are the git VM's own, and the root reads none of them.
+- **A push** (git/git-remote-desolate-out.ts): `git push origin <branch>` leaves a bundle of
+  the commit, its new LFS objects and the request in the out-box; the host moves them where
+  the root reads them and asks the root (`git.push`), which checks every object as it does a
+  domain's bundle (root/intake.ts), takes the commit in, and pushes it as a raw push is:
+  through the reviewer, the approval page, and the pusher (root/raw-push.ts). The answer
+  comes back to the git VM's terminal.
+- **The terminal** (host/git-web.ts) is the host daemon's, at `desolate-git.localhost`: the
+  same gate as the approval page (a cookie only `desolate git`'s address gives, the page's
+  own origin, JSON bodies, a token per shell), and xterm.js vendored by hash (no CDN), with
+  links that do nothing, no clipboard addon and no title. A shell is `bash -l` under a small
+  pseudo-terminal in the git VM (git/terminal.py, run with `python3 -I`).
+- **The out-box is the git VM's, so the host follows no name in it** (the review of this
+  step found that the first version did: a link where the host wrote its answer would have
+  had the host overwrite any file of the person's; a linked LFS directory would have had it
+  move and delete files elsewhere; a file swapped between check and read could hang the
+  daemon; a file the git VM still held open could be changed after the root checked it).
+  Now the host opens each file without following a link, checks it is a plain file of a
+  bounded size, and copies it into a file of its own (an LFS object hashed on the way); the
+  git VM keeps no hold on what the root reads. Answers are written to a directory the git VM
+  can read and not write. One request at a time; a request that cannot be taken is answered,
+  never left to stop the daemon.
+- **The root's clones are there to fetch from, not to work in.** Their config is the root's
+  user's, and git follows a repository's own config: the git VM's shell refuses to run git
+  inside `/desolate/root` or the mirrors, the first clone is `--no-local` (every object
+  checked), a fetch's upload-pack has its command-naming settings pinned from this side, and
+  `GIT_NO_LAZY_FETCH` is set.
+- **Not yet.** An offered branch whose LFS objects are not on the remote yet checks out as
+  pointers in the git VM (its LFS store is the mirror's).
+- **What is left.** The terminal draws bytes a file or a commit holds: xterm.js interprets
+  escape sequences, and a bug there is a bug in the person's browser tab (no more: the tab
+  has no token but its own, and an approval still needs the approval page's click). A
+  connection is routed by its first request's name, and each page refuses a request for
+  another (found by T2: a kept-alive connection carried a second name).
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the

@@ -3,13 +3,17 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import * as path from "node:path";
+import { isBranch, isCommit } from "../shared/names.ts";
 import { writeJson } from "../shared/json.ts";
-import { repoOf, writeKnownHosts } from "./git.ts";
+import { git as gitIn, repoOf, writeKnownHosts } from "./git.ts";
+import { bundleRefusal } from "./intake.ts";
+import { pushCommit } from "./raw-push.ts";
 import type { Forge } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { withReviewer } from "./review-client.ts";
 import { parseApproval } from "../shared/approval.ts";
-import { APPROVALS, FORGE, GITCONFIG, KEYRING, PINNED_FORGE, PUSHER, REVIEWER, ROOT } from "./layout.ts";
+import { APPROVALS, clonePath, FORGE, GIT_IN, GITCONFIG, KEYRING, PINNED_FORGE, PUSHER, REVIEWER, ROOT } from "./layout.ts";
 import { proxyUserOf } from "./proxy/as-proxy.ts";
 import { SECRETS_DIR } from "./proxy/secret-store.ts";
 import * as domains from "./domains.ts";
@@ -143,6 +147,75 @@ export const ops: Record<string, Op> = {
       }
     }
     return pending;
+  },
+  /** A `git push` made in the git VM (host/git-vm.ts), handed over by the host: its bundle
+   *  is checked like a domain's (intake.ts), taken in, and pushed as a raw push is, after
+   *  the person's approval on the host. Returns what the person waiting should read. */
+  async "git.push"(args) {
+    const repo = repoOf(args.repo);
+    const branch = String(args.branch ?? "");
+    const commit = String(args.commit ?? "");
+    const file = String(args.bundle ?? "");
+    if (!isBranch(branch) || !isCommit(commit) || /^0{40}$/.test(commit) || !/^[0-9a-f]{16}\.bundle$/.test(file)) throw new Error("git.push names a branch, a commit, and a bundle the host left");
+    const bundle = path.join(GIT_IN, file);
+    const said: string[] = [];
+    try {
+      // (The host has just written it; a share can be a moment behind on vz.)
+      for (let i = 0; i < 20 && !fs.existsSync(bundle); i++) await new Promise((resolve) => setTimeout(resolve, 250));
+      const stat = fs.lstatSync(bundle);
+      if (!stat.isFile()) throw new Error("the bundle is not a plain file");
+      const clone = clonePath(repo);
+      const gitDir = path.join(clone, ".git");
+      const why = await bundleRefusal(bundle, gitDir);
+      if (why) return { pushed: false, error: `the root refused the push's bundle: ${why}`, said };
+      // One ref, of the shape the git VM's helper makes: what it names is checked below.
+      const heads = (await gitIn(clone, ["bundle", "list-heads", bundle])).stdout.split("\n").filter(Boolean).map((line) => line.split(" "));
+      if (heads.length !== 1 || !/^refs\/desolate\/out\/[0-9a-f]{16}$/.test(heads[0]![1] ?? "")) return { pushed: false, error: "the push's bundle does not carry the one ref the git VM's helper makes", said };
+      const ref = `refs/desolate/git/${file.slice(0, 16)}`;
+      const fetched = await gitIn(clone, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", bundle, `+${heads[0]![1]}:${ref}`]);
+      if (fetched.code !== 0) return { pushed: false, error: `the root could not take the push in: ${fetched.stderr.trim().split("\n").pop() ?? ""}`, said };
+      try {
+        const found = (await gitIn(clone, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])).stdout.trim();
+        if (found !== commit) return { pushed: false, error: "the bundle did not hold the commit the push names", said };
+        // Its new LFS objects, each only if it hashes to its name, into the clone's store
+        // (where send.ts takes what the remote lacks).
+        for (const oid of Array.isArray(args.lfs) ? (args.lfs as unknown[]) : []) {
+          if (typeof oid !== "string" || !/^[0-9a-f]{64}$/.test(oid)) return { pushed: false, error: "an LFS object is not named by its sha256", said };
+          const from = path.join(GIT_IN, `${file.slice(0, 16)}.lfs`, oid);
+          const stat = fs.lstatSync(from);
+          if (!stat.isFile()) return { pushed: false, error: "an LFS object is not a plain file", said };
+          // Hashed while copied: what is hashed is what is kept.
+          const to = path.join(gitDir, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid);
+          if (fs.existsSync(to)) continue;
+          fs.mkdirSync(path.dirname(to), { recursive: true });
+          const part = `${to}.part-${process.pid}`;
+          const input = fs.openSync(from, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+          const output = fs.openSync(part, "wx", 0o644);
+          const hash = createHash("sha256");
+          const buffer = Buffer.alloc(1024 * 1024);
+          try {
+            for (let read = fs.readSync(input, buffer); read > 0; read = fs.readSync(input, buffer)) {
+              hash.update(buffer.subarray(0, read));
+              fs.writeSync(output, buffer, 0, read);
+            }
+          } finally {
+            fs.closeSync(input);
+            fs.closeSync(output);
+          }
+          if (hash.digest("hex") !== oid) {
+            fs.rmSync(part, { force: true });
+            return { pushed: false, error: `the LFS object ${oid.slice(0, 12)} does not hash to its name`, said };
+          }
+          fs.renameSync(part, to);
+        }
+        const failed = await pushCommit(repo, commit, branch, args.forced === true, "a git push from the git VM", (line) => said.push(line));
+        return failed ? { pushed: false, error: failed, said } : { pushed: true, said };
+      } finally {
+        await gitIn(clone, ["update-ref", "-d", ref]).catch(() => {});
+      }
+    } finally {
+      fs.rmSync(bundle, { force: true });
+    }
   },
   /** The approval page's Refuse: the waiting push is taken off the list, and the `git push`
    *  that asked gives up (git-remote-desolate-push.ts watches for it). */

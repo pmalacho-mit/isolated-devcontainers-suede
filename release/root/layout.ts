@@ -68,6 +68,9 @@ export const GITCONFIG = `${ROOT.sys}/gitconfig`;
  *  pusher reads (root/forge-pin.ts writes them). The root's user's copies (FORGE and its
  *  known_hosts) are for fetching, and that user could rewrite them. */
 export const PINNED_FORGE = { config: `${ROOT.sys}/forge.json`, knownHosts: `${ROOT.sys}/known_hosts` } as const;
+/** Where the host leaves a push from the git VM (a bundle) for the root to take in: in the
+ *  root clones' share, which the host writes and the git VM cannot. */
+export const GIT_IN = `${ROOT.clones}/.git-in`;
 /** Raw `git push` in the root's terminal waits here for `desolate approve` on the host. */
 export const APPROVALS = `${ROOT.state}/approvals`;
 export const FORGE = `${ROOT.state}/forge.json`;

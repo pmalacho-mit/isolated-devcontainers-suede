@@ -296,21 +296,25 @@ for _ in $(seq 1 100); do [ -S "$RUN/keyring/control.sock" ] && break; sleep 0.1
 # The pusher and the reviewer, kept running by root: one request per process (pusher.ts,
 # reviewer.ts), and before each start every process of that user is killed, so nothing a
 # request's git started outlives it. Their logs are root's files.
-kept_alone() { # kept_alone <user> <home> <script> <socket>
-  local user=$1 home=$2 script=$3 socket=$4 name
+kept_alone() { # kept_alone <user> <home> <script> <socket> <user|session>
+  # user: every process of the user is killed before each start (the pusher: nothing a push
+  # started outlives it). session: only the service's own session (the reviewer, whose
+  # one-shot summaries for the host run as the same user, beside it).
+  local user=$1 home=$2 script=$3 socket=$4 kill=$5 name
   name=$(basename "$script" .ts)
   if ! alive "$RUN/$name.pid"; then
-    setsid bash -c 'exec >>"$1" 2>&1; while :; do pkill -KILL -u "$2" 2>/dev/null; sleep 0.2
-        runuser -u "$2" -- env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$3" \
-          node --disable-warning=ExperimentalWarning "$4" </dev/null
-        sleep 0.5; done' _ "$SYS/$name.log" "$user" "$home" "$PROXY_CODE/root/$script" </dev/null >/dev/null 2>&1 &
+    setsid bash -c 'exec >>"$1" 2>&1; while :; do [ "$5" = user ] && pkill -KILL -u "$2" 2>/dev/null; sleep 0.2
+        setsid runuser -u "$2" -- env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME="$3" \
+          node --disable-warning=ExperimentalWarning "$4" </dev/null & child=$!
+        wait "$child"; [ "$5" = session ] && pkill -KILL -s "$child" 2>/dev/null
+        sleep 0.5; done' _ "$SYS/$name.log" "$user" "$home" "$PROXY_CODE/root/$script" "$kill" </dev/null >/dev/null 2>&1 &
     echo $! >"$RUN/$name.pid"
   fi
   for _ in $(seq 1 100); do [ -S "$socket" ] && break; sleep 0.1; done
   [ -S "$socket" ] || { echo "start.sh: the $name did not start; see $SYS/$name.log" >&2; tail -5 "$SYS/$name.log" >&2; exit 1; }
 }
-kept_alone desolate-pusher "$PUSHER_HOME" pusher.ts "$RUN/pusher/control.sock"
-kept_alone desolate-reviewer "$REVIEWER_HOME" reviewer.ts "$RUN/reviewer/control.sock"
+kept_alone desolate-pusher "$PUSHER_HOME" pusher.ts "$RUN/pusher/control.sock" user
+kept_alone desolate-reviewer "$REVIEWER_HOME" reviewer.ts "$RUN/reviewer/control.sock" session
 ln -sf "$HERE/git-remote-desolate" /usr/local/bin/git-remote-desolate
 ln -sf "$HERE/git-remote-desolate-push" /usr/local/bin/git-remote-desolate-push
 # rootd and the state service are kept running: if one ends, it is started again and its

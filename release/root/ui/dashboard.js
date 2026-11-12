@@ -18,6 +18,12 @@ const el = (tag, attrs = {}, ...children) => {
   for (const child of children.flat()) if (child !== null && child !== undefined && child !== false) node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   return node;
 };
+/** "Open in git": the git terminal (the host's page, not this one) in a new tab, at the
+ *  person's clone of the repository. It carries no token: the tab is signed in only if the
+ *  person opened `desolate git`'s address in this browser once. */
+const gitLink = (repo) => state && state.stack && state.stack.editorPort
+  ? el("a", { class: "button quiet", href: `http://desolate-git.localhost:${state.stack.editorPort}/?repo=${encodeURIComponent(repo)}`, target: "_blank", rel: "noopener noreferrer" }, "Open in git")
+  : null;
 // A token in an address is for the link, never for the label.
 const redact = (text) => String(text).replace(/tkn=[0-9a-f]+/g, "tkn=...");
 const short = (commit) => String(commit).slice(0, 12);
@@ -84,7 +90,7 @@ const needsYou = () => {
     items.push(el("li", { "data-offer": `${o.domain}/${o.repo}/${o.branch}` }, el("span", { class: "dot blue" }), el("div", { class: "what" },
       el("div", { class: "name" }, `Offered: ${o.repo} ${o.branch}`),
       el("div", { class: "line" }, `from ${o.domain}/${o.workspace}, at `, el("span", { class: "mono" }, short(o.commit)), o.lfs ? `, with ${o.lfs} LFS object(s)` : "")),
-      el("div", { class: "buttons" }, el("button", { class: "quiet", onclick: () => openReview(o) }, "Review"))));
+      el("div", { class: "buttons" }, el("button", { class: "quiet", onclick: () => openReview(o) }, "Review"), gitLink(o.repo))));
   }
   for (const d of state.domains) for (const w of d.workspaces) {
     const says = w.says.status;

@@ -1,0 +1,3 @@
+#!/bin/sh
+# git's remote helper for the git VM's pushes: see git-remote-desolate-out.ts.
+exec node --disable-warning=ExperimentalWarning /desolate/release/git/git-remote-desolate-out.ts "$@"

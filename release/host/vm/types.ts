@@ -21,7 +21,7 @@ export type SocketLink = { host: string; guest: string };
 
 export type VmSpec = {
   name: string;
-  role: "root" | "workspace";
+  role: "root" | "workspace" | "git";
   /** "open": ordinary outbound network (the root, which reaches the remotes).
    *  "none": no route to anything; only `sockets` lead out. */
   egress: "open" | "none";
