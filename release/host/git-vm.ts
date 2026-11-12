@@ -156,7 +156,7 @@ const answer = (id: string, value: Record<string, unknown>) => {
 
 /** One request the git VM left: read safely, its files copied where the root reads them,
  *  handed to the root, and the answer left where the git VM reads it. */
-const take = async (id: string, log: (line: string) => void) => {
+const take = async (id: string, log: (line: string) => void, announce: (fields: Record<string, unknown>) => void = () => {}) => {
   const out = paths.gitOut;
   const opened = openPlain(path.join(out, `${id}.json`), LIMIT.request);
   fs.rmSync(path.join(out, `${id}.json`), { force: true });
@@ -202,6 +202,7 @@ const take = async (id: string, log: (line: string) => void) => {
       }
     }
     log(`git VM: a push of ${repoId(repo)} ${String(asked.branch)} at ${String(asked.commit)}, handed to the root`);
+    announce({ repo: repoId(repo), branch: asked.branch, commit: asked.commit });
     const reply = await rootctl<{ pushed: boolean; error?: string; said?: string[] }>("git.push", { repo: repoId(repo), branch: asked.branch, commit: asked.commit, forced: asked.forced === true, bundle: `${name}.bundle`, lfs }, { quiet: true, timeoutMs: 20 * 60_000 });
     answer(id, reply);
   } catch (error) {
@@ -215,7 +216,7 @@ const take = async (id: string, log: (line: string) => void) => {
 
 /** Watch what the git VM leaves: one request at a time (a git VM cannot crowd the root, or
  *  the approval page). (The host daemon runs this.) */
-export const watchGitOut = (log: (line: string) => void) => {
+export const watchGitOut = (log: (line: string) => void, announce: (fields: Record<string, unknown>) => void = () => {}) => {
   for (const dir of [paths.gitOut, paths.gitAnswers]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   let busy = false;
   const scan = () => {
@@ -238,7 +239,7 @@ export const watchGitOut = (log: (line: string) => void) => {
     const id = names.map((file) => /^([0-9a-f]{16})\.json$/.exec(file)?.[1]).find(Boolean);
     if (!id) return;
     busy = true;
-    void take(id, log)
+    void take(id, log, announce)
       .catch((error: Error) => {
         log(`git VM: a request could not be taken: ${error.message}`);
         try {

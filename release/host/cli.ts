@@ -44,6 +44,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate push <domain> <owner/repo> <branch> --expect <commit> [--allow-default]
                                                                  to the remote; you approve it here, on the
                                                                  host, on your terminal
+  desolate events [--replay <n>]                                 what happens, as JSON lines, until stopped: pushed,
+                                                                 offered, status, approval-waiting, workspace-up, ...
   desolate git [<owner/repo>]                                    a shell in the git VM, in your browser: your own
                                                                  clones, git and nothing else; pushes wait for approval
   desolate approve [--web | --selftest]                          approve a raw git push waiting in the root shell
@@ -206,6 +208,18 @@ const main = async (argv: string[]): Promise<number> => {
     }
     const { approve } = await import("./push.ts");
     return approve(out);
+  }
+  if (verb === "events") {
+    // JSON lines, one per event, until stopped: for a script to act on (events.ts says how
+    // far each kind of event can be believed).
+    const at = rest.indexOf("--replay");
+    const replay = at >= 0 ? Number(rest[at + 1]) : 0;
+    if (at >= 0 && (!Number.isInteger(replay) || replay < 0)) refuse("--replay takes a number", "desolate events --replay 20", EXIT.usage);
+    const { followEvents } = await import("./daemon.ts");
+    // (A reader that stops reading is let go by the daemon, with a "lagged" line: this
+    // process does not pile lines up either, it stops when stdout does.)
+    process.stdout.on("error", () => process.exit(0));
+    await followEvents(replay, (line) => process.stdout.write(`${line}\n`), (resume) => process.stdout.once("drain", resume));
   }
   if (verb === "git") {
     // A shell in the git VM, in a browser tab: the address carries this stack's token, and
