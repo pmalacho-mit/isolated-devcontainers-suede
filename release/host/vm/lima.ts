@@ -145,10 +145,14 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       const checks: Check[] = [];
       const version = await run(LIMACTL, ["--version"], { env: env() });
       const number = /(\d+)\.(\d+)\.(\d+)/.exec(version.stdout);
+      // vz needs 2.3: on 2.1.2 a confined guest's pings were answered and it was never
+      // shown that nothing left the Mac; on 2.3.0 they are not (decisions.md, section 4.3).
+      const [major, minor] = number ? [Number(number[1]), Number(number[2])] : [0, 0];
+      const least = kind === "vz" ? [2, 3] : [2, 0];
       checks.push({
-        name: "lima", ok: version.code === 0 && number !== null && Number(number[1]) >= 2,
+        name: "lima", ok: version.code === 0 && number !== null && (major > least[0]! || (major === least[0] && minor >= least[1]!)),
         detail: version.code === 0 ? version.stdout.trim() : "limactl was not found",
-        fix: process.platform === "darwin" ? "brew install lima (2.0 or newer)" : "install Lima 2.0 or newer (https://lima-vm.io) and put limactl on PATH, or set DESOLATE_LIMACTL",
+        fix: process.platform === "darwin" ? `brew upgrade lima (${least.join(".")} or newer)` : `install Lima ${least.join(".")} or newer (https://lima-vm.io) and put limactl on PATH, or set DESOLATE_LIMACTL`,
       });
       for (const override of ["default.yaml", "override.yaml"])
         if (fs.existsSync(path.join(LIMA_HOME, "_config", override)))
@@ -161,8 +165,9 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       } else {
         const sandbox = await run("sandbox-exec", ["-n", "no-network", "true"]);
         checks.push({ name: "sandbox-exec (cuts a workspace's egress from outside it)", ok: sandbox.code === 0, detail: sandbox.code === 0 ? "present" : "not usable on this macOS", fix: "desolate's vz backend needs macOS's sandbox-exec" });
-        // Recorded, not asserted: see docs/v3/decisions.md, section 4.3.
-        checks.push({ name: "vz: ICMP from a workspace", ok: true, detail: "NOT YET SHOWN to be closed. TCP, UDP and DNS are (measured). Run tests/probes/v3/phase0-mac-egress3.sh and record the result in docs/v3/decisions.md" });
+        // Measured, by tests/probes/v3/phase0-mac-egress3.sh and on every T4 run
+        // (tests/v3/t3/01-boundaries): docs/v3/decisions.md, section 4.3.
+        checks.push({ name: "vz: ICMP from a workspace", ok: true, detail: "closed by the same confinement as TCP, UDP and DNS (measured on Lima 2.3.0: a confined guest's echo gets no reply; the unconfined control's does)" });
       }
       const haveBase = fs.existsSync(path.join(LIMA_HOME, BASE, "lima.yaml"));
       checks.push({ name: "base image", ok: haveBase, detail: haveBase ? `the base VM ${BASE}` : "no base VM yet", fix: `desolate bootstrap --backend ${kind}` });

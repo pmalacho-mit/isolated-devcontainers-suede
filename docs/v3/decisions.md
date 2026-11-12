@@ -90,7 +90,7 @@ other path is on the host, per backend:
 |---|---|---|---|
 | `fake` | `--network none` | a unix socket, bind-mounted | T2 only: not a boundary |
 | `qemu` | QEMU's user network with `restrict=on` | `guestfwd` to the host's socket | see T3 |
-| `vz` | Lima's host process under `sandbox-exec` | one loopback port on the Mac | measured; ICMP open |
+| `vz` | Lima's host process under `sandbox-exec` | one loopback port on the Mac | measured, ICMP included (Lima 2.3.0) |
 
 Why this shape. Lima always attaches its user-mode network, and offers no setting that
 removes it or filters it (read: Lima's network docs; `networkOpts.hostLoopback: false`, new in
@@ -115,12 +115,24 @@ three gaps round 1 found:
    socket (`/var/run/mDNSResponder`), `getent hosts example.com` in the guest fails, where
    under the profile without that line it resolved. So the profile is: one proxy port, the
    ssh port, unix sockets except the resolver's.
-3. **ICMP: open question, probably a false alarm.** Under all four profiles a ping to
-   1.1.1.1 and to the LAN router was answered, including two profiles written to stop it.
-   The likely reason is that Lima's user-mode stack answers every echo request itself (it
-   treats every address as its own), in which case nothing leaves the Mac. Round 2 cannot
-   tell: it never pinged an address that cannot answer. `phase0-mac-egress3.sh` does (two
-   minutes): it pings a documentation address from the guest and from the Mac.
+3. **ICMP: closed (round 3, Lima 2.3.0).** Round 2 (Lima 2.1.2) saw a confined guest's
+   ping to 1.1.1.1 and to the LAN router answered under all four profiles, and could not
+   tell whether the echoes left the Mac. Round 3 (`phase0-mac-egress3.sh`,
+   `docs/v3/phase0/mac-m1-egress3-2026-11-11.md`) pinged documentation addresses as well:
+
+   | | 1.1.1.1 | 192.0.2.1, 203.0.113.77 |
+   |---|---|---|
+   | the Mac itself | answered, 27.7 ms | no reply |
+   | guest, host process unconfined (control) | answered, 20.0 ms | no reply |
+   | guest, host process under the workspace profile | **no reply** | no reply |
+
+   So on 2.3.0 Lima's user-mode stack does **not** answer echoes itself: an unconfined
+   guest's ping really leaves the Mac (a channel, if it were allowed), and the profile's
+   `(deny network-outbound)` stops it, as it stops TCP and UDP. Why 2.1.2 differed is not
+   known (it may have answered locally, or its ICMP path may have escaped the profile), so
+   the vz backend requires Lima 2.3.0 or newer (`doctor` fails older), and tier T4's
+   boundary test pings from root in a workspace with the root VM's ping as the control,
+   so a Lima that changes this again fails a test rather than a probe nobody reruns.
 
 A flaw in round 2's own probe, recorded because it is the kind this project exists to catch:
 its "query straight to 1.1.1.1" and "to 192.168.5.3" rows tested for any output from `dig`,
@@ -130,8 +142,8 @@ timeout. Round 3 requires an address in the answer.
 
 **Status of the vz backend's network boundary:** TCP and UDP egress, the Mac's loopback and
 the LAN over TCP: closed, measured, root in the guest included. DNS through the system
-resolver: closed, measured. ICMP: not yet shown either way. `doctor` on vz reports the ICMP
-row as unverified until round 3 has been run and recorded here.
+resolver: closed, measured. ICMP: closed, measured on Lima 2.3.0 (round 3), and asserted by
+tier T4 on every run.
 
 Inside the VM, all of this is made transparent to programs (they need no proxy settings) by a
 resolver that answers every name with a placeholder address and a redirect of ports 80 and

@@ -158,7 +158,7 @@ everything but the hypervisor boundary. "T3" is real VMs on Linux (QEMU through 
 | Offers, the root's view (`git fetch --all`), deliveries between domains | yes | T2 | `desolate upstream` (suede) |
 | Ports: same number, routed by name, reservations | yes | T2 | forwarded connections on real VMs are untested |
 | P5: read-only shares against root in the VM | yes | **T3** (and measured on an M1 for the Mac) | |
-| P5: forced egress against root in the VM | yes | **T3**; Mac: measured for TCP, UDP, DNS; ICMP unverified | |
+| P5: forced egress against root in the VM | yes | **T3**; Mac: measured for TCP, UDP, DNS and ICMP (Lima 2.3.0 or newer required) | |
 | Egress through each workspace's own proxy, per-domain rules, audit by link | yes | T2, T3 | |
 | Secrets: per domain, substituted for the hosts and headers they name, proven by the upstream's certificate, scrubbed from responses, switched off and on (`--ttl`) | yes | T2, T3 | v2's self-test fixture; "learn" as a timed mode |
 | **P1: the editor**: VSCodium's server in every workspace VM (in the project's devcontainer when it can), its own hostname, v2's gate | yes | T2 (HTTP, WebSocket, a real browser), T3 | desolate's workspace extension (`carryover/editor/extension`: mapping `localhost` URLs) is not ported |

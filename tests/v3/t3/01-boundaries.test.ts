@@ -273,6 +273,17 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
       getent hosts example.com >/dev/null 2>&1 && echo dns=REACHED || echo dns=refused
       python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(4); s.sendto(b'x', ('192.168.5.2', ${port})); s.recvfrom(10)" 2>/dev/null && echo udp=REACHED || echo udp=refused`).stdout);
     for (const [name, verdict] of Object.entries(second)) assert.match(verdict, /^refused/, `${name}, after root rewrote routes, flushed the firewall and chose a resolver`);
+    // ICMP. An echo carries a payload, so a ping that leaves is a channel. On Lima/vz 2.3
+    // the user-mode stack really sends echoes from the host (a documentation address gets
+    // no reply, 1.1.1.1 does: docs/v3/decisions.md, section 4.3), so a reply to a workspace
+    // means its echo left the Mac. Control: the root VM, whose egress is open, gets one.
+    const ping = (where: string) => `ping -c 3 -W 2 1.1.1.1 >/dev/null 2>&1 && echo ${where}=REACHED || echo ${where}=refused`;
+    const icmpControl = lines(stack.inRoot(["bash", "-c", ping("icmp")], { root: true }).stdout).icmp ?? "";
+    const icmp = lines(asRoot("a/w1", ping("icmp")).stdout).icmp ?? "";
+    assert.match(icmp, /^refused/, "ICMP, as root in the workspace");
+    if (stack.backend === "vz") assert.match(icmpControl, /^REACHED/, "control: the root VM's ping is answered, so the workspace's silence is its confinement");
+    // (qemu: slirp answers echoes only where the host may send them; a sandbox may not.)
+    else if (!/^REACHED/.test(icmpControl)) console.log("# ICMP: the root VM's own ping got no answer on this machine, so the refusal above has no control here");
     // And outside the VM, on the qemu backend: the hypervisor that is running is the
     // restricted one, and the root VM's is not (the control).
     if (stack.backend === "qemu") {

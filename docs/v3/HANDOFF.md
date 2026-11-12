@@ -148,7 +148,7 @@ T2 takes about 9 minutes. T3 takes about 27 minutes under software emulation.
    enter the root VM as root and read it. Under the rule (no untrusted code on the Mac)
    that is accepted, not open. If the rule ever needs to be weaker, `decisions.md` section
    5.3 says what would close it: a write key held by the Secure Enclave.
-3. **The Mac backend is unproven**, and one row of its boundary (ICMP) is unverified.
+3. **The Mac backend is unproven.** (Its ICMP row was measured closed on Lima 2.3.0.)
 4. **A domain can fill the disk.** Nothing limits the size of an outbox or of a workspace's
    share. That costs availability, not integrity.
 
@@ -166,7 +166,7 @@ T2 takes about 9 minutes. T3 takes about 27 minutes under software emulation.
 
 3. **Bring up the `vz` backend.**
    ```bash
-   brew install lima node git-lfs            # Lima >= 2.0; the Mac has 2.1.2
+   brew install lima node git-lfs            # Lima >= 2.3 for vz (ICMP); the Mac has 2.3.0
    release/cli.sh bootstrap                  # backend vz is the default on macOS
    ```
    What it does, and where it may stop:
@@ -235,7 +235,7 @@ Each item names where to start. The order is by what unblocks use.
 Things that are true of the code as it is, that the next person should not have to discover.
 
 **Boundaries**
-- **vz, ICMP:** unverified (section 4, step 2).
+- **vz, ICMP:** closed on Lima 2.3.0 (measured; `decisions.md` 4.3). Lima 2.1.2 behaved differently and unexplainedly, so vz requires 2.3.0.
 - **The vz link is a loopback port on the Mac** (the guest's confinement allows it that one
   port). Any process on the Mac can connect to a loopback port, and behind this one is a
   workspace's proxy, which substitutes its domain's secrets. So a connection must open with
