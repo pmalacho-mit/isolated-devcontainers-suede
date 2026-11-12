@@ -270,6 +270,19 @@ Each item names where to start. The order is by what unblocks use.
 6. **Hardening**, the list in section 6.
 7. **Ergonomics (13.3):** the fresh-eyes run, screenshots, budgets as tests. The transcripts
    are in place and are the thing to read first: `tests/v3/transcripts/`.
+8. **[ ] Tests that document the TypeScript, with `nests`** (the owner's request, 2026-11-12:
+   once the code has settled after the Mac bring-up; not before). `pmalacho-mit/suede.nests`
+   writes tests as TypeScript namespaces beside the code they test, run by Vitest through a
+   Vite plugin, so a module's tests read as its documentation. Start with the modules a
+   reader most needs to trust: `shared/link.ts`, `shared/approval.ts`, `root/outbox.ts`,
+   `host/vm/lima.ts` (`unmounted`), `root/proxy/as-proxy.ts`, `host/templates.ts`. Keep the
+   tiers' rules: a test's name says its tier, every negative check has a control. Mind
+   desolate's own:
+   - **dev-only.** `release/` carries no `package.json` and ships no test code; the
+     namespaces must not change what node runs in the VMs, or be stripped where they would;
+   - **pinned.** A suede dependency by commit, as `SUEDE_COMMIT` is meant to be (`pins.env`),
+     never `curl | bash` of a moving branch; vite and vitest in the dev lockfile;
+   - **T1 stays one command** (`make test`), seconds, the same on Linux and macOS.
 
 ## 6. Known gaps and sharp edges
 
