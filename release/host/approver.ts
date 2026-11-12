@@ -2,15 +2,21 @@
 // VM (P2, P5). It holds a signing key; the root's keyring files an approval only for a
 // challenge this key signed (root/keyring.ts, shared/approval.ts).
 //
+// WHAT THE GATE IS FOR. desolate's rule is that nothing untrusted runs on the host or in the
+// root VM: both hold what is sensitive, as any developer's machine does. Under that rule the
+// approval is not a wall against an attacker on the host. It is what tells "a person decided
+// to push this commit" from "a script ran a command": well-meaning automation stops here.
+//
 // Two kinds, chosen once at bootstrap and recorded:
-//   touchid   (the default on macOS) the key is in the Secure Enclave and signs only with
-//             the person present: Touch ID, or the login password. A program running as
-//             you on the Mac, an agent harness included, cannot make it sign.
-//   terminal  (Linux, and the tests) a software key in ~/.desolate/approver, mode 0600. It
-//             signs after the branch name is typed on this process's controlling terminal.
-//             What this does not stop: a program running as you ON THE HOST, which can
-//             read the key file or fabricate a terminal. It does stop everything in the
-//             VMs, which is what moved: before, the prompt was inside the root VM.
+//   terminal  (the default) a software key in ~/.desolate/approver, mode 0600. It signs
+//             after the branch name is typed on this process's controlling terminal. It
+//             does not stop a program running as you on the host, which can read the key
+//             file or fabricate a terminal: that program is outside desolate's rule.
+//   touchid   (macOS, opt-in: DESOLATE_APPROVER=touchid at the first bootstrap) the key is
+//             in the Secure Enclave and signs only with the person present. For a stricter
+//             stance than the rule above. It is a whole defence only together with a write
+//             key that is also out of reach (docs/v3/decisions.md, section 5.3), and it has
+//             never been compiled or run.
 import { spawnSync } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign as signWith, verify } from "node:crypto";
 import * as fs from "node:fs";
@@ -40,19 +46,19 @@ export const publicKey = (): string | null => {
 };
 export const fingerprint = (pem: string) => createHash("sha256").update(pem).digest("hex");
 
-/** Make the approver if there is none. Returns whether it made one. Which kind: the
- *  DESOLATE_APPROVER environment variable, else touchid on macOS and terminal elsewhere.
- *  On a Mac the weaker kind is never a silent fallback: if Touch ID cannot be set up,
- *  this refuses and says how to choose `terminal` on purpose (P6). */
+/** Make the approver if there is none. Returns whether it made one. Which kind: `terminal`,
+ *  unless DESOLATE_APPROVER=touchid asks for the Secure Enclave. If that was asked for and
+ *  cannot be set up, this refuses: the stronger kind is never quietly swapped for the
+ *  other (P6). */
 export const init = (log: (line: string) => void): boolean => {
   if (kind() && publicKey()) return false;
   const asked = process.env.DESOLATE_APPROVER;
   if (asked !== undefined && asked !== "touchid" && asked !== "terminal") refuse(`DESOLATE_APPROVER is '${asked}'`, "use touchid or terminal");
-  const chosen: Kind = (asked as Kind | undefined) ?? (process.platform === "darwin" ? "touchid" : "terminal");
+  const chosen: Kind = (asked as Kind | undefined) ?? "terminal";
   fs.mkdirSync(DIR, { recursive: true, mode: 0o700 });
   fs.chmodSync(DIR, 0o700);
   if (chosen === "touchid") {
-    const weaker = "to use the weaker terminal approver on purpose: DESOLATE_APPROVER=terminal desolate bootstrap";
+    const weaker = "or use the default approver: unset DESOLATE_APPROVER and bootstrap again";
     if (process.platform !== "darwin") refuse("the touchid approver needs a Mac", "DESOLATE_APPROVER=terminal");
     const built = spawnSync("swiftc", ["-O", "-o", FILES.helper, path.join(RELEASE_DIR, "host", "approver", "touchid.swift")], { encoding: "utf8" });
     if (built.status !== 0) refuse(`the Touch ID approver did not compile: ${(built.stderr || String(built.error ?? "")).trim().split("\n").slice(-3).join(" | ")}`, `install the Xcode command line tools (xcode-select --install) and bootstrap again; ${weaker}`);
@@ -64,7 +70,7 @@ export const init = (log: (line: string) => void): boolean => {
     const pair = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
     fs.writeFileSync(FILES.key, pair.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
     fs.writeFileSync(FILES.pub, pair.publicKey.export({ type: "spki", format: "pem" }), { mode: 0o644 });
-    log(`approver: a software key in ${DIR}; every push will ask on your terminal${process.platform === "darwin" ? " (weaker than Touch ID: a program running as you can read this key)" : ""}`);
+    log(`approver: a software key in ${DIR}; every push will ask on your terminal`);
   }
   fs.writeFileSync(FILES.kind, `${chosen}\n`, { mode: 0o644 });
   return true;

@@ -49,8 +49,10 @@ page is about, and because three of them were mistakes in the *tests*.
 - **A terminal is not a person.** The same first cut filed an approval when the branch name
   was typed on a terminal, and the tests typed it from a script on a pseudo-terminal. That
   was written down as a residual; with an agent harness running on the same Mac it was the
-  ordinary case. An approval is now a signature by a key on the host that, on a Mac, only
-  Touch ID or the login password can use.
+  ordinary case. An approval is now a signature by a key on the host, asked for on the
+  host's terminal. (For one pass the Mac's default was a Secure Enclave key behind Touch
+  ID. It is opt-in now: the rule is that untrusted code never runs on the Mac, and under
+  that rule the gate is against work going out unread, which the terminal does.)
 - **A killed process that still had a pid.** In the fake backend nothing reaps a detached
   child, so a secrets proxy that had been killed still answered `kill -0`, was taken for
   running, and its hosts were refused for ever. "Running" now means "listening".
@@ -60,6 +62,44 @@ page is about, and because three of them were mistakes in the *tests*.
   with its answer already in hand, and the first hand-off of a dashboard request gave the
   request to a caller that then threw it away. Two fixes, both kept: an answer is complete
   at its Content-Length, and a request stays queued until the host reports on it.
+- **A check that did not apply to the one route that mattered.** The root set
+  `fetch.fsckObjects`, so "git checks every object a domain sends" was written down as
+  done. Every object a domain sends arrives in a bundle, and on the image's git (2.43) a
+  fetch from a bundle is not checked: a tree containing `.git` was imported and offered.
+  Found by the first test that sent one (`tests/v3/t2/10-hostile-content.test.ts`), not by
+  reading the config. A bundle's pack is now indexed strictly into a throwaway object
+  directory before any of it enters a root clone, whichever git the image has.
+- **The root deleted a file of its own because a domain asked.** The root tidied a
+  domain's outbox by path: read a directory, then remove what it had read. The directory is
+  the domain's to replace, and replaced by a link into the root's state, the tidy removed
+  a file there. Opening files had been made careful (no links followed); *removing* had not
+  been thought of as an operation on untrusted input at all. Now a directory is opened
+  once, checked to be the one meant, and everything (list, open, remove) is by name inside
+  that open directory. `release/root/outbox.ts` is the only code that touches an outbox.
+- **Verified, then copied by name.** An LFS object's hash was checked, and then the file at
+  that path was copied. Between the two the path is the domain's. The bytes that are hashed
+  are now the bytes that are kept.
+- **One refused branch, and silence.** With bundles refused, a domain holding one bad
+  branch had every later offer fail with "the root received nothing": true, and useless.
+  The refusal is now recorded and said in three places (the offering workspace, the
+  dashboard, `desolate offers`), with what to do, and it clears itself when the branch is
+  gone.
+- **The dashboard died the first time a domain sent work, on real VMs only.** The state
+  service watched its state directory as a tree. Checking a bundle makes a quarantine
+  directory under that tree and removes it seconds later; node's recursive watch on Linux
+  scans each new directory, found this one already gone, and raised an error on a watcher
+  nobody listened to, which ends a node process. Nothing restarted it. On the fake backend
+  the timing never allowed it, so ninety-odd green tests said the dashboard worked. Found
+  only because this pass added an offer to the real-VM tier, after which the next test
+  asked the dashboard a question and got no answer. Three changes: each directory is
+  watched by itself with a listener for its errors; the state service and `rootd` are
+  started again if they end, and say so in their logs; and the tests that send hostile
+  content end by checking those logs.
+- **Four attacks, one tested.** The first version of that test offered four dangerous
+  branches in a row and saw four refusals. After the first, the other three were refused
+  because the first was still there. Each is now offered alone.
+- **A count that counted itself.** "No editor runs in the root" used `pgrep -f` with the
+  pattern on its own command line, and found one.
 - **A test that read a socket.** "No file on the host holds a private key" read every file
   under the home, and failed when the host's daemon began to run from bootstrap and left a
   socket there. The check now reads files.

@@ -10,9 +10,9 @@ A tier whose needs are not met fails and says what to install. It never skips.
 
 | Tier | Backend | Proves | Does not prove |
 |---|---|---|---|
-| **T1** `t1/` | none | names, the name sniffer, the root's reading of an outbox; types; shell syntax | |
-| **T2** `t2/` | `fake`: each "VM" is a container | everything but the hypervisor boundary: bootstrap, the keyring and the push gate, mirrors and LFS, domains and checkouts, the port router, offers and pushes, the proxy and its rules | **any boundary a VM gives.** A T2 test is never taken as proof of one |
-| **T3** `t3/` | `qemu`: real VMs through Lima (KVM, or software emulation) | read-only shares against root in the VM, forced egress against root in the VM, no path between domains | anything about a Mac |
+| **T1** `t1/` | none | names, the name sniffer, the root's reading of an outbox and of status files (links, swapped directories, fifos); types; shell syntax | |
+| **T2** `t2/` | `fake`: each "VM" is a container | everything but the hypervisor boundary: bootstrap, the keyring and the push gate, mirrors and LFS, domains and checkouts, the port router, offers and pushes, the proxy and its rules, the editor, secrets, devcontainers, the dashboard, and what a hostile domain can send the root (`10-hostile-content`) | **any boundary a VM gives.** A T2 test is never taken as proof of one |
+| **T3** `t3/` | `qemu`: real VMs through Lima (KVM, or software emulation) | read-only shares against root in the VM, forced egress against root in the VM, no path between domains; an offer, a dangerous tree and a linked outbox over a real share | anything about a Mac |
 | **T4** | `vz` on a Mac | not written yet: see `docs/v3/HANDOFF.md` | |
 
 How the tests are built (move-to-vms.md section 13):
@@ -31,8 +31,12 @@ How the tests are built (move-to-vms.md section 13):
   test talks to GitHub.
 - **`lib/person.py` plays the person**: it runs a command on a pseudo-terminal and types the
   answer to a prompt. The tests' stacks use the `terminal` approver, whose prompt is on the
-  host; `docs/v3/decisions.md` says why that approver cannot tell this from a real person,
-  and why the Mac's (Touch ID) can.
+  host. That approver is the default everywhere; `docs/v3/decisions.md` says what it is
+  for, why it cannot tell this from a real person, and what the opt-in Touch ID one adds.
+- **Hostile content is made with plumbing** (`t2/10`): git's own commands refuse to make a
+  tree with `.git` in it, so the test builds trees with `git mktree` and commits with
+  `git commit-tree`, as an attacker would. Each dangerous object is offered alone, so each
+  is refused for what it is.
 - **Devcontainers need no registry**: `lib/devimage.sh` makes a small image inside a
   workspace VM from the VM's own files, under a name whose registry does not exist.
 - **The editor is the real one**: the pinned VSCodium server in the base image. `t2/06`

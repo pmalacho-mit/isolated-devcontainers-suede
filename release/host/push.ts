@@ -3,11 +3,12 @@
 // A push is three steps, and the middle one happens here, outside every VM (P2):
 //   1. the root checks the push and its keyring issues a challenge naming it;
 //   2. the approver on this host shows the challenge to the person and signs it
-//      (approver.ts: Touch ID on a Mac);
+//      (approver.ts: on your terminal, or Touch ID if chosen);
 //   3. the root hands the signature to its keyring, which lets the write key sign for
 //      that one push.
 // Nothing in a VM can do step 2, so nothing in a VM can push.
 import { EXIT, refuse } from "../shared/exit.ts";
+import { editorHostPort, ROOT_HOSTNAME } from "../shared/names.ts";
 import { sign } from "./approver.ts";
 import { guest } from "./paths.ts";
 import { backend, ROOT_VM, rootctl } from "./stack.ts";
@@ -23,13 +24,16 @@ const plain = (text: string) => text.replace(/[\x00-\x1f\x7f-\x9f]/g, "?");
 export const offers = async (domain: string | undefined, out: Out, json: boolean) => {
   const list = await rootctl<Offer[]>("offers.list", { domain }, { quiet: true });
   if (json) return out(JSON.stringify(list));
+  const refused = await rootctl<{ domain: string; repo: string; at: string; why: string }[]>("offers.refused", { domain }, { quiet: true }).catch(() => []);
+  for (const r of refused) out(`Refused from ${r.domain} (${r.repo}, ${r.at}): ${plain(r.why)}\n  Nothing new from ${r.domain} is taken while one of its branches holds what git refused. Delete that branch in the workspace, then \`desolate sync\` there.`);
   if (list.length === 0) return out("no offers. In a workspace, `desolate offer` marks a branch ready for you.");
   out("Needs you:");
   for (const o of list) out(`  ${o.domain}  ${o.repo}  ${plain(o.branch)}  ${o.commit.slice(0, 12)}  from ${o.workspace}${o.lfs ? `  ${o.lfs} LFS object(s)` : ""}\n    review: desolate review ${o.domain} ${o.repo} ${o.branch}`);
 };
 
 export const review = async (args: string[], out: Out, json: boolean) => {
-  const [domain, repo, branch] = args;
+  const diff = args.includes("--diff");
+  const [domain, repo, branch] = args.filter((arg) => arg !== "--diff");
   if (!domain || !repo || !branch) refuse("review what?", "desolate review <domain> <owner/repo> <branch>   (see `desolate offers`)", EXIT.usage);
   const r = await rootctl<Review>("review", { domain, repo, branch }, { quiet: true });
   if (json) return out(JSON.stringify(r));
@@ -37,10 +41,21 @@ export const review = async (args: string[], out: Out, json: boolean) => {
   out(`a push would send ${r.commits.length} commit(s): ${r.stat || "no file changes"}${r.lfsObjects ? `, and ${r.lfsObjects} LFS object(s) first` : ""}`);
   for (const c of r.commits.slice(0, 30)) out(`  ${c.commit.slice(0, 12)}  ${plain(c.subject).slice(0, 100)}`);
   if (r.commits.length > 30) out(`  ... and ${r.commits.length - 30} more`);
-  for (const file of r.files.slice(0, 40)) out(`  M ${plain(file)}`);
+  for (const file of r.files.slice(0, 40)) out(`  ${plain(file)}`);
   if (r.files.length > 40) out(`  ... and ${r.files.length - 40} more files`);
   for (const warning of r.warnings) out(`  WARNING: ${warning}`);
-  out(`read the diff in the root: desolate root shell, then: git -C /desolate/root/${r.repo} diff origin/HEAD...${domain}/${plain(r.branch)}`);
+  if (diff) {
+    // The diff is the content's own text, made in the root by git alone. Shown as text:
+    // anything that could repaint a terminal is replaced.
+    const d = await rootctl<{ text: string; truncated: boolean }>("review.diff", { domain, repo, branch }, { quiet: true });
+    out("");
+    out(d.text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "?").trimEnd());
+    if (d.truncated) out("... the diff is longer than is shown here. The whole of it: desolate root shell, then git diff.");
+  } else {
+    out(`read the diff: desolate review ${domain} ${r.repo} ${plain(r.branch)} --diff`);
+    out(`  or in the dashboard: http://${ROOT_HOSTNAME}:${editorHostPort()}/?review&domain=${encodeURIComponent(domain)}&repo=${encodeURIComponent(r.repo)}&branch=${encodeURIComponent(r.branch)}`);
+    out("  or with git, in `desolate root shell`");
+  }
   if (!r.pushable) out(`${r.repo} is not pushable (cloned --no-push): there is no write key for it.`);
   else out(`to push exactly this: desolate push ${domain} ${r.repo} ${plain(r.branch)} --expect ${r.commit}${r.isDefault ? " --allow-default" : ""}`);
 };

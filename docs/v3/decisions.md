@@ -165,7 +165,7 @@ On the M1, in a Lima/vz VM: an image with two features (node, docker-in-docker) 
 docker-in-docker devcontainer worked. The 87 s is what a domain template (C3) saves every
 workspace after the first.
 
-## Section 5.3. A push is approved on the host, outside every VM (decided; Touch ID unrun)
+## Section 5.3. A push is approved on the host, outside every VM (decided; the terminal approver is the default)
 
 **What it was.** The write key is held by an ssh-agent that runs a check before every
 signature, and the check passes only against an approval on file. In the first v3 cut the
@@ -191,17 +191,27 @@ for `desolate approve`, run by the person on the host. It is a remote helper and
 pre-push hook because git authenticates to the remote, which takes the write key's
 signature, before it runs pre-push (measured: the first cut's hook could never have asked).
 
+**What the gate is for.** The Mac and the root VM both hold sensitive things (the Mac
+controls every VM; the root holds the write keys). Code that is not trusted is never run in
+either: that is a rule the person follows, not one desolate can enforce. Given the rule,
+the approval is not there to stop a hostile program on the host. It is there so that
+nothing in a workspace, and no well-meaning automation (an agent harness driving
+`desolate` on the host), turns an offer into a push without a person having read which
+commit goes where.
+
 **The two approvers.**
 
-- `touchid` (the default on macOS): a P-256 key made in the Secure Enclave with
-  `userPresence` access control (`release/host/approver/touchid.swift`, compiled by
-  bootstrap with `swiftc`). It signs only after Touch ID or the login password. A program
-  running as the person on the Mac, an agent harness included, cannot make it sign, and
-  cannot copy it. **This file has never been compiled or run** (it was written on Linux).
-  If it does not compile or the enclave refuses, bootstrap stops and says how to choose the
-  other kind on purpose; it never falls back silently.
-- `terminal` (Linux, the tests, or `DESOLATE_APPROVER=terminal`): a key file in
-  `~/.desolate/approver`, used after the branch name is typed on the controlling terminal.
+- `terminal` (the default everywhere): a key file in `~/.desolate/approver`, used after
+  the branch name is typed on the controlling terminal. It needs nothing compiled and has
+  run on every tier that has run.
+- `touchid` (`DESOLATE_APPROVER=touchid`, macOS only, opt-in): a P-256 key made in the
+  Secure Enclave with `userPresence` access control
+  (`release/host/approver/touchid.swift`, compiled by bootstrap with `swiftc`). It signs
+  only after Touch ID or the login password, so a program running as the person cannot make
+  it sign or copy it. **This file has never been compiled or run** (it was written on
+  Linux). It was the macOS default for one pass; it is opt-in now because, under the rule
+  above, what it adds over the terminal is small (next paragraph, second point), and an
+  unrun Swift file should not stand between a new user and their first bootstrap.
 
 **What is left, said plainly.**
 
@@ -222,6 +232,122 @@ signature, before it runs pre-push (measured: the first cut's hook could never h
 - No prompt appears by itself: an approval is always started by the person, from the host
   (`desolate push`, `desolate approve`). A process in the root VM can leave a request; it
   cannot make a dialog appear.
+
+## The root has no editor (decided; reverses the first cut)
+
+The first cuts ran an editor in the root VM, in Restricted Mode, for reviewing offers. It
+is gone (`release/root/editor.sh` and its settings are deleted). An editor is a large
+program whose job is to interpret a tree: tasks, launch configurations, language servers,
+extensions that activate on a file's presence. Restricted Mode is the editor's promise to
+hold all of that back, and the root is the one place where the tree being looked at was
+written by an agent and the keys are next door. What the person needs in the root is
+smaller:
+
+- **the dashboard**: what needs them, and for an offer the commits, the files, the
+  warnings, and the diff;
+- **a diff that is text**: `git diff --no-ext-diff --no-textconv`, capped at 1 MiB, put on
+  the page as text nodes (`release/root/ui/dashboard.js`, `diffView`) and on the terminal
+  by `desolate review <domain> <repo> <branch> --diff` with control characters replaced.
+  Nothing in it is parsed as markup, and it is shown only if it is of the commit the Push
+  button names;
+- **a terminal** (`desolate root shell`), for people who prefer git's own commands. The
+  root's git settings (next section) are what make that safe to do on a tree an agent wrote.
+
+Editing happens in workspaces, where every workspace has an editor.
+
+## What the root takes from a domain, and how (audited; two holes found and closed)
+
+The root reads four kinds of thing a domain wrote: bundles, the list of refs, LFS objects,
+and small JSON files (requests, statuses). A domain's VM has the outbox mounted read-write,
+so everything in it, the directory entries included, is the domain's to shape. An audit by
+test (`tests/v3/t2/10-hostile-content.test.ts`, and the same route over a real VM's share in
+`tests/v3/t3/`) found two holes in the previous cut, both
+closed here; `release/docs/incidents.md` has them as incidents.
+
+**1. The directory is checked once, and then held.** (`release/root/outbox.ts`.) The root
+opens an outbox directory with `O_DIRECTORY|O_NOFOLLOW`, and takes it only if the kernel's
+own name for the open descriptor is the path under the root's `domains/` it meant to open.
+Files are opened by name relative to that descriptor, `O_NOFOLLOW`, regular files only,
+within a size limit (JSON 1 MiB, a bundle 2 GiB, an LFS object 5 GiB). Removal is of a
+name in that checked directory and nothing else. *The hole this closed:* with the sync
+directory replaced by a symlink into the root's own state, the root removed a file of its
+own through it.
+
+**2. git is never given a path a domain controls.** A bundle is copied, through the open
+descriptor, to a directory only the root can write (`/var/lib/desolate/incoming`), under a
+name the root made, and git reads the copy. One at a time: copy, check, fetch, delete, so
+the root's own disk holds one bundle of a domain's at once.
+
+**3. Every object is checked before any enters a root clone.** The copy's pack is indexed
+with `git index-pack --strict` into a throwaway object directory that borrows the clone's
+objects (`refusedBy` in `release/root/git-remote-desolate.ts`); only a bundle that passes
+is fetched. Only a v2 bundle is looked at (what a workspace's git writes; v3 exists to
+carry a filter that leaves objects out, or another hash), and a check that runs longer
+than eight minutes is a refusal. `--strict` is git's fsck with its errors fatal: a tree with `.git` in it (in
+any case, or in a form macOS or Windows would fold to it), a `.gitmodules` that is a
+symlink or names an option or a climbing path, a malformed object. *The hole this closed:*
+`fetch.fsckObjects` does not apply to a fetch from a bundle on the image's git (2.43): a
+tree containing `.git` was imported and offered.
+
+A domain's bundle carries all its branches, so one branch with such an object gets the
+whole bundle refused. That is deliberate (a bundle is taken whole or not at all), and it
+is said three times: to the workspace that offered, on the dashboard, and in `desolate
+offers`. It clears when the branch is deleted in the domain and the next bundle is taken.
+
+**4. An LFS object is the bytes that were hashed.** It is copied from one open descriptor
+while being hashed, and the copy becomes the root's only if the hash is its name and the
+size is the pointer's. (Before: verify, then copy by path, which a domain could have
+swapped between the two.)
+
+**5. The root's git does not act on what a tree says.** In the root's global git config
+(`release/root/start.sh`): `transfer`/`fetch`/`receive.fsckObjects`; `core.protectHFS` and
+`protectNTFS` (the Mac's and Windows' ways of spelling `.git`, refused on Linux too);
+`core.fsmonitor=false`; `safe.bareRepository=explicit`, so a directory in a checked-out
+tree that is shaped like a repository is not one, whatever its config names; `protocol.allow
+=never` with only `file`, `ssh`, `https` and desolate's two helpers allowed;
+`submodule.recurse=false` and `fetch.recurseSubmodules=false`. Diffs desolate itself makes
+use `--no-ext-diff --no-textconv`. Hooks, filters, diff drivers and aliases need config,
+and a tree cannot supply config: `.gitattributes` can name a driver, only the root's own
+config can define one, and it defines none. The test has a control for this: the same
+planted repository does run its program with `safe.bareRepository=all` given for one
+command.
+
+**What is left, by nature.** These are surfaces that cannot be removed, only kept small:
+
+- **git's own parsers** read a pack an agent wrote (`index-pack`, then `fetch`, `diff`,
+  `log`). A memory-safety bug in git's pack or object parsing would be reachable. Keeping
+  the image's git current is the mitigation; desolate runs that parsing as the root's
+  ordinary user, never as root, and never as the keyring's user.
+- **JSON.parse** on files up to 1 MiB, then field-by-field validation
+  (`release/shared/names.ts`).
+- **The proxies** parse what workspaces send (HTTP CONNECT, TLS ClientHello in
+  `release/root/proxy/proxy.ts`; full HTTP in mitmproxy, for secret hosts only), and the
+  root's resolver answers their DNS.
+- **Size.** A domain can fill its own outbox and its own share, and what it commits ends
+  up in the root clone when it is taken. Each file the root reads is bounded (counted
+  while reading, not trusted from its size), a bundle is at most 2 GiB and is handled one
+  at a time, and a slow pack is cut off. What is not bounded is the total: there is no
+  quota on a domain's share, and a pack built to expand can still use a great deal of
+  memory in `index-pack`. That costs availability, not integrity.
+- **The person.** `git checkout dev/branch` in the root's terminal writes an agent's files
+  into the root clone's work tree. Looking at them, diffing them and committing on top of
+  them is safe under the settings above. *Running* them (`npm install`, `make`, a script,
+  opening the folder in a tool that runs tasks) is running untrusted code in the root, and
+  nothing can make that safe. The README says so first.
+- **Your terminal.** `desolate exec` and the root shell show you a VM's output as it is:
+  you asked for it, as with ssh. Everything else desolate prints that began in a workspace
+  (a status, a branch name, a commit subject, a diff, why a devcontainer failed, why a
+  bundle was refused) has its control characters replaced first, and the dashboard puts
+  all of it on the page as text.
+- **Status files and notes** (`release/shared/status.ts`) live in the domain's clone, and
+  the root and the host both show them. They are opened without following a link, checked
+  on the open descriptor (a regular file, a bounded size), and refused unless the file
+  that was opened is the one that was meant. In the root VM that last check is asked of
+  the kernel about the open descriptor, so nothing can be swapped. On the Mac, node has no
+  such question to ask: the path is resolved a second time and must name the same device
+  and inode. A domain that wins that race (a directory swapped for a link and back within
+  one read) gets text from a file the person can read shown to that same person. It is
+  never acted on, and never returned to a domain.
 
 ## ssh-agent needs a relay in front of it (measured)
 

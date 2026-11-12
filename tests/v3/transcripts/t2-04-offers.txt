@@ -54,9 +54,11 @@ $ desolate review dev acme/widgets issue/12
 acme/widgets  issue/12  at <commit>
 a push would send 1 commit(s): 2 files changed, 4 insertions(+), and 1 LFS object(s) first
   <id>  fix: issue 12
-  M README.md
-  M new.bin
-read the diff in the root: desolate root shell, then: git -C /desolate/root/acme/widgets diff origin/HEAD...dev/issue/12
+  README.md
+  new.bin
+read the diff: desolate review dev acme/widgets issue/12 --diff
+  or in the dashboard: http://desolate.localhost:31591/?review&domain=dev&repo=acme%2Fwidgets&branch=issue%2F12
+  or with git, in `desolate root shell`
 to push exactly this: desolate push dev acme/widgets issue/12 --expect <commit>
 [exit 0]
 

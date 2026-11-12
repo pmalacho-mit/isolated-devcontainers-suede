@@ -38,12 +38,13 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate rm <domain>                                           the domain and its clones; not the root's
 
   desolate offers [<domain>] [--json]                            what workspaces have offered: needs you
-  desolate review <domain> <owner/repo> <branch> [--json]        what a push would send
+  desolate review <domain> <owner/repo> <branch> [--diff] [--json]
+                                                                 what a push would send; --diff: the diff itself
   desolate push <domain> <owner/repo> <branch> --expect <commit> [--allow-default]
                                                                  to the remote; you approve it here, on the
-                                                                 host: Touch ID on a Mac, else your terminal
+                                                                 host, on your terminal
   desolate approve [--selftest]                                  approve a raw git push waiting in the root shell
-  desolate ui [--json]                                           the dashboard's address, and the root editor's
+  desolate ui [--json]                                           the dashboard's address, for your browser
   desolate root shell                                            the root's terminal: git on the root clones
 
   desolate help                                                  this text
@@ -154,9 +155,9 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "review") {
-    const { values, positionals } = flags(rest, {});
+    const { values, positionals } = flags(rest, { diff: { type: "boolean" } });
     const { review } = await import("./push.ts");
-    await review(positionals, out, values.json === true);
+    await review(values.diff === true ? [...positionals, "--diff"] : positionals, out, values.json === true);
     return EXIT.ok;
   }
   if (verb === "push") {
@@ -169,10 +170,7 @@ const main = async (argv: string[]): Promise<number> => {
     const { ui } = await import("./daemon.ts");
     const shown = await ui();
     if (values.json === true) out(JSON.stringify(shown));
-    else {
-      out(`dashboard    ${shown.dashboard}`);
-      out(shown.rootEditor ? `root editor  ${shown.rootEditor}` : "root editor  not running (desolate bootstrap starts it)");
-    }
+    else out(`dashboard    ${shown.dashboard}`);
     return EXIT.ok;
   }
   if (verb === "down") {

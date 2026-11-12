@@ -134,6 +134,48 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     assert.ok(log.some((e) => e.domain === "a" && e.workspace === "w1" && e.host === "api.example.test" && e.verdict === "allowed"));
   });
 
+  it("T3 work crosses from a real VM as checked data: an honest offer is taken, a dangerous tree is refused whole, the outbox cannot point the root at its own files", () => {
+    stack.step("an offer, and hostile content, over a real share");
+    // The root's handling of an outbox leans on what the kernel says about an open
+    // directory on the SHARE's filesystem (9p here, virtiofs on a Mac). T2 has the full
+    // set of attacks on bind mounts; this is the same route on the real thing.
+    const ws = (script: string, root = false) => stack.inVm(vmOf("a/w1"), ["bash", "-lc", `cd /workspaces/acme/widgets && ${script}`], { root });
+    const offers = () => JSON.parse(stack.quiet("offers", "--json").stdout) as { branch: string; commit: string }[];
+    const honest = ws("git checkout -q -b offered && echo y >> README.md && git commit -qam 'an honest change' && desolate offer 2>&1 && /desolate/status set green 'ready: offered' && git rev-parse HEAD");
+    assert.equal(honest.code, 0, honest.stdout + honest.stderr);
+    const tip = honest.stdout.trim().split("\n").pop()!;
+    assert.ok(offers().some((o) => o.branch === "offered" && o.commit === tip), "control: an honest branch is taken, bundle and all");
+    const shown = stack.desolate("review", "a", "acme/widgets", "offered", "--diff");
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.match(shown.stdout, /^\+y$/m, "and its diff is read in the root");
+    assert.match(stack.quiet("status", "a/w1", "--json").stdout, /"color":"green"/, "its status is read through the share");
+
+    // A tree with .git in it, made with plumbing (git's own commands refuse to).
+    const hostile = ws(`git checkout -q -f main && b=$(echo x | git hash-object -w --stdin) && inner=$(printf '100644 blob %s\\tconfig\\n' $b | git mktree) && t=$(printf '040000 tree %s\\t.git\\n' $inner | git mktree --missing) && c=$(git commit-tree -m hostile -p HEAD $t) && git branch -f hostile $c && desolate offer acme/widgets hostile 2>&1`);
+    assert.notEqual(hostile.code, 0, hostile.stdout);
+    assert.match(hostile.stdout + hostile.stderr, /the root refused this domain's bundle of acme\/widgets: .*hasDotgit/, hostile.stdout + hostile.stderr);
+    assert.ok(!offers().some((o) => o.branch === "hostile"));
+    assert.match(stack.quiet("offers").stdout, /Refused from a \(acme\/widgets/);
+
+    // The outbox, as root in the VM: the repository's sync directory becomes a link to the
+    // root's own state, where a file with a bundle's name waits to be "tidied".
+    assert.equal(stack.inRoot(["bash", "-c", "echo the-roots-own > /var/lib/desolate/canary.bundle"]).code, 0);
+    const planted = ws("git branch -D hostile >/dev/null; cd /desolate/outbox && rm -rf sync/acme/widgets && ln -s /var/lib/desolate sync/acme/widgets && readlink sync/acme/widgets", true);
+    assert.equal(planted.stdout.trim(), "/var/lib/desolate", planted.stderr);
+    stack.inRoot(["bash", "-c", "export GIT_CONFIG_GLOBAL=/var/lib/desolate/gitconfig; cd /desolate/root/acme/widgets && git fetch a 2>&1; true"]);
+    assert.equal(stack.inRoot(["cat", "/var/lib/desolate/canary.bundle"]).stdout, "the-roots-own\n", "nothing of the root's was removed through the domain's link");
+    // Put back, and with the dangerous branch gone, the domain's work flows again.
+    ws("rm -f /desolate/outbox/sync/acme/widgets", true);
+    const again = ws("git checkout -q offered && echo z >> README.md && git commit -qam 'after' && desolate offer 2>&1 && git rev-parse HEAD");
+    assert.equal(again.code, 0, again.stdout + again.stderr);
+    assert.ok(offers().some((o) => o.branch === "offered" && o.commit === again.stdout.trim().split("\n").pop()), "control: the same route works for honest work afterwards");
+    assert.doesNotMatch(stack.quiet("offers").stdout, /Refused from/);
+    stack.inRoot(["rm", "-f", "/var/lib/desolate/canary.bundle"]);
+    // None of this ended the root's own services. (It once did: the state service watched
+    // a tree in which git's quarantine came and went, on real VMs only. release/docs/incidents.md.)
+    assert.equal(stack.inRoot(["bash", "-c", "cat /var/lib/desolate/stated.log /var/lib/desolate/rootd.log | grep -c 'starting it again'; true"]).stdout.trim(), "0", "the state service and rootd ran throughout");
+  });
+
   it("T3 the editor runs inside the workspace's VM and answers at its own hostname", async () => {
     stack.step("the editor, in a real VM");
     const shown = stack.desolate("editor", "a/w1");

@@ -33,14 +33,50 @@ done
 [ -s "$STATE/registry.json" ] || echo '{"repos":{}}' >"$STATE/registry.json"
 chown "$USER_NAME:$USER_GROUP" "$STATE"
 install -d -m 0700 -o "$USER_NAME" -g "$USER_GROUP" "$STATE/secrets" "$STATE/proxy"
+# The root's git settings, for desolate's own commands and for the person's shell alike.
+# The root's clones hold commits that agents wrote. Nothing here trusts what a commit
+# contains:
 cat >"$STATE/gitconfig" <<G
 [user]
 	name = desolate root
 	email = root@desolate.invalid
 [advice]
 	detachedHead = false
+# Every object that arrives is checked: a tree with ".git" in it, a .gitmodules that is a
+# symlink or names an option, a malformed object, are refused before any ref points at them.
 [fetch]
 	fsckObjects = true
+	recurseSubmodules = false
+[transfer]
+	fsckObjects = true
+[receive]
+	fsckObjects = true
+# The root's clones are on the Mac's disk, which folds case and normalises Unicode: paths
+# that only LOOK different from ".git" must not be checked out there.
+[core]
+	protectHFS = true
+	protectNTFS = true
+	fsmonitor = false
+# A directory inside a checked-out tree that is shaped like a bare repository (with a
+# config of its own) is not a repository: git run from inside it does not read that config.
+[safe]
+	bareRepository = explicit
+# A submodule or a remote can name a transport. Only the ones desolate uses exist here;
+# "ext::" (which runs a command) and the rest do not.
+[protocol]
+	allow = never
+[protocol "file"]
+	allow = always
+[protocol "ssh"]
+	allow = always
+[protocol "https"]
+	allow = always
+[protocol "desolate"]
+	allow = always
+[protocol "desolate-push"]
+	allow = always
+[submodule]
+	recurse = false
 G
 # The person's shell in the root uses the same git settings as desolate does.
 grep -qs GIT_CONFIG_GLOBAL /etc/profile.d/desolate-root.sh 2>/dev/null || cat >/etc/profile.d/desolate-root.sh <<'P'
@@ -67,15 +103,16 @@ for _ in $(seq 1 100); do [ -S "$RUN/keyring/control.sock" ] && break; sleep 0.1
 ln -sf "$HERE/git-remote-desolate" /usr/local/bin/git-remote-desolate
 ln -sf "$HERE/git-remote-desolate-push" /usr/local/bin/git-remote-desolate-push
 install -d -m 0755 -o "$USER_NAME" -g "$USER_GROUP" "$STATE/push-locks"
-if ! alive "$RUN/rootd.pid"; then
+# rootd and the state service are kept running: if one ends, it is started again and its
+# log says so. (The keyring is not: a keyring that has stopped signs nothing, which is the
+# safe way for it to be wrong, and `desolate doctor` says it is down.)
+kept() { # kept <name> <script>
   setsid runuser -u "$USER_NAME" -- env HOME="$USER_HOME" GIT_CONFIG_GLOBAL="$STATE/gitconfig" \
-    $NODE "$HERE/rootd.ts" >>"$STATE/rootd.log" 2>&1 </dev/null &
-  echo $! >"$RUN/rootd.pid"
-fi
+    bash -c 'name=$1; shift; while :; do "$@"; echo "$name: ended with $? at $(date -u +%FT%TZ); starting it again" >&2; sleep 2; done' \
+    _ "$1" $NODE "$HERE/$2" >>"$STATE/$1.log" 2>&1 </dev/null &
+  echo $! >"$RUN/$1.pid"
+}
+alive "$RUN/rootd.pid" || kept rootd rootd.ts
 # The state service: what the dashboard draws from (stated.ts).
-if ! alive "$RUN/stated.pid"; then
-  setsid runuser -u "$USER_NAME" -- env HOME="$USER_HOME" GIT_CONFIG_GLOBAL="$STATE/gitconfig" \
-    $NODE "$HERE/stated.ts" >>"$STATE/stated.log" 2>&1 </dev/null &
-  echo $! >"$RUN/stated.pid"
-fi
+alive "$RUN/stated.pid" || kept stated stated.ts
 echo "root services: keyring, rootd and the state service up"

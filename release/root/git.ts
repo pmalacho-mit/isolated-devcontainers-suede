@@ -66,7 +66,10 @@ export const ownedByRoot = (dir: string): boolean => {
 
 export const git = (dir: string, args: string[], options: RunOptions = {}): Promise<RunResult> => {
   if (!ownedByRoot(dir)) throw new Error(`the root does not run git in ${dir}: it is not a mirror or a root clone (P4)`);
-  return run("git", ["-C", dir, ...args], { ...options, env: { ...baseEnv(), ...(options.env ?? {}) } });
+  // A mirror is a bare repository, named outright: the root's config (safe.bareRepository)
+  // lets git use a bare repository only when it is told which one, never by finding one.
+  const where = fs.realpathSync(dir).startsWith(`${ROOT.mirrors}/`) ? ["--git-dir", dir] : ["-C", dir];
+  return run("git", [...where, ...args], { ...options, env: { ...baseEnv(), ...(options.env ?? {}) } });
 };
 
 export const gitOk = async (dir: string, args: string[], options: RunOptions = {}): Promise<string> => {

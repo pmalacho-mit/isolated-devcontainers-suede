@@ -14,7 +14,7 @@
 //
 // AN APPROVAL IS A SIGNATURE MADE OUTSIDE THIS VM. The keyring issues a challenge naming
 // the repository, branch and commit (shared/approval.ts); the approver on the HOST shows it
-// to the person and signs it (Touch ID on a Mac; see host/approver.ts); the keyring files
+// to the person and signs it (on the host's terminal, or Touch ID if chosen; see host/approver.ts); the keyring files
 // the approval only if that signature verifies against the approver's public key, which
 // root installed at /etc/desolate/approver.pub. Nothing in this VM holds the approver's
 // private key, so nothing in this VM can approve a push: not a script, not a fabricated

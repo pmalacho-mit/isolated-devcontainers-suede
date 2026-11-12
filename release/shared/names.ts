@@ -71,8 +71,8 @@ export const editorHostPort = () => {
   return port;
 };
 
-/** The root UI (section 4.8): the state service in the root VM, and the root's editor. Both
- *  are on the root VM's loopback; the host's forwarder carries them on the editors' port,
- *  the dashboard at ROOT_HOSTNAME and the root editor at ROOT_EDITOR_HOSTNAME. */
+/** The root UI: the state service in the root VM, which serves the dashboard. It is on the
+ *  root VM's loopback; the host's forwarder carries it on the editors' port, at
+ *  ROOT_HOSTNAME. (The root has no editor: nothing in the root opens what an agent wrote
+ *  with anything but git and desolate's own code.) */
 export const ROOT_UI = { port: 31590 } as const;
-export const ROOT_EDITOR_HOSTNAME = "desolate-editor.localhost";

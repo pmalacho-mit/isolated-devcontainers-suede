@@ -6,7 +6,7 @@
 //      no connection to the remote exists yet.
 //   2. If no approval for exactly that is on file, this asks the keyring for a challenge,
 //      leaves it where the host can read it, and waits. The person runs `desolate approve`
-//      in a terminal ON THE HOST (Touch ID on a Mac). Nothing in this VM can answer.
+//      in a terminal ON THE HOST. Nothing in this VM can answer.
 //   3. Then the push goes to the remote: LFS objects first, then the commit (send.ts).
 //
 // Why a helper and not the pre-push hook: git connects to the remote, which takes the write

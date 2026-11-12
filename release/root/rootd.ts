@@ -16,7 +16,7 @@ import { parseRepo } from "../shared/names.ts";
 import { sleep } from "../shared/run.ts";
 import { domains } from "./domains.ts";
 import { take } from "./offers.ts";
-import { inbox, outbox, readData } from "./outbox.ts";
+import { drain, inbox, outbox } from "./outbox.ts";
 import * as repos from "./repos.ts";
 
 const RATE = { perMinute: 30 } as const;
@@ -46,17 +46,9 @@ const log = (line: string) => process.stderr.write(`${new Date().toISOString()} 
 log("up");
 for (;;) {
   for (const d of domains()) {
-    const dir = path.join(outbox(d.slug), "requests");
-    let names: string[] = [];
-    try {
-      names = fs.readdirSync(dir).filter((name) => /^[0-9a-z-]{1,60}\.json$/.test(name)).sort().slice(0, 50);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      const file = path.join(dir, name);
-      const request = readData<Record<string, unknown>>(file);
-      fs.rmSync(file, { force: true });
+    // Each request is read once and removed, by name, in a directory that was checked to be
+    // the outbox's own (outbox.ts): never through a path a workspace could have redirected.
+    for (const { name, data: request } of drain<Record<string, unknown>>(path.join(outbox(d.slug), "requests"), /^[0-9a-z-]{1,60}\.json$/, 50)) {
       let reply: Record<string, unknown>;
       if (!request || typeof request.op !== "string") reply = { ok: false, error: "not a request" };
       else if (!allowed(d.slug)) reply = { ok: false, error: `this domain has made ${RATE.perMinute} requests in a minute; wait and ask again` };

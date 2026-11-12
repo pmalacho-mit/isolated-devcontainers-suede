@@ -105,10 +105,8 @@ export const bootstrap = async (options: { forge?: string; forgeKnownHosts?: str
   step(!wasUp, "root services: keyring");
   if (configChanged || !wasUp) await rootctl("forge.set", { forge }, { quiet: true });
   step(await installApprover(), "root: the approver's public key and the host daemon's token");
-  // The root's own surfaces: its editor (review), and the host daemon, which carries the
-  // dashboard and tells the root's state service what only the host knows.
-  const editor = await b.exec(ROOT_VM, ["bash", "-lc", `bash ${guest.release}/root/editor.sh`], { timeoutMs: 300_000 });
-  if (editor.code !== 0) out(`    the root editor is not available: ${(editor.stderr || editor.stdout).trim().split("\n").pop() ?? ""}`);
+  // The host daemon carries the dashboard, and tells the root's state service what only
+  // the host knows.
   const { ensureDaemon } = await import("./daemon.ts");
   await ensureDaemon();
   out(`  dashboard    http://${ROOT_HOSTNAME}:${editorHostPort()}/   (and: desolate ui)`);
@@ -155,7 +153,7 @@ export const doctor = async (out: Out, json = false): Promise<number> => {
     }
   // The approver: this host holds it, and the root must have been given the same key.
   const pem = approver.publicKey();
-  checks.push({ name: "approver", ok: approver.kind() !== null && pem !== null, detail: pem ? `${approver.kind()}; pushes are approved on this host${approver.kind() === "terminal" && process.platform === "darwin" ? " (terminal: weaker than Touch ID)" : ""}` : "this stack has no approver key", fix: "desolate bootstrap" });
+  checks.push({ name: "approver", ok: approver.kind() !== null && pem !== null, detail: pem ? `${approver.kind()}; pushes are approved on this host` : "this stack has no approver key", fix: "desolate bootstrap" });
   if (asked && pem) {
     const installed = asked.find((check) => check.name === "root: approver key installed");
     // Compared as the root stores it: the PEM text and one newline.

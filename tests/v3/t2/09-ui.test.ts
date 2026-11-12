@@ -42,7 +42,7 @@ const http = (method: string, pathAndQuery: string, options: { host?: string; he
     socket.on("error", () => resolve({ status: 0, headers: "", body: data, ms: performance.now() - started }));
   });
 type State = {
-  stack: { backend: string; isolated: boolean } | null; hostConnected: boolean; rootEditor: string | null;
+  stack: { backend: string; isolated: boolean } | null; hostConnected: boolean;
   repos: { repo: string }[]; offers: { repo: string; branch: string; commit: string }[]; approvals: { repo: string; branch: string; commit: string }[];
   domains: { slug: string; workspaces: { workspace: string; says: { status: { color: string; message: string } | null }; host: { status: string; editor?: string; devcontainer?: string } | null }[] }[];
   actions: { id: string; kind: string; command: string; state: string; lines: string[] }[];
@@ -168,13 +168,18 @@ describe("T2 section 4.8: the root UI", () => {
     assert.ok(await until(async () => (await state()).actions.filter((a) => a.kind === "repo.fetch" && a.state === "done").length === 3));
   });
 
-  it("in a browser: cards, Needs you, and a workspace's words shown as text, never run", async () => {
-    stack.step("the dashboard in a browser");
+  // The dashboard in a real browser. `?once` draws the current state and leaves no stream
+  // open, so the browser finishes.
+  const browser = (query: string, ...extra: string[]) => {
     const chrome = [process.env.DESOLATE_CHROME, "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"].find((file) => file && fs.existsSync(file));
     assert.ok(chrome, "this check needs Chrome or Chromium: install one, or set DESOLATE_CHROME to its path");
     const profile = fs.mkdtempSync(path.join(stack.work, "chrome-"));
-    // `?once` draws the current state and leaves no stream open, so the browser finishes.
-    const dump = (...extra: string[]) => spawnSync(chrome!, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", `--user-data-dir=${profile}`, "--host-resolver-rules=MAP *.localhost 127.0.0.1", "--enable-logging=stderr", "--log-level=0", "--virtual-time-budget=4000", "--window-size=1180,1500", ...extra, `http://${HOST}:${port}/?once`], { encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+    return spawnSync(chrome!, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", `--user-data-dir=${profile}`, "--host-resolver-rules=MAP *.localhost 127.0.0.1", "--enable-logging=stderr", "--log-level=0", "--virtual-time-budget=4000", "--window-size=1180,1500", ...extra, `http://${HOST}:${port}/?${query}`], { encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+  };
+
+  it("in a browser: cards, Needs you, and a workspace's words shown as text, never run", async () => {
+    stack.step("the dashboard in a browser");
+    const dump = (...extra: string[]) => browser("once", ...extra);
     let page = dump("--dump-dom");
     for (let i = 0; i < 4 && !/data-domain="web"/.test(page.stdout); i++) page = dump("--dump-dom");
     // A picture of it, for a person to look at (section 4.8: the owner reviews screenshots).
@@ -221,20 +226,35 @@ describe("T2 section 4.8: the root UI", () => {
     assert.deepEqual([end.offers.length, end.approvals.length], [0, 0], "the offer is no longer waiting");
   });
 
-  it("the root has an editor, for review: Restricted Mode, at a name of its own", async () => {
-    stack.step("the root editor");
-    const shown = stack.desolate("ui");
-    assert.match(shown.stdout, /^dashboard {4}http:\/\/desolate\.localhost:\d+\/\nroot editor {2}http:\/\/desolate-editor\.localhost:\d+\/\?tkn=[0-9a-f]{48}&folder=%2Fdesolate%2Froot$/m);
-    const url = new URL((JSON.parse(stack.quiet("ui", "--json").stdout) as { rootEditor: string }).rootEditor);
-    const cookie = `Cookie: vscode-tkn=${url.searchParams.get("tkn")}`;
-    const page = await http("GET", "/", { host: url.hostname, headers: [cookie] });
-    assert.equal(page.status, 200, page.body.slice(0, 200));
-    assert.match(page.body, /enableWorkspaceTrust&quot;:true/, "workspace trust is on: content is not trusted here");
-    assert.equal((await http("GET", "/", { host: url.hostname })).status, 403, "control: the editor wants its token");
-    assert.equal((await http("GET", "/", { host: url.hostname, headers: [cookie, `Origin: http://${HOST}:${port}`] })).status, 403, "the dashboard's page is another origin to it");
-    assert.equal((await state()).rootEditor, url.href);
-    const held = JSON.parse(stack.inRoot(["bash", "-lc", "cat ~/.desolate-root-editor/data/Machine/settings.json"]).stdout) as Record<string, unknown>;
-    assert.deepEqual([held["security.workspace.trust.enabled"], held["security.workspace.trust.startupPrompt"], held["task.allowAutomaticTasks"], held["extensions.ignoreRecommendations"]], [true, "never", "off", true]);
+  it("the diff is read in the dashboard, as text made by git in the root; the root has no editor", async () => {
+    stack.step("the diff, and no root editor");
+    const work = stack.quiet("exec", "web/one", "--", "sh", "-c", "git checkout -q -b markup && printf '<img src=x onerror=alert(1)>\\n' >> README.md && git -c user.name=t -c user.email=t@example.test commit -qam 'markup in a file' && desolate offer && git rev-parse HEAD");
+    assert.equal(work.code, 0, work.stderr);
+    const tip = work.stdout.trim().split("\n").pop()!;
+    assert.ok(await until(async () => (await state()).offers.some((o) => o.branch === "markup" && o.commit === tip)));
+    const diff = JSON.parse((await http("GET", "/diff?domain=web&repo=acme%2Fapp&branch=markup")).body) as { commit: string; text: string; truncated: boolean };
+    assert.equal(diff.commit, tip, "the diff says which commit it is of: the one a push would name");
+    assert.match(diff.text, /^diff --git a\/README\.md b\/README\.md\n[\s\S]*\n\+<img src=x onerror=alert\(1\)>\n/);
+    assert.equal(diff.truncated, false);
+    assert.equal((await http("GET", "/diff?domain=web&repo=acme%2Fapp&branch=no-such")).status, 400);
+    assert.equal((await http("GET", "/diff?domain=web&repo=acme%2Fapp&branch=markup", { headers: ["Sec-Fetch-Site: cross-site"] })).status, 403);
+    // In the browser: the review opens at the offer, and the diff's markup is text on the
+    // page, in a span, not an element of it.
+    const at = "once&review&domain=web&repo=acme%2Fapp&branch=markup";
+    let page = browser(at, "--dump-dom");
+    for (let i = 0; i < 4 && !/data-diff/.test(page.stdout); i++) page = browser(at, "--dump-dom");
+    assert.match(page.stdout, /<pre class="mono diff" data-diff="">[\s\S]*<span class="add">\+&lt;img src=x onerror=alert\(1\)&gt;<\/span>/, page.stdout.slice(0, 800));
+    assert.doesNotMatch(page.stdout, /<img/i, "no element was made from the diff");
+    assert.doesNotMatch(page.stderr, /alert|Uncaught/i, "and nothing of it ran");
+    if (process.env.DESOLATE_SCREENSHOTS) browser(at, `--screenshot=${path.join(process.env.DESOLATE_SCREENSHOTS, "review.png")}`);
+    // The state service is kept running: ended, it is back, and its log says what happened.
+    assert.equal(stack.inRoot(["bash", "-c", "pkill -f '^node .*stated\\.ts$'"]).code, 0, "control: it was running, and was ended");
+    assert.ok(await until(async () => (await http("GET", "/state").catch(() => ({ status: 0 }))).status === 200), "the dashboard answers again");
+    assert.match(stack.inRoot(["bash", "-c", "tail -3 /var/lib/desolate/stated.log"]).stdout, /stated: ended with \d+ at .*; starting it again\n/);
+    // There is one surface in the root, and it is the dashboard.
+    assert.equal(stack.desolate("ui").stdout.trim(), `dashboard    http://${HOST}:${port}/`);
+    assert.equal((await http("GET", "/", { host: "desolate-editor.localhost" })).status, 421, "the name the root's editor had answers nothing");
+    assert.equal(stack.inRoot(["bash", "-c", "ss -ltnH | grep -cE ':(31580|31581) '; pgrep -fc 'codium-serve[r]|server-mai[n].js'; true"]).stdout.replace(/\s+/g, " ").trim(), "0 0", "no editor's server runs in the root VM");
   });
 
   it("the transcript reads as reviewed", () => {

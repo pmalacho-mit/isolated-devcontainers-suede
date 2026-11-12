@@ -296,7 +296,11 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     const lied = inRootClone("git fetch dev 2>&1; git for-each-ref --format='%(refname)' refs/remotes/dev refs/desolate; ls /desolate/root/acme/widgets/.git/refs/remotes/dev");
     assert.match(lied.stdout, /^refs\/remotes\/dev\/honest$/m, "control: a well-formed ref from the same list is accepted");
     assert.doesNotMatch(lied.stdout, /evil|notasha|ProxyCommand|refs\/desolate/);
-    assert.ok(fs.lstatSync(path.join(sync, "zz-evil.bundle")).isSymbolicLink(), "the symlink was not followed or consumed");
+    // The root removes what it finds by NAME, in the directory it checked: the link goes,
+    // what it pointed at is never opened, and the person is told something was dropped.
+    assert.match(lied.stdout, /2 file\(s\) in dev's outbox were not plain bundle files and were dropped|was refused and dropped/, lied.stdout);
+    assert.ok(!fs.existsSync(path.join(sync, "zz-evil.bundle")) && fs.lstatSync(path.join(sync, "zz-evil.bundle"), { throwIfNoEntry: false }) === undefined, "the link itself is gone from the outbox");
+    assert.match(stack.inRoot(["bash", "-c", "head -c 5 /etc/passwd; stat -c %h /etc/passwd"], { root: true }).stdout, /^root:1\n$/, "and what it pointed at is as it was");
   });
 
   it("a person moves work between domains through the root: git push <domain> delivers", () => {

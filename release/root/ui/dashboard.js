@@ -39,6 +39,23 @@ const alertLine = (text) => { notice = text; render(); setTimeout(() => { notice
 const button = (label, key, kind, args, quiet = false) =>
   el("button", { class: quiet ? "quiet" : "", disabled: busy.has(key), "data-action": kind, onclick: () => act(key, kind, args) }, busy.has(key) ? `${label}...` : label);
 
+// The diff, as text. Each line is a text node in a span whose class comes from the line's
+// first character: nothing in the diff is ever parsed as markup.
+const diffView = (text) => el("pre", { class: "mono diff", "data-diff": "" }, text.split("\n").map((line) =>
+  el("span", { class: line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" }, line || " ")));
+const loadDiff = async () => {
+  const { offer } = reviewing;
+  reviewing.diff = { loading: true };
+  render();
+  try {
+    const response = await fetch(`/diff?domain=${encodeURIComponent(offer.domain)}&repo=${encodeURIComponent(offer.repo)}&branch=${encodeURIComponent(offer.branch)}`);
+    reviewing.diff = await response.json();
+  } catch (error) {
+    reviewing.diff = { error: String(error) };
+  }
+  render();
+};
+
 const openReview = async (offer) => {
   reviewing = { offer, loading: true };
   render();
@@ -49,6 +66,7 @@ const openReview = async (offer) => {
     reviewing = { offer, review: { error: String(error) } };
   }
   render();
+  if (reviewing && reviewing.review && !reviewing.review.error) loadDiff();
 };
 
 const needsYou = () => {
@@ -56,7 +74,11 @@ const needsYou = () => {
   for (const a of state.approvals) items.push(el("li", {}, el("span", { class: "dot orange" }), el("div", { class: "what" },
     el("div", { class: "name" }, `A push is waiting for your approval: ${a.repo} ${a.branch}`),
     el("div", { class: "line mono" }, `${a.commit}`),
-    el("div", { class: "line" }, "Approve it on the host, outside every VM: run ", el("code", {}, "desolate approve"), " in a terminal there (Touch ID on a Mac).")), el("div", {})));
+    el("div", { class: "line" }, "Approve it on the host, outside every VM: run ", el("code", {}, "desolate approve"), " in a terminal there.")), el("div", {})));
+  for (const r of state.refused || []) items.push(el("li", { "data-refused": `${r.domain}/${r.repo}` }, el("span", { class: "dot red" }), el("div", { class: "what" },
+    el("div", { class: "name" }, `Refused from ${r.domain}: a bundle of ${r.repo}`),
+    el("div", { class: "line mono" }, r.why),
+    el("div", { class: "line" }, `Nothing new from ${r.domain} is taken while one of its branches holds what git refused. Delete that branch in the workspace, then run `, el("code", {}, "desolate sync"), " there.")), el("div", {})));
   for (const o of state.offers) {
     const key = `push:${o.domain}:${o.repo}:${o.branch}`;
     items.push(el("li", { "data-offer": `${o.domain}/${o.repo}/${o.branch}` }, el("span", { class: "dot blue" }), el("div", { class: "what" },
@@ -87,7 +109,13 @@ const reviewPanel = () => {
     review.warnings.map((w) => el("div", { class: "warn" }, `Warning: this push ${w}`)),
     el("pre", { class: "mono" }, review.commits.slice(0, 40).map((c) => `${short(c.commit)}  ${c.subject}`).join("\n")),
     el("pre", { class: "mono" }, review.files.slice(0, 80).join("\n")),
-    el("div", { class: "sub" }, "Read the diff itself in the root editor (Source Control), or in ", el("code", {}, "desolate root shell"), ": ", el("code", {}, `git -C /desolate/root/${review.repo} diff origin/HEAD...${offer.domain}/${review.branch}`)),
+    reviewing.diff && reviewing.diff.loading ? el("div", { class: "sub" }, "reading the diff...") : null,
+    reviewing.diff && reviewing.diff.error ? el("div", { class: "warn" }, reviewing.diff.error) : null,
+    // The diff is shown only if it is of the commit the Push button names.
+    reviewing.diff && reviewing.diff.text !== undefined && reviewing.diff.commit === review.commit ? [diffView(reviewing.diff.text),
+      reviewing.diff.truncated ? el("div", { class: "warn" }, "The diff is longer than is shown here. Read the rest with git, in `desolate root shell`, before you push.") : null] : null,
+    reviewing.diff && reviewing.diff.commit && reviewing.diff.commit !== review.commit ? el("div", { class: "warn" }, "The branch moved while you were reading. Close this and review it again.") : null,
+    el("div", { class: "sub" }, "For a richer view (syntax colouring, the whole file), open the branch in a workspace's editor. The diff here is the one to trust: it is made in the root, by git alone."),
     el("div", { class: "buttons" }, !review.pushable ? el("span", { class: "sub" }, "Not pushable: cloned --no-push, so there is no write key for it.")
       : review.isDefault ? el("span", { class: "sub" }, "This is the default branch. Push it from the host: ", el("code", {}, `desolate push ${offer.domain} ${review.repo} ${review.branch} --expect ${review.commit} --allow-default`))
       : button(`Push exactly ${short(review.commit)}`, key, "offer.push", { domain: offer.domain, repo: review.repo, branch: review.branch, commit: review.commit })),
@@ -151,9 +179,6 @@ const render = () => {
   const host = document.getElementById("host");
   host.textContent = notice || (state.hostConnected ? "host connected" : "host not connected: VM states are as last known; run `desolate bootstrap` on the host");
   host.className = `chip ${notice || !state.hostConnected ? "bad" : ""}`;
-  const rootEditor = document.getElementById("root-editor");
-  rootEditor.hidden = !state.rootEditor;
-  if (state.rootEditor) rootEditor.href = state.rootEditor;
   const needs = needsYou();
   document.getElementById("needs").hidden = needs.length === 0;
   document.getElementById("needs-list").replaceChildren(...needs);
@@ -181,12 +206,24 @@ const render = () => {
   document.title = needs.length ? `(${needs.length}) desolate` : "desolate";
 };
 
+// `?review&domain=<d>&repo=<owner/repo>&branch=<b>`: open that offer's review when the
+// state first shows it. A link to a review, for `desolate review` to print and for a
+// screenshot. It names an offer; it carries nothing that is run.
+const asked = new URLSearchParams(location.search);
+let pending = asked.has("review");
+const arrived = (now) => {
+  state = now;
+  render();
+  if (!pending) return;
+  const offer = state.offers.find((o) => o.domain === asked.get("domain") && o.repo === asked.get("repo") && o.branch === asked.get("branch"));
+  if (offer) { pending = false; openReview(offer); }
+};
 const listen = () => {
   const events = new EventSource("/events");
-  events.onmessage = (event) => { state = JSON.parse(event.data); render(); };
+  events.onmessage = (event) => arrived(JSON.parse(event.data));
   events.onerror = () => { events.close(); setTimeout(listen, 1500); };
 };
 // `?once`: the state as it is now, drawn once, with no stream left open. For a screenshot
 // or a printed page; the dashboard itself always listens.
-if (new URLSearchParams(location.search).has("once")) fetch("/state").then((response) => response.json()).then((now) => { state = now; render(); });
+if (asked.has("once")) fetch("/state").then((response) => response.json()).then(arrived);
 else listen();

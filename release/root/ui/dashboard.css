@@ -44,3 +44,9 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 12px; }
 ol.steps li.done { color: var(--soft); }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; background: var(--bg); padding: 1px 5px; border-radius: 4px; }
 .warn { color: var(--orange); }
+pre.diff { max-height: 70vh; white-space: pre; overflow: auto; line-height: 1.35; }
+pre.diff span { display: block; min-width: max-content; }
+pre.diff .add { background: color-mix(in srgb, var(--green) 16%, transparent); }
+pre.diff .del { background: color-mix(in srgb, var(--red) 16%, transparent); }
+pre.diff .hunk { color: var(--accent); }
+pre.diff .file { font-weight: 700; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }

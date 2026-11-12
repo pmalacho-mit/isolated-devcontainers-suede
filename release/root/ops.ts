@@ -9,6 +9,7 @@ import { ask } from "./keyring-client.ts";
 import { parseApproval } from "../shared/approval.ts";
 import { APPROVALS, FORGE, KEYRING } from "./layout.ts";
 import * as domains from "./domains.ts";
+import { refusalsOf } from "./outbox.ts";
 import * as offers from "./offers.ts";
 import * as proxy from "./proxy/manage.ts";
 import * as secrets from "./proxy/secrets.ts";
@@ -113,6 +114,12 @@ export const ops: Record<string, Op> = {
 
   async "offers.list"(args) {
     return offers.allOffers(typeof args.domain === "string" ? domains.slugOf(args.domain, "domain") : undefined);
+  },
+  async "offers.refused"(args) {
+    return domains.domains().filter((d) => typeof args.domain !== "string" || d.slug === args.domain).flatMap((d) => refusalsOf(d.slug));
+  },
+  async "review.diff"(args) {
+    return offers.diff(domains.slugOf(args.domain, "domain"), args.repo, args.branch);
   },
   async "review"(args) {
     return offers.review(domains.slugOf(args.domain, "domain"), args.repo, args.branch);

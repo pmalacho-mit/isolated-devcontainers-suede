@@ -48,9 +48,8 @@ Type the branch name (fix) to push, or anything else to refuse: fix
 approved; the push waiting in the root continues.
 [exit 0]
 
-## the root editor
+## the diff, and no root editor
 
 $ desolate ui
 dashboard    http://desolate.localhost:31591/
-root editor  http://desolate-editor.localhost:31591/?tkn=<token>&folder=%2Fdesolate%2Froot
 [exit 0]

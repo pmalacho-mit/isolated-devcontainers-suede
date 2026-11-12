@@ -1,6 +1,7 @@
 // Offers (section 6.4): a branch a workspace marked ready. Taking one brings the branch into
 // the root clone (through the domain's remote), verifies and imports the LFS objects its
 // commits reference, and records it under "Needs you". Offering is not pushing.
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { refuse } from "../shared/exit.ts";
@@ -8,9 +9,9 @@ import { readJson, writeJson } from "../shared/json.ts";
 import { isBranch, isCommit, isLfsOid, parseRepo } from "../shared/names.ts";
 import type { Repo } from "../shared/names.ts";
 import { domain as domainOf, domains } from "./domains.ts";
-import { git, gitOk } from "./git.ts";
-import { clonePath, domainPath, mirrorPath } from "./layout.ts";
-import { outbox, verifiedLfs } from "./outbox.ts";
+import { git, gitOk, ownedByRoot } from "./git.ts";
+import { clonePath, domainPath, mirrorPath, ROOT } from "./layout.ts";
+import { dropLfs, refusalsOf, takeLfs } from "./outbox.ts";
 import { recordOf } from "./repos.ts";
 
 export type Offer = { domain: string; repo: string; branch: string; commit: string; workspace: string; lfs: number; at: string };
@@ -35,7 +36,11 @@ export const take = async (domain: string, request: Record<string, unknown>): Pr
   await fetchDomain(domain, repo);
   const clone = clonePath(repo);
   const have = (await git(clone, ["rev-parse", "--verify", "--quiet", `refs/remotes/${domain}/${request.branch}`])).stdout.trim();
-  if (have !== request.commit) return { ok: false, error: `the root received ${have ? have.slice(0, 12) : "nothing"} for ${request.branch}, not ${request.commit.slice(0, 12)}`, fix: "run `desolate sync`, then offer again" };
+  if (have !== request.commit) {
+    const refusal = refusalsOf(domain).find((r) => r.repo === id);
+    if (refusal) return { ok: false, error: `the root refused this domain's bundle of ${id}: ${refusal.why}`, fix: "a branch in this domain holds an object git calls dangerous (a .git inside a tree, a .gitmodules that is a symlink or names an option, a malformed object). Nothing new is taken until that branch is deleted here; then offer again" };
+    return { ok: false, error: `the root received ${have ? have.slice(0, 12) : "nothing"} for ${request.branch}, not ${request.commit.slice(0, 12)}`, fix: "run `desolate sync`, then offer again" };
+  }
 
   // LFS: every object the offer names is verified against its id and its pointer's size
   // before it is the root's. Then every pointer in the offered commits must resolve.
@@ -44,13 +49,10 @@ export const take = async (domain: string, request: Record<string, unknown>): Pr
     if (!isLfsOid(item.oid) || !Number.isInteger(item.size)) return { ok: false, error: "an LFS object is named by its sha256 and its size" };
     const target = lfsStore(path.join(clone, ".git", "lfs", "objects"), item.oid);
     if (!fs.existsSync(target)) {
-      const verified = verifiedLfs(domain, id, item.oid, item.size as number);
-      if ("error" in verified) return { ok: false, error: verified.error, fix: "offer again" };
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.copyFileSync(verified.file, `${target}.tmp`);
-      fs.renameSync(`${target}.tmp`, target);
+      const taken = takeLfs(domain, id, item.oid, item.size as number, target);
+      if ("error" in taken) return { ok: false, error: taken.error, fix: "offer again" };
     }
-    fs.rmSync(path.join(outbox(domain), "lfs", id, item.oid), { force: true });
+    else dropLfs(domain, id, item.oid);
   }
   const missing = await missingLfs(repo, request.commit);
   if (missing.length > 0) return { ok: false, error: `the offered commits reference ${missing.length} LFS object(s) the root does not have (${missing[0]!.slice(0, 12)}...)`, fix: "offer again from the workspace that made them" };
@@ -109,8 +111,8 @@ export const review = async (domain: string, repoArg: unknown, branch: unknown):
   const base = upstream ? (await git(clone, ["merge-base", commit, upstream])).stdout.trim() : "";
   const range = base ? `${base}..${commit}` : commit;
   const log = await gitOk(clone, ["log", "--format=%H%x09%s", "--max-count=200", range]);
-  const files = (await gitOk(clone, ["diff", "--name-only", "-z", base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit])).split("\0").filter(Boolean);
-  const stat = (await gitOk(clone, ["diff", "--shortstat", base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit])).trim();
+  const files = (await gitOk(clone, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit])).split("\0").filter(Boolean);
+  const stat = (await gitOk(clone, ["diff", "--no-ext-diff", "--no-textconv", "--shortstat", base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit])).trim();
   const warnings: string[] = [];
   if (files.some((f) => f === ".github" || f.startsWith(".github/"))) warnings.push("changes .github/: a pushed branch's own workflows run on the remote, with the repository's secrets");
   if (files.some((f) => /(^|\/)\.suede\/core\//.test(f))) warnings.push("changes a vendored .suede/core/: a proposal that rewrites suede's own machinery is worth a second look");
@@ -121,4 +123,40 @@ export const review = async (domain: string, repoArg: unknown, branch: unknown):
     commits: log.split("\n").filter(Boolean).map((line) => ({ commit: line.slice(0, line.indexOf("\t")), subject: line.slice(line.indexOf("\t") + 1) })),
     files, stat, lfsObjects: (await lfsOf(repo, commit)).length, warnings,
   };
+};
+
+/** The diff a push would send, as text, for a person to read before they push it. Made by
+ *  git from objects in the root clone, with nothing the content could steer: no external
+ *  diff program, no textconv, no colour, no pager, and no checkout (two commits are
+ *  compared; no file of the branch is ever written into the root's working tree). The text
+ *  is the content's, so whoever shows it shows it as text. Capped: a diff too long to read
+ *  is cut, and says so. */
+export const DIFF_LIMIT = 1024 * 1024;
+export const diff = async (domain: string, repoArg: unknown, branch: unknown): Promise<{ repo: string; branch: string; commit: string; base: string; text: string; truncated: boolean }> => {
+  const r = await review(domain, repoArg, branch);
+  const clone = clonePath(parseRepo(r.repo)!);
+  if (!ownedByRoot(clone)) throw new Error("not a root clone");
+  const child = spawn("git", ["-C", clone, "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--unified=3", r.base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", r.commit, "--"],
+    { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: "C.UTF-8", GIT_CONFIG_GLOBAL: `${ROOT.state}/gitconfig`, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", GIT_EXTERNAL_DIFF: "" } });
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let truncated = false;
+  const timer = setTimeout(() => {
+    truncated = true;
+    child.kill("SIGKILL");
+  }, 60_000);
+  child.stdout.on("data", (chunk: Buffer) => {
+    if (size + chunk.length > DIFF_LIMIT) {
+      chunks.push(chunk.subarray(0, DIFF_LIMIT - size));
+      size = DIFF_LIMIT;
+      truncated = true;
+      child.kill("SIGKILL");
+    } else {
+      chunks.push(chunk);
+      size += chunk.length;
+    }
+  });
+  await new Promise<void>((resolve) => child.on("close", () => resolve()));
+  clearTimeout(timer);
+  return { repo: r.repo, branch: r.branch, commit: r.commit, base: r.base, text: Buffer.concat(chunks).toString("utf8"), truncated };
 };

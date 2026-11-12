@@ -1,0 +1,150 @@
+$ desolate bootstrap --forge stand-in:ssh://git@<forge>:22 --forge-known-hosts <work>/forge-state/known_hosts
+desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; tests only), instance <instance>
+  + home <home>
+    base image desolate/base:latest present (<id>)
+  = base image
+  + config: backend fake, forge stand-in (<forge>:22)
+    approver: a software key in <home>/approver; every push will ask on your terminal
+  + approver (terminal): the key that approves pushes, held on this host
+  + root VM dsl-<instance>-root created
+  + root VM running
+  + root services: keyring
+  + root: the approver's public key and the host daemon's token
+  dashboard    http://desolate.localhost:31591/   (and: desolate ui)
+bootstrap: 7 step(s) done.
+  ok   home: <home>
+  ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
+  ok   docker daemon: docker 29.9.3
+  ok   base image: desolate/base:latest <id>
+  ok   root VM running: dsl-<instance>-root
+  ok   approver: terminal; pushes are approved on this host
+  ok   root: keyring answers: 0 key(s) held
+  ok   root: the write agent's askpass socket is closed to the root's own user: only the keyring's user can answer for a signature
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: approver key installed: sha256 <oid>
+  ok   root: forge configured: yes
+doctor: all checks passed.
+[exit 0]
+
+## an honest offer
+
+$ desolate review dev acme/widgets honest --diff
+acme/widgets  honest  at <commit>
+a push would send 1 commit(s): 1 file changed, 1 insertion(+)
+  <id>  an honest change
+  README.md
+diff --git a/README.md b/README.md
+index cd7f97a..d67f011 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ # widgets
++more
+to push exactly this: desolate push dev acme/widgets honest --expect <commit>
+[exit 0]
+
+## trees that attack a checkout
+
+## content that hopes to be run
+
+$ desolate review dev acme/widgets planted --diff
+acme/widgets  planted  at <commit>
+a push would send 1 commit(s): 9 files changed, 21 insertions(+)
+  <id>  planted
+  .gitattributes
+  .gitconfig
+  README.md
+  hooks/post-checkout
+  out-of-tree
+  sub/trap/HEAD
+  sub/trap/config
+  sub/trap/objects/.keep
+  sub/trap/refs/heads/.keep
+  WARNING: changes .lfsconfig, .gitattributes or .gitmodules: these steer what git does with this repository elsewhere
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000..a905473
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1,2 @@
++* diff=evil filter=evil merge=evil
++*.md textconv=evil
+diff --git a/.gitconfig b/.gitconfig
+new file mode 100644
+index 0000000..e0c2e0d
+--- /dev/null
++++ b/.gitconfig
+@@ -0,0 +1,6 @@
++[diff "evil"]
++	command = touch /tmp/desolate-pwned-diffdriver
++	textconv = touch /tmp/desolate-pwned-textconv
++[filter "evil"]
++	smudge = touch /tmp/desolate-pwned-smudge
++	clean = touch /tmp/desolate-pwned-clean
+diff --git a/README.md b/README.md
+index cd7f97a..82e9384 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ # widgets
++changed
+diff --git a/hooks/post-checkout b/hooks/post-checkout
+new file mode 100755
+index 0000000..077ee00
+--- /dev/null
++++ b/hooks/post-checkout
+@@ -0,0 +1,2 @@
++#!/bin/sh
++touch /tmp/desolate-pwned-hook
+diff --git a/out-of-tree b/out-of-tree
+new file mode 120000
+index 0000000..5f03a98
+--- /dev/null
++++ b/out-of-tree
+@@ -0,0 +1 @@
++/var/lib/desolate/keyring
+\ No newline at end of file
+diff --git a/sub/trap/HEAD b/sub/trap/HEAD
+new file mode 100644
+index 0000000..b870d82
+--- /dev/null
++++ b/sub/trap/HEAD
+@@ -0,0 +1 @@
++ref: refs/heads/main
+diff --git a/sub/trap/config b/sub/trap/config
+new file mode 100644
+index 0000000..6d2f744
+--- /dev/null
++++ b/sub/trap/config
+@@ -0,0 +1,8 @@
++[core]
++	bare = false
++	worktree = .
++	repositoryformatversion = 0
++	fsmonitor = "touch /tmp/desolate-pwned-fsmonitor; false"
++	pager = "touch /tmp/desolate-pwned-pager; cat"
++[alias]
++	status = "!touch /tmp/desolate-pwned-alias"
+diff --git a/sub/trap/objects/.keep b/sub/trap/objects/.keep
+new file mode 100644
+index 0000000..e69de29
+diff --git a/sub/trap/refs/heads/.keep b/sub/trap/refs/heads/.keep
+new file mode 100644
+index 0000000..e69de29
+to push exactly this: desolate push dev acme/widgets planted --expect <commit>
+[exit 0]
+
+## a hostile outbox
+
+## hostile names and messages
+
+$ desolate review dev acme/widgets escapes
+acme/widgets  escapes  at <commit>
+a push would send 1 commit(s): 1 file changed, 1 insertion(+)
+  <id>  title?[2J?]0;owned? <script>alert(1)</script>
+  README.md
+read the diff: desolate review dev acme/widgets escapes --diff
+  or in the dashboard: http://desolate.localhost:31591/?review&domain=dev&repo=acme%2Fwidgets&branch=escapes
+  or with git, in `desolate root shell`
+to push exactly this: desolate push dev acme/widgets escapes --expect <commit>
+[exit 0]

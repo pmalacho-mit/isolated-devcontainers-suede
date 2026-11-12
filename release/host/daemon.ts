@@ -22,7 +22,7 @@ import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { accept as acceptLink } from "../shared/link.ts";
 import { hostArgv } from "../shared/actions.ts";
-import { devHostname, EDITOR, editorHostname, editorHostPort, ROOT_EDITOR_HOSTNAME, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
+import { devHostname, EDITOR, editorHostname, editorHostPort, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
 import { statusDir } from "../shared/status.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { sleep, waitFor } from "../shared/run.ts";
@@ -121,13 +121,12 @@ const serve = async () => {
   const editors = createServer((client) => {
     client.on("error", () => client.destroy());
     void sniffSocket(client, 400).then(({ sniffed, head }) => {
-      // The root's two surfaces: the dashboard (the state service checks the name and the
-      // origin of every request itself) and the root's editor (behind its gate).
+      // The root's one surface: the dashboard. The state service checks the name and the
+      // origin of every request itself.
       if (sniffed.kind === "http" && sniffed.name === ROOT_HOSTNAME) {
         dashboardUsed = Date.now();
         return pipe(client, toStateService(), head);
       }
-      if (sniffed.kind === "http" && sniffed.name === ROOT_EDITOR_HOSTNAME) return pipe(client, b.dial(ROOT_VM, EDITOR.gate), head);
       const target = sniffed.kind === "http" && sniffed.name ? byName(sniffed.name) : null;
       if (!target || target.surface !== "editor") {
         if (sniffed.kind === "http") refuseHttp(client, "421 Misdirected Request", "desolate: this port answers to a workspace's editor hostname only. `desolate editor <domain>/<workspace>` prints it.\n");
@@ -254,9 +253,14 @@ const serve = async () => {
     if (typeof checkouts[0]?.path === "string" && /^\/workspaces\/[A-Za-z0-9._\/-]+$/.test(checkouts[0].path)) entry.folder = checkouts[0].path;
     for (const c of checkouts)
       try {
-        entry.watchers.push(fs.watch(statusDir(paths.domainRepos(r.domain), c), (_event, file) => {
+        const watcher = fs.watch(statusDir(paths.domainRepos(r.domain), c), (_event, file) => {
           if (file === null || String(file).startsWith("desolate-")) nudge();
-        }));
+        });
+        // The directory is the workspace's: it can vanish or be replaced at any moment. A
+        // watcher that fails is closed; it must never be an error nobody listens to,
+        // which would end this daemon and with it every workspace's link.
+        watcher.on("error", () => watcher.close());
+        entry.watchers.push(watcher);
       } catch {
         /* no such checkout yet: the state service's own slow look covers it */
       }
@@ -374,17 +378,12 @@ const serve = async () => {
     }, 60);
   };
 
-  let rootEditorToken = "";
   let sentFacts = "";
   let sentAt = 0;
   const tellRoot = async () => {
     const vms = await b.list();
     rootUp = vms.find((vm) => vm.name === ROOT_VM)?.status === "running";
     if (!rootUp) return;
-    if (!rootEditorToken) {
-      const token = await b.exec(ROOT_VM, ["bash", "-lc", "cat ~/.desolate-root-editor/token"], { timeoutMs: 20_000 }).catch(() => null);
-      if (token && /^[0-9a-f]{48}$/.test(token.stdout.trim())) rootEditorToken = token.stdout.trim();
-    }
     const port = editorHostPort();
     const workspaces: Record<string, unknown> = {};
     for (const vm of vms) {
@@ -400,7 +399,7 @@ const serve = async () => {
       };
     }
     const { kind } = await import("./approver.ts");
-    const facts = { stack: { instance: INSTANCE, backend: b.kind, isolated: b.isolated, editorPort: port, approver: kind() }, workspaces, rootEditor: rootEditorToken && !editorError ? `http://${ROOT_EDITOR_HOSTNAME}:${port}/?tkn=${rootEditorToken}&folder=${encodeURIComponent(guest.rootClones)}` : undefined };
+    const facts = { stack: { instance: INSTANCE, backend: b.kind, isolated: b.isolated, editorPort: port, approver: kind() }, workspaces };
     const text = JSON.stringify(facts);
     // Said when it changes, and now and then regardless, so the service knows the host is there.
     if (text === sentFacts && Date.now() - sentAt < 45_000) return;
@@ -591,13 +590,10 @@ export const editorPort = async (): Promise<{ port: number; error: string }> => 
   return reply.editor as { port: number; error: string };
 };
 
-/** Where the root's two surfaces are, for a browser on this machine. */
-export const ui = async (): Promise<{ dashboard: string; rootEditor: string | null }> => {
+/** Where the dashboard is, for a browser on this machine. */
+export const ui = async (): Promise<{ dashboard: string }> => {
   await ensureDaemon();
-  const port = editorHostPort();
-  const token = await backend().exec(ROOT_VM, ["bash", "-lc", "cat ~/.desolate-root-editor/token"], { timeoutMs: 30_000 }).catch(() => null);
-  const ok = token !== null && /^[0-9a-f]{48}$/.test(token.stdout.trim());
-  return { dashboard: `http://${ROOT_HOSTNAME}:${port}/`, rootEditor: ok ? `http://${ROOT_EDITOR_HOSTNAME}:${port}/?tkn=${token!.stdout.trim()}&folder=${encodeURIComponent(guest.rootClones)}` : null };
+  return { dashboard: `http://${ROOT_HOSTNAME}:${editorHostPort()}/` };
 };
 
 export const stopForwarder = async () => {

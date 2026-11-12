@@ -41,6 +41,7 @@ import { isBranch, isCommit, isSlug, parseRepo, ROOT_HOSTNAME, ROOT_UI } from ".
 import { statusView } from "../shared/status.ts";
 import { refusal } from "../workspace/editor-gate.ts";
 import * as domains from "./domains.ts";
+import { refusalsOf } from "./outbox.ts";
 import { APPROVALS, clonePath, domainPath, ROOT } from "./layout.ts";
 import * as offers from "./offers.ts";
 import * as proxy from "./proxy/manage.ts";
@@ -62,7 +63,6 @@ const hostToken = (): string | null => {
 type HostFacts = {
   stack?: { instance: string; backend: string; isolated: boolean; editorPort: number; approver: string | null };
   workspaces?: Record<string, { status: string; devcontainer?: string; editor?: string; ports?: { port: number; url: string }[]; reserved?: number[] }>;
-  rootEditor?: string;
   at?: string;
 };
 type Action = { id: string; kind: string; args: Record<string, string>; command: string; state: "queued" | "running" | "done" | "failed"; lines: string[]; at: string; code?: number };
@@ -106,10 +106,10 @@ const snapshot = () => {
     // The host's daemon tells this service what only the host knows. If it has gone quiet,
     // what is shown about VMs is stale, and the page says so.
     hostConnected: Date.now() - hostSeen < 150_000,
-    rootEditor: facts.rootEditor ?? null,
     repos: repos.list().map((r) => ({ repo: r.repo, pushable: r.pushable, defaultBranch: r.defaultBranch })),
     domains: list,
     offers: offers.allOffers(),
+    refused: domains.domains().flatMap((d) => refusalsOf(d.slug)),
     approvals: pendingApprovals(),
     actions: actions.slice(-12),
   };
@@ -170,7 +170,7 @@ const push = (args: Record<string, string>, record: (command: string) => Action)
   if (!offer || offer.commit !== args.commit) return { error: `${args.branch} is no longer offered at ${args.commit.slice(0, 12)}: it moved, or was withdrawn. Review it again.` };
   const action = record(`desolate push ${args.domain} ${args.repo} ${args.branch} --expect ${args.commit}`);
   action.state = "running";
-  action.lines.push("waiting for your approval on the host: run `desolate approve` in a terminal there (Touch ID on a Mac)");
+  action.lines.push("waiting for your approval on the host: run `desolate approve` in a terminal there");
   const child = spawn("git", ["-C", clonePath(repo), "push", "--porcelain", "origin", `${args.commit}:refs/heads/${args.branch}`], { env: { ...process.env, GIT_CONFIG_GLOBAL: `${ROOT.state}/gitconfig`, GIT_TERMINAL_PROMPT: "0" }, stdio: ["ignore", "pipe", "pipe"] });
   const take = (chunk: Buffer) => {
     for (const line of chunk.toString().split("\n").map((l) => l.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").trim()).filter(Boolean)) action.lines.push(line.slice(0, 300));
@@ -298,6 +298,13 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 400, { error: (error as Error).message });
     }
   }
+  if (req.method === "GET" && url.pathname === "/diff") {
+    try {
+      return json(res, 200, await offers.diff(domains.slugOf(url.searchParams.get("domain"), "domain"), url.searchParams.get("repo"), url.searchParams.get("branch")));
+    } catch (error) {
+      return json(res, 400, { error: (error as Error).message });
+    }
+  }
   if (req.method === "POST" && url.pathname === "/action") {
     // A header a cross-site page cannot add without a preflight this server never grants,
     // on top of the gate: a form or an image cannot press a button here.
@@ -323,9 +330,22 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
   // inside a VM; the host's daemon watches those and nudges.) And a look every second
   // regardless, which costs a few small files read, so that a missed event is a second
   // late and not lost.
-  for (const dir of [ROOT.state, APPROVALS, ROOT.domains])
+  //
+  // EACH DIRECTORY BY ITSELF, NEVER A TREE. node's recursive watch on Linux scans every
+  // directory that appears under the tree. One that is gone again by then (git's
+  // quarantine, while a bundle is checked) is an error it raises on the watcher, and with
+  // nobody listening that ended this process: the dashboard died the first time a domain
+  // sent work, on real VMs only, where the timing allows it (found by tier T3). So: no
+  // recursion, and every watcher has a listener. One that fails is dropped; the look
+  // every second remains.
+  for (const dir of [ROOT.state, APPROVALS, path.join(ROOT.state, "refused"), path.join(ROOT.state, "secrets"), ROOT.domains])
     try {
-      fs.watch(dir, { recursive: dir === ROOT.state }, changed);
+      if (!fs.existsSync(dir)) continue;
+      const watcher = fs.watch(dir, changed);
+      watcher.on("error", (error) => {
+        console.error(`stated: no longer watching ${dir}: ${String(error)}`);
+        watcher.close();
+      });
     } catch (error) {
       console.error(`stated: cannot watch ${dir}: ${String(error)}`);
     }

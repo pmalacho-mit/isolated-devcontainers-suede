@@ -53,6 +53,11 @@ const sized = (name: string, fallback: number, min: number, max: number) => {
   return number;
 };
 
+/** What a workspace VM printed is the workspace's text. On its way to the person's
+ *  terminal it is text: nothing in it may move the cursor, retitle the window or write the
+ *  clipboard. (`desolate exec` is different: there the person asked for the VM's output.) */
+const said = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "?");
+
 const startServices = async (plan: WorkspacePlan) => {
   const b = backend();
   // The workspace's own proxy, in the root; then its link, which leads there and nowhere else.
@@ -60,17 +65,17 @@ const startServices = async (plan: WorkspacePlan) => {
   const { connectWorkspace } = await import("./daemon.ts");
   await connectWorkspace({ ...plan, proxyPort: proxy.port });
   const services = await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest], { root: true, timeoutMs: 300_000 });
-  if (services.code !== 0) throw new Error(`the workspace's services did not start: ${(services.stderr || services.stdout).trim().slice(-600)}`);
+  if (services.code !== 0) throw new Error(`the workspace's services did not start: ${said((services.stderr || services.stdout).trim().slice(-600))}`);
   const init = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/init.ts`, plan.workspace], { timeoutMs: 900_000 });
-  if (init.code !== 0) throw new Error(`the workspace could not make its checkouts: ${(init.stderr || init.stdout).trim().slice(-800)}`);
+  if (init.code !== 0) throw new Error(`the workspace could not make its checkouts: ${said((init.stderr || init.stdout).trim().slice(-800))}`);
   // A docker daemon only where one is wanted: a checkout with a spec (start.sh says how).
   if (plan.checkouts.some((c) => locateSpec(paths.domainRepos(plan.domain), c))) await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest, "docker"], { root: true, timeoutMs: 300_000 });
   // The project's devcontainer, then the editor (which runs in it when it can). Neither
   // fails the workspace: without them it is the VM itself, and `up` says which it is.
   const dev = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/devcontainer.ts`, plan.workspace], { timeoutMs: 3_700_000 });
-  const devcontainer = /^devcontainer: (.*)$/m.exec(dev.stdout)?.[1]?.trim().slice(0, 500) ?? `FAILED: ${(dev.stderr || dev.stdout).trim().slice(-300) || "it said nothing"}`;
+  const devcontainer = said(/^devcontainer: (.*)$/m.exec(dev.stdout)?.[1]?.trim().slice(0, 500) ?? `FAILED: ${(dev.stderr || dev.stdout).trim().slice(-300) || "it said nothing"}`);
   const editor = await b.exec(plan.vm, ["bash", "-lc", `bash ${guest.release}/workspace/editor.sh ${editorHostname(INSTANCE, plan.domain, plan.workspace)}`], { timeoutMs: 300_000 });
-  return { editorDown: editor.code === 0 ? null : (editor.stderr || editor.stdout).trim().split("\n").slice(-2).join(" ").slice(0, 300) || "the editor did not start", devcontainer };
+  return { editorDown: editor.code === 0 ? null : said((editor.stderr || editor.stdout).trim().split("\n").slice(-2).join(" ").slice(0, 300)) || "the editor did not start", devcontainer };
 };
 
 /** The address a person opens for a workspace's editor: its own hostname, the stack's
