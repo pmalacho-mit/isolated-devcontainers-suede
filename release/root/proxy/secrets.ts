@@ -19,7 +19,7 @@ import { readJson, writeJson } from "../../shared/json.ts";
 import { normalizeName } from "../../shared/sniff.ts";
 import { ROOT } from "../layout.ts";
 import { inbox } from "../outbox.ts";
-import { alive, ensureLinkToken, hasProxyUser, linkTokenFile, PROXY_CODE, proxyDomainDir, proxyOutDir, spawnAsProxy, stopProxy } from "./as-proxy.ts";
+import { alive, ensureLinkToken, hasProxyUser, linkTokenFile, listenerUid, PROXY_CODE, proxyDomainDir, proxyOutDir, proxyUid, spawnAsProxy, stopProxy } from "./as-proxy.ts";
 
 const DIR = `${ROOT.state}/proxy`;
 const MITMDUMP = "/opt/desolate/proxy-venv/bin/mitmdump";
@@ -96,7 +96,7 @@ export const ensure = async (domain: string): Promise<Running | null> => {
   }
   // Alive means listening: a process that was killed can linger as a pid (unreaped) and
   // answer nothing.
-  if (existing && alive(existing.pid) && !(await free(existing.port))) {
+  if (existing && alive(existing.pid) && !(await free(existing.port)) && listenerUid(existing.port) === proxyUid(domain)) {
     // The addon reloads the store by itself; the hosts are what proxy.ts routes by.
     if (existing.hosts.join() !== hosts.join()) writeJson(runningFile(domain), { ...existing, hosts }, 0o640);
     publish(domain);
@@ -122,7 +122,12 @@ export const ensure = async (domain: string): Promise<Running | null> => {
   fs.closeSync(log);
   const ca = path.join(confdir(domain), "mitmproxy-ca-cert.pem");
   for (let waited = 0; waited < 180_000 && ((await free(port)) || !fs.existsSync(ca)); waited += 100) await new Promise((resolve) => setTimeout(resolve, 100));
-  if ((await free(port)) || !fs.existsSync(ca)) throw new Error(`the secrets proxy for ${domain} did not start; see ${DIR}/secrets/${domain}.log`);
+  if ((await free(port)) || !fs.existsSync(ca)) throw new Error(`the secrets proxy for ${domain} did not start; see ${DIR}/logs/secrets-${domain}.log`);
+  // What listens there must be what was started: the domain's proxies' user.
+  if (listenerUid(port) !== proxyUid(domain)) {
+    stopProxy(domain, child.pid!);
+    throw new Error(`the port chosen for ${domain}'s secrets proxy (${port}) was taken by another user first; nothing was recorded. Try again`);
+  }
   const running = { port, pid: child.pid!, hosts };
   writeJson(runningFile(domain), running, 0o640);
   publish(domain);

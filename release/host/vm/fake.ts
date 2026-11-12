@@ -18,6 +18,7 @@ import { must, run } from "../../shared/run.ts";
 import type { RunResult } from "../../shared/run.ts";
 import { INSTANCE } from "../paths.ts";
 import { GUEST_USER } from "./types.ts";
+import { socatAddress } from "./types.ts";
 import type { Backend, Check, ExecOptions, Listener, VmInfo, VmSpec, VmStatus } from "./types.ts";
 
 const IMAGE = process.env.DESOLATE_FAKE_IMAGE ?? "desolate/base:latest";
@@ -215,9 +216,8 @@ export const fakeBackend = (): Backend => {
       return new Promise((resolve) => child.on("close", (code) => resolve(code ?? 1)));
     },
 
-    dial(name, port) {
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`bad port ${port}`);
-      return duplexOf(spawn("docker", ["exec", "-i", "-u", "0:0", name, "socat", "STDIO", `TCP:127.0.0.1:${port}`], { stdio: ["pipe", "pipe", "ignore"] }));
+    dial(name, target) {
+      return duplexOf(spawn("docker", ["exec", "-i", "-u", "0:0", name, "socat", "STDIO", socatAddress(target)], { stdio: ["pipe", "pipe", "ignore"] }));
     },
 
     link() {

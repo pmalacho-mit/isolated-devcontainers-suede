@@ -6,7 +6,7 @@ import { readJson, writeJson } from "../shared/json.ts";
 import { repoId } from "../shared/names.ts";
 import type { Repo } from "../shared/names.ts";
 import { refuse } from "../shared/exit.ts";
-import { forge, git, gitBare, gitOk, remoteUrl, sshCommand } from "./git.ts";
+import { forge, git, gitBare, gitOk, remoteUrl, safeIn, sshCommand } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { clonePath, HOOKS, KEYRING, MIRROR_HOOKS, mirrorPath, REGISTRY } from "./layout.ts";
 
@@ -136,7 +136,9 @@ export const ensureClone = async (repo: Repo, defaultBranch: string | null): Pro
   const fresh = !fs.existsSync(path.join(clone, ".git"));
   if (fresh) {
     fs.mkdirSync(path.dirname(clone), { recursive: true });
-    const made = await gitBare(["clone", "--shared", "--no-checkout", "--quiet", mirror, clone]);
+    // The mirror named as safe, for this command only (git.ts, safeIn: on vz a share reports
+    // as owned by whoever last asked).
+    const made = await gitBare([...safeIn(fs.realpathSync(mirror)), "clone", "--shared", "--no-checkout", "--quiet", mirror, clone]);
     if (made.code !== 0) throw new Error(`cannot create the root clone: ${made.stderr.trim()}`);
   }
   const record = recordOf(repo);

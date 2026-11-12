@@ -186,6 +186,34 @@ page is about, and because three of them were mistakes in the *tests*.
   session's groups are not the user's. Found with the first real project on the M1
   (microsoft/vscode-remote-try-node: image pulled through the workspace's proxy, its
   `npm install` too, its dev server at the workspace's own hostname).
+- **What an independent audit found after all of the above** (a reviewer given the code and
+  the threat model, not these notes; 2026-11-12). Each was then checked on the live stack:
+  - *One domain's proxies could use another's secrets through that domain's workspace
+    proxy.* Workspace proxies listened on loopback ports in the root VM, asked their client
+    for nothing, and added their domain's handoff token to whatever they were asked; as
+    `node`'s proxies, `CONNECT` to `hello`'s workspace proxy got 200. The handoff token had
+    been tested against the secrets proxy directly, not through the workspace proxy, which
+    was the confused deputy. Now a workspace proxy is a unix socket in its domain's `out/`,
+    which only that domain's proxies and the root's user reach (as `node`'s: permission
+    denied; as the root's user: 200). T4 asserts both.
+  - *A secrets proxy's port could be taken first* by another domain's proxies while it
+    started; the root recorded whatever listened. Now the root, and each workspace proxy on
+    every connection, checks in `/proc/net/tcp` that the listener is the domain's own user.
+  - *The vz link sent its token to whatever held the port.* A freed port is any local
+    user's to take. The link now proves knowledge of the token both ways, host first, and
+    the token never crosses (`shared/link.ts`; T1 has both impostors). A workspace's VM is
+    stopped before its port is let go, and a port the daemon cannot bind is retried.
+  - *A workspace could have the host bind any loopback port*, a VM's ssh or link port
+    included, by listening on it. Ports desolate itself uses are never forwarded.
+  - *sshd allowed ten sessions per connection*, and every link connection, dashboard
+    request and forward is one, all on one connection per VM: raised to 1000, and a link
+    takes at most 64 connections at once; a proxy client that does not finish asking in ten
+    seconds is dropped.
+  - *Updated proxies kept running old code*: start.sh matched them by a path they no longer
+    run from. And the host daemon and each workspace's relay also kept old code after an
+    update: both now restart when their code changes.
+  - Open, not fixed: the root's ordinary user both parses what domains send and performs
+    pushes (`docs/v3/mac-audit-notes.md`).
 - **A deploy key named its owner.** A key's title carried the Mac's hostname, which on a
   Mac is usually its owner's name, and a deploy key's title is shown to everyone who
   administers the repository. It is a hash of the hostname now.

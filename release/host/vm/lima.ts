@@ -25,6 +25,7 @@ import type { RunResult } from "../../shared/run.ts";
 import { readJson, writeJson } from "../../shared/json.ts";
 import { INSTANCE, paths, RELEASE_DIR } from "../paths.ts";
 import { duplexOf, parseSs } from "./fake.ts";
+import { socatAddress } from "./types.ts";
 import type { Backend, Check, ExecOptions, Listener, VmInfo, VmSpec, VmStatus } from "./types.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -370,10 +371,9 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       return new Promise((resolve) => child.on("close", (code) => resolve(code ?? 1)));
     },
 
-    dial(name, port) {
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`bad port ${port}`);
+    dial(name, target) {
       // A session, not ssh's stdio forwarding, which Lima's control master refuses (measured).
-      return duplexOf(spawn(LIMACTL, ["--tty=false", "shell", "--workdir", "/", name, "socat", "STDIO", `TCP:127.0.0.1:${port}`], { stdio: ["pipe", "pipe", "ignore"], env: env() }));
+      return duplexOf(spawn(LIMACTL, ["--tty=false", "shell", "--workdir", "/", name, "socat", "STDIO", socatAddress(target)], { stdio: ["pipe", "pipe", "ignore"], env: env() }));
     },
 
     link(name) {
@@ -393,8 +393,30 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       return parseSs(result.stdout);
     },
 
-    async refreshSessions(name) {
-      const same = await lima(["shell", "--workdir", "/", name, "bash", "-c", 'test "$(id -G)" = "$(id -G "$(id -un)")"'], { timeoutMs: 60_000 });
+    hostPorts() {
+      const ports = new Set<number>();
+      let names: string[] = [];
+      try {
+        names = fs.readdirSync(LIMA_HOME);
+      } catch {
+        return ports;
+      }
+      for (const name of names) {
+        const m = meta(name);
+        if (m) for (const port of [m.sshPort, m.linkPort]) if (Number.isInteger(port)) ports.add(port);
+        // A VM desolate did not clone (the base) has its ssh port in Lima's own file.
+        try {
+          const port = /^\s*localPort:\s*(\d+)\s*$/m.exec(fs.readFileSync(path.join(LIMA_HOME, name, "lima.yaml"), "utf8"))?.[1];
+          if (port) ports.add(Number(port));
+        } catch {
+          /* not a VM */
+        }
+      }
+      return ports;
+    },
+
+    async refreshSessions(name, force = false) {
+      const same = force ? { code: 1 } : await lima(["shell", "--workdir", "/", name, "bash", "-c", 'test "$(id -G)" = "$(id -G "$(id -un)")"'], { timeoutMs: 60_000 });
       if (same.code === 0) return;
       await run("ssh", ["-F", path.join(LIMA_HOME, name, "ssh.config"), "-O", "exit", `lima-${name}`], { env: env(), timeoutMs: 30_000 });
     },

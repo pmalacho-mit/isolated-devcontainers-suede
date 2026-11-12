@@ -68,13 +68,13 @@ export const startServices = async (plan: WorkspacePlan) => {
   // The workspace's own proxy, in the root, as its domain's proxies' user; then its link,
   // which leads there and nowhere else.
   await ensureProxyUser(plan.domain);
-  const proxy = await rootctl<{ port: number }>("proxy.start", { vm: plan.vm, domain: plan.domain, workspace: plan.workspace }, { quiet: true });
+  const proxy = await rootctl<{ socket: string }>("proxy.start", { vm: plan.vm, domain: plan.domain, workspace: plan.workspace }, { quiet: true });
   const { connectWorkspace } = await import("./daemon.ts");
-  await connectWorkspace({ ...plan, proxyPort: proxy.port });
+  await connectWorkspace({ ...plan, proxy: proxy.socket });
   const services = await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest], { root: true, timeoutMs: 300_000 });
   if (services.code !== 0) throw new Error(`the workspace's services did not start: ${said((services.stderr || services.stdout).trim().slice(-600))}`);
   // start.sh puts the user in the docker group; what the host runs next must have it.
-  await b.refreshSessions?.(plan.vm);
+  await b.refreshSessions?.(plan.vm, services.stdout.includes("desolate: sessions raised"));
   const init = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/init.ts`, plan.workspace], { timeoutMs: 900_000 });
   if (init.code !== 0) throw new Error(`the workspace could not make its checkouts: ${said((init.stderr || init.stdout).trim().slice(-800))}`);
   // A docker daemon only where one is wanted: a checkout with a spec (start.sh says how).
@@ -209,8 +209,11 @@ export const reconnectRunning = async (): Promise<number> => {
     for (const w of d.workspaces) {
       if (!running.has(w.vm)) continue;
       await ensureProxyUser(w.domain);
-      const proxy = await rootctl<{ port: number }>("proxy.start", { vm: w.vm, domain: w.domain, workspace: w.workspace }, { quiet: true });
-      await connectWorkspace({ ...w, proxyPort: proxy.port });
+      const proxy = await rootctl<{ socket: string }>("proxy.start", { vm: w.vm, domain: w.domain, workspace: w.workspace }, { quiet: true });
+      await connectWorkspace({ ...w, proxy: proxy.socket });
+      // And its end of the link, which restarts its relay if desolate's code changed (the
+      // link's handshake is in it).
+      await b.exec(w.vm, ["bash", `${guest.release}/workspace/net/up.sh`, b.link(w.vm).guest], { root: true, timeoutMs: 120_000 });
       count += 1;
     }
   return count;
@@ -225,9 +228,11 @@ export const stop = async (target: string | undefined, out: Out) => {
   const w = await find(target);
   const b = backend();
   const { disconnectWorkspace } = await import("./daemon.ts");
+  // The VM first: its link's port is let go only once nothing in a VM can still dial it (a
+  // freed port is anyone's on this machine to take; shared/link.ts).
+  if ((await b.info(w.vm)).status === "running") await b.stop(w.vm);
   await disconnectWorkspace(w.vm);
   await rootctl("proxy.stop", { vm: w.vm }, { quiet: true }).catch(() => {});
-  if ((await b.info(w.vm)).status === "running") await b.stop(w.vm);
   await rootctl("workspace.state", { domain: w.domain, name: w.workspace, state: "stopped" }, { quiet: true });
   out(`stopped ${w.domain}/${w.workspace}. Its checkouts stay held; start it again with: desolate start ${w.domain}/${w.workspace}`);
 };
@@ -257,9 +262,9 @@ export const remove = async (target: string | undefined, out: Out) => {
   }
   const w = await find(target);
   const { disconnectWorkspace } = await import("./daemon.ts");
+  await backend().destroy(w.vm);
   await disconnectWorkspace(w.vm);
   await rootctl("proxy.stop", { vm: w.vm }, { quiet: true }).catch(() => {});
-  await backend().destroy(w.vm);
   fs.rmSync(paths.link(w.vm), { recursive: true, force: true });
   await rootctl("workspace.remove", { domain: w.domain, name: w.workspace }, { quiet: true });
   out(`removed ${w.domain}/${w.workspace}. Its branches and worktrees stay in the domain's clones.`);

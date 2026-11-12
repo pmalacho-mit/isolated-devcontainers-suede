@@ -27,11 +27,13 @@ import { readJson } from "../../shared/json.ts";
 import { normalizeName } from "../../shared/sniff.ts";
 import { ROOT } from "../layout.ts";
 import type { Running } from "./secrets.ts";
+import { listenerUid } from "./as-proxy.ts";
 
-const [, , portArg, domain, workspace] = process.argv;
-// The domain names this proxy's directories: a slug, or nothing at all.
-if (process.argv[1]?.endsWith("proxy.ts") && !/^[a-z0-9][a-z0-9-]{0,39}$/.test(domain ?? "")) {
-  console.error("proxy.ts: usage: proxy.ts <port> <domain> <workspace>");
+const [, , socketArg, domain, workspace] = process.argv;
+// The domain names this proxy's directories: a slug, or nothing at all. Its socket is in
+// its domain's out/ (root/proxy-user.sh): there and nowhere else.
+if (process.argv[1]?.endsWith("proxy.ts") && (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(domain ?? "") || !(socketArg ?? "").startsWith(`${ROOT.proxies}/out/${domain}/`) || !/^[a-z0-9-]{1,60}\.sock$/.test((socketArg ?? "").slice(`${ROOT.proxies}/out/${domain}/`.length)))) {
+  console.error("proxy.ts: usage: proxy.ts <its socket, in its domain's out/> <domain> <workspace>");
   process.exit(2);
 }
 // What it reads is its domain's directory, and what it writes is its domain's proxies' own
@@ -86,6 +88,9 @@ const handle = async (client: Socket, head: string) => {
   // placeholder must never reach such a host as if it were the value (P6).
   const secrets = port === 443 ? readJson<Running | null>(`${DOMAIN_DIR}/secrets-proxy.json`, null) : null;
   const viaSecrets = secrets !== null && hostAllowed(host, secrets.hosts);
+  // And only to a secrets proxy that is this domain's: the same user as this process is what
+  // listens on that port (a port is anyone's to take first).
+  if (viaSecrets && listenerUid(secrets.port) !== process.getuid!()) return refuse(`${host} is a host of one of this domain's secrets, and what listens where its secrets proxy should is not this domain's`);
   // To the address that was checked: a second lookup could answer differently.
   const upstream = viaSecrets ? connect({ host: "127.0.0.1", port: secrets.port }) : connect({ host: address, port });
   let open = false;
@@ -131,20 +136,31 @@ const handle = async (client: Socket, head: string) => {
   client.on("close", close);
 };
 
-if (portArg) {
-  // (proxy-out/<domain> is root's to make: root/proxy-user.sh.)
+if (socketArg) {
+  // A unix socket, not a loopback port: a port in the root VM is any of its users' to
+  // connect to, and the proxies of another domain would have been one of them, asking this
+  // workspace's proxy for this domain's secret hosts (it adds the domain's handoff token to
+  // what it is asked): found by an audit on the M1. The socket is in the domain's out/,
+  // which its proxies own and the root's user's group reads (root/proxy-user.sh): the host
+  // daemon reaches it as that user, and no other domain's proxies can.
+  try {
+    fs.unlinkSync(socketArg);
+  } catch {
+    /* none left over */
+  }
   createServer((client) => {
     client.on("error", () => client.destroy());
+    // A client that does not finish asking in ten seconds holds nothing open.
+    client.setTimeout(10_000, () => client.destroy());
     let head = "";
     const onData = (chunk: Buffer) => {
       head += chunk.toString("latin1");
       if (head.length > 8192) return client.destroy();
       if (!head.includes("\r\n\r\n")) return;
       client.off("data", onData);
+      client.setTimeout(0);
       void handle(client, head);
     };
     client.on("data", onData);
-    // Loopback in the root VM only: the host daemon dials it over the VM layer, for the one
-    // workspace whose link it is.
-  }).listen(Number(portArg), "127.0.0.1");
+  }).listen(socketArg, () => fs.chmodSync(socketArg, 0o660));
 }
