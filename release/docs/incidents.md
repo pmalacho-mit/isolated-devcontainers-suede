@@ -104,6 +104,27 @@ page is about, and because three of them were mistakes in the *tests*.
   under the home, and failed when the host's daemon began to run from bootstrap and left a
   socket there. The check now reads files.
 
+## Found bringing v3 up on a Mac (2026-11), first contact with the vz backend
+
+- **A setting that matched nothing.** The image set `safe.directory '/desolate/mirrors/*'`
+  so that a workspace's git would read the read-only mirrors. The image's git is 2.43, and
+  the `<dir>/*` form arrived in git 2.46: the line was accepted and did nothing. It had
+  never mattered because on Linux the mirror's owner and the guest user agree. On vz, a
+  virtiofs share's root can report uid 0 for a while after it is mounted, and the first
+  workspace failed with "dubious ownership". Each mirror mounted in a workspace is now
+  listed by exact path (`workspace/start.sh`), and the dead line is gone from
+  `image/provision.sh`. (Measured in the root VM: `/tmp/sd/*` refused, the exact path and
+  `*` accepted.)
+- **A VM used before its shares were there.** `limactl start` returns when ssh answers, not
+  when the last virtiofs share is mounted. Nothing checked, so a command could see a
+  share's bare mount point: an empty directory that looks like a repository with nothing
+  in it. The backend now waits for every share in the spec to be in the guest's
+  `/proc/mounts`, and on vz refuses (and stops the VM) if a share is mounted read-write
+  that the spec says is read-only, or the reverse. (`tests/v3/t1/lima.test.ts`)
+- **A deploy key named its owner.** A key's title carried the Mac's hostname, which on a
+  Mac is usually its owner's name, and a deploy key's title is shown to everyone who
+  administers the repository. It is a hash of the hostname now.
+
 ## Found by the 2026 security audits
 
 **Tab completion ran commands a project named.** `compgen -W` expands its
