@@ -393,6 +393,12 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       return parseSs(result.stdout);
     },
 
+    async refreshSessions(name) {
+      const same = await lima(["shell", "--workdir", "/", name, "bash", "-c", 'test "$(id -G)" = "$(id -G "$(id -un)")"'], { timeoutMs: 60_000 });
+      if (same.code === 0) return;
+      await run("ssh", ["-F", path.join(LIMA_HOME, name, "ssh.config"), "-O", "exit", `lima-${name}`], { env: env(), timeoutMs: 30_000 });
+    },
+
     async logs(name) {
       const tail = (file: string) => {
         try {

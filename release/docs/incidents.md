@@ -177,6 +177,15 @@ page is about, and because three of them were mistakes in the *tests*.
   started, and was refused. The test read the link's address and never followed it; a
   real browser on the M1 did. The gate now lets in that one navigation when it carries
   the editor's own token.
+- **Every devcontainer failed on the Mac: "the VM's docker daemon is not answering".** The
+  daemon was fine. Lima runs every command over one ssh connection per VM, and a command
+  keeps the groups that connection logged in with; start.sh adds the user to `docker`
+  after the connection exists, so every later command the host ran was refused by the
+  socket (`id -Gn` in a session: no docker; in a fresh login: docker). The same held for
+  the root's user and the proxies' group. The backend now starts a new connection when a
+  session's groups are not the user's. Found with the first real project on the M1
+  (microsoft/vscode-remote-try-node: image pulled through the workspace's proxy, its
+  `npm install` too, its dev server at the workspace's own hostname).
 - **A deploy key named its owner.** A key's title carried the Mac's hostname, which on a
   Mac is usually its owner's name, and a deploy key's title is shown to everyone who
   administers the repository. It is a hash of the hostname now.
