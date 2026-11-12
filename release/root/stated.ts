@@ -298,8 +298,7 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
     if (!same(given, ui)) return send(res, 403, "text/plain; charset=utf-8", "desolate: refused: that is not this dashboard's address; `desolate ui` prints it\n");
     // Exchanged for a cookie the page's own script cannot read, sent to this name only,
     // and never on a request another site starts; the token leaves the address bar.
-    url.searchParams.delete("tkn");
-    const rest = url.searchParams.toString();
+    const rest = url.search.slice(1).split("&").filter((part) => part !== "" && !part.startsWith("tkn=")).join("&");
     res.writeHead(303, { location: `/${rest ? `?${rest}` : ""}`, "set-cookie": `${name}=${ui}; HttpOnly; SameSite=Strict; Path=/`, "content-length": 0, ...SECURITY });
     return res.end();
   }

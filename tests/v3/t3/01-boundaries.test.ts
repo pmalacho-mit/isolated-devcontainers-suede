@@ -6,6 +6,7 @@
 //
 // Run: tests/v3/run.sh t3   (tens of minutes under TCG: each VM takes minutes to boot)
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -201,13 +202,16 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     assert.deepEqual(inside.stdout.trim().split("\n"), ["127.0.0.1:31580", "127.0.0.1:31581"], "both on the VM's loopback only");
     // The dashboard, from the root VM, through the same port by its own name: the host's
     // daemon has told the root's state service which VMs run and where this editor is.
+    // With the dashboard's own credential, as the browser `desolate ui` was opened in has it.
+    const ui = new URL((JSON.parse(stack.quiet("ui", "--json").stdout) as { dashboard: string }).dashboard).searchParams.get("tkn")!;
+    const uiCookie = `desolate_ui_${createHash("sha256").update(ui).digest("hex").slice(0, 12)}=${ui}`;
     let seen = "";
     for (let i = 0; i < 40 && !/"status":"running"/.test(seen); i++) {
       seen = await new Promise<string>((resolve) => {
         const socket = net.connect(Number(url.port), "127.0.0.1");
         let data = "";
         socket.setTimeout(120_000, () => socket.destroy());
-        socket.on("connect", () => socket.write(`GET /state HTTP/1.1\r\nHost: desolate.localhost:${url.port}\r\nConnection: close\r\n\r\n`));
+        socket.on("connect", () => socket.write(`GET /state HTTP/1.1\r\nHost: desolate.localhost:${url.port}\r\nCookie: ${uiCookie}\r\nConnection: close\r\n\r\n`));
         socket.on("data", (chunk) => (data += chunk));
         socket.on("close", () => resolve(data));
         socket.on("error", () => resolve(data || "ERROR"));
