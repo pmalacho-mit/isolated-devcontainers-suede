@@ -697,6 +697,10 @@ Section 4.8's requirements, and how each came out:
   Content-Length (the relay that carries a connection into a VM holds it open until the
   caller closes, half a second with socat).
 - **It is a page, not an extension.** See `status-by-section.md`.
+- **On the Mac (vz)**, measured on the M1 with five workspaces running: `/state` through the
+  forwarder in 1.7 ms (median of 6; one of 92 ms), against the 300 ms budget; a status a
+  workspace set reached the event stream 587, 55 and 46 ms after the command that set it
+  returned, against 1 s.
 
 ## Timings in the sandbox (TCG, no KVM), for scale only
 
