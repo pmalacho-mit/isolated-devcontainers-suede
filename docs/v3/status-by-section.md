@@ -16,7 +16,7 @@ VMs under QEMU on Linux, T4 the Mac (`vz`), which has never run.
 | P2. Every push goes through a human | **Done** | An approval is a signature by a key on the host, over a challenge naming repository, branch and commit, asked for on the host's terminal (the default approver everywhere). T2 `04-offers` tries every automation path from inside the VMs. The opt-in Touch ID approver is written and unrun. What the gate is for, and what is left, is in `decisions.md` section 5.3 (the write key is a file in the root VM; code running as you on the Mac is trusted, by the rule in the README). |
 | P3. No credential in a workspace | **Done** | Deploy keys never leave the keyring (T2 `01-root`); a secret's value never leaves the root (T2 `07-secrets`, T3). |
 | P4. One owner per `.git`; the root never runs git in a domain clone | **Done** | `root/git.ts` refuses; T2 `04-offers` plants a booby-trapped clone and a lying outbox. **What crosses as data is checked before it is the root's** (`decisions.md`, "What the root takes from a domain"): T2 `10-hostile-content`, T1 `outbox`, `status`, and on real VMs T3 (an offer, a tree with `.git` in it, an outbox linked into the root's state). That audit found two holes in the previous cut (bundles were not fsck'd on git 2.43; the root removed a file through a link in an outbox); both are closed and in `release/docs/incidents.md`. |
-| P5. Boundaries enforced outside the VM | **Done on Linux; unrun on the Mac** | Read-only shares and forced egress against root in the VM: T3. On the Mac both were measured by hand in Phase 0; the backend that applies them is unrun; ICMP is unverified. |
+| P5. Boundaries enforced outside the VM | **Done on Linux; unrun on the Mac** | Read-only shares and forced egress against root in the VM: T3. On the Mac both were measured by hand in Phase 0; the backend that applies them is unrun; ICMP was measured closed on Lima 2.3.0 (`decisions.md`, 4.3), and vz now requires that version. |
 | P6. Fail closed; a control beside every negative check | **Done, as a practice** | `doctor` fails what it could not ask; a secrets proxy that is down refuses its hosts; every negative test has a control. Not a thing that finishes. |
 
 ## 2 and 3. Vocabulary and trust model
@@ -152,7 +152,7 @@ budgets as tests: the dashboard's three budgets only.
 
 | Phase | State |
 |---|---|
-| 0 Probes | Partly: Lima/vz measured on the M1; ICMP open; the other substrates not measured. |
+| 0 Probes | Partly: Lima/vz measured on the M1, ICMP included; the other substrates not measured. |
 | 1 Root VM | Done. |
 | 2 One workspace | Done but for caches C2 to C4 and the workspace-side extension. |
 | 3 Domains | Mostly: the environment is way 1 only; no templates, no package caches, no gc. |
