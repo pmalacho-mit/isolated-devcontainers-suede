@@ -22,7 +22,7 @@ const vmOf = (target: string) => {
 const inWs = (target: string, script: string) => stack.inVm(vmOf(target), ["bash", "-lc", script]);
 const WT = "/workspaces/acme/widgets/.worktrees/issue-12";
 const ROOT_CLONE = "/desolate/root/acme/widgets";
-const inRootClone = (script: string) => stack.inRoot(["bash", "-c", `export GIT_CONFIG_GLOBAL=/var/lib/desolate/gitconfig; cd ${ROOT_CLONE} && ${script}`]);
+const inRootClone = (script: string) => stack.inRoot(["bash", "-c", `export GIT_CONFIG_GLOBAL=/var/lib/desolate-root/gitconfig; cd ${ROOT_CLONE} && ${script}`]);
 const forgeRefs = (repo: string) => Object.fromEntries(stack.forge("refs", repo).trim().split("\n").filter(Boolean).map((line) => line.split(" ") as [string, string]));
 const audit = () => (JSON.parse(stack.inRoot(["node", "--disable-warning=ExperimentalWarning", "/desolate/release/root/rootctl.ts"], { input: JSON.stringify({ op: "keys.audit", args: { last: 500 } }) }).stdout).result as { event: string; repo?: string; ref?: string; commit?: string }[]);
 /** One request to the keyring's public socket, made by the root's ordinary user. */

@@ -158,6 +158,34 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
     `(allow network-outbound (remote ip "localhost:${m.linkPort}"))`,
   ].join("\n") + "\n";
 
+  /** One argument for a remote shell, quoted so that it stays one argument. */
+  const quote = (arg: string) => `'${arg.replace(/'/g, "'\\''")}'`;
+  /** Root in the ROOT VM is reached by ssh as root, with Lima's key for this home (on the
+   *  host only), on its own control socket: never through the VM's login user, which runs
+   *  everything there that reads a domain's data and has no sudo (root/start.sh). */
+  const rootSshArgs = (name: string, argv: string[], options: ExecOptions) => {
+    const vars = Object.entries(options.env ?? {}).map(([key, value]) => `${key}=${value}`);
+    const command = `cd ${quote(options.cwd ?? "/")} && exec ${["env", ...vars, ...argv].map(quote).join(" ")}`;
+    return ["-F", path.join(LIMA_HOME, name, "ssh.config"), "-o", `ControlPath=${path.join(LIMA_HOME, name, "ssh-root.sock")}`, "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "-l", "root", `lima-${name}`, "--", command];
+  };
+  const rootReady = new Set<string>();
+  /** Make sure root in a root VM takes this home's key. The first time (and after a boot
+   *  that reset root's keys), the key is put there through the login user's sudo, which
+   *  Lima's cloud-init gives it at boot and root/start.sh then takes away. */
+  const ensureRootSsh = async (name: string) => {
+    if (rootReady.has(name)) return;
+    const probe = () => run("ssh", rootSshArgs(name, ["true"], {}), { env: env(), timeoutMs: 60_000 });
+    if ((await probe()).code !== 0) {
+      const pub = fs.readFileSync(path.join(LIMA_HOME, "_config", "user.pub"), "utf8").trim();
+      if (!/^ssh-ed25519 [A-Za-z0-9+/=]+( \S+)?$/.test(pub)) throw new Error(`${LIMA_HOME}/_config/user.pub is not the ed25519 key Lima makes`);
+      const put = await lima(["shell", "--workdir", "/", name, "sudo", "-n", "bash", "-c", "install -d -m 0700 -o root -g root /root/.ssh && cat >/root/.ssh/authorized_keys.new && chmod 0600 /root/.ssh/authorized_keys.new && mv /root/.ssh/authorized_keys.new /root/.ssh/authorized_keys"], { input: pub + "\n", timeoutMs: 60_000 });
+      const again = put.code === 0 ? await probe() : put;
+      if (again.code !== 0) throw new Error(`cannot reach root in ${name}: ssh as root was refused and its login user could not install the key (${(again.stderr || again.stdout).trim().split("\n").slice(-2).join(" | ")}). Only the first bootstrap can install that key (root/start.sh then takes the login user's sudo away for good), so ${LIMA_HOME}/_config/user.pub or root's authorized_keys in ${name} has changed since. Its keys are on its own disk: make it again (desolate destroy, then bootstrap) only after adding new deploy keys is acceptable.`);
+    }
+    rootReady.add(name);
+  };
+  const isRootVm = (name: string) => meta(name)?.spec.role === "root";
+
   const shellArgs = (name: string, argv: string[], options: ExecOptions) => {
     const vars = Object.entries(options.env ?? {}).map(([key, value]) => `${key}=${value}`);
     const command = options.root ? ["sudo", "env", ...vars, ...argv] : vars.length > 0 ? ["env", ...vars, ...argv] : argv;
@@ -317,11 +345,17 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       return Promise.all(names.sort().map((name) => backend.info(name)));
     },
 
-    exec(name, argv, options = {}): Promise<RunResult> {
+    async exec(name, argv, options = {}): Promise<RunResult> {
+      if (options.root && isRootVm(name)) {
+        await ensureRootSsh(name);
+        return run("ssh", rootSshArgs(name, argv, options), { env: env(), input: options.input, timeoutMs: options.timeoutMs, inheritStderr: options.inheritStderr });
+      }
       return lima(shellArgs(name, argv, options), { input: options.input, timeoutMs: options.timeoutMs, inheritStderr: options.inheritStderr });
     },
 
     spawn(name, argv, options = {}) {
+      // Root in the root VM is asked for by exec() only; nothing streams as root there.
+      if (options.root && isRootVm(name)) throw new Error("spawn as root in the root VM is not offered; use exec");
       return spawn(LIMACTL, ["--tty=false", ...shellArgs(name, argv, options)], { stdio: ["pipe", "pipe", "pipe"], env: env() });
     },
 

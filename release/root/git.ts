@@ -6,7 +6,7 @@ import type { RunOptions, RunResult } from "../shared/run.ts";
 import { parseRepo, repoId } from "../shared/names.ts";
 import type { Repo } from "../shared/names.ts";
 import { readJson } from "../shared/json.ts";
-import { FORGE, KEYRING, ROOT } from "./layout.ts";
+import { FORGE, GITCONFIG, KEYRING, ROOT } from "./layout.ts";
 
 /** Which forge the root reaches. GitHub in real use; a stand-in in tests (section 13.2). */
 export type Forge = {
@@ -48,7 +48,7 @@ const baseEnv = (): NodeJS.ProcessEnv => ({
   LANG: "C.UTF-8",
   GIT_TERMINAL_PROMPT: "0",
   // The root's global config is desolate's file, not a dotfile anything else writes.
-  GIT_CONFIG_GLOBAL: `${ROOT.state}/gitconfig`,
+  GIT_CONFIG_GLOBAL: GITCONFIG,
   GIT_LFS_SKIP_SMUDGE: process.env.GIT_LFS_SKIP_SMUDGE,
 });
 

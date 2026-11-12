@@ -20,7 +20,7 @@ bootstrap: 7 step(s) done.
   ok   approver: terminal; pushes are approved on this host
   ok   root: keyring answers: 0 key(s) held
   ok   root: the write agent's askpass socket is closed to the root's own user: only the keyring's user can answer for a signature
-  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate/keyring is the keyring user's alone
+  ok   root: private keys are unreadable to the root's own user: /var/lib/desolate-root/keyring is the keyring user's alone
   ok   root: approver key installed: sha256 <oid>
   ok   root: forge configured: yes
 doctor: all checks passed.

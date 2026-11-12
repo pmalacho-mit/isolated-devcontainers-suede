@@ -108,10 +108,17 @@ export const newStack = (label: string): Stack => {
       .replace(/\b\d+(\.\d+)? ?(ms|s)\b/g, "<duration>")
       .replace(/dsl-<instance>-[0-9a-f]{10}/g, "dsl-<instance>-<vm>")
       .replace(/-[0-9a-f]{6}\.localhost/g, "-<hex>.localhost");
+  // Root in the root VM is reached as the host reaches it (host/vm/lima.ts): ssh as root
+  // with Lima's key. Its login user has no sudo there.
+  const quote = (arg: string) => `'${arg.replace(/'/g, "'\\''")}'`;
+  const rootSsh = (vm: string, argv: string[], input: string) =>
+    sh("ssh", ["-F", path.join(home, "lima", vm, "ssh.config"), "-o", "ControlPath=none", "-l", "root", `lima-${vm}`, "--", `cd / && exec ${argv.map(quote).join(" ")}`], { env, input });
   const vmExec = (vm: string, argv: string[], options: { root?: boolean; input?: string } = {}) =>
     backend === "fake"
       ? sh("docker", ["exec", "-i", "-u", options.root ? "0:0" : "desolate", "-e", `HOME=${options.root ? "/root" : "/home/desolate"}`, vm, ...argv], { input: options.input ?? "" })
-      : sh(process.env.DESOLATE_LIMACTL ?? "limactl", ["--tty=false", "shell", "--workdir", "/", vm, ...(options.root ? ["sudo"] : []), ...argv], { env, input: options.input ?? "" });
+      : options.root && vm === `dsl-${instance}-root`
+        ? rootSsh(vm, argv, options.input ?? "")
+        : sh(process.env.DESOLATE_LIMACTL ?? "limactl", ["--tty=false", "shell", "--workdir", "/", vm, ...(options.root ? ["sudo"] : []), ...argv], { env, input: options.input ?? "" });
 
   const stack: Stack = {
     tier: backend === "fake" ? "T2" : backend === "qemu" ? "T3" : "T4",

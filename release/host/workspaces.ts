@@ -176,6 +176,25 @@ export const list = async (out: Out, json: boolean, only?: string) => {
   }
 };
 
+/** Every running workspace gets its proxy and its link again. A workspace's proxy lives in
+ *  the root VM, so a root VM that was restarted left each running workspace with no way out
+ *  at all, while `list` still said "running" (found on the M1). Bootstrap calls this.
+ *  Returns how many were reconnected. */
+export const reconnectRunning = async (): Promise<number> => {
+  const b = backend();
+  const running = new Set((await b.list()).filter((vm) => vm.status === "running").map((vm) => vm.name));
+  const { connectWorkspace } = await import("./daemon.ts");
+  let count = 0;
+  for (const d of await rootctl<DomainView[]>("domain.list", {}, { quiet: true }))
+    for (const w of d.workspaces) {
+      if (!running.has(w.vm)) continue;
+      const proxy = await rootctl<{ port: number }>("proxy.start", { vm: w.vm, domain: w.domain, workspace: w.workspace }, { quiet: true });
+      await connectWorkspace({ ...w, proxyPort: proxy.port });
+      count += 1;
+    }
+  return count;
+};
+
 const find = async (target: string | undefined) => {
   const { domain, workspace } = splitTarget(target);
   return rootctl<Workspace>("workspace.get", { domain, name: workspace }, { quiet: true });
