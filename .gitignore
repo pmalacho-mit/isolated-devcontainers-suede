@@ -47,3 +47,6 @@ todo.txt
 #   release/     -- the shipped tree; all of it is meant to be committed
 #   docs/dind/HANDOFF.md -- working notes for whoever picks this up next
 image-out/
+
+# The test dependencies. Without a slash: a worktree may have it as a link.
+/node_modules
