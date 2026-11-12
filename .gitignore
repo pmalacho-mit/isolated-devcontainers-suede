@@ -50,3 +50,4 @@ image-out/
 
 # The test dependencies. Without a slash: a worktree may have it as a link.
 /node_modules
+/demo-out

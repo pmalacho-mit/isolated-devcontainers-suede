@@ -169,4 +169,23 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
     assert.equal(fs.readFileSync(canary, "utf8"), "the person's file\n", "the file the links named is as it was, and where it was");
     assert.ok(!fs.lstatSync(path.join(stack.home, "git-answers", `${id}.json`)).isSymbolicLink(), "the answers are the host's: the git VM could not leave a link there");
   });
+
+  it("a new branch at a commit the remote has already (main's, which two of its refs name) is described, not left blank", async () => {
+    // Found recording the demo: the reviewer was sent origin/HEAD and origin/main at one
+    // commit, and refused the whole bundle; the page could not say what the push was.
+    const port = Number(stack.env.DESOLATE_EDITOR_PORT);
+    stack.inVm(gitVm(), ["bash", "-lc", "cd /git/acme/widgets && (timeout 150 git push origin origin/main:refs/heads/same-as-main >/tmp/same.log 2>&1 &)"]);
+    const approvals = client("desolate-approve.localhost", port);
+    await approvals.login(/approvals {4}(http:\S+)/.exec(stack.desolate("approve", "--web").stdout)![1]!);
+    type Waiting = { nonce: string; token: string; branch: string; commit: string; summary: { waiting?: boolean; ok: boolean; error?: string; commits?: unknown[] } };
+    let push: Waiting | undefined;
+    for (let i = 0; i < 120 && !push; i++) {
+      push = (JSON.parse((await approvals.get("/pending")).body) as { pending: Waiting[] }).pending.find((p) => p.branch === "same-as-main" && !p.summary.waiting);
+      if (!push) await sleep(250);
+    }
+    assert.ok(push, "the push waits on the approval page");
+    assert.equal(push!.summary.ok, true, JSON.stringify(push!.summary));
+    assert.deepEqual(push!.summary.commits, [], "no commit the remote does not have");
+    assert.equal((await approvals.post("/refuse", { nonce: push!.nonce, token: push!.token, commit: push!.commit })).status, 200);
+  });
 });
