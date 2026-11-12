@@ -20,6 +20,7 @@ import type { Server, Socket } from "node:net";
 import * as path from "node:path";
 import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { refuse } from "../shared/exit.ts";
 import { accept as acceptLink } from "../shared/link.ts";
 import { hostArgv } from "../shared/actions.ts";
 import { devHostname, EDITOR, editorHostname, editorHostPort, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
@@ -591,9 +592,19 @@ export const editorPort = async (): Promise<{ port: number; error: string }> => 
 };
 
 /** Where the dashboard is, for a browser on this machine. */
+/** The dashboard's address, with the token that lets a browser in (the root's state
+ *  service exchanges it for a cookie). Like an editor's address, it is the person's to
+ *  open, and not to paste anywhere else. */
 export const ui = async (): Promise<{ dashboard: string }> => {
   await ensureDaemon();
-  return { dashboard: `http://${ROOT_HOSTNAME}:${editorHostPort()}/` };
+  let token = "";
+  try {
+    token = fs.readFileSync(path.join(paths.state, "ui-token"), "utf8").trim();
+  } catch {
+    /* not bootstrapped */
+  }
+  if (!/^[0-9a-f]{48}$/.test(token)) refuse("this stack has no dashboard credential yet", "desolate bootstrap");
+  return { dashboard: `http://${ROOT_HOSTNAME}:${editorHostPort()}/?tkn=${token}` };
 };
 
 export const stopForwarder = async () => {

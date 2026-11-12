@@ -5,6 +5,7 @@
 // change <= 1 s later, a click acknowledged <= 100 ms later.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
@@ -16,16 +17,19 @@ let stack: Stack;
 let port = 0;
 let commit = "";
 const HOST = "desolate.localhost";
+/** The dashboard's address from `desolate ui`, and the cookie a browser gets for it. */
+let token = "";
+let cookie = "";
 type Answer = { status: number; headers: string; body: string; ms: number };
 /** One request to the host's loopback, as a browser at the dashboard would send it. */
-const http = (method: string, pathAndQuery: string, options: { host?: string; headers?: string[]; body?: unknown } = {}): Promise<Answer> =>
+const http = (method: string, pathAndQuery: string, options: { host?: string; headers?: string[]; body?: unknown; cookie?: string | null } = {}): Promise<Answer> =>
   new Promise((resolve) => {
     const started = performance.now();
     const socket = net.connect(port, "127.0.0.1");
     const payload = options.body === undefined ? "" : JSON.stringify(options.body);
     let data = "";
     socket.setTimeout(20_000, () => socket.destroy());
-    socket.on("connect", () => socket.write([`${method} ${pathAndQuery} HTTP/1.1`, `Host: ${options.host ?? HOST}:${port}`, ...(options.headers ?? []), ...(payload ? ["Content-Type: application/json", `Content-Length: ${Buffer.byteLength(payload)}`] : []), "Connection: close", "", payload].join("\r\n")));
+    socket.on("connect", () => socket.write([`${method} ${pathAndQuery} HTTP/1.1`, `Host: ${options.host ?? HOST}:${port}`, ...((options.cookie === undefined ? cookie : options.cookie) ? [`Cookie: ${options.cookie ?? cookie}`] : []), ...(options.headers ?? []), ...(payload ? ["Content-Type: application/json", `Content-Length: ${Buffer.byteLength(payload)}`] : []), "Connection: close", "", payload].join("\r\n")));
     // `ms` is when the whole answer had arrived (its Content-Length), as a browser sees
     // it: the connection itself may be closed a moment later by whatever carries it.
     let ms = 0;
@@ -63,7 +67,7 @@ const pushed = (wanted: (s: State) => boolean, ms = 15_000): Promise<{ at: numbe
     const socket = net.connect(port, "127.0.0.1");
     let buffer = "";
     const timer = setTimeout(() => { socket.destroy(); resolve(null); }, ms);
-    socket.on("connect", () => socket.write(`GET /events HTTP/1.1\r\nHost: ${HOST}:${port}\r\nAccept: text/event-stream\r\n\r\n`));
+    socket.on("connect", () => socket.write(`GET /events HTTP/1.1\r\nHost: ${HOST}:${port}\r\nCookie: ${cookie}\r\nAccept: text/event-stream\r\n\r\n`));
     socket.on("data", (chunk) => {
       buffer += chunk;
       for (const match of buffer.matchAll(/data: (\{.*\})\n\n/g)) {
@@ -85,8 +89,12 @@ describe("T2 section 4.8: the root UI", () => {
     });
     const booted = bootstrap(stack);
     assert.equal(booted.code, 0);
-    assert.match(booted.stdout, /^ {2}dashboard {4}http:\/\/desolate\.localhost:\d+\/ {3}\(and: desolate ui\)$/m);
-    port = Number(new URL((JSON.parse(stack.quiet("ui", "--json").stdout) as { dashboard: string }).dashboard).port);
+    assert.match(booted.stdout, /^ {2}dashboard {4}http:\/\/desolate\.localhost:\d+\/\?tkn=[0-9a-f]{48} {3}\(and: desolate ui\)$/m);
+    const address = new URL((JSON.parse(stack.quiet("ui", "--json").stdout) as { dashboard: string }).dashboard);
+    port = Number(address.port);
+    token = address.searchParams.get("tkn") ?? "";
+    // What the browser is given in exchange for the address (checked in a test below).
+    cookie = `desolate_ui_${createHash("sha256").update(token).digest("hex").slice(0, 12)}=${token}`;
   });
   after(() => stack.destroy());
 
@@ -116,6 +124,28 @@ describe("T2 section 4.8: the root UI", () => {
     const one = ws(await state(), "web/one")!;
     assert.match(one.host!.editor ?? "", /^http:\/\/web-one-editor-[0-9a-f]+\.localhost:\d+\/\?tkn=[0-9a-f]{48}&folder=/, "the editor's address is known: one click, no token to copy");
     assert.equal(one.host!.devcontainer, "none");
+  });
+
+  it("only the browser the dashboard was opened in gets in: not another program on this machine", async () => {
+    stack.step("the dashboard's credential");
+    // Another program here (another user of the Mac, a sandboxed app) can send any Host and
+    // no Origin. Without the cookie it gets nothing: not the state with its editor tokens,
+    // not the stream, not a diff, not a button.
+    for (const [method, target] of [["GET", "/"], ["GET", "/state"], ["GET", "/events"], ["GET", "/ui.js"], ["GET", "/diff?domain=web&repo=acme%2Fapp&branch=x"], ["POST", "/action"]] as const) {
+      const refused = await http(method, target, { cookie: null, headers: ["X-Desolate-UI: 1", "Sec-Fetch-Site: same-origin", `Origin: http://${HOST}:${port}`], body: method === "POST" ? { kind: "repo.fetch", args: { repo: "acme/app" } } : undefined });
+      assert.equal(refused.status, 401, `${method} ${target} without the cookie`);
+      assert.doesNotMatch(refused.body, /tkn=|"domains"/, "and nothing of the state");
+    }
+    assert.equal((await http("GET", "/state", { cookie: cookie.replace(/=.*/, `=${"0".repeat(48)}`) })).status, 401, "a cookie with another value");
+    assert.equal((await http("GET", `/?tkn=${"0".repeat(48)}`, { cookie: null })).status, 403, "an address with another token");
+    // The address `desolate ui` prints is exchanged for a cookie the page cannot read, sent
+    // to this name only and never on a request another site starts, and it leaves the bar.
+    const opened = await http("GET", `/?tkn=${token}&once`, { cookie: null });
+    assert.equal(opened.status, 303);
+    assert.match(opened.headers, /\r\nlocation: \/\?once\r\n/i);
+    assert.match(opened.headers, new RegExp(`\\r\\nset-cookie: ${cookie.replace(/=.*/, "")}=${token}; HttpOnly; SameSite=Strict; Path=/\\r\\n`, "i"));
+    // Control: with it, the state is there.
+    assert.equal((await http("GET", "/state")).status, 200);
   });
 
   it("only the dashboard's own page may talk to it, and only the host's daemon to the host's side", async () => {
@@ -174,7 +204,7 @@ describe("T2 section 4.8: the root UI", () => {
     const chrome = [process.env.DESOLATE_CHROME, "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"].find((file) => file && fs.existsSync(file));
     assert.ok(chrome, "this check needs Chrome or Chromium: install one, or set DESOLATE_CHROME to its path");
     const profile = fs.mkdtempSync(path.join(stack.work, "chrome-"));
-    return spawnSync(chrome!, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", `--user-data-dir=${profile}`, "--host-resolver-rules=MAP *.localhost 127.0.0.1", "--enable-logging=stderr", "--log-level=0", "--virtual-time-budget=4000", "--window-size=1180,1500", ...extra, `http://${HOST}:${port}/?${query}`], { encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+    return spawnSync(chrome!, ["--headless=new", "--no-sandbox", "--disable-gpu", "--no-first-run", `--user-data-dir=${profile}`, "--host-resolver-rules=MAP *.localhost 127.0.0.1", "--enable-logging=stderr", "--log-level=0", "--virtual-time-budget=4000", "--window-size=1180,1500", ...extra, `http://${HOST}:${port}/?tkn=${token}&${query}`], { encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
   };
 
   it("in a browser: cards, Needs you, and a workspace's words shown as text, never run", async () => {
@@ -252,7 +282,7 @@ describe("T2 section 4.8: the root UI", () => {
     assert.ok(await until(async () => (await http("GET", "/state").catch(() => ({ status: 0 }))).status === 200), "the dashboard answers again");
     assert.match(stack.inRoot(["bash", "-c", "tail -3 /var/lib/desolate/stated.log"]).stdout, /stated: ended with \d+ at .*; starting it again\n/);
     // There is one surface in the root, and it is the dashboard.
-    assert.equal(stack.desolate("ui").stdout.trim(), `dashboard    http://${HOST}:${port}/`);
+    assert.equal(stack.desolate("ui").stdout.trim(), `dashboard    http://${HOST}:${port}/?tkn=${token}`);
     assert.equal((await http("GET", "/", { host: "desolate-editor.localhost" })).status, 421, "the name the root's editor had answers nothing");
     assert.equal(stack.inRoot(["bash", "-c", "ss -ltnH | grep -cE ':(31580|31581) '; pgrep -fc 'codium-serve[r]|server-mai[n].js'; true"]).stdout.replace(/\s+/g, " ").trim(), "0 0", "no editor's server runs in the root VM");
   });
