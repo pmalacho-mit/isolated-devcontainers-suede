@@ -30,6 +30,11 @@ export const specOf = (plan: WorkspacePlan, repos: string[]): VmSpec => ({
     { host: paths.outbox(plan.domain), guest: guest.outbox, writable: true },
     // The inbox is the root's to write: a domain cannot forge a delivery or its own plan.
     { host: paths.inbox(plan.domain), guest: guest.inbox, writable: false },
+    // The domain's package caches (section 4.7, C4): npm's, pip's and the rest, shared by
+    // the domain's workspaces and nobody else's. Whatever one of them puts there, every
+    // workspace of the domain could have done itself (section 2), so sharing it poisons
+    // nothing; it is never shown to another domain, the root's git or the host's tools.
+    { host: paths.domainCache(plan.domain), guest: guest.cache, writable: true },
     // The mirrors of this domain's repositories, and no others, each read-only and at the
     // same path in every VM (a clone's alternates file names it).
     ...repos.map((id) => {

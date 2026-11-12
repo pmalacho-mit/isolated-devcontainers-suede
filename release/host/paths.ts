@@ -34,6 +34,7 @@ export const paths = {
   domainRepos: (domain: string) => path.join(HOME, "domains", domain, "repos"),
   outbox: (domain: string) => path.join(HOME, "domains", domain, "outbox"),
   inbox: (domain: string) => path.join(HOME, "domains", domain, "inbox"),
+  domainCache: (domain: string) => path.join(HOME, "domains", domain, "cache"),
   link: (vm: string) => path.join(HOME, "run", vm),
 } as const;
 
@@ -48,6 +49,7 @@ export const guest = {
   workspaces: "/workspaces",
   outbox: "/desolate/outbox",
   inbox: "/desolate/inbox",
+  cache: "/desolate/cache",
   link: "/desolate/link",
   linkSocket: "/desolate/link/proxy.sock",
 } as const;

@@ -58,6 +58,15 @@ describe("T1 the spec desolate hands the devcontainer CLI", () => {
     const compose = overrideOf({ dockerComposeFile: "compose.yml", service: "app", workspaceFolder: "/src" }, "/workspaces/acme/app", "/home/dev") as Record<string, unknown>;
     assert.deepEqual([compose.dockerComposeFile, compose.service, compose.workspaceFolder, compose.runArgs, compose.mounts], ["compose.yml", "app", "/src", undefined, undefined]);
   });
+  it("the domain's package caches (C4): mounted and named for a container, not for compose, and the spec's own setting wins", () => {
+    assert.ok(merged.mounts.includes("source=/desolate/cache,target=/desolate/cache,type=bind"), "the domain's cache, writable, at its own path");
+    assert.deepEqual([merged.containerEnv.npm_config_cache, merged.containerEnv.PIP_CACHE_DIR, merged.containerEnv.GOMODCACHE], ["/desolate/cache/npm", "/desolate/cache/pip", "/desolate/cache/go-mod"]);
+    assert.equal(merged.containerEnv.CARGO_HOME, undefined, "never where a tool installs itself");
+    const compose = overrideOf({ dockerComposeFile: "compose.yml", service: "app" }, "/workspaces/acme/app", "/home/dev") as { containerEnv: Record<string, string> };
+    assert.equal(compose.containerEnv.npm_config_cache, undefined, "compose services are not given the mount, so they are not pointed at it");
+    const own = overrideOf({ image: "x", containerEnv: { npm_config_cache: "/home/node/.npm" } }, "/workspaces/acme/app", "/home/dev") as { containerEnv: Record<string, string> };
+    assert.equal(own.containerEnv.npm_config_cache, "/home/node/.npm");
+  });
   it("extension ids are taken only if they are ids", () => {
     assert.deepEqual(extensionsOf(spec), ["rust-lang.rust-analyzer", "a.b@1.2.3"]);
     assert.deepEqual(extensionsOf({ customizations: "nonsense" }), []);

@@ -138,6 +138,13 @@ the security findings, open and closed.
   shares, one user per domain, and each secrets proxy takes only its own domain's token.
 - **Templates (C3)**: a domain's environment is built once and cloned: 18.8 s per
   workspace with a real devcontainer, from 54 s (`decisions.md`, "A domain's template").
+- **Package caches (C4)**: each domain's npm, pip and the rest in a share of its own, mounted
+  into its workspaces and devcontainers (`mac/package-caches`).
+- **Not done, and why:** mapping `localhost` links in the workspace's editor to the
+  workspace's hostname (section 4.4). VSCodium's web workbench resolves external URLs through
+  hooks its embedder supplies (a tunnel provider), which the reh-web server does not expose
+  to configure; `carryover/editor/extension` is v2's panel, not this. `desolate ports` and
+  the dashboard give the right address.
 - **T2 on a Mac is partial** (the fake backend's link is a host socket Colima cannot reach):
   `tests/v3/README.md`.
 
@@ -180,6 +187,12 @@ the security findings, open and closed.
    share. That costs availability, not integrity.
 
 ## 4. First things to do on the M1, in order
+
+**Done, 2026-11-12, by an agent on the M1** (section 2d; pull requests #65 to #75 into `v3`,
+stacked in that order but for #65 and #68, which stand alone): steps 1 to 4 below, and T2 on
+the Mac as far as it can go there. What is left of this section: running the Touch ID
+approver (a person's), and the first bootstrap from a fresh home with the hash-locked image
+(#68). Section 5 is where the work is now; its item 1 is half done (C3 templates, C4 caches).
 
 1. **T1.** `npm install && make test`. Seconds. If this fails on macOS, fix it first: it is
    the one tier that should be identical everywhere.
