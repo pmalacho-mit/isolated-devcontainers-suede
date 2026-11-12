@@ -10,5 +10,6 @@
 FROM ubuntu:24.04
 COPY pins.env /opt/desolate-build/pins.env
 COPY image/provision.sh /opt/desolate-build/image/provision.sh
+COPY image/locks /opt/desolate-build/image/locks
 RUN DESOLATE_IMAGE_KIND=container bash /opt/desolate-build/image/provision.sh && rm -rf /opt/desolate-build
 CMD ["sleep", "infinity"]
