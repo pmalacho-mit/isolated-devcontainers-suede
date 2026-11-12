@@ -49,6 +49,33 @@ const freePort = (): Promise<number> =>
     });
   });
 
+/** Which of a VM's shares are not mounted yet, and which are mounted the wrong way, from
+ *  the guest's /proc/mounts. `flags`: also hold each mount's ro/rw to the spec (vz, where
+ *  the guest's flag and the host's refusal agree; measured).
+ *
+ *  Why it exists: on vz, ssh answers before every virtiofs share is mounted, so the first
+ *  command after `limactl start` can see a share's bare mount point: an empty directory
+ *  owned by root (release/docs/incidents.md). And a VM that came up without a share, or
+ *  with a read-only one writable, must not be used at all (P6). */
+export const unmounted = (procMounts: string, shares: { guest: string; writable: boolean }[], fsType: string, flags: boolean): { missing: string[]; wrong: string[] } => {
+  // /proc/mounts escapes space, tab, newline and backslash as octal.
+  const decode = (field: string) => field.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
+  const mounted = new Map<string, { type: string; ro: boolean }>();
+  for (const line of procMounts.split("\n")) {
+    const [, where, type, options] = line.split(" ");
+    // The last mount at a path is the one that is seen.
+    if (where && type && options) mounted.set(decode(where), { type, ro: options.split(",").includes("ro") });
+  }
+  const missing: string[] = [];
+  const wrong: string[] = [];
+  for (const share of shares) {
+    const found = mounted.get(share.guest);
+    if (!found || found.type !== fsType) missing.push(share.guest);
+    else if (flags && found.ro === share.writable) wrong.push(`${share.guest} is mounted ${found.ro ? "read-only" : "read-write"}`);
+  }
+  return { missing, wrong };
+};
+
 export const limaBackend = (kind: "qemu" | "vz"): Backend => {
   const arch = os.arch() === "arm64" ? "aarch64" : "x86_64";
   const imageDir = process.env.DESOLATE_IMAGE_DIR ?? path.join(paths.images, arch);
@@ -135,6 +162,26 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
     const vars = Object.entries(options.env ?? {}).map(([key, value]) => `${key}=${value}`);
     const command = options.root ? ["sudo", "env", ...vars, ...argv] : vars.length > 0 ? ["env", ...vars, ...argv] : argv;
     return ["shell", "--workdir", options.cwd ?? "/", name, ...command];
+  };
+
+  /** Wait for every share to be mounted as the spec says; stop the VM and refuse if one
+   *  is mounted the wrong way, or is still missing after a minute. */
+  const sharesReady = async (name: string, m: Meta) => {
+    const fsType = kind === "qemu" ? "9p" : "virtiofs";
+    let last = { missing: m.spec.shares.map((share) => share.guest), wrong: [] as string[] };
+    for (let waited = 0; waited <= 60_000; waited += 250) {
+      const mounts = await lima(["shell", "--workdir", "/", name, "cat", "/proc/mounts"], { timeoutMs: 30_000 });
+      if (mounts.code === 0) {
+        last = unmounted(mounts.stdout, m.spec.shares, fsType, kind === "vz");
+        if (last.wrong.length > 0) break;
+        if (last.missing.length === 0) return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    await lima(["stop", "-f", name], { timeoutMs: 120_000 });
+    throw new Error(last.wrong.length > 0
+      ? `${name} came up with a share mounted against its spec (${last.wrong.join("; ")}); it was stopped. This is a bug in desolate's ${kind} backend.`
+      : `${name} came up without its shares after a minute (${last.missing.join(", ")}); it was stopped. ${path.join(LIMA_HOME, name, "ha.stderr.log")} may say why.`);
   };
 
   const backend: Backend = {
@@ -225,7 +272,7 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
         // The host process starts under the profile and keeps it for its whole life.
         const result = await run("sandbox-exec", ["-f", file, LIMACTL, "--tty=false", ...args], { env: env(), timeoutMs: 2_400_000 });
         if (result.code !== 0) throw new Error(`could not start ${name} confined: ${(result.stderr || result.stdout).trim().split("\n").slice(-4).join(" | ")}`);
-        return;
+        return sharesReady(name, m);
       }
       const extraEnv: Record<string, string> = kind === "qemu" && cut ? { DESOLATE_QEMU_EGRESS: "none", DESOLATE_QEMU_LINK: m.spec.sockets[0]?.host ?? "" } : {};
       await limaOk(args, { timeoutMs: 2_400_000, extraEnv });
@@ -238,6 +285,7 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
           throw new Error(`${name} came up with an unrestricted network; it was stopped. This is a bug in desolate's qemu backend.`);
         }
       }
+      await sharesReady(name, m);
     },
 
     async stop(name) {
