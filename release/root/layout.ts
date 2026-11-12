@@ -15,6 +15,9 @@ export const ROOT = {
    *  it could swap the entry for a link or a directory of its own (start.sh, as root,
    *  would then follow it). */
   sys: process.env.DESOLATE_ROOT_SYS ?? "/var/lib/desolate-root",
+  /** Root's too: each domain's proxies' directories, made by root/proxy-user.sh, where
+   *  nothing of the root's ordinary user's is on the way. */
+  proxies: process.env.DESOLATE_ROOT_PROXIES ?? "/var/lib/desolate-proxies",
   run: process.env.DESOLATE_ROOT_RUN ?? "/run/desolate",
 } as const;
 

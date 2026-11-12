@@ -1,33 +1,42 @@
-// The proxies run as a user of their own (desolate-proxy), not as the root's ordinary user.
+// Each domain's proxies run as a user of that domain's own (dsp-<hash>), not as the root's
+// ordinary user, and not as one user for every domain.
 //
 // They are what parses everything a workspace sends: proxy.ts reads its CONNECTs and TLS
 // ClientHellos, mitmproxy whole HTTP exchanges for a secret's hosts. A bug there should
-// reach what a proxy needs and nothing else: the domains' policies and secret values (read,
-// through the group desolate-proxy) and its own output (proxy-out/: the audit log, each
-// domain's CA). Not the keyring's sockets (it is not in the root user's group), so not the
-// read keys; not the root clones, the mirrors or the registry.
+// reach what that domain's proxies need and nothing else: the domain's policy, its secret
+// values and its handoff token (read, through the domain's proxies' group, in
+// proxy-domains/<domain>), and their own output (proxy-out/<domain>). Not another domain's
+// secrets, and not another domain's secrets proxy (it takes a connection only with its own
+// domain's token). Not the keyring's sockets (no proxies' user is in the root user's group),
+// so not the read keys; not the shares (/desolate is closed to them: root/start.sh).
 //
-// The root's user starts and stops them through sudo, by the one rule root/start.sh writes
-// (`<user> ALL=(desolate-proxy) NOPASSWD: ALL`). That direction is safe: the root's user
-// already holds everything the proxies' user can reach. The other direction is what this
-// separation is for.
+// The users and their directories are made by root (root/proxy-user.sh, which the host runs
+// when a domain's proxies are first wanted). The root's user starts and stops proxies as
+// them through one sudoers rule (`<user> ALL=(%desolate-proxies) NOPASSWD: ALL`): safe in
+// that direction, since the root's user already holds everything any of them can reach.
 import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import * as fs from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import { ROOT } from "../layout.ts";
 
-export const PROXY_USER = "desolate-proxy";
+/** A domain's proxies' user: what root/proxy-user.sh makes for it. */
+export const proxyUserOf = (domain: string) => `dsp-${createHash("sha256").update(domain).digest("hex").slice(0, 10)}`;
+/** The domain's directory of what its proxies read: policy, secrets, token, the secrets
+ *  proxy's port. The root's user writes it; the domain's proxies read it. */
+export const proxyDomainDir = (domain: string) => `${ROOT.proxies}/domains/${domain}`;
 /** Where the proxies' code is for them: a root-owned copy root/start.sh makes. /desolate,
  *  where the release is shared, is closed to them (on vz any user that reaches a share can
  *  write it; start.sh). Outside the root VM (tests on the host), the release itself. */
 export const PROXY_CODE = process.env.DESOLATE_PROXY_CODE ?? "/opt/desolate/proxy-code";
-/** What the proxies write: theirs, readable by the root's user. */
-export const PROXY_OUT = `${ROOT.state}/proxy-out`;
+/** What a domain's proxies write: theirs, readable by the root's user. */
+export const proxyOutDir = (domain: string) => `${ROOT.proxies}/out/${domain}`;
 
 /** `command` as the proxies' user, with exactly `env` (sudo resets the rest), detached, its
  *  output to `log`. The pid is sudo's, which waits for the command and ends with it. */
-export const spawnAsProxy = (command: string, args: string[], env: Record<string, string>, log: number): ChildProcess => {
+export const spawnAsProxy = (domain: string, command: string, args: string[], env: Record<string, string>, log: number): ChildProcess => {
   const vars = Object.entries(env).map(([key, value]) => `${key}=${value}`);
-  const child = spawn("sudo", ["-n", "-u", PROXY_USER, "--", "env", "-i", ...vars, command, ...args], { detached: true, stdio: ["ignore", log, log] });
+  const child = spawn("sudo", ["-n", "-u", proxyUserOf(domain), "--", "env", "-i", ...vars, command, ...args], { detached: true, stdio: ["ignore", log, log] });
   child.unref();
   return child;
 };
@@ -45,7 +54,25 @@ export const alive = (pid: number) => {
 
 /** Stop a proxy started by spawnAsProxy: the command (sudo's child) is the proxies' user's
  *  to signal, and sudo ends with it. */
-export const stopProxy = (pid: number) => {
+export const stopProxy = (domain: string, pid: number) => {
   if (!Number.isInteger(pid) || pid < 2) return;
-  spawnSync("sudo", ["-n", "-u", PROXY_USER, "pkill", "-TERM", "-P", String(pid)], { stdio: "ignore", timeout: 10_000 });
+  spawnSync("sudo", ["-n", "-u", proxyUserOf(domain), "pkill", "-TERM", "-P", String(pid)], { stdio: "ignore", timeout: 10_000 });
+};
+
+/** Whether root has made this domain's proxies' user (root/proxy-user.sh). */
+export const hasProxyUser = (domain: string) => spawnSync("id", ["-u", proxyUserOf(domain)], { stdio: "ignore" }).status === 0;
+
+/** The token a workspace's proxy shows its domain's secrets proxy: made once, in the
+ *  domain's directory (its proxies' to read, nobody else's). */
+export const linkTokenFile = (domain: string) => `${proxyDomainDir(domain)}/link-token`;
+export const ensureLinkToken = (domain: string) => {
+  const file = linkTokenFile(domain);
+  try {
+    if (/^[0-9a-f]{64}$/.test(fs.readFileSync(file, "utf8").trim())) return;
+  } catch {
+    /* none yet */
+  }
+  const temp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(temp, randomBytes(32).toString("hex") + "\n", { mode: 0o640 });
+  fs.renameSync(temp, file);
 };

@@ -19,7 +19,7 @@ import { readJson, writeJson } from "../../shared/json.ts";
 import { normalizeName } from "../../shared/sniff.ts";
 import { ROOT } from "../layout.ts";
 import { inbox } from "../outbox.ts";
-import { alive, PROXY_CODE, PROXY_OUT, spawnAsProxy, stopProxy } from "./as-proxy.ts";
+import { alive, ensureLinkToken, hasProxyUser, linkTokenFile, PROXY_CODE, proxyDomainDir, proxyOutDir, spawnAsProxy, stopProxy } from "./as-proxy.ts";
 
 const DIR = `${ROOT.state}/proxy`;
 const MITMDUMP = "/opt/desolate/proxy-venv/bin/mitmdump";
@@ -29,12 +29,13 @@ type Secret = { value: string; hosts: string[]; headers?: string[]; off?: boolea
 type Store = { domain: string; secrets: Record<string, Secret> };
 export type Running = { port: number; pid: number; hosts: string[] };
 
-const storeFile = (domain: string) => `${ROOT.state}/secrets/${domain}.json`;
-export const runningFile = (domain: string) => path.join(DIR, "secrets", `${domain}.json`);
-/** The domain's CA and mitmproxy's own state: the proxies' user's (as-proxy.ts). */
-const confdir = (domain: string) => path.join(PROXY_OUT, "ca", domain);
-/** Where it was when the proxies ran as the root's own user: taken across once. */
-const oldConfdir = (domain: string) => path.join(DIR, "secrets", domain);
+/** The values: in the domain's directory, which its proxies' group reads and no other. */
+const storeFile = (domain: string) => path.join(proxyDomainDir(domain), "secrets.json");
+/** Where its secrets proxy listens, for its workspaces' proxies. */
+export const runningFile = (domain: string) => path.join(proxyDomainDir(domain), "secrets-proxy.json");
+/** The domain's CA and mitmproxy's own state: the domain's proxies' (as-proxy.ts). Made by
+ *  mitmproxy, as that user, in the directory root made for it. */
+const confdir = (domain: string) => path.join(proxyOutDir(domain), "ca");
 const store = (domain: string): Store => readJson<Store>(storeFile(domain), { domain, secrets: {} });
 
 const NAME = /^[A-Z][A-Z0-9_-]{7,63}$/;
@@ -88,7 +89,7 @@ export const ensure = async (domain: string): Promise<Running | null> => {
   const hosts = [...new Set(Object.values(store(domain).secrets).flatMap((s) => s.hosts))].sort();
   const existing = readJson<Running | null>(runningFile(domain), null);
   if (hosts.length === 0) {
-    if (existing && alive(existing.pid) && !(await free(existing.port))) stopProxy(existing.pid);
+    if (existing && alive(existing.pid) && !(await free(existing.port))) stopProxy(domain, existing.pid);
     fs.rmSync(runningFile(domain), { force: true });
     publish(domain);
     return null;
@@ -102,31 +103,22 @@ export const ensure = async (domain: string): Promise<Running | null> => {
     return { ...existing, hosts };
   }
   if (!fs.existsSync(MITMDUMP)) refuse("this image has no mitmproxy, so secrets cannot be substituted", "rebuild the base image (release/image/build.sh)");
-  // Made by the root's user for the proxies' user to write in: the directory's group is
-  // theirs (set-group-ID proxy-out), and group-writable.
-  if (!fs.existsSync(confdir(domain))) {
-    fs.mkdirSync(confdir(domain), { recursive: true, mode: 0o2770 });
-    fs.chmodSync(confdir(domain), 0o2770);
-    // A CA made before: the same CA, so workspaces that trust it go on working.
-    for (const name of ["mitmproxy-ca.pem", "mitmproxy-ca-cert.pem", "mitmproxy-ca-cert.cer", "mitmproxy-ca.p12", "mitmproxy-ca-cert.p12", "mitmproxy-dhparam.pem"]) {
-      const from = path.join(oldConfdir(domain), name);
-      if (!fs.existsSync(from) || !fs.lstatSync(from).isFile()) continue;
-      fs.copyFileSync(from, path.join(confdir(domain), name));
-      fs.chmodSync(path.join(confdir(domain), name), 0o640);
-    }
-  }
+  if (!hasProxyUser(domain)) refuse(`the domain ${domain} has no proxies' user yet`, "desolate bootstrap (the host makes it: root/proxy-user.sh)");
+  ensureLinkToken(domain);
   let port = 0;
   for (let candidate = 22000; candidate < 23000 && port === 0; candidate++) if (await free(candidate)) port = candidate;
   if (port === 0) throw new Error("no free port for a secrets proxy in the root");
-  const log = fs.openSync(path.join(DIR, "secrets", `${domain}.log`), "a");
-  const child = spawnAsProxy(MITMDUMP, [
+  // Its output, as the root's user saw it start (its audit log is its own, in out/<domain>).
+  fs.mkdirSync(path.join(DIR, "logs"), { recursive: true, mode: 0o700 });
+  const log = fs.openSync(path.join(DIR, "logs", `secrets-${domain}.log`), "a");
+  const child = spawnAsProxy(domain, MITMDUMP, [
     "--mode", "regular", "--listen-host", "127.0.0.1", "--listen-port", String(port),
     "--set", `confdir=${confdir(domain)}`,
     // Upstream certificates are checked against this VM's own trust store.
     "--set", "ssl_verify_upstream_trusted_ca=/etc/ssl/certs/ca-certificates.crt",
     "--set", "flow_detail=0", "--set", "termlog_verbosity=warn",
     "-s", path.join(PROXY_CODE, "root", "proxy", "secrets_addon.py"),
-  ], { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: confdir(domain), DESOLATE_SECRETS: storeFile(domain), DESOLATE_POLICY: `${DIR}/policy/${domain}.json`, DESOLATE_AUDIT: `${PROXY_OUT}/audit.log` }, log);
+  ], { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: confdir(domain), DESOLATE_SECRETS: storeFile(domain), DESOLATE_POLICY: path.join(proxyDomainDir(domain), "policy.json"), DESOLATE_AUDIT: path.join(proxyOutDir(domain), "audit.log"), DESOLATE_LINK_TOKEN: linkTokenFile(domain) }, log);
   fs.closeSync(log);
   const ca = path.join(confdir(domain), "mitmproxy-ca-cert.pem");
   for (let waited = 0; waited < 180_000 && ((await free(port)) || !fs.existsSync(ca)); waited += 100) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -157,6 +149,7 @@ export const set = async (domain: string, input: { name?: unknown; value?: unkno
   if (hosts.length === 0) refuse("a secret names the hosts it may be sent to: with none it would have no allowlist", usage);
   const headers = Array.isArray(input.headers) && input.headers.length > 0 ? input.headers.map((header) => String(header).toLowerCase()) : undefined;
   for (const header of headers ?? []) if (!HEADER.test(header)) refuse(`'${header}' is not a header name`, usage);
+  if (!hasProxyUser(domain)) refuse(`the domain ${domain} has no proxies' user yet`, "desolate bootstrap (the host makes it: root/proxy-user.sh)");
   const next = store(domain);
   for (const other of Object.keys(next.secrets))
     if (other !== name && (other.includes(name) || name.includes(other))) refuse(`${name} and ${other} overlap (one contains the other), so neither could be substituted unambiguously`, "choose a name that does not contain, and is not contained in, another secret's");

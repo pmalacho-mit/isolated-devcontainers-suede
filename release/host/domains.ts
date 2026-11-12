@@ -2,7 +2,7 @@
 import { EXIT, refuse } from "../shared/exit.ts";
 import * as fs from "node:fs";
 import { guest } from "./paths.ts";
-import { backend, rootctl } from "./stack.ts";
+import { backend, ensureProxyUser, rootctl } from "./stack.ts";
 
 type Out = (line: string) => void;
 
@@ -51,6 +51,7 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
   if (first === "create") {
     if (!second) refuse("a domain needs a name", "desolate domain create <slug> [--title \"...\"]", EXIT.usage);
     const made = await rootctl<{ slug: string; title: string }>("domain.create", { slug: second, title: values.title }, { quiet: true });
+    await ensureProxyUser(made.slug);
     return out(json ? JSON.stringify(made) : `created the domain ${made.slug} ("${made.title}").\nnext: desolate domain ${made.slug} add --repo <owner>/<repo>`);
   }
   if (!first) refuse("which domain?", "desolate domain create <slug> | desolate domain <slug> add --repo <owner>/<repo> | desolate domain <slug> show", EXIT.usage);
@@ -105,6 +106,7 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
     return;
   }
   if (second === "secret") {
+    await ensureProxyUser(first);
     // desolate domain <d> secret [list] | set <NAME> --hosts a,b [--headers h,...] | rm <NAME>
     const [, , action, name] = args;
     type Listed = { name: string; hosts: string[]; headers: string[] | null; on: boolean; secondsLeft?: number };

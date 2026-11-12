@@ -238,19 +238,48 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     assert.equal(stack.quiet("domain", "a", "secret", "rm", "T3-SECRET-NAME").code, 0);
   });
 
-  it("T3 the proxies run as their own user, which reaches no share and not the keyring", () => {
+  it("T3 each domain's proxies run as that domain's own user, which reaches no share, not the keyring, and not another domain's secrets", () => {
     // What parses a workspace's traffic is the most exposed code in the root. On vz a share
-    // takes a write from any user that reaches it, so the shares are closed to that user by
-    // a directory that is not a share (root/start.sh, proxy/as-proxy.ts).
+    // takes a write from any user that reaches it, so the shares are closed to the proxies by
+    // a directory that is not a share (root/start.sh); each domain's secrets and its secrets
+    // proxy are its own proxies' alone (proxy/as-proxy.ts).
+    // A secret, so the domain's secrets proxy runs (the previous test removed its own).
+    const set = spawnSync(path.join(REPO_ROOT, "release", "cli.sh"), ["domain", "a", "secret", "set", "T3-HANDOFF-NAME", "--hosts", "api.example.test"], { env: stack.env, input: "t3-handoff-value-77\n", encoding: "utf8" });
+    assert.equal(set.status, 0, set.stderr);
+    const userOf = (domain: string) => stack.inRoot(["bash", "/desolate/release/root/proxy-user.sh", stack.inRoot(["stat", "-c", "%u", "/var/lib/desolate"], { root: true }).stdout.trim(), domain], { root: true }).stdout.trim();
+    const a = userOf("a");
+    const other = userOf("t3other");
+    assert.match(a, /^dsp-[0-9a-f]{10}$/);
     const users = stack.inRoot(["bash", "-c", "ps -eo user:20,args | grep -E 'proxy/proxy.ts|mitmdump' | grep -v -e grep -e '^root ' | awk '{print $1}' | sort -u"]).stdout.trim();
-    assert.equal(users, "desolate-proxy", "every proxy running is the proxies' user's");
+    assert.equal(users, a, "every proxy running (all of domain a's) is domain a's proxies' user's");
+    // A tunnel into domain a's secrets proxy, as its own proxy would open one: to the address
+    // the secret's host has here (the forge's stand-in), with or without a's token.
+    const script = [
+      "import json, socket, sys",
+      "d = '/var/lib/desolate-proxies/domains/a/'",
+      "port = int(sys.argv[3])",
+      "token = open(d + 'link-token').read().strip() if sys.argv[2] == 'token' else ''",
+      "s = socket.create_connection(('127.0.0.1', port), timeout=20)",
+      "extra = 'X-Desolate-Token: ' + token + '\\r\\n' if token else ''",
+      "s.sendall(('CONNECT ' + sys.argv[1] + ':443 HTTP/1.1\\r\\nHost: ' + sys.argv[1] + ':443\\r\\nX-Desolate-Workspace: w1\\r\\nX-Desolate-Host: api.example.test\\r\\n' + extra + '\\r\\n').encode())",
+      "print(s.recv(100).split(b' ')[1].decode())",
+    ].join("\n");
+    stack.inRoot(["bash", "-c", "cat > /tmp/handoff.py && chmod 0644 /tmp/handoff.py"], { root: true, input: script });
     const tried = stack.inRoot(["bash", "-c", `
-      for p in /desolate/root /desolate/mirrors /desolate/domains; do sudo -n -u desolate-proxy touch $p/proxy-tried 2>/dev/null && echo "$p=WROTE" || echo "$p=refused"; done
-      sudo -n -u desolate-proxy bash -c 'echo "{\"op\":\"list\"}" | socat - UNIX-CONNECT:/run/desolate/keyring/control.sock' >/dev/null 2>&1 && echo keyring=REACHED || echo keyring=refused
-      touch /desolate/root/user-tried && echo control=WROTE && rm -f /desolate/root/user-tried`]);
+      address=$(getent ahostsv4 api.example.test | head -1 | cut -d' ' -f1)
+      port=$(python3 -c "import json; print(json.load(open('/var/lib/desolate-proxies/domains/a/secrets-proxy.json'))['port'])")
+      for p in /desolate/root /desolate/mirrors /desolate/domains; do sudo -n -u ${a} touch $p/proxy-tried 2>/dev/null && echo "share_$p=WROTE" || echo "share_$p=refused"; done
+      sudo -n -u ${a} bash -c 'echo "{\\"op\\":\\"list\\"}" | socat - UNIX-CONNECT:/run/desolate/keyring/control.sock' >/dev/null 2>&1 && echo keyring=REACHED || echo keyring=refused
+      sudo -n -u ${other} cat /var/lib/desolate-proxies/domains/a/secrets.json >/dev/null 2>&1 && echo other_reads_secrets=REACHED || echo other_reads_secrets=refused
+      echo "other_uses_secrets_proxy=$(sudo -n -u ${other} python3 /tmp/handoff.py "$address" none "$port" 2>/dev/null || echo refused)"
+      echo "control_own=$(sudo -n -u ${a} python3 /tmp/handoff.py "$address" token "$port" 2>&1 | tail -1)"
+      touch /desolate/root/user-tried && echo control_share=WROTE && rm -f /desolate/root/user-tried /tmp/handoff.py`], { root: true });
     const got = lines(tried.stdout);
-    assert.equal(got.control, "WROTE", "control: the root's own user does write the share, so a refusal above is the closed directory");
-    for (const [name, verdict] of Object.entries(got)) if (name !== "control") assert.match(verdict, /^refused/, `${name}, as the proxies' user`);
+    assert.equal(got.control_share, "WROTE", "control: the root writes the share, so a refusal above is the closed directory");
+    assert.equal(got.control_own, "200", "control: domain a's own proxies, with its token, are let into its secrets proxy");
+    assert.equal(got.other_uses_secrets_proxy, "403", "another domain's proxies reach it (given the port), and are refused for want of the token");
+    for (const [name, verdict] of Object.entries(got)) if (!name.startsWith("control") && name !== "other_uses_secrets_proxy") assert.match(verdict, /^refused/, name);
+    assert.equal(stack.quiet("domain", "a", "secret", "rm", "T3-HANDOFF-NAME").code, 0);
   });
 
   it("T3 forced egress: root inside the VM reaches nothing", () => {

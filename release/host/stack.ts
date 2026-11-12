@@ -89,3 +89,15 @@ export const ensureHome = () => {
   // The home holds every repository's history and every domain's work: the user's alone.
   fs.chmodSync(paths.home, 0o700);
 };
+
+const proxyUsers = new Set<string>();
+/** Have root make a domain's proxies' user and its two directories, if it has not (root/
+ *  proxy-user.sh). Before anything starts the domain's proxies or writes its secrets. Root
+ *  is asked through the host's own way in (never the root's ordinary user, which may run
+ *  programs as these users and must not make them). */
+export const ensureProxyUser = async (domain: string) => {
+  if (proxyUsers.has(domain)) return;
+  const result = await backend().exec(ROOT_VM, ["bash", `${guest.release}/root/proxy-user.sh`, String(process.getuid!()), domain], { root: true, timeoutMs: 60_000 });
+  if (result.code !== 0) refuse(`the domain ${domain}'s proxies' user could not be made: ${(result.stderr || result.stdout).trim().slice(-300)}`, "desolate doctor");
+  proxyUsers.add(domain);
+};

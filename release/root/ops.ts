@@ -8,7 +8,8 @@ import { repoOf, writeKnownHosts } from "./git.ts";
 import type { Forge } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { parseApproval } from "../shared/approval.ts";
-import { APPROVALS, FORGE, GITCONFIG, KEYRING } from "./layout.ts";
+import { APPROVALS, FORGE, GITCONFIG, KEYRING, ROOT } from "./layout.ts";
+import { proxyUserOf } from "./proxy/as-proxy.ts";
 import * as domains from "./domains.ts";
 import { refusalsOf } from "./outbox.ts";
 import * as offers from "./offers.ts";
@@ -196,16 +197,38 @@ export const ops: Record<string, Op> = {
       }
     });
     add("root: the programs root runs are root's", notRoots.length === 0, notRoots.length === 0 ? `node (${process.execPath}) and root's PATH` : `${notRoots.join(", ")} could be changed by someone other than root`, "desolate bootstrap (root/start.sh gives them back)");
-    // The proxies run as a user of their own (proxy/as-proxy.ts): asked, both halves.
-    const asProxy = spawnSync("sudo", ["-n", "-u", "desolate-proxy", "id", "-G"], { encoding: "utf8", timeout: 10_000 });
+    // Each domain's proxies run as a user of that domain's own (proxy/as-proxy.ts): asked,
+    // for every one of them, of every other domain's directory too.
+    const members = (spawnSync("getent", ["group", "desolate-proxies"], { encoding: "utf8" }).stdout.trim().split(":")[3] ?? "").split(",").filter(Boolean);
     const mine = new Set(spawnSync("id", ["-G"], { encoding: "utf8" }).stdout.trim().split(/\s+/));
-    const proxyGroups = asProxy.status === 0 ? asProxy.stdout.trim().split(/\s+/) : [];
-    const shared = proxyGroups.filter((group) => mine.has(group) && group !== spawnSync("id", ["-g", "desolate-proxy"], { encoding: "utf8" }).stdout.trim());
-    // And it cannot reach a share: on vz any user who reaches one can write it (start.sh).
-    const reaches = spawnSync("sudo", ["-n", "-u", "desolate-proxy", "test", "-x", "/desolate/root"], { timeout: 10_000 }).status === 0;
-    add("root: the proxies run as their own user", asProxy.status === 0 && shared.length === 0 && !reaches,
-      asProxy.status !== 0 ? "the root's user cannot start a program as desolate-proxy" : shared.length > 0 ? `desolate-proxy shares the root's user's group(s) ${shared.join(", ")}: it could reach the keyring` : reaches ? "desolate-proxy can reach the shares under /desolate" : "desolate-proxy: in none of the root's user's groups, and the shares are closed to it",
-      "desolate bootstrap (root/start.sh)");
+    const domainDirs = (() => {
+      try {
+        return fs.readdirSync(`${ROOT.proxies}/domains`).filter((name) => /^[a-z0-9-]{1,40}$/.test(name));
+      } catch {
+        return [] as string[];
+      }
+    })();
+    const wrong: string[] = [];
+    for (const member of members) {
+      const groups = spawnSync("sudo", ["-n", "-u", member, "id", "-G"], { encoding: "utf8", timeout: 10_000 });
+      if (groups.status !== 0) {
+        wrong.push(`${member}: the root's user cannot start a program as it`);
+        continue;
+      }
+      const own = spawnSync("id", ["-g", member], { encoding: "utf8" }).stdout.trim();
+      const shared = groups.stdout.trim().split(/\s+/).filter((group) => group !== own && mine.has(group));
+      if (shared.length > 0) wrong.push(`${member} shares the root's user's group(s) ${shared.join(", ")}`);
+      if (spawnSync("sudo", ["-n", "-u", member, "test", "-x", "/desolate/root"], { timeout: 10_000 }).status === 0) wrong.push(`${member} can reach the shares`);
+      for (const other of domainDirs) {
+        if (proxyUserOf(other) === member) continue;
+        if (spawnSync("sudo", ["-n", "-u", member, "test", "-r", `${ROOT.proxies}/domains/${other}`], { timeout: 10_000 }).status === 0 ||
+          spawnSync("sudo", ["-n", "-u", member, "test", "-x", `${ROOT.proxies}/domains/${other}`], { timeout: 10_000 }).status === 0)
+          wrong.push(`${member} can reach the domain ${other}'s directory`);
+      }
+    }
+    add("root: each domain's proxies run as that domain's own user", wrong.length === 0,
+      wrong.length > 0 ? wrong.join("; ") : "none shares a group with the root's user, reaches the shares, or reaches another domain's secrets",
+      "desolate bootstrap (root/start.sh, root/proxy-user.sh)");
     let gitconfig = "";
     try {
       const stat = fs.lstatSync(GITCONFIG);

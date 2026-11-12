@@ -29,10 +29,17 @@ import { ROOT } from "../layout.ts";
 import type { Running } from "./secrets.ts";
 
 const [, , portArg, domain, workspace] = process.argv;
-// Its own output is in proxy-out (as-proxy.ts): the only directory the proxies' user writes.
-const AUDIT = `${ROOT.state}/proxy-out/audit.log`;
+// The domain names this proxy's directories: a slug, or nothing at all.
+if (process.argv[1]?.endsWith("proxy.ts") && !/^[a-z0-9][a-z0-9-]{0,39}$/.test(domain ?? "")) {
+  console.error("proxy.ts: usage: proxy.ts <port> <domain> <workspace>");
+  process.exit(2);
+}
+// What it reads is its domain's directory, and what it writes is its domain's proxies' own
+// (as-proxy.ts; it runs as that domain's proxies' user).
+const DOMAIN_DIR = `${ROOT.proxies}/domains/${domain}`;
+const AUDIT = `${ROOT.proxies}/out/${domain}/audit.log`;
 export type Policy = { mode: "open" | "enforce"; hosts: string[]; internal: string[] };
-const policy = (): Policy => ({ mode: "open", hosts: [], internal: [], ...readJson<Partial<Policy>>(`${ROOT.state}/proxy/policy/${domain}.json`, {}) });
+const policy = (): Policy => ({ mode: "open", hosts: [], internal: [], ...readJson<Partial<Policy>>(`${DOMAIN_DIR}/policy.json`, {}) });
 
 const audit = (entry: Record<string, unknown>) =>
   fs.appendFileSync(AUDIT, JSON.stringify({ time: new Date().toISOString(), domain, workspace, ...entry }) + "\n");
@@ -77,7 +84,7 @@ const handle = async (client: Socket, head: string) => {
   // A host one of the domain's secrets names goes through the domain's secrets proxy. If
   // that proxy is not running the connection is refused, not passed around it: a
   // placeholder must never reach such a host as if it were the value (P6).
-  const secrets = port === 443 ? readJson<Running | null>(`${ROOT.state}/proxy/secrets/${domain}.json`, null) : null;
+  const secrets = port === 443 ? readJson<Running | null>(`${DOMAIN_DIR}/secrets-proxy.json`, null) : null;
   const viaSecrets = secrets !== null && hostAllowed(host, secrets.hosts);
   // To the address that was checked: a second lookup could answer differently.
   const upstream = viaSecrets ? connect({ host: "127.0.0.1", port: secrets.port }) : connect({ host: address, port });
@@ -96,7 +103,15 @@ const handle = async (client: Socket, head: string) => {
     // The tunnel into the secrets proxy: the checked address as the destination, and what
     // this process knows about the connection in headers the workspace cannot set (its own
     // bytes begin after this exchange).
-    upstream.write(`CONNECT ${address}:443 HTTP/1.1\r\nHost: ${address}:443\r\nX-Desolate-Workspace: ${workspace}\r\nX-Desolate-Host: ${host}\r\n\r\n`);
+    // And the domain's token: the secrets proxy listens on the root VM's loopback, where any
+    // user of the VM can connect, and substitutes only for a connection that shows it.
+    let token = "";
+    try {
+      token = fs.readFileSync(`${DOMAIN_DIR}/link-token`, "utf8").trim();
+    } catch {
+      return refuse(`${host} is a host of one of this domain's secrets, and its handoff token cannot be read`);
+    }
+    upstream.write(`CONNECT ${address}:443 HTTP/1.1\r\nHost: ${address}:443\r\nX-Desolate-Workspace: ${workspace}\r\nX-Desolate-Host: ${host}\r\nX-Desolate-Token: ${token}\r\n\r\n`);
     let reply = "";
     const onReply = (chunk: Buffer) => {
       reply += chunk.toString("latin1");
@@ -117,7 +132,7 @@ const handle = async (client: Socket, head: string) => {
 };
 
 if (portArg) {
-  fs.mkdirSync(`${ROOT.state}/proxy-out`, { recursive: true });
+  // (proxy-out/<domain> is root's to make: root/proxy-user.sh.)
   createServer((client) => {
     client.on("error", () => client.destroy());
     let head = "";

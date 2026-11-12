@@ -5,7 +5,7 @@ import { EXIT, refuse } from "../shared/exit.ts";
 import { devHostname, editorHostname, editorHostPort, parseRepo } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
-import { backend, rootctl } from "./stack.ts";
+import { backend, ensureProxyUser, rootctl } from "./stack.ts";
 import type { VmSpec } from "./vm/types.ts";
 
 type Out = (line: string) => void;
@@ -60,7 +60,9 @@ const said = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "?
 
 export const startServices = async (plan: WorkspacePlan) => {
   const b = backend();
-  // The workspace's own proxy, in the root; then its link, which leads there and nowhere else.
+  // The workspace's own proxy, in the root, as its domain's proxies' user; then its link,
+  // which leads there and nowhere else.
+  await ensureProxyUser(plan.domain);
   const proxy = await rootctl<{ port: number }>("proxy.start", { vm: plan.vm, domain: plan.domain, workspace: plan.workspace }, { quiet: true });
   const { connectWorkspace } = await import("./daemon.ts");
   await connectWorkspace({ ...plan, proxyPort: proxy.port });
@@ -201,6 +203,7 @@ export const reconnectRunning = async (): Promise<number> => {
   for (const d of await rootctl<DomainView[]>("domain.list", {}, { quiet: true }))
     for (const w of d.workspaces) {
       if (!running.has(w.vm)) continue;
+      await ensureProxyUser(w.domain);
       const proxy = await rootctl<{ port: number }>("proxy.start", { vm: w.vm, domain: w.domain, workspace: w.workspace }, { quiet: true });
       await connectWorkspace({ ...w, proxyPort: proxy.port });
       count += 1;
