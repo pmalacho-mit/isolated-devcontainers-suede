@@ -102,6 +102,7 @@ export const newStack = (label: string): Stack => {
       .split(instance).join("<instance>").split(ip).join("<forge>")
       .replace(/ssh-ed25519 [A-Za-z0-9+/=]+/g, "ssh-ed25519 <key>")
       .replace(/tkn=[0-9a-f]{48}/g, "tkn=<token>")
+      .replace(/docker daemon: docker \d+\.\d+\.\d+/g, "docker daemon: docker <version>")
       .replace(/\b[0-9a-f]{40}\b/g, "<commit>").replace(/\b[0-9a-f]{64}\b/g, "<oid>")
       .replace(/sha256:[0-9a-f]{12}|\b[0-9a-f]{12}\b/g, "<id>")
       .replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, "<time>")
