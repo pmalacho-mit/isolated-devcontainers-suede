@@ -121,6 +121,38 @@ page is about, and because three of them were mistakes in the *tests*.
   in it. The backend now waits for every share in the spec to be in the guest's
   `/proc/mounts`, and on vz refuses (and stops the VM) if a share is mounted read-write
   that the spec says is read-only, or the reverse. (`tests/v3/t1/lima.test.ts`)
+- **The root's ordinary user could become root, so the keyring's user separated nothing.**
+  HANDOFF said keys were "safe from the root's unprivileged processes". Those processes
+  run as Lima's login user, which Lima gives `NOPASSWD: ALL` at every boot, and they
+  include every workspace's proxy and every secrets proxy, which parse what workspaces
+  send. A test in T2 ("sudo to root ... must fail") had passed only because the fake
+  backend's container user has no sudo rule: on a real VM it would have succeeded. Found
+  by reading `start.sh` beside `sudo -l` in the first real root VM. Now a sudoers rule of
+  desolate's takes it away at every start, the host reaches root by ssh as root, and
+  `doctor` asks. (`docs/v3/decisions.md`, "The root VM's ordinary user is not root".)
+- **Root's start-up followed links its ordinary user could plant.** Moot while that user
+  had sudo, and the way to root once it did not: `start.sh` ran `install -d -o <user>` and
+  `cat >` as root on names inside the user's own directory, so a link there handed the
+  user `/usr/local/bin` (on root's PATH). And the keyring's key directory was itself a name
+  in that directory: the user could have put a directory of its own there before any key
+  was made. What root and the keyring rely on is in `/var/lib/desolate-root` now, the
+  user's directories are made by the user, and the keyring refuses a key directory that is
+  not its own all the way up. (T2 `01-root` plants three links and checks.)
+- **What root runs belonged to nobody in particular.** The image unpacked node with `tar`
+  as root, which keeps the archive's owner: `/usr/local/bin`, `node` and npm belonged to
+  uid 1001, a uid no account had yet and the next account made could get. Root runs that
+  node (start.sh, the keyring). Found by the control of the T2 test above ("/usr/local/bin
+  is root's") failing on the fake backend's image, then seen in the root VM too. Now
+  `tar --no-same-owner`, start.sh gives existing images' files back to root, and `doctor`
+  asks.
+- **A restarted root VM left every running workspace without a way out.** A workspace's
+  proxy runs in the root VM; after the root VM's restart, `list` said "running" and every
+  connection from the workspace was refused. Bootstrap now gives each running workspace
+  its proxy and its link again.
+- **Logs that went nowhere.** After the layout changed, a root-owned leftover log made the
+  services' `exec >>log` fail, and bash carried on with output to `/dev/null`: the
+  services ran, and said nothing. The log open is now fatal, and the leftovers are taken
+  over by the user.
 - **A deploy key named its owner.** A key's title carried the Mac's hostname, which on a
   Mac is usually its owner's name, and a deploy key's title is shown to everyone who
   administers the repository. It is a hash of the hostname now.

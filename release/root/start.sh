@@ -34,7 +34,7 @@ printf '# desolate (root/start.sh): this user runs what reads a domain'"'"'s dat
 chmod 0440 /etc/sudoers.d/99-desolate.new
 visudo -qcf /etc/sudoers.d/99-desolate.new && mv /etc/sudoers.d/99-desolate.new /etc/sudoers.d/99-desolate
 for group in sudo admin wheel docker lxd; do
-  id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx "$group" && gpasswd -q -d "$USER_NAME" "$group" >/dev/null
+  id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx "$group" && gpasswd -d "$USER_NAME" "$group" >/dev/null
 done
 if runuser -u "$USER_NAME" -- sudo -n true 2>/dev/null; then
   echo "start.sh: $USER_NAME can still sudo; refusing to start anything that reads a domain's data" >&2
@@ -47,6 +47,11 @@ id desolate-keyring >/dev/null 2>&1 || useradd --system --no-create-home --shell
 # a 0700 directory) and its approvals socket (0600) are the keyring user's alone.
 
 install -d -m 0755 -o root -g root "$SYS" "$RUN"
+# What root runs here is root's. Images provisioned before tar was told --no-same-owner have
+# node, npm and /usr/local/bin owned by the archive's uid (1001): given back to root.
+for dir in /usr/local/bin /usr/local/lib /usr/local/include /usr/local/share; do
+  [ -d "$dir" ] && find "$dir" -xdev \( ! -uid 0 -o ! -gid 0 \) -exec chown -h 0:0 {} +
+done
 # The places above are layout 2. Services an older desolate started use the old places
 # (a keyring that went on making keys in the user's directory): stopped here, and started
 # again below.

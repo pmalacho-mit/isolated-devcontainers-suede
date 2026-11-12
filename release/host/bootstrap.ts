@@ -146,7 +146,7 @@ export const doctor = async (out: Out, json = false): Promise<number> => {
   }
   // What only the root can say. If it cannot be asked, each of these is a failure: a probe
   // that did not run is not a probe that found nothing (P6).
-  const rootChecks = ["root: keyring answers", "root: the write agent's askpass socket is closed to the root's own user", "root: private keys are unreadable to the root's own user", "root: the root's own user cannot become root", "root: git's settings are root's", "root: approver key installed", "root: forge configured"];
+  const rootChecks = ["root: keyring answers", "root: the write agent's askpass socket is closed to the root's own user", "root: private keys are unreadable to the root's own user", "root: the root's own user cannot become root", "root: the programs root runs are root's", "root: git's settings are root's", "root: approver key installed", "root: forge configured"];
   let asked: Check[] | null = null;
   if (rootUp)
     try {

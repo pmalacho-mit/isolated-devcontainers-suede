@@ -183,6 +183,16 @@ export const ops: Record<string, Op> = {
     // Asked, not assumed (P6): this user runs everything here that reads a domain's data.
     const sudo = spawnSync("sudo", ["-n", "true"], { stdio: "ignore", timeout: 10_000 });
     add("root: the root's own user cannot become root", sudo.status !== 0, sudo.status !== 0 ? "sudo refuses it" : "`sudo -n true` succeeds: a bug in a proxy or in git would reach the write keys", "desolate bootstrap (root/start.sh removes the rule)");
+    // What root (start.sh) and the keyring run: node, and every directory on root's PATH.
+    const notRoots = ["/usr/local/bin", "/usr/local/sbin", "/usr/bin", "/usr/sbin", "/bin", "/sbin", process.execPath].filter((file) => {
+      try {
+        const stat = fs.statSync(file);
+        return stat.uid !== 0 || (stat.mode & 0o022) !== 0;
+      } catch {
+        return false;
+      }
+    });
+    add("root: the programs root runs are root's", notRoots.length === 0, notRoots.length === 0 ? `node (${process.execPath}) and root's PATH` : `${notRoots.join(", ")} could be changed by someone other than root`, "desolate bootstrap (root/start.sh gives them back)");
     let gitconfig = "";
     try {
       const stat = fs.lstatSync(GITCONFIG);
