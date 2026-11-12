@@ -26,16 +26,15 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
    #68): locks with every package's hash.
 7. **A deploy key's title carried the Mac's hostname** (often its owner's name) (#67).
 8. **The proxies ran as rootd's user, and on vz any user who reaches a share can write it**
-   (`mac/proxy-user`). The proxies run as `desolate-proxy`: no group of the root's user (so
+   (`mac/proxy-user`, #72). The proxies run as their own user: no group of the root's user (so
    not the keyring), and `/desolate` is closed to it (so no share). Measured before the
    fix: the proxies' user appended to a root clone's file on the Mac.
+9. **One proxies' user read every domain's secrets, and any root VM user could use any
+   domain's secrets proxy** (`mac/proxy-per-domain`). A user per domain, its secrets in a
+   directory only its group reads, and a handoff token every secrets proxy requires.
 
 ## Open
 
-9. **One proxies' user reads every domain's secrets.** A bug in mitmproxy, reached from one
-   domain's workspace, can read every domain's secret values (and the proxies have the
-   internet). A user per domain, or a secrets proxy that is given only its domain's
-   values, would narrow it.
 10. **A domain can fill the disk** (from HANDOFF): no quota on an outbox or a share.
 11. **The write key is a file in the root VM** (from HANDOFF, `decisions.md` 5.3): accepted
     under the rule that nothing untrusted runs on the Mac or in the root.

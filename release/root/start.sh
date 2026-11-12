@@ -30,9 +30,11 @@ for rule in /etc/sudoers.d/*; do
   case $rule in */99-desolate) continue ;; esac
   [ -f "$rule" ] && grep -qE "^[[:space:]]*\"?$USER_NAME\"?[[:space:]]" "$rule" && rm -f "$rule"
 done
-# The one thing it may do: run programs as the proxies' user (proxy/as-proxy.ts), which can
-# reach less than it can. That line comes last, so it is what matches for that user alone.
-printf '# desolate (root/start.sh): this user runs what reads a domain'"'"'s data. It is never root.\n%s ALL=(ALL) !ALL\n%s ALL=(desolate-proxy) NOPASSWD: ALL\n' "$USER_NAME" "$USER_NAME" >/etc/sudoers.d/99-desolate.new
+# The one thing it may do: run programs as a domain's proxies' user (proxy/as-proxy.ts),
+# each of which reaches less than it does. That line comes last, so it is what matches for
+# those users alone. (The group is made here, so the rule never names a group that is not.)
+getent group desolate-proxies >/dev/null || groupadd --system desolate-proxies
+printf '# desolate (root/start.sh): this user runs what reads a domain'"'"'s data. It is never root.\n%s ALL=(ALL) !ALL\n%s ALL=(%%desolate-proxies) NOPASSWD: ALL\n' "$USER_NAME" "$USER_NAME" >/etc/sudoers.d/99-desolate.new
 chmod 0440 /etc/sudoers.d/99-desolate.new
 visudo -qcf /etc/sudoers.d/99-desolate.new && mv /etc/sudoers.d/99-desolate.new /etc/sudoers.d/99-desolate
 for group in sudo admin wheel docker lxd; do
@@ -44,13 +46,16 @@ if runuser -u "$USER_NAME" -- sudo -n true 2>/dev/null; then
 fi
 
 id desolate-keyring >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin desolate-keyring
-# The proxies' user (proxy/as-proxy.ts). Its group is how it reads policies and secrets; the
-# root's user is in that group (to make files the proxies read, and read what they write).
-# The proxies' user is in no group of the root's user: the keyring's sockets are not its.
-id desolate-proxy >/dev/null 2>&1 || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin desolate-proxy
-id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx desolate-proxy || usermod -aG desolate-proxy "$USER_NAME"
-for group in $(id -nG desolate-proxy); do
-  [ "$group" = desolate-proxy ] || gpasswd -d desolate-proxy "$group" >/dev/null
+# Each domain's proxies' user (proxy/as-proxy.ts) is made by proxy-user.sh: for every domain
+# there is, here, and for a new one when the host first wants its proxies. None of them is
+# in a group of the root's user (the keyring's sockets are not theirs), and the root's user
+# is in none of theirs. (Layout 2 had one proxies' user for every domain: gone, with the
+# root's user's membership of its group.)
+id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx desolate-proxy && gpasswd -d "$USER_NAME" desolate-proxy >/dev/null
+for domain_dir in /desolate/domains/*/; do
+  domain=$(basename "$domain_dir")
+  [[ $domain =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] && [[ $domain != *--* ]] || continue
+  bash "$HERE/proxy-user.sh" "$USER_UID" "$domain" >/dev/null
 done
 # THE SHARES ARE CLOSED TO EVERY OTHER USER HERE. On vz, a file in a share reports as owned
 # by whichever user last asked about it, so the guest's permission bits keep no user of this
@@ -97,6 +102,7 @@ if [ "$(cat "$SYS/layout" 2>/dev/null)" != "$LAYOUT" ] || [ "$(cat "$SYS/code" 2
   pkill -f "$HERE/proxy/proxy.ts" 2>/dev/null || true
   pkill -f /opt/desolate/proxy-venv/bin/mitmdump 2>/dev/null || true
   [ -d "$STATE" ] && as_user bash -c 'rm -f "$1"/proxy/running/*.json "$1"/proxy/secrets/*.json' _ "$STATE" 2>/dev/null || true
+  rm -f /var/lib/desolate-proxies/domains/*/secrets-proxy.json
   sleep 1
 fi
 install -d -m 0755 -o "$USER_NAME" -g "$USER_GROUP" "$STATE"
@@ -133,17 +139,25 @@ as_user bash -c '
   mkdir -p -m 0700 approvals proxy/running
   mkdir -p -m 0755 push-locks
   chmod 0700 approvals proxy/running
-  # What the proxies read: the policies, each domain'"'"'s secrets and where its secrets proxy
-  # listens. Theirs to read, through the group (set-group-ID, so what is made in them is
-  # in the group too); nobody else'"'"'s.
-  mkdir -p secrets proxy/policy proxy/secrets
-  chgrp desolate-proxy proxy proxy/policy proxy/secrets secrets
-  chmod 0750 proxy && chmod 2750 proxy/policy proxy/secrets secrets
-  find proxy/policy proxy/secrets secrets -maxdepth 1 -type f -name "*.json" -exec chgrp desolate-proxy {} + -exec chmod 0640 {} +
-  # What the proxies write: proxy-out, theirs to write and anyone here to read.
-  mkdir -p proxy-out proxy-out/ca
-  chgrp desolate-proxy proxy-out proxy-out/ca
-  chmod 2775 proxy-out && chmod 2770 proxy-out/ca' _ "$STATE"
+  chmod 0700 proxy
+  # Layout 2 kept every domain'"'"'s policy and secret values here, for one proxies'"'"' user:
+  # each goes to its domain'"'"'s own directory (proxy-user.sh made them above), once, and
+  # the old copies go.
+  for old in proxy/policy/*.json secrets/*.json; do
+    [ -f "$old" ] && [ ! -L "$old" ] || continue
+    domain=$(basename "$old" .json)
+    case $old in proxy/policy/*) new=policy.json ;; *) new=secrets.json ;; esac
+    dir=/var/lib/desolate-proxies/domains/$domain
+    [ -d "$dir" ] && [ -O "$dir" ] || continue
+    [ -e "$dir/$new" ] || { cat "$old" >"$dir/$new.tmp" && chmod 0640 "$dir/$new.tmp" && mv "$dir/$new.tmp" "$dir/$new"; }
+    rm -f "$old"
+  done
+  rmdir proxy/policy proxy/secrets secrets 2>/dev/null || true
+  # And its shared proxy-out. (Not carried over: a domain'"'"'s secrets proxy makes a new CA,
+  # which its workspaces trust at their next start. Root copying from this directory, which
+  # is the user'"'"'s to swap, could be made to copy anything root can read.)
+  rm -rf proxy-out' _ "$STATE"
+id desolate-proxy >/dev/null 2>&1 && { pkill -u desolate-proxy 2>/dev/null; userdel desolate-proxy 2>/dev/null; groupdel desolate-proxy 2>/dev/null; } || true
 # The root's git settings, for desolate's own commands and for the person's shell alike.
 # The root's clones hold commits that agents wrote. Nothing here trusts what a commit
 # contains:

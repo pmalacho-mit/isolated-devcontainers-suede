@@ -162,13 +162,13 @@ describe("T2 phase 1: the root VM", () => {
     // The user owns /var/lib/desolate, so it can replace any name there with a link. Before,
     // root's start-up ran `install -d -o <user>` on such names and gave the user what the
     // link named. Plant links where start-up looks, run it again, and see what moved.
-    const planted = stack.inRoot(["bash", "-c", "cd /var/lib/desolate && mv secrets secrets.kept && ln -s /usr/local/bin secrets && rm -rf push-locks && ln -s /etc/desolate push-locks && ln -s /etc/profile.d hooks && echo planted"]);
+    const planted = stack.inRoot(["bash", "-c", "cd /var/lib/desolate && mv approvals approvals.kept && ln -s /usr/local/bin approvals && rm -rf push-locks && ln -s /etc/desolate push-locks && ln -s /etc/profile.d hooks && echo planted"]);
     assert.match(planted.stdout, /planted/, planted.stderr);
     // Start-up may refuse (the user broke its own directory): that is failing closed.
     // What it must not do is act on root's directories.
     bootstrap(stack);
     const after = stack.inRoot(["stat", "-c", "%U %a %n", "/usr/local/bin", "/etc/desolate", "/etc/profile.d"], { root: true }).stdout;
-    stack.inRoot(["bash", "-c", "cd /var/lib/desolate && rm -f secrets push-locks hooks && mv secrets.kept secrets && mkdir -p push-locks"]);
+    stack.inRoot(["bash", "-c", "cd /var/lib/desolate && rm -f approvals push-locks hooks && mv approvals.kept approvals && mkdir -p push-locks"]);
     assert.match(after, /^root 755 \/usr\/local\/bin\nroot 755 \/etc\/desolate\nroot 755 \/etc\/profile\.d\n$/, "root's directories stayed root's");
     const again = bootstrap(stack);
     assert.equal(again.code, 0, again.stderr + again.stdout.slice(-800));

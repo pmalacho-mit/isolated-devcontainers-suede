@@ -6,11 +6,12 @@ import { refuse } from "../../shared/exit.ts";
 import { readJson, writeJson } from "../../shared/json.ts";
 import { normalizeName } from "../../shared/sniff.ts";
 import { ROOT } from "../layout.ts";
-import { alive, PROXY_CODE, PROXY_OUT, spawnAsProxy, stopProxy } from "./as-proxy.ts";
+import { alive, hasProxyUser, PROXY_CODE, proxyDomainDir, proxyOutDir, spawnAsProxy, stopProxy } from "./as-proxy.ts";
 import type { Policy } from "./proxy.ts";
 
 const DIR = `${ROOT.state}/proxy`;
 type Running = { port: number; pid: number; domain: string; workspace: string };
+const notMade = (domain: string) => refuse(`the domain ${domain} has no proxies' user yet`, "desolate bootstrap (the host makes it: root/proxy-user.sh)");
 const file = (vm: string) => path.join(DIR, "running", `${vm}.json`);
 const free = (port: number) =>
   new Promise<boolean>((resolve) => {
@@ -23,6 +24,7 @@ export const start = async (vm: string, domain: string, workspace: string): Prom
   if (!/^[a-z0-9-]{1,60}$/.test(vm)) throw new Error("not a VM name");
   const existing = readJson<Running | null>(file(vm), null);
   if (existing && alive(existing.pid)) return { port: existing.port };
+  if (!hasProxyUser(domain)) notMade(domain);
   fs.mkdirSync(path.join(DIR, "running"), { recursive: true });
   let port = 0;
   for (let candidate = 21000; candidate < 22000 && port === 0; candidate++) if (await free(candidate)) port = candidate;
@@ -30,7 +32,7 @@ export const start = async (vm: string, domain: string, workspace: string): Prom
   const log = fs.openSync(path.join(DIR, "proxy.log"), "a");
   const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
   for (const key of ["DESOLATE_ROOT_STATE", "DESOLATE_ROOT_DOMAINS", "DESOLATE_ROOT_SYS"]) if (process.env[key]) env[key] = process.env[key]!;
-  const child = spawnAsProxy(process.execPath, ["--disable-warning=ExperimentalWarning", path.join(PROXY_CODE, "root", "proxy", "proxy.ts"), String(port), domain, workspace], env, log);
+  const child = spawnAsProxy(domain, process.execPath, ["--disable-warning=ExperimentalWarning", path.join(PROXY_CODE, "root", "proxy", "proxy.ts"), String(port), domain, workspace], env, log);
   fs.closeSync(log);
   for (let waited = 0; (await free(port)) && waited < 5000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
   writeJson(file(vm), { port, pid: child.pid, domain, workspace });
@@ -39,11 +41,11 @@ export const start = async (vm: string, domain: string, workspace: string): Prom
 
 export const stop = (vm: string) => {
   const existing = readJson<Running | null>(file(vm), null);
-  if (existing && alive(existing.pid)) stopProxy(existing.pid);
+  if (existing && alive(existing.pid)) stopProxy(existing.domain, existing.pid);
   fs.rmSync(file(vm), { force: true });
 };
 
-const policyFile = (domain: string) => path.join(DIR, "policy", `${domain}.json`);
+const policyFile = (domain: string) => path.join(proxyDomainDir(domain), "policy.json");
 export const policy = (domain: string): Policy => ({ mode: "open", hosts: [], internal: [], ...readJson<Partial<Policy>>(policyFile(domain), {}) });
 
 export const setPolicy = (domain: string, change: { mode?: unknown; allow?: unknown; deny?: unknown; internal?: unknown }): Policy => {
@@ -86,12 +88,32 @@ export const recommend = (domain: string) => {
   return { mode: rules.mode, listed: rules.hosts, reached: rank(reached), refused: rank(refused) };
 };
 
+/** What a domain's proxies audited (each domain's log is its proxies' own, in
+ *  proxy-out/<domain>): every domain's, or one's, oldest first. A line that is not JSON, or
+ *  names another domain than the log it is in, is not believed. */
 export const auditLog = (filter: { domain?: string; last?: number }) => {
-  let lines: string[] = [];
+  let domains: string[] = [];
   try {
-    lines = fs.readFileSync(path.join(PROXY_OUT, "audit.log"), "utf8").trim().split("\n").filter(Boolean);
+    domains = filter.domain ? [filter.domain] : fs.readdirSync(`${ROOT.proxies}/out`).filter((name) => /^[a-z0-9-]{1,40}$/.test(name));
   } catch {
     /* nothing audited yet */
   }
-  return lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((entry) => !filter.domain || entry.domain === filter.domain).slice(-(filter.last ?? 100));
+  const entries: Record<string, unknown>[] = [];
+  for (const domain of domains) {
+    let text = "";
+    try {
+      text = fs.readFileSync(path.join(proxyOutDir(domain), "audit.log"), "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.trim().split("\n").filter(Boolean)) {
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (entry.domain === domain) entries.push(entry);
+      } catch {
+        /* not a line a proxy wrote */
+      }
+    }
+  }
+  return entries.sort((a, b) => String(a.time).localeCompare(String(b.time))).slice(-(filter.last ?? 100));
 };

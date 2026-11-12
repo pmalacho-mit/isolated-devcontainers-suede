@@ -427,32 +427,41 @@ still go to the network. Not on the fake backend (its clone carries no docker im
 Not covered by a test that builds one: the tiers have no registry. T1 covers the key and
 the name.
 
-## The proxies run as a user of their own (decided on the Mac; measured)
+## Each domain's proxies run as a user of that domain's own (decided on the Mac; measured)
 
 Each workspace's `proxy.ts` and each domain's mitmproxy parse everything a workspace sends.
 They ran as the root's ordinary user, so a bug in either reached what that user reaches:
-the keyring's sockets (every read key signs for it; write keys need an approval), the root
-clones and mirrors (a hook or an `fsmonitor` in a clone's config runs as the user at its
-next git command), and every domain's secrets.
+the keyring's sockets (every read key signs for it), the root clones and mirrors (a hook or
+an `fsmonitor` in a clone's config runs as the user at its next git command), and every
+domain's secrets. A first step gave all proxies one user of their own; that still let a bug
+reached from one domain read every domain's secrets. Now:
 
-- **`desolate-proxy`**, a system user with a group of its own. The root's user may run
-  programs as it (`<user> ALL=(desolate-proxy) NOPASSWD: ALL`, the last line of
-  `99-desolate`): safe in that direction, since the root's user already holds all it holds.
-  It is in no group of the root's user, so the keyring's sockets (0660, that group) refuse
-  it.
-- **What it reads**, through its group, in set-group-ID directories the root's user makes:
-  the policies, each domain's secret values and where its secrets proxy listens. **What it
-  writes**: `/var/lib/desolate/proxy-out` (the audit log, each domain's CA). The root's
-  user copies a CA into a domain's inbox only if it is a plain file holding a certificate.
-- **The shares are closed to it** by `/desolate` (root, the root user's group, 0750), not a
-  share: on vz any user that reaches a share can write it (previous section). Its code is
-  a root-owned copy at `/opt/desolate/proxy-code`, made by `start.sh`.
-- `doctor` asks: it can be started, shares no group with the root's user, and cannot reach
-  `/desolate/root`. T4 tries, as it, to write each share and to ask the keyring, with the
-  root's user writing the same share as the control.
-- **Left:** the proxies' user reads every domain's secrets (one user for all domains), and
-  has the internet. A bug in a proxy can still leak secrets and the traffic it carries. A
-  user per domain would narrow that; not done.
+- **`dsp-<10 hex>`, one per domain** (`root/proxy-user.sh`, run by root: by start.sh for
+  every domain there is, and by the host, through its own way in, when a domain's proxies
+  are first wanted). Each is in the group `desolate-proxies` and in no group of the root's
+  user, so the keyring's sockets refuse it. The root's user may run programs as any member
+  of that group (`<user> ALL=(%desolate-proxies) NOPASSWD: ALL`, the last line of
+  `99-desolate`): safe in that direction, since the root's user holds all any of them holds.
+- **Two directories per domain, in root's `/var/lib/desolate-proxies`**, where nothing of
+  the root's user's is on the way: `domains/<d>` (the root's user's, group: the domain's
+  proxies, 2750) holds the policy, the secret values, where the secrets proxy listens and a
+  handoff token; `out/<d>` (the domain's proxies', group: the root's user's, 2750) holds
+  their audit log and the domain's CA.
+- **The handoff token.** A secrets proxy listens on the root VM's loopback, where any user
+  can connect. It opens a tunnel only for a connection that shows its domain's token, which
+  only that domain's proxies (and the root's user) can read. Measured on the M1: another
+  domain's proxies' user, given the port, got 403 without the token and with a wrong one;
+  the domain's own, with it, 200; reading the domain's secrets file: permission denied.
+- **The shares are closed to all of them** by `/desolate` (root, the root user's group,
+  0750), not a share: on vz any user that reaches a share can write it (previous
+  section). Their code is a root-owned copy at `/opt/desolate/proxy-code`.
+- `doctor` asks, for every domain's proxies' user: it can be started, shares no group with
+  the root's user, cannot reach `/desolate/root`, and cannot reach any other domain's
+  directory. T4 tries as domain a's proxies to write each share and ask the keyring, and as
+  another domain's to read a's secrets and use a's secrets proxy, each beside a control.
+- **Left:** a domain's proxies have the internet (they are its way out) and read its
+  secrets; a bug in them reached from that domain's own workspace can leak that domain's
+  secrets. That domain's workspaces can already use them.
 
 ## ssh-agent needs a relay in front of it (measured)
 

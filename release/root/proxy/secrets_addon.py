@@ -36,6 +36,7 @@ on the CONNECT it makes), never anything the workspace says: a workspace's own b
 inside the tunnel.
 """
 import fnmatch
+import hmac
 import ipaddress
 import json
 import logging
@@ -49,7 +50,23 @@ log = logging.getLogger("desolate-secrets")
 
 SETTINGS_PATH = os.environ.get("DESOLATE_SECRETS", "/var/lib/desolate/secrets/unset.json")
 POLICY_PATH = os.environ.get("DESOLATE_POLICY", "/var/lib/desolate/proxy/policy/unset.json")
-AUDIT_PATH = os.environ.get("DESOLATE_AUDIT", "/var/lib/desolate/proxy/audit.log")
+AUDIT_PATH = os.environ.get("DESOLATE_AUDIT", "/var/lib/desolate/proxy-out/unset/audit.log")
+# The domain's handoff token: this proxy listens on the root VM's loopback, where any user of
+# that VM can connect, so it takes a tunnel only from what can read this file (its domain's
+# proxies: root/proxy/as-proxy.ts). Read once; unreadable or malformed, nothing is let in.
+TOKEN_PATH = os.environ.get("DESOLATE_LINK_TOKEN", "")
+
+
+def _read_token() -> str:
+    try:
+        with open(TOKEN_PATH) as handle:
+            token = handle.read().strip()
+        return token if re.fullmatch(r"[0-9a-f]{64}", token) else ""
+    except OSError:
+        return ""
+
+
+LINK_TOKEN = _read_token()
 
 SECRET_NAME = re.compile(r"[A-Z][A-Z0-9_-]{7,63}")
 HEADER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
@@ -254,6 +271,11 @@ class DesolateSecrets:
     def http_connect(self, flow: http.HTTPFlow):
         """proxy.ts opening a tunnel for one workspace's connection."""
         try:
+            given = flow.request.headers.get("x-desolate-token", "")
+            if not LINK_TOKEN or not hmac.compare_digest(given.encode(), LINK_TOKEN.encode()):
+                return self._block(flow, 403, "this proxy is reached only through its own domain's workspaces' proxies")
+            # Not passed on: the upstream never sees desolate's own headers.
+            del flow.request.headers["x-desolate-token"]
             workspace = flow.request.headers.get("x-desolate-workspace", "")
             host = flow.request.headers.get("x-desolate-host", "").lower()
             if not re.fullmatch(r"[a-z0-9-]{1,80}", workspace) or not host or flow.request.port != 443:
