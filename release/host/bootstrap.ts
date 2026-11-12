@@ -1,6 +1,8 @@
 // bootstrap, doctor, destroy (section 13.1).
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
+import { createServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import * as path from "node:path";
 import { refuse } from "../shared/exit.ts";
 import { waitFor } from "../shared/run.ts";
@@ -104,6 +106,18 @@ export const bootstrap = async (options: { forge?: string; forgeKnownHosts?: str
   step(info.status !== "running", "root VM running");
 
   const wasUp = await rootctl<{ keyring: boolean }>("ping", {}, { quiet: true, timeoutMs: 30_000 }).then((r) => r.keyring, () => false);
+  // The root does not reach the Mac's loopback or private addresses (root/wall.sh), set
+  // before its services start. In a test run only: a stand-in forge on the Mac's loopback or
+  // a private address is let through. On a real VM a wall that cannot be set stops here, and
+  // from then on stops start.sh too.
+  {
+    const testing = process.env.DESOLATE_TEST_RUN === "1";
+    const standIn = forge.kind === "stand-in" && testing ? forge.ssh.host : null;
+    const ports = [...(standIn === "192.168.5.2" ? [forge.ssh.port] : []), ...(testing ? (process.env.DESOLATE_TEST_GATEWAY_PORTS ?? "").split(",").filter(Boolean) : [])].map(String);
+    const hosts = standIn && standIn !== "192.168.5.2" && /^\d+\.\d+\.\d+\.\d+$/.test(standIn) ? ["--allow-host", standIn] : [];
+    const walled = await backend().exec(ROOT_VM, ["bash", `${guest.release}/root/wall.sh`, "set", ...(backend().isolated ? ["--required"] : []), ...hosts, ...ports], { root: true, timeoutMs: 60_000 });
+    if (walled.code !== 0 && backend().isolated) refuse(`the root VM could not be walled off from the Mac's loopback: ${(walled.stderr || walled.stdout).trim().slice(-300)}`, "desolate doctor");
+  }
   // Always: start.sh leaves alone what is running, and starts what a newer desolate added.
   {
     await startRootServices();
@@ -175,6 +189,23 @@ export const doctor = async (out: Out, json = false): Promise<number> => {
   }
   if (asked) checks.push(...asked);
   else for (const name of rootChecks) checks.push({ name, ok: false, detail: "could not be asked: the root does not answer", fix: "desolate bootstrap" });
+  // The Mac's loopback, from the root's own user, asked by trying: a listener of doctor's own
+  // on the Mac's 127.0.0.1 (so the port certainly answers there), tried at both addresses
+  // Lima's network maps to the Mac; and the wall itself, as root.
+  if (rootUp && b.isolated) {
+    const server = createServer((socket) => socket.end("mac\n"));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const tried = await b.exec(ROOT_VM, ["bash", "-c", `for a in 192.168.5.2 192.168.5.3; do timeout 4 bash -c "</dev/tcp/$a/${port}" 2>/dev/null && echo "$a REACHED" || echo "$a refused"; done`], { timeoutMs: 30_000 });
+      const wall = await b.exec(ROOT_VM, ["nft", "list", "table", "inet", "desolate_wall"], { root: true, timeoutMs: 30_000 });
+      const reached = tried.stdout.split("\n").filter((line) => line.endsWith("REACHED")).map((line) => line.split(" ")[0]);
+      const ok = tried.code === 0 && reached.length === 0 && /192\.168\.5\.0\/24 reject/.test(wall.stdout);
+      checks.push({ name: "root: the Mac's loopback is walled off", ok, detail: ok ? `the root's own user cannot reach a port that answers on the Mac's 127.0.0.1, at 192.168.5.2 or .3` : reached.length ? `the root's own user reached the Mac's 127.0.0.1 at ${reached.join(", ")}` : "the root VM's wall is not set", fix: "desolate bootstrap" });
+    } finally {
+      server.close();
+    }
+  }
 
   const failed = checks.filter((check) => !check.ok);
   if (json) out(JSON.stringify({ ok: failed.length === 0, backend: kind, isolated: b.isolated, checks }, null, 2));

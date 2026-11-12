@@ -286,6 +286,14 @@ install -d -m 0755 -o root -g root /etc/desolate
 # `desolate approve`, was made above, by the user.)
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+# The Mac's loopback, walled off before anything that reads a domain's data starts (wall.sh).
+# Best effort here (a container standing in for a VM may not be allowed to set it); the host
+# sets it at bootstrap and refuses to go on without it on a real VM, and doctor asks.
+if ! bash "$HERE/wall.sh" apply; then
+  # On a real VM the host asked for it (wall.sh set --required): nothing starts without it.
+  [ -f "$SYS/wall-required" ] && { echo "start.sh: the Mac's loopback could not be walled off; nothing that reads a domain's data is started" >&2; exit 1; }
+  echo "start.sh: the Mac's loopback could not be walled off here (not a real VM)" >&2
+fi
 if ! alive "$RUN/keyring.pid"; then
   setsid runuser -u desolate-keyring -g "$USER_GROUP" -- \
     $NODE "$HERE/keyring.ts" >>"$SYS/keyring.log" 2>&1 </dev/null &

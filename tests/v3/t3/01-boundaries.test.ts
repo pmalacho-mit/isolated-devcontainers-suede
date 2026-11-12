@@ -64,6 +64,32 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
     assert.match(result.stdout, /doctor: all checks passed/);
   });
 
+  it("T3 the root VM does not reach the Mac's loopback: the host daemon's port answers on the Mac, and not to the root", async () => {
+    // A listener of the test's own on the Mac's loopback, and the daemon's (editors') port.
+    const server = net.createServer((socket) => socket.end("the-mac\n"));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const mine = (server.address() as net.AddressInfo).port;
+    try {
+      const control = await new Promise<string>((resolve) => {
+        const socket = net.connect(mine, "127.0.0.1");
+        let got = "";
+        socket.on("data", (chunk) => (got += chunk));
+        socket.on("close", () => resolve(got));
+        socket.on("error", () => resolve(""));
+      });
+      assert.equal(control, "the-mac\n", "control: it answers on the Mac");
+      const port = Number(stack.env.DESOLATE_EDITOR_PORT);
+      const tried = stack.inRoot(["bash", "-c", `for a in 192.168.5.2 192.168.5.3; do for p in ${mine} ${port}; do timeout 4 bash -c "</dev/tcp/$a/$p" 2>/dev/null && echo "$a:$p REACHED" || echo "$a:$p refused"; done; done; curl -s -m 4 -g "http://[fec0::2]:${mine}/" >/dev/null 2>&1 && echo "v6 REACHED" || echo "v6 refused"`]);
+      assert.equal(tried.stdout.trim(), [`192.168.5.2:${mine}`, `192.168.5.2:${port}`, `192.168.5.3:${mine}`, `192.168.5.3:${port}`].map((x) => `${x} refused`).concat("v6 refused").join("\n"), "none reaches the root, as its own user, on either address Lima maps to the Mac, or IPv6");
+      const asRoot = stack.inRoot(["bash", "-c", `gw=$(ip -4 route show default | awk '/^default via/ {print $3; exit}'); timeout 4 bash -c "</dev/tcp/$gw/${mine}" 2>/dev/null && echo REACHED || echo refused`], { root: true });
+      assert.equal(asRoot.stdout.trim(), "refused", "nor as root in the VM (the wall is the VM's own; root could take it down, and runs nothing untrusted)");
+      // And it is desolate's wall that refuses, not an accident of the network.
+      assert.match(stack.inRoot(["bash", "-c", "nft list table inet desolate_wall >/dev/null 2>&1 && echo walled"], { root: true }).stdout, /walled/);
+    } finally {
+      server.close();
+    }
+  });
+
   it("T3 a repository, a domain, and a workspace in its own VM", () => {
     stack.step("clone, domain, workspace");
     const cloned = stack.desolate("clone", "acme/widgets");
@@ -332,8 +358,11 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
       "try internet_ip http://1.1.1.1/",
       "try internet_name http://example.com/",
     ].join("\n");
-    // Control: the same requests from the root VM, whose egress is open, do reach the host.
-    const control = lines(stack.inRoot(["bash", "-c", probe(`try gateway http://192.168.5.2:${port}/`)]).stdout);
+    // Control: the same request from the root VM, whose egress is open, does reach the host,
+    // once root there lifts the root's own wall from the Mac's loopback (root/wall.sh; tested
+    // above) for this one probe, and sets it again.
+    const control = lines(stack.inRoot(["bash", "-c", `nft delete table inet desolate_wall; ${probe(`try gateway http://192.168.5.2:${port}/`)}
+      bash /desolate/release/root/wall.sh apply >/dev/null`], { root: true }).stdout);
     assert.match(control.gateway ?? "", /^REACHED/, "control: a VM with open egress reaches the host's listener, so a refusal below is the confinement");
     const first = lines(asRoot("a/w1", probe(targets)).stdout);
     for (const [name, verdict] of Object.entries(first)) assert.match(verdict, /^refused/, `${name}, as root in the workspace`);

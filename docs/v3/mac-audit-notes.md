@@ -39,6 +39,10 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
     ports; ten ssh sessions per VM; proxies, the daemon and relays keeping old code. Each in
     `release/docs/incidents.md`.
 
+11b. **The root VM reached the Mac's loopback** (`mac/root-loopback`): the gateway Lima
+    gives every VM is the Mac's loopback, and from the root the approval page answered.
+    Walled off (root/wall.sh); doctor and T4 ask by trying.
+
 ## Open
 
 0. **The root's ordinary user both parses what domains send and pushes** (the audit's F6).

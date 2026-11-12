@@ -231,6 +231,12 @@ page is about, and because three of them were mistakes in the *tests*.
     against a real receive-pack; T2 `04-offers` hands it another commit's pack under a real
     approval: nothing moved. It reads the forge's address from root's copy, not the root's
     user's (`docs/v3/decisions.md`, "The pusher").
+- **The root VM reached the Mac's loopback.** Lima's gateway, 192.168.5.2, is the Mac's
+  loopback: from the root VM the host daemon's approval page answered, and the Mac's own ssh.
+  Nothing from the root needs either. Walled off in the root VM (root/wall.sh): Lima's subnet,
+  private ranges and IPv6, but for replies, DNS and DHCP; at boot, at bootstrap and at every
+  start. Its review found the first cut walled the gateway only, and not after a reboot.
+  Doctor and T4 try it, as the root's user, against a listener that does answer on the Mac.
 - **A deploy key named its owner.** A key's title carried the Mac's hostname, which on a
   Mac is usually its owner's name, and a deploy key's title is shown to everyone who
   administers the repository. It is a hash of the hostname now.
