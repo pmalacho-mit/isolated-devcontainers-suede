@@ -101,3 +101,20 @@ export const ensureProxyUser = async (domain: string) => {
   if (result.code !== 0) refuse(`the domain ${domain}'s proxies' user could not be made: ${(result.stderr || result.stdout).trim().slice(-300)}`, "desolate doctor");
   proxyUsers.add(domain);
 };
+
+/** Change a domain's secrets: as root in the root VM, through the host's own way in, with
+ *  the request (a value among it) on stdin (root/proxy/secret-store.ts). Then the root's
+ *  user, which never sees a value, starts or stops the domain's secrets proxy and tells its
+ *  workspaces the names. Returns the names, hosts and switches. */
+export const changeSecrets = async <T>(domain: string, op: "set" | "switch" | "remove", input: Record<string, unknown>): Promise<T> => {
+  await ensureProxyUser(domain);
+  const result = await backend().exec(ROOT_VM, [...NODE, `${guest.release}/root/proxy/secret-store.ts`, domain, op], { root: true, input: JSON.stringify(input), timeoutMs: 60_000 });
+  let reply: { ok: boolean; error?: string; fix?: string };
+  try {
+    reply = JSON.parse(result.stdout.trim().split("\n").pop() ?? "");
+  } catch {
+    throw new Refusal(`the root did not change ${domain}'s secrets (exit ${result.code}): ${(result.stderr || result.stdout).trim().slice(-300)}`, "desolate doctor");
+  }
+  if (!reply.ok) throw new Refusal(reply.error ?? "the root refused", reply.fix ?? "");
+  return rootctl<T>("secret.apply", { domain }, { quiet: true });
+};

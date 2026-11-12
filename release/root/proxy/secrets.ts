@@ -19,24 +19,23 @@ import { readJson, writeJson } from "../../shared/json.ts";
 import { normalizeName } from "../../shared/sniff.ts";
 import { ROOT } from "../layout.ts";
 import { inbox } from "../outbox.ts";
+import { indexFile, storeFile } from "./secret-store.ts";
+import type { Indexed } from "./secret-store.ts";
 import { alive, ensureLinkToken, hasProxyUser, linkTokenFile, listenerUid, PROXY_CODE, proxyDomainDir, proxyOutDir, proxyUid, spawnAsProxy, stopProxy } from "./as-proxy.ts";
 
 const DIR = `${ROOT.state}/proxy`;
 const MITMDUMP = "/opt/desolate/proxy-venv/bin/mitmdump";
-/** `off`: switched off until someone switches it on. `until` (seconds since the epoch): on
- *  until then, off after: `secret on NAME --ttl 30m`. Neither: on. (v2's switch.) */
-type Secret = { value: string; hosts: string[]; headers?: string[]; off?: boolean; until?: number };
-type Store = { domain: string; secrets: Record<string, Secret> };
+type Store = { domain: string; secrets: Record<string, Omit<Indexed, "name">> };
 export type Running = { port: number; pid: number; hosts: string[] };
 
-/** The values: in the domain's directory, which its proxies' group reads and no other. */
-const storeFile = (domain: string) => path.join(proxyDomainDir(domain), "secrets.json");
+// The values are root's (secret-store.ts); this user reads the index: names, hosts,
+// headers, switches.
 /** Where its secrets proxy listens, for its workspaces' proxies. */
 export const runningFile = (domain: string) => path.join(proxyDomainDir(domain), "secrets-proxy.json");
 /** The domain's CA and mitmproxy's own state: the domain's proxies' (as-proxy.ts). Made by
  *  mitmproxy, as that user, in the directory root made for it. */
 const confdir = (domain: string) => path.join(proxyOutDir(domain), "ca");
-const store = (domain: string): Store => readJson<Store>(storeFile(domain), { domain, secrets: {} });
+const store = (domain: string): Store => ({ domain, secrets: Object.fromEntries(readJson<Indexed[]>(indexFile(domain), []).filter((s) => s && typeof s.name === "string").map(({ name, ...rest }) => [name, rest])) });
 
 const NAME = /^[A-Z][A-Z0-9_-]{7,63}$/;
 const HEADER = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
@@ -134,65 +133,10 @@ export const ensure = async (domain: string): Promise<Running | null> => {
   return running;
 };
 
-const hostPattern = (text: string): string => {
-  const wildcard = text.startsWith("*.");
-  const name = normalizeName(wildcard ? text.slice(2) : text);
-  // `*.name.tld` and deeper only: `*.com` is a whole TLD, and `*foo.com` also matches evilfoo.com.
-  if (!name || text.includes(":") || /[*?[\]]/.test(wildcard ? text.slice(2) : text) || (wildcard && name.split(".").length < 2))
-    refuse(`'${text}' does not pin a destination`, "name the hosts the secret may be sent to: api.example.com, or *.example.com");
-  return wildcard ? `*.${name}` : name!;
-};
-
-export const set = async (domain: string, input: { name?: unknown; value?: unknown; hosts?: unknown; headers?: unknown }) => {
-  const usage = `desolate domain ${domain} secret set <NAME> --hosts <host>[,<host>...] [--headers <header>[,...]]   (the value on stdin)`;
-  const name = String(input.name ?? "");
-  if (!NAME.test(name)) refuse(`'${name}' is not a placeholder name`, "8 to 64 of A-Z, 0-9, _ and -, starting with a letter: for example MYAPP-OPENAI-KEY. It is what workspaces send in place of the value");
-  const value = typeof input.value === "string" ? input.value.replace(/\r?\n$/, "") : "";
-  if (!value || /[\r\n]/.test(value)) refuse("a secret's value is one line, and not empty", usage);
-  if (value.includes(name) || name.includes(value)) refuse("the value and its placeholder overlap", "choose another name");
-  const hosts = (Array.isArray(input.hosts) ? input.hosts : []).map((host) => hostPattern(String(host)));
-  if (hosts.length === 0) refuse("a secret names the hosts it may be sent to: with none it would have no allowlist", usage);
-  const headers = Array.isArray(input.headers) && input.headers.length > 0 ? input.headers.map((header) => String(header).toLowerCase()) : undefined;
-  for (const header of headers ?? []) if (!HEADER.test(header)) refuse(`'${header}' is not a header name`, usage);
-  if (!hasProxyUser(domain)) refuse(`the domain ${domain} has no proxies' user yet`, "desolate bootstrap (the host makes it: root/proxy-user.sh)");
-  const next = store(domain);
-  for (const other of Object.keys(next.secrets))
-    if (other !== name && (other.includes(name) || name.includes(other))) refuse(`${name} and ${other} overlap (one contains the other), so neither could be substituted unambiguously`, "choose a name that does not contain, and is not contained in, another secret's");
-  next.domain = domain;
-  next.secrets[name] = { value, hosts: [...new Set(hosts)].sort(), ...(headers ? { headers: [...new Set(headers)].sort() } : {}) };
-  writeJson(storeFile(domain), next, 0o640);
+/** After root changed the domain's secrets (proxy/secret-store.ts, by the host): its
+ *  secrets proxy running if it has any, its workspaces told the names. Values are not this
+ *  user's to see, and are not seen here. */
+export const apply = async (domain: string) => {
   await ensure(domain);
-  return list(domain).find((s) => s.name === name)!;
-};
-
-/** Switch a secret off, or on (for good, or for a while). Off, its value goes nowhere and a
- *  request that carries its name toward its hosts is refused: the name is never sent in
- *  the value's place. The addon reads the store again by itself. */
-export const switchSecret = async (domain: string, input: { name?: unknown; on?: unknown; ttlSeconds?: unknown }) => {
-  const next = store(domain);
-  const name = String(input.name ?? "");
-  const secret = next.secrets[name];
-  if (!secret) refuse(`the domain ${domain} has no secret named ${name}`, `desolate domain ${domain} secret list`);
-  delete secret!.off;
-  delete secret!.until;
-  if (input.on !== true) secret!.off = true;
-  else if (input.ttlSeconds !== undefined) {
-    const ttl = Number(input.ttlSeconds);
-    if (!Number.isFinite(ttl) || ttl < 1 || ttl > 366 * 86400) refuse("a time to live is between a second and a year", `desolate domain ${domain} secret on ${name} --ttl 30m`);
-    secret!.until = Math.floor(Date.now() / 1000 + ttl);
-  }
-  writeJson(storeFile(domain), next, 0o640);
-  await ensure(domain);
-  return list(domain).find((s) => s.name === name)!;
-};
-
-export const remove = async (domain: string, name: unknown) => {
-  const next = store(domain);
-  const existed = typeof name === "string" && name in next.secrets;
-  if (existed) {
-    delete next.secrets[name as string];
-    writeJson(storeFile(domain), next, 0o640);
-  }
-  await ensure(domain);
-  return { existed };
+  return list(domain);
 };

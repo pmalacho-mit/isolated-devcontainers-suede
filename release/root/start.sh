@@ -171,6 +171,19 @@ as_user bash -c '
   # which its workspaces trust at their next start. Root copying from this directory, which
   # is the user'"'"'s to swap, could be made to copy anything root can read.)
   rm -rf proxy-out' _ "$STATE"
+# Secret values are root's (proxy/secret-store.ts). A domain's store kept by the root's user
+# (layout of 2026-11-12, before) is read BY THAT USER and handed to root as data, then goes.
+install -d -m 0755 -o root -g root /var/lib/desolate-proxies/secrets
+for old in /var/lib/desolate-proxies/domains/*/secrets.json; do
+  [ -f "$old" ] || continue
+  domain=$(basename "$(dirname "$old")")
+  [[ $domain =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] || continue
+  if [ ! -e "/var/lib/desolate-proxies/secrets/$domain.json" ]; then
+    as_user cat "$old" | $NODE "$HERE/proxy/secret-store.ts" "$domain" import >/dev/null \
+      || { echo "start.sh: the domain $domain's secrets could not be taken over; they are still in $old" >&2; exit 1; }
+  fi
+  as_user rm -f "$old"
+done
 id desolate-proxy >/dev/null 2>&1 && { pkill -u desolate-proxy 2>/dev/null; userdel desolate-proxy 2>/dev/null; groupdel desolate-proxy 2>/dev/null; } || true
 # The root's git settings, for desolate's own commands and for the person's shell alike.
 # The root's clones hold commits that agents wrote. Nothing here trusts what a commit
@@ -200,6 +213,12 @@ cat >"$SYS/gitconfig.new" <<G
 # config of its own) is not a repository: git run from inside it does not read that config.
 [safe]
 	bareRepository = explicit
+# Not a protection here, and so not pretended: every file on a share is the root's user's on
+# every backend (all VMs share the Mac user's uid), and on vz a file reports as owned by
+# whoever last asked. Git's ownership check never kept the root out of a domain's
+# repositories; root/git.ts does, for desolate's own git, and the shell's guard below does
+# for the person's. What the check did do was refuse the root's own clones on vz.
+	directory = *
 # A submodule or a remote can name a transport. Only the ones desolate uses exist here;
 # "ext::" (which runs a command) and the rest do not.
 [protocol]
@@ -223,6 +242,14 @@ chmod 0644 "$SYS/gitconfig.new" && mv "$SYS/gitconfig.new" "$SYS/gitconfig"
 cat >/etc/profile.d/desolate-root.sh <<'P'
 export GIT_CONFIG_GLOBAL=/var/lib/desolate-root/gitconfig
 export PS1='[desolate root: review and push here; never run a repository'"'"'s own code] \w \$ '
+# A domain's repositories are its own, and their config is the domain's to write: git run in
+# one would act on it (P4). Where a person's shell is in one, git says so instead.
+git() {
+  case "$(pwd -P)/" in
+    /desolate/domains/*) echo "desolate: this is a domain's own repository, not the root's: git is not run here (P4). The root's clone of it is under /desolate/root." >&2; return 1 ;;
+  esac
+  command git "$@"
+}
 P
 
 # No sudo rule: nothing in this VM can approve a push. An approval is a signature by the

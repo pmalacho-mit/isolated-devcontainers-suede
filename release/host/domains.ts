@@ -2,7 +2,7 @@
 import { EXIT, refuse } from "../shared/exit.ts";
 import * as fs from "node:fs";
 import { guest } from "./paths.ts";
-import { backend, ensureProxyUser, rootctl } from "./stack.ts";
+import { backend, changeSecrets, ensureProxyUser, rootctl } from "./stack.ts";
 
 type Out = (line: string) => void;
 
@@ -122,7 +122,7 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
         if (!match || action === "off") refuse(action === "off" ? "--ttl goes with `secret on`" : `'${String(values.ttl)}' is not a time to live`, `desolate domain ${first} secret on ${name} --ttl 30m   (s, m, h or d)`, EXIT.usage);
         ttlSeconds = Number(match![1]) * { s: 1, m: 60, h: 3600, d: 86400 }[match![2] as "s" | "m" | "h" | "d"];
       }
-      const switched = await rootctl<Listed>("secret.switch", { domain: first, name, on: action === "on", ttlSeconds }, { quiet: true });
+      const switched = (await changeSecrets<Listed[]>(first, "switch", { name, on: action === "on", ttlSeconds })).find((s) => s.name === name)!;
       if (json) return out(JSON.stringify(switched));
       return out(switched.on ? `${name} is ${stateOf(switched)}${switched.secondsLeft !== undefined ? ", then off" : ""}.` : `${name} is OFF: its value goes nowhere, and a request that carries its name toward ${switched.hosts.join(", ")} is refused. To switch it on: desolate domain ${first} secret on ${name} [--ttl 30m]`);
     }
@@ -133,14 +133,15 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
         // process on the machine and are kept in shell history.
         if (process.stdin.isTTY) process.stderr.write(`Paste the value of ${name} and press Enter (it is not shown): `);
         const value = await readSecretLine();
-        const set = await rootctl<Listed>("secret.set", { domain: first, name, value, hosts: csv(values.hosts), headers: csv(values.headers) }, { quiet: true });
+        const set = (await changeSecrets<Listed[]>(first, "set", { name, value, hosts: csv(values.hosts), headers: csv(values.headers) })).find((s) => s.name === name)!;
         await trustCa(first);
         if (json) return out(JSON.stringify(set));
         out(`${set.name} is held in the root for the domain ${first}. Its workspaces send the name; the value is put in its place on the way to: ${set.hosts.join(", ")}${set.headers ? ` (in the header${set.headers.length > 1 ? "s" : ""} ${set.headers.join(", ")} only)` : ""}.`);
         return out(`in a workspace: export SOME_API_KEY=${set.name}   (the name is not a secret)`);
       }
-      const removed = await rootctl<{ existed: boolean }>("secret.remove", { domain: first, name }, { quiet: true });
-      return out(json ? JSON.stringify(removed) : removed.existed ? `${name} is no longer held for the domain ${first}.` : `the domain ${first} had no secret named ${name}.`);
+      const existed = (await rootctl<Listed[]>("secret.list", { domain: first }, { quiet: true })).some((s) => s.name === name);
+      await changeSecrets<Listed[]>(first, "remove", { name });
+      return out(json ? JSON.stringify({ existed }) : existed ? `${name} is no longer held for the domain ${first}.` : `the domain ${first} had no secret named ${name}.`);
     }
     if (action && action !== "list") refuse(`'secret ${action}' is not understood`, usage, EXIT.usage);
     const listed = await rootctl<Listed[]>("secret.list", { domain: first }, { quiet: true });
