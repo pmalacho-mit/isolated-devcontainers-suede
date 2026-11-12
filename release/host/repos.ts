@@ -1,5 +1,6 @@
 // clone, fetch, repos, keys: the host's part. The root makes keys and fetches; the host only
 // registers the public halves with the forge, using the person's own credentials there.
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -29,7 +30,11 @@ const register = async (repo: string, key: Key) => {
   const file = path.join(os.tmpdir(), `desolate-${process.pid}-${key.role}.pub`);
   fs.writeFileSync(file, key.pubkey + "\n");
   try {
-    const args = ["repo", "deploy-key", "add", file, "--repo", repo, "--title", `desolate ${key.role} (${os.hostname()}, ${INSTANCE})`];
+    // The title is seen by everyone who administers the repository. A Mac's hostname is
+    // often its owner's name ("Someones-MacBook-Pro"), so the host is named by a hash of it:
+    // enough to tell two machines' keys apart, nothing about who owns them.
+    const host = createHash("sha256").update(os.hostname()).digest("hex").slice(0, 8);
+    const args = ["repo", "deploy-key", "add", file, "--repo", repo, "--title", `desolate ${key.role} (host ${host}, ${INSTANCE})`];
     if (key.role === "write") args.push("--allow-write");
     const result = await run("gh", args);
     if (result.code === 0) return "registered";

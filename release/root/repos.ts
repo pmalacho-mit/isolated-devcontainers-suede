@@ -96,7 +96,7 @@ export const fetch = async (repo: Repo, log: (line: string) => void = () => {}) 
   await gitOk(mirror, ["config", "--add", "remote.origin.fetch", "+refs/heads/*:refs/heads/*"]);
   await gitOk(mirror, ["config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"]);
 
-  log(`fetching ${repoId(repo)} with the read key`);
+  log(`fetching ${repoId(repo)} ${record.anonymous ? "anonymously, over https" : "with the read key"}`);
   const fetched = await git(mirror, ["fetch", "--prune", "--no-auto-gc", "--quiet", "origin"], { timeoutMs: 600_000 });
   if (fetched.code !== 0)
     refuse(`cannot fetch ${repoId(repo)}: ${fetched.stderr.trim().split("\n").slice(-3).join(" | ")}`,

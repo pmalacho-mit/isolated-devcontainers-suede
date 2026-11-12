@@ -110,7 +110,8 @@ fi
 
 say "git: system settings a domain clone needs (section 4.2)"
 git lfs install --system >/dev/null
-git config --system --replace-all safe.directory '/desolate/mirrors/*'
+# safe.directory for the mirrors is set per VM, by exact path, by workspace/start.sh: the
+# image's git (2.43) ignores "<dir>/*", so a pattern here would be config that does nothing.
 git config --system init.defaultBranch main
 git config --system protocol.file.allow always
 

@@ -11,6 +11,15 @@ LINK=${2:?usage: start.sh <uid> <link>}
 HERE=$(cd "$(dirname "$0")" && pwd)
 USER_NAME=$(getent passwd "$USER_UID" | cut -d: -f1)
 install -d -m 0755 /run/desolate /var/lib/desolate
+# The mirrors this VM was shown, by their exact paths, as directories git may read although
+# its user does not own them. Needed on vz, where a virtiofs share's root can report uid 0
+# for a while after it is mounted, and git then refuses the mirror (release/docs/incidents.md).
+# Exact paths: the image's git (2.43) does not understand "<dir>/*", which came in 2.46.
+git config --system --unset-all safe.directory 2>/dev/null || true
+# (A repository's name is [A-Za-z0-9._-], so a mirror's path never needs /proc's escapes.)
+awk '$2 ~ "^/desolate/mirrors/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+[.]git$" { print $2 }' /proc/mounts | while read -r mirror; do
+  git config --system --add safe.directory "$mirror"
+done
 # `desolate` and `/desolate/status` inside a workspace: its own small CLI.
 ln -sf "$HERE/desolate" /usr/local/bin/desolate
 "$HERE/net/up.sh" "$LINK"
