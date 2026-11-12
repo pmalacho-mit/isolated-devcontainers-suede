@@ -139,6 +139,45 @@ way out, only over TLS, only toward the hosts the secret names, only in the head
 Connections to those hosts are the only ones whose TLS the root terminates (the workspace
 trusts its domain's CA for that); everything else stays end to end.
 
+## On a Mac: if macOS asks about `limactl` and incoming connections
+
+With the macOS firewall on, you may see this dialog (the wording on macOS 14.5, from the
+Application Firewall's own strings):
+
+> **Do you want the application “limactl” to accept incoming network connections?**
+>
+> Clicking Deny may limit the application’s behavior. This setting can be changed in the
+> Firewall pane of Network Settings.
+>
+> [ Deny ] [ Allow ]
+
+**Click Deny.** desolate never needs another machine to connect to it:
+
+- Everything desolate listens on is your Mac's loopback (`127.0.0.1`): the dashboard, the
+  editors, dev servers, each workspace's link. The macOS firewall does not apply to loopback,
+  so Deny changes nothing for desolate.
+- desolate's VMs forward nothing onto your Mac by themselves: every desolate VM refuses
+  Lima's own port forwarding, on every address, TCP and UDP, and `desolate doctor` checks
+  it ("VMs forward nothing by themselves").
+- What raises this dialog is a `limactl` binding a port on *all* interfaces, which
+  desolate's VMs were shown not to do (on the M1, every kind of listener in a workspace
+  was tried). Another Lima instance does: Colima, which the tests use for Docker,
+  forwards a container port published without an address (`docker run -p 8080:80`) to
+  every interface of the Mac, and that is the likely source of the dialog seen on the M1
+  (which process it was could not be read back without an administrator). Allowing it
+  would let other machines on your network reach that container; if you need a published
+  port, publish it on loopback (`-p 127.0.0.1:8080:80`).
+
+`limactl` is one binary for every Lima instance, so the answer covers all of them, and macOS
+asks again after Homebrew updates Lima (the path changes). To change it later: **System
+Settings → Network → Firewall → Options…**, find `limactl` and set it to "Block incoming
+connections" (or remove it). From a terminal, as an administrator:
+
+```bash
+/usr/libexec/ApplicationFirewall/socketfilterfw --listapps        # what is allowed
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --blockapp "$(realpath "$(command -v limactl)")"
+```
+
 ## What works today, and what does not
 
 "T2" is the fake backend: containers standing in for VMs, **not isolated**, good for
