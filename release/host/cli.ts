@@ -50,6 +50,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
                                                                  host, on your terminal
   desolate events [--replay <n>]                                 what happens, as JSON lines, until stopped: pushed,
                                                                  offered, status, approval-waiting, workspace-up, ...
+  desolate notify                                                notifications on this Mac: a push waiting, an offer,
+                                                                 an agent asking for you, a push done; until stopped
   desolate git [<owner/repo>] [--open]                           a shell in the git VM, in your browser: your own
                                                                  clones, git and nothing else; pushes wait for approval
   desolate approve [--web [--open] | --selftest]                 approve a raw git push waiting in the root shell
@@ -248,6 +250,11 @@ const main = async (argv: string[]): Promise<number> => {
     // process does not pile lines up either, it stops when stdout does.)
     process.stdout.on("error", () => process.exit(0));
     await followEvents(replay, (line) => process.stdout.write(`${line}\n`), (resume) => process.stdout.once("drain", resume));
+  }
+  if (verb === "notify") {
+    flags(rest, {});
+    await (await import("./notify.ts")).notify(out);
+    return EXIT.ok;
   }
   if (verb === "git") {
     // A shell in the git VM, in a browser tab: the address carries this stack's token, and

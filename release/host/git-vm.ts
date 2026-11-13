@@ -94,6 +94,11 @@ export const ensureGitClone = async (repo: Repo) => {
     `git config remote.origin.url "$1"`,
     `git config remote.origin.pushurl "desolate-out::$3"`,
     `git config lfs.url "file://$1"`,
+    // LFS objects come through desolate's own agent (git/lfs-file.ts): from the mirror, or
+    // from the root clone, where domains' offered objects are.
+    "git config lfs.standalonetransferagent desolate-file",
+    "git config lfs.customtransfer.desolate-file.path /usr/local/bin/desolate-lfs-file",
+    `git config lfs.customtransfer.desolate-file.args "$3"`,
     "git config lfs.locksverify false",
     `git remote get-url root >/dev/null 2>&1 || git remote add root "$4"`,
     `git config remote.root.url "$4"`,

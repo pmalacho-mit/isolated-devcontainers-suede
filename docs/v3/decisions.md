@@ -612,8 +612,12 @@ proxies, and the dashboard.
   inside `/desolate/root` or the mirrors, the first clone is `--no-local` (every object
   checked), a fetch's upload-pack has its command-naming settings pinned from this side, and
   `GIT_NO_LAZY_FETCH` is set.
-- **Not yet.** An offered branch whose LFS objects are not on the remote yet checks out as
-  pointers in the git VM (its LFS store is the mirror's).
+- **LFS files check out** (fixed on the Mac; T2). No LFS file had ever checked out in the git
+  VM: git-lfs's own file transfer runs `git rev-parse` inside the bare mirror, which the git
+  VM's `safe.bareRepository=explicit` refuses (kept: it guards against a clone's embedded
+  repositories). The git VM's clones use desolate's own transfer agent (`git/lfs-file.ts`):
+  downloads only, from the mirror's store or the root clone's (where offered objects are),
+  each copied without following a link and kept only if it hashes to its name and size.
 - **What is left.** The terminal draws bytes a file or a commit holds: xterm.js interprets
   escape sequences, and a bug there is a bug in the person's browser tab (no more: the tab
   has no token but its own, and an approval still needs the approval page's click). A
@@ -788,6 +792,14 @@ They stay two origins, and:
 - `desolate up` ends with the next two commands; its first phase is called what it is
   ("asked the root": the domain, the template check, the plan; about 0.2 s each, no network).
 - `desolate clone`'s hint teaches `domain create --repo`.
+
+## `desolate notify`: what needs you, as a notification (decided on the Mac; tested on T1, seen on the M1)
+
+It reads `desolate events` and shows a macOS notification for a push waiting for approval,
+an offer, an agent setting orange or red, a refused bundle, and a push done, failed or
+uncertain. An agent's words appear under its workspace's name ("dev/w1 says: ..."), made
+printable, and reach osascript as an argument, never as script: a status message cannot
+pose as desolate, or run anything.
 
 ## ssh-agent needs a relay in front of it (measured)
 
