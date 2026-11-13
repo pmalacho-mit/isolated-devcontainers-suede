@@ -31,11 +31,15 @@ const sentence = words.join(" ").trim();
 if (!domain || !sentence) fail("a task is a domain and what to do", 'desolate task acme "Add a shout() greeting"');
 
 const taken = new Set<string>();
+let listed: { domain: string; workspaces: { workspace: string }[] }[] = [];
 try {
-  for (const d of JSON.parse(desolate(["list", domain!, "--json"]).out) as { workspaces: { workspace: string }[] }[]) for (const w of d.workspaces) taken.add(w.workspace);
+  listed = JSON.parse(desolate(["list", domain!, "--json"]).out);
 } catch {
-  fail(`there is no domain '${domain}'`, `desolate domain create ${domain} --repo <owner/repo>`);
+  listed = [];
 }
+const mine = listed.find((d) => d.domain === domain);
+if (!mine) fail(`there is no domain '${domain}'`, `desolate domain create ${domain} --repo <owner/repo>`);
+for (const w of mine!.workspaces) taken.add(w.workspace);
 let name = values.name ?? nameFor(sentence);
 for (let n = 2; !values.name && taken.has(name); n++) name = `${nameFor(sentence).slice(0, 27)}-${n}`;
 const branch = values.branch ?? `task/${name}`;
