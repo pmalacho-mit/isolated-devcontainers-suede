@@ -31,6 +31,7 @@
 //   the host    with the token the host installed as root at bootstrap.
 // Repository content (branch names, commit subjects, statuses, notes) leaves here as JSON
 // strings and is put on the page as text, never as HTML.
+import { pendingIn } from "./approvals.ts";
 import { printable } from "../shared/text.ts";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -92,19 +93,8 @@ const actions: Action[] = [];
 const waiters = new Set<() => void>();
 const queued = () => actions.filter((action) => action.state === "queued" && action.kind !== "offer.push");
 
-const pendingApprovals = () => {
-  const out: { repo: string; branch: string; commit: string; summary: string }[] = [];
-  try {
-    for (const file of fs.readdirSync(APPROVALS)) {
-      const entry = JSON.parse(fs.readFileSync(path.join(APPROVALS, file), "utf8")) as { message: string; summary?: string; at: string };
-      const parsed = parseApproval(entry.message);
-      if (parsed && Date.now() - Date.parse(entry.at) < 120_000) out.push({ repo: parsed.repo, branch: parsed.branch, commit: parsed.commit, summary: String(entry.summary ?? "").slice(0, 200) });
-    }
-  } catch {
-    /* none */
-  }
-  return out;
-};
+const pendingApprovals = () =>
+  pendingIn(APPROVALS).map(({ approval, summary }) => ({ repo: approval.repo, branch: approval.branch, commit: approval.commit, summary }));
 
 /** The last HEAD each checkout was seen on: a read that caught one half written (null) shows
  *  that instead, so a `git switch` is one change and not two. */
@@ -232,7 +222,10 @@ const body = (req: IncomingMessage, limit = 262_144): Promise<unknown> =>
     let text = "";
     req.on("data", (chunk) => {
       text += chunk;
-      if (text.length > limit) reject(new Error("too large"));
+      if (text.length > limit) {
+        reject(new Error("too large"));
+        req.destroy();
+      }
     });
     req.on("end", () => {
       try {
@@ -246,6 +239,7 @@ const body = (req: IncomingMessage, limit = 262_144): Promise<unknown> =>
 const SECURITY = {
   "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cache-control": "no-store", "cross-origin-resource-policy": "same-origin",
+  "x-frame-options": "DENY", "cross-origin-opener-policy": "same-origin", "permissions-policy": "camera=(), microphone=(), geolocation=(), clipboard-read=()",
 };
 const send = (res: ServerResponse, status: number, type: string, content: string) => {
   res.writeHead(status, { "content-type": type, "content-length": Buffer.byteLength(content), ...SECURITY });

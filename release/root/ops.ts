@@ -1,5 +1,6 @@
 // Every operation the host can ask of the root. A fixed table: the CLI channel carries an
 // operation's name and JSON arguments, never a command line.
+import { pendingIn } from "./approvals.ts";
 import { takeHashed } from "../shared/copy.ts";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -195,17 +196,7 @@ export const ops: Record<string, Op> = {
   /** Raw pushes in the root's terminal that are waiting for `desolate approve`. What the
    *  person is shown comes from the message the host parses itself, not from this list. */
   async "approvals.pending"() {
-    const pending: { message: string; summary: string; at: string }[] = [];
-    for (const file of fs.existsSync(APPROVALS) ? fs.readdirSync(APPROVALS).filter((name) => name.endsWith(".json")).sort() : []) {
-      try {
-        const entry = JSON.parse(fs.readFileSync(`${APPROVALS}/${file}`, "utf8")) as { message: string; summary: string; at: string };
-        if (!parseApproval(entry.message) || Date.now() - Date.parse(entry.at) > 120_000) fs.rmSync(`${APPROVALS}/${file}`, { force: true });
-        else pending.push({ message: entry.message, summary: String(entry.summary).slice(0, 200), at: entry.at });
-      } catch {
-        fs.rmSync(`${APPROVALS}/${file}`, { force: true });
-      }
-    }
-    return pending;
+    return pendingIn(APPROVALS, Date.now(), true).map(({ message, summary, at }) => ({ message, summary, at }));
   },
   /** A `git push` made in the git VM (host/git-vm.ts), handed over by the host: its bundle
    *  is checked like a domain's (intake.ts), taken in, and pushed as a raw push is, after

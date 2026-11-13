@@ -1,4 +1,5 @@
-// T1. The host's daemon restarts itself when the code it runs has changed (daemon.ts, codeOf:
+// T1. The host's daemon, and the root's services, restart when the code they run has
+// changed. The host's daemon restarts itself when the code it runs has changed (daemon.ts, codeOf:
 // a hash of host/, host/vm/ and shared/). That holds only while everything it imports lives
 // there: an import from elsewhere would be served from old code after an update (the origin
 // gate once lived in workspace/, and the approval page's checks with it).
@@ -33,6 +34,14 @@ describe("T1 the daemon's code, as its restart sees it", () => {
     const outside = [...reached("host/daemon.ts"), ...reached("host/cli.ts")]
       .map((file) => path.relative(RELEASE, file))
       .filter((file) => !HASHED.includes(path.dirname(file)));
+    assert.deepEqual([...new Set(outside)].sort(), []);
+  });
+  it("everything the root's services import is in root/ or shared/: what start.sh copies and hashes", () => {
+    const entries = fs.readdirSync(path.join(RELEASE, "root")).filter((name) => name.endsWith(".ts")).map((name) => `root/${name}`)
+      .concat(fs.readdirSync(path.join(RELEASE, "root/proxy")).filter((name) => name.endsWith(".ts")).map((name) => `root/proxy/${name}`));
+    const outside = entries.flatMap((entry) => [...reached(entry)])
+      .map((file) => path.relative(RELEASE, file))
+      .filter((file) => !/^(root|shared)\//.test(file));
     assert.deepEqual([...new Set(outside)].sort(), []);
   });
 });
