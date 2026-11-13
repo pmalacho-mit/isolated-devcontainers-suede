@@ -268,12 +268,12 @@ describe("T2 section 4.8: the root UI", () => {
     assert.equal(diff.truncated, false);
     assert.equal((await http("GET", "/diff?domain=web&repo=acme%2Fapp&branch=no-such")).status, 400);
     assert.equal((await http("GET", "/diff?domain=web&repo=acme%2Fapp&branch=markup", { headers: ["Sec-Fetch-Site: cross-site"] })).status, 403);
-    // In the browser: the review opens at the offer, and the diff's markup is text on the
-    // page, in a span, not an element of it.
+    // In the browser: the review opens at the offer, side by side (the default layout), and
+    // the diff's markup is text on the page, in a span, not an element of it.
     const at = "once&review&domain=web&repo=acme%2Fapp&branch=markup";
     let page = browser(at, "--dump-dom");
     for (let i = 0; i < 4 && !/data-diff/.test(page.stdout); i++) page = browser(at, "--dump-dom");
-    assert.match(page.stdout, /<pre class="mono diff" data-diff="">[\s\S]*<span class="add">\+&lt;img src=x onerror=alert\(1\)&gt;<\/span>/, page.stdout.slice(0, 800));
+    assert.match(page.stdout, /<div class="sbs" data-diff="">[\s\S]*<span class="code add">&lt;img src=x onerror=alert\(1\)&gt;<\/span>/, page.stdout.slice(0, 800));
     assert.doesNotMatch(page.stdout, /<img/i, "no element was made from the diff");
     assert.doesNotMatch(page.stderr, /alert|Uncaught/i, "and nothing of it ran");
     if (process.env.DESOLATE_SCREENSHOTS) browser(at, `--screenshot=${path.join(process.env.DESOLATE_SCREENSHOTS, "review.png")}`);

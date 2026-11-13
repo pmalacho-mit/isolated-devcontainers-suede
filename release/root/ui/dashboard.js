@@ -52,6 +52,157 @@ const button = (label, key, kind, args, quiet = false) =>
 const unhidden = (line) => line.replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}⟩`);
 const diffView = (text) => el("pre", { class: "mono diff", "data-diff": "" }, text.split("\n").map((line) =>
   el("span", { class: line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" }, unhidden(line) || " ")));
+// Side by side: git's unified text, laid out in two columns by this script (nothing in the
+// root parses anything more). A run of removed lines beside the run of added lines that
+// follows it, line by line; in each such pair, the part that differs is marked (the longest
+// common start and end are not), so a one-word change reads as one word.
+const sides = (text) => {
+  const rows = [];
+  let oldNo = 0;
+  let newNo = 0;
+  let dels = [];
+  let adds = [];
+  const flush = () => {
+    // Each removed line beside the added line most like it, in order (so a line inserted
+    // above a changed one does not shift every pair after it). Between those, what is left
+    // of each side is beside what is left of the other, unmarked: they are not alike.
+    let d0 = 0;
+    let a0 = 0;
+    for (const [d, a] of [...pairs(dels, adds), [dels.length, adds.length]]) {
+      const lefts = dels.slice(d0, d);
+      const rights = adds.slice(a0, a);
+      for (let k = 0; k < Math.max(lefts.length, rights.length); k++) rows.push({ kind: "change", left: lefts[k], right: rights[k], like: false });
+      if (d < dels.length) rows.push({ kind: "change", left: dels[d], right: adds[a], like: true });
+      d0 = d + 1;
+      a0 = a + 1;
+    }
+    dels = [];
+    adds = [];
+  };
+  for (const line of text.split("\n")) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (line.startsWith("diff --git")) {
+      flush();
+      rows.push({ kind: "file", text: line.replace(/^diff --git a\/(.*) b\/.*$/, "$1") });
+    } else if (hunk) {
+      flush();
+      oldNo = Number(hunk[1]);
+      newNo = Number(hunk[2]);
+      rows.push({ kind: "hunk", text: line });
+    } else if (/^(index |--- |\+\+\+ |new file|deleted file|similarity|rename |old mode|new mode|Binary)/.test(line)) {
+      flush();
+      if (/^(new file|deleted file|rename |Binary)/.test(line)) rows.push({ kind: "meta", text: line });
+    } else if (line.startsWith("-")) dels.push({ no: oldNo++, text: line.slice(1) });
+    else if (line.startsWith("+")) adds.push({ no: newNo++, text: line.slice(1) });
+    else if (line.startsWith(" ") || line === "") {
+      flush();
+      if (line === "" && oldNo === 0) continue;
+      rows.push({ kind: "same", left: { no: oldNo++, text: line.slice(1) }, right: { no: newNo++, text: line.slice(1) } });
+    }
+  }
+  flush();
+  return rows;
+};
+/** How alike two lines are, 0 to 1: the better of their common start and end against the
+ *  longer, and the words they share (a line rewritten in its middle keeps its words). */
+const likeness = (a, b) => {
+  const most = Math.max(a.length, b.length);
+  if (most === 0) return 1;
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let end = 0;
+  while (end < a.length - start && end < b.length - start && a[a.length - 1 - end] === b[b.length - 1 - end]) end++;
+  const words = (line) => line.match(/[\p{L}\p{N}_$]+/gu) ?? [];
+  const mine = words(a);
+  const theirs = new Map();
+  for (const word of words(b)) theirs.set(word, (theirs.get(word) ?? 0) + 1);
+  let shared = 0;
+  for (const word of mine) if ((theirs.get(word) ?? 0) > 0) {
+    shared++;
+    theirs.set(word, theirs.get(word) - 1);
+  }
+  const total = mine.length + words(b).length;
+  return Math.max((start + end) / most, total ? (2 * shared) / total : 0);
+};
+/** Which removed line goes beside which added one: pairs [d, a] in order, alike enough (half),
+ *  as many and as alike as can be (a small dynamic program; a long run is paired as it comes). */
+const pairs = (dels, adds) => {
+  const n = dels.length;
+  const m = adds.length;
+  if (n === 0 || m === 0) return [];
+  if (n * m > 40_000) return Array.from({ length: Math.min(n, m) }, (_, k) => [k, k]);
+  const score = (d, a) => {
+    const like = likeness(dels[d].text.trim(), adds[a].text.trim());
+    return like >= 0.5 ? like : 0;
+  };
+  const best = Array.from({ length: n + 1 }, () => new Float64Array(m + 1));
+  for (let d = n - 1; d >= 0; d--)
+    for (let a = m - 1; a >= 0; a--) {
+      const here = score(d, a);
+      best[d][a] = Math.max(best[d + 1][a], best[d][a + 1], here > 0 ? here + best[d + 1][a + 1] : 0);
+    }
+  const out = [];
+  for (let d = 0, a = 0; d < n && a < m; ) {
+    const here = score(d, a);
+    if (here > 0 && best[d][a] === here + best[d + 1][a + 1]) out.push([d++, a++]);
+    else if (best[d][a] === best[d + 1][a]) d++;
+    else a++;
+  }
+  return out;
+};
+/** One side's text, the part that differs from the other side marked. */
+const marked = (mine, theirs) => {
+  if (theirs === undefined) return [mine];
+  let start = 0;
+  while (start < mine.length && start < theirs.length && mine[start] === theirs[start]) start++;
+  let end = 0;
+  while (end < mine.length - start && end < theirs.length - start && mine[mine.length - 1 - end] === theirs[theirs.length - 1 - end]) end++;
+  const middle = mine.slice(start, mine.length - end);
+  return middle ? [mine.slice(0, start), el("mark", {}, middle), mine.slice(mine.length - end)] : [mine];
+};
+const sideBySide = (text) => el("div", { class: "sbs", "data-diff": "" }, sides(text).map((row) => {
+  if (row.kind !== "change" && row.kind !== "same") return el("div", { class: `sbs-${row.kind}` }, row.text);
+  const cell = (side, other, cls) => side
+    ? [el("span", { class: `no ${cls}` }, String(side.no)), el("span", { class: `code ${cls}` }, row.kind === "change" && row.like ? marked(unhidden(side.text), other && unhidden(other.text)) : unhidden(side.text) || " ")]
+    : [el("span", { class: "no empty" }, ""), el("span", { class: "code empty" }, "")];
+  return el("div", { class: "sbs-row" }, cell(row.left, row.right, row.kind === "change" ? "del" : ""), cell(row.right, row.left, row.kind === "change" ? "add" : ""));
+}));
+// The diff's element, kept across redraws: the dashboard redraws on every change of state (a
+// workspace's status, an action's progress), and a long diff drawn again each time cost up to
+// half a second, and threw away where the person had scrolled to. Drawn again only when the
+// diff, the layout, or how much of it is shown changes. At first at most DIFF_LINES of it.
+const DIFF_LINES = 3000;
+let shownDiff = null; // { diff, layout, all, node }
+const diffElement = (diff) => {
+  const all = Boolean(diff.all);
+  if (shownDiff && shownDiff.diff === diff && shownDiff.layout === layout && shownDiff.all === all) return shownDiff.node;
+  const lines = diff.text.split("\n");
+  const cut = !all && lines.length > DIFF_LINES;
+  const text = cut ? lines.slice(0, DIFF_LINES).join("\n") : diff.text;
+  const node = el("div", { class: "diff-box" },
+    layout === "sides" ? sideBySide(text) : diffView(text),
+    cut ? el("div", { class: "sub" }, `The first ${DIFF_LINES.toLocaleString()} of ${lines.length.toLocaleString()} lines. `,
+      el("button", { class: "quiet small", onclick: () => { diff.all = true; render(); } }, "Show the rest")) : null);
+  shownDiff = { diff, layout, all, node };
+  return node;
+};
+let layout = (() => {
+  try {
+    return localStorage.getItem("desolate-diff-layout") === "unified" ? "unified" : "sides";
+  } catch {
+    return "sides";
+  }
+})();
+const setLayout = (value) => {
+  layout = value;
+  try {
+    localStorage.setItem("desolate-diff-layout", value);
+  } catch {
+    /* a page without storage keeps it for now */
+  }
+  render();
+};
+
 const query = (target, against) => `domain=${encodeURIComponent(target.domain)}&repo=${encodeURIComponent(target.repo)}&branch=${encodeURIComponent(target.branch)}&against=${encodeURIComponent(against)}`;
 const loadDiff = async () => {
   const { offer, against } = reviewing;
@@ -133,7 +284,8 @@ const reviewPanel = () => {
     // The diff is shown only if it is of the commit the Push button names.
     reviewing.diff && reviewing.diff.text !== undefined && reviewing.diff.commit === review.commit ? [
       el("div", { class: "sub" }, el("button", { class: "quiet small", "data-whitespace": "", onclick: () => { reviewing.whitespace = reviewing.whitespace === "ignore" ? "show" : "ignore"; loadDiff(); } }, reviewing.whitespace === "ignore" ? "Show whitespace changes" : "Ignore whitespace changes")),
-      diffView(reviewing.diff.text),
+      el("div", { class: "sub" }, el("button", { class: "quiet small", "data-layout": "", onclick: () => setLayout(layout === "sides" ? "unified" : "sides") }, layout === "sides" ? "Unified" : "Side by side")),
+      diffElement(reviewing.diff),
       reviewing.diff.truncated ? el("div", { class: "warn" }, "The diff is longer than is shown here. Read the rest with git, in `desolate root shell`, before you push.") : null] : null,
     reviewing.diff && reviewing.diff.commit && reviewing.diff.commit !== review.commit ? el("div", { class: "warn" }, "The branch moved while you were reading. Close this and review it again.") : null,
     el("div", { class: "sub" }, "For a richer view (syntax colouring, the whole file), open the branch in a workspace's editor. The diff here is the one to trust: it is made in the root, by git alone."),
@@ -236,9 +388,12 @@ const render = () => {
   const needs = needsYou();
   document.getElementById("needs").hidden = needs.length === 0;
   document.getElementById("needs-list").replaceChildren(...needs);
+  // (Where the diff was scrolled to, kept: its element is the same one, moved.)
+  const scrolled = shownDiff && shownDiff.node.isConnected ? [...shownDiff.node.querySelectorAll("[data-diff]")].map((n) => [n, n.scrollTop, n.scrollLeft]) : [];
   const panel = reviewPanel();
   document.getElementById("review").hidden = !panel;
   document.getElementById("review").replaceChildren(...(panel ? [panel] : []));
+  for (const [node, top, left] of scrolled) if (node.isConnected) { node.scrollTop = top; node.scrollLeft = left; }
   const first = firstRun();
   document.getElementById("first-run").hidden = !first;
   document.getElementById("first-run").replaceChildren(...(first ? [first] : []));
