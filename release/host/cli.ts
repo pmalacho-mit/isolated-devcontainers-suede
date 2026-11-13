@@ -53,6 +53,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
                                                                  host, on your terminal
   desolate events [--replay <n>]                                 what happens, as JSON lines, until stopped: pushed,
                                                                  offered, status, approval-waiting, workspace-up, ...
+  desolate task <domain> "<what to do>" [--name <w>] [--branch <b>] [--attach] [-- <agent...>]
+                                                                 a workspace, its branch and an agent on it, at once
   desolate agent start <domain>/<workspace> [--name <n>] [--checkout <repo>] -- <command...>
                                                                  an agent kept running in a workspace (no tmux)
   desolate agent attach|log|stop <domain>/<workspace> [--name <n>]   your terminal on it; Ctrl-] detaches
@@ -279,6 +281,12 @@ const main = async (argv: string[]): Promise<number> => {
     else if (sub === "log") await agents.log(where, { name: values.name as string | undefined });
     else refuse("desolate agent what?", "desolate agent start|attach|list|log|stop <domain>/<workspace> [--name <n>]", EXIT.usage);
     return EXIT.ok;
+  }
+  if (verb === "task") {
+    // From a sentence to an agent at work on it (release/factory/task.ts).
+    const { RELEASE_DIR } = await import("./paths.ts");
+    const child = (await import("node:child_process")).spawn(process.execPath, ["--disable-warning=ExperimentalWarning", `${RELEASE_DIR}/factory/task.ts`, ...rest], { stdio: "inherit" });
+    return new Promise<number>((resolve) => child.on("close", (code) => resolve(code ?? 1)));
   }
   if (verb === "factory") {
     // Harnesses on top of desolate (release/factory/): they drive this CLI and your gh.
