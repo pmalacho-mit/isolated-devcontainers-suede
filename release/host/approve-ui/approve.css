@@ -14,7 +14,11 @@ h1 { font-size: 22px; margin: 0 0 4px; }
 .summary ul { margin: 4px 0 8px; padding-left: 20px; }
 .summary li { overflow-wrap: anywhere; }
 .summary .error { color: var(--danger); }
-.actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+/* The decision stays in view: while a card is taller than the window, its buttons stay at the
+   bottom of the window (inside the card, in front of nothing but the card's own text). */
+.actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 12px; position: sticky; bottom: 0; z-index: 1; background: var(--card); padding: 10px 0; border-top: 1px solid var(--line); }
+/* A long list scrolls in its own box. */
+.summary ul.long { max-height: 11em; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px 6px 28px; }
 button { font: inherit; padding: 8px 16px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
 button.approve { background: var(--accent); border-color: var(--accent); color: var(--card); font-weight: 600; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -29,8 +33,9 @@ html.embed .lede { display: none; }
 html.embed h1 { font-size: 16px; }
 html.embed .card { margin: 10px 0; padding: 12px; }
 html.embed .status { font-size: 13px; }
+html.embed pre.diff { max-height: 40vh; }
 /* The diff, on asking: git's text, coloured by each line's first character. */
-pre.diff { margin: 8px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; max-height: 60vh; overflow: auto; white-space: pre; font: 12.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+pre.diff { margin: 8px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; max-height: 50vh; overflow: auto; white-space: pre; font: 12.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
 pre.diff span { display: block; min-width: max-content; }
 pre.diff .add { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 pre.diff .del { background: color-mix(in srgb, var(--danger) 18%, transparent); }

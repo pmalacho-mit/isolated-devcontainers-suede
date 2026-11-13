@@ -127,22 +127,34 @@ const summaryOf = (summary, card) => {
   const commits = summary.commits || [];
   const total = commits.length + (summary.more || 0);
   box.append(el("p", total ? `${total} commit(s) the remote does not have:` : "No commit the remote does not have already."));
-  const ul = el("ul");
+  // A long list scrolls in a box of its own: the card stays short enough that Approve is in
+  // view, and what is scrolled away is never what needs attention (see the files below).
+  const ul = el("ul", undefined, commits.length > 8 ? "long" : "");
   for (const c of commits) { const li = el("li"); li.append(el("code", c.commit.slice(0, 12)), document.createTextNode(` ${c.subject}  (${c.author})`)); ul.append(li); }
   if (summary.more) ul.append(el("li", `and ${summary.more} more`));
   if (commits.length) box.append(ul);
   const files = summary.files || [];
   if (files.length) {
     box.append(el("p", `${files.length + (summary.moreFiles || 0)} file(s) changed${summary.base ? ` against ${summary.base.slice(0, 12)}` : ""}${summary.lfs ? `, ${summary.lfs} of them LFS objects` : ""}:`));
-    const fl = el("ul");
-    for (const f of files) {
+    // What runs on the forge (CI workflows, hooks) or changes how git treats the repository:
+    // always listed in full, outside any scrolling box, before the rest.
+    const line = (f) => {
       const li = el("li", undefined, f.sensitive ? "sensitive" : "");
       li.append(el("code", f.path), document.createTextNode(f.binary ? "  (binary)" : `  +${f.added} -${f.removed}`));
-      if (f.sensitive) li.append(document.createTextNode("  (runs on the forge, or changes how git treats the repository)"));
-      fl.append(li);
+      return li;
+    };
+    const sensitive = files.filter((f) => f.sensitive);
+    const rest = files.filter((f) => !f.sensitive);
+    if (sensitive.length) {
+      box.append(el("p", `${sensitive.length} of them run on the forge, or change how git treats the repository:`, "error"));
+      const sl = el("ul");
+      for (const f of sensitive) sl.append(line(f));
+      box.append(sl);
     }
+    const fl = el("ul", undefined, rest.length > 8 ? "long" : "");
+    for (const f of rest) fl.append(line(f));
     if (summary.moreFiles) fl.append(el("li", `and ${summary.moreFiles} more (every one that runs on the forge is listed above)`));
-    box.append(fl);
+    if (rest.length || summary.moreFiles) box.append(fl);
   }
   if (summary.hasDiff !== undefined && card) box.append(...diffToggle(card));
   return box;
