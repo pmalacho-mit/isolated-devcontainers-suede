@@ -213,7 +213,7 @@ export const handler = (backend: Backend, log: (line: string) => void) => {
     const given = url.searchParams.get("token") ?? "";
     if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(given)) return json(res, 403, { error: "not a push this page showed" });
     const waiting = (await backend.pending().catch(() => [] as Waiting[])).find((w) => parseApproval(w.message)?.nonce === nonce);
-    if (!waiting || !same(given, pushToken(token, waiting.message))) return json(res, 410, { error: "that push is no longer waiting, or is not the one this page showed" });
+    if (!waiting || !sameSecret(given, pushToken(token, waiting.message))) return json(res, 410, { error: "that push is no longer waiting, or is not the one this page showed" });
     const shown = summaries.get(digestOf(waiting.message))?.value;
     if (!shown?.ok) return json(res, 404, { error: "the reviewer has not worked it out yet" });
     return json(res, 200, { diff: shown.diff ?? null, cut: shown.diffCut === true });

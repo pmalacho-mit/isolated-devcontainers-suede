@@ -30,7 +30,7 @@ let port = 0;
 before(async () => {
   server = createServer(handler({
     pending: async () => listed,
-    summary: async () => ({ ok: true, commits: [{ commit: "a".repeat(40), subject: "<img src=x onerror=alert(1)>", author: "agent" }] }),
+    summary: async () => ({ ok: true, commits: [{ commit: "a".repeat(40), subject: "<img src=x onerror=alert(1)>", author: "agent" }], diff: "diff --git a/x b/x\n+<script>alert(1)</script>\n" }),
     approve: async (m) => void approved.push(m),
     refuse: async (m) => void refused.push(m),
   }, () => {}));
@@ -108,6 +108,20 @@ describe("T1 the approval page", () => {
     assert.match(String(listed.headers["content-type"]), /^application\/json/);
   });
 
+  it("the diff: not in the list polled every second, but on asking, for the push the page showed and no other", async () => {
+    const listed = JSON.parse((await call("GET", "/pending", asPage())).body) as { pending: { summary: Record<string, unknown> }[] };
+    assert.equal(listed.pending[0]!.summary.hasDiff, true);
+    assert.equal("diff" in listed.pending[0]!.summary, false, "the list carries no diff");
+    const ask = (nonce: string, token: string, headers: Record<string, string> = asPage()) => call("GET", `/diff?nonce=${nonce}&token=${token}`, headers);
+    const shown = await ask(push.nonce, pushToken(approveToken(), message));
+    assert.equal(shown.status, 200, shown.body);
+    assert.deepEqual(JSON.parse(shown.body), { diff: "diff --git a/x b/x\n+<script>alert(1)</script>\n", cut: false }, "JSON text; the page sets it as text");
+    assert.equal((await ask(push.nonce, pushToken(approveToken(), `${message}x`))).status, 410, "a token for another text");
+    assert.equal((await ask("f".repeat(32), pushToken(approveToken(), message))).status, 410, "a push that is not waiting");
+    assert.equal((await ask("../x", "y")).status, 403, "not a nonce and a token");
+    assert.equal((await ask(push.nonce, pushToken(approveToken(), message), page)).status, 401, "no cookie");
+    assert.equal((await ask(push.nonce, pushToken(approveToken(), message), { cookie, "sec-fetch-site": "cross-site" })).status, 403, "another site");
+  });
   it("nothing signs without everything: a form, another origin, no push token, a made-up push, another commit", async () => {
     assert.equal((await approve(good(), { "content-type": "application/x-www-form-urlencoded" })).status, 415, "a form another site could send");
     assert.equal((await approve(good(), { "content-type": "text/plain" })).status, 415);
