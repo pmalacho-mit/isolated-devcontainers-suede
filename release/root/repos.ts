@@ -8,7 +8,7 @@ import type { Repo } from "../shared/names.ts";
 import { refuse } from "../shared/exit.ts";
 import { forge, git, gitBare, gitOk, remoteUrl, safeIn, sshCommand } from "./git.ts";
 import { ask } from "./keyring-client.ts";
-import { clonePath, HOOKS, KEYRING, MIRROR_HOOKS, mirrorPath, REGISTRY } from "./layout.ts";
+import { clonePath, HOOKS, KEYRING, MIRROR_HOOKS, mirrorPath, REGISTRY, ROOT } from "./layout.ts";
 
 export type RepoRecord = {
   /** The root holds a write key for it. A domain has no access level: every domain reads,
@@ -75,7 +75,7 @@ export const remoteTip = async (repo: Repo, branch: string): Promise<string | nu
   return found.code === 0 && /^[0-9a-f]{40}$/.test(id) ? id : null;
 };
 
-export const fetch = async (repo: Repo, log: (line: string) => void = () => {}) => {
+const fetchNow = async (repo: Repo, log: (line: string) => void) => {
   const record = recordOf(repo);
   const mirror = mirrorPath(repo);
   const url = fetchUrl(repo, record);
@@ -192,3 +192,42 @@ export const ensureClone = async (repo: Repo, defaultBranch: string | null): Pro
 
 export const list = () =>
   Object.entries(registry().repos).map(([name, record]) => ({ repo: name, ...record })).sort((a, b) => a.repo.localeCompare(b.repo));
+
+// One fetch of a repository at a time. Two at once (two clicks on the dashboard's Fetch, a
+// push's own fetch beside a person's) raced on the mirror's config and one failed. In this
+// process (the rootctl service) a fetch waits for the one under way; across processes, for a
+// lock directory, which a fetch that died leaves for at most ten minutes.
+const fetching = new Map<string, Promise<unknown>>();
+const FETCH_LOCK_STALE_MS = 10 * 60_000;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const lockedFetch = async (repo: Repo, log: (line: string) => void) => {
+  const lock = path.join(ROOT.state, "fetch-locks", repoId(repo).replace("/", "--"));
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  for (let said = false; ; await sleep(200)) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch {
+      const age = Date.now() - (fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
+      if (age > FETCH_LOCK_STALE_MS) fs.rmSync(lock, { recursive: true, force: true });
+      else if (!said) {
+        said = true;
+        log(`waiting for another fetch of ${repoId(repo)} to finish`);
+      }
+    }
+  }
+  try {
+    return await fetchNow(repo, log);
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+};
+export const fetch = (repo: Repo, log: (line: string) => void = () => {}): ReturnType<typeof fetchNow> => {
+  const key = repoId(repo);
+  const next = (fetching.get(key) ?? Promise.resolve()).catch(() => {}).then(() => lockedFetch(repo, log));
+  fetching.set(key, next);
+  void next.catch(() => {}).finally(() => {
+    if (fetching.get(key) === next) fetching.delete(key);
+  });
+  return next;
+};
