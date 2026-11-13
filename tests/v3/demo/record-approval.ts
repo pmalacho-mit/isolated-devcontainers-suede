@@ -165,7 +165,19 @@ try {
   await until(frameSession, /a-small-change/);
   await caption(term.sessionId, "5 · beside it: what the push names, and what it would send (worked out in the root)");
   await until(frameSession, /1 commit\(s\) the remote does not have/);
-  await sleep(2500);
+  await sleep(1500);
+  // The diff itself, on asking: a real click on "Show the diff", inside the frame.
+  {
+    const at = (await evaluate(term.sessionId, "(() => { const r = document.getElementById('frame').getBoundingClientRect(); return [r.x, r.y]; })()")) as [number, number];
+    const button = (await evaluate(frameSession, "(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent === 'Show the diff'); const r = b.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")) as [number, number];
+    await caption(term.sessionId, "5b · and the diff itself, from desolate's reviewer in the root: read it, then approve");
+    await mouseTo(term.sessionId, [at[0] + 40, 120], [at[0] + button[0], at[1] + button[1]], 20);
+    await sleep(300);
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", x: at[0] + button[0], y: at[1] + button[1], button: "left", clickCount: 1 }, term.sessionId);
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at[0] + button[0], y: at[1] + button[1], button: "left", clickCount: 1 }, term.sessionId);
+    await until(frameSession, /\+a small change/);
+    await sleep(3500);
+  }
   // Approve arms only for a pointer that moves onto it, a moment after the pointer came over
   // the frame (the terminal keeps the focus), and only while the button is visibly unobscured.
   const inFrame = (await evaluate(frameSession, "(() => { const r = document.querySelector('.arm').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")) as [number, number];
