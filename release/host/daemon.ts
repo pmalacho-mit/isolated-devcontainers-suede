@@ -26,6 +26,7 @@ import { refuse } from "../shared/exit.ts";
 import { accept as acceptLink } from "../shared/link.ts";
 import { hostArgv } from "../shared/actions.ts";
 import { createServer as createHttpServer } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { parseApproval } from "../shared/approval.ts";
 import { APPROVE_HOSTNAME, GIT_HOSTNAME, parseRepo, devHostname, EDITOR, editorHostname, editorHostPort, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
 import { handler as approvePage } from "./approve-web.ts";
@@ -55,6 +56,15 @@ export type PortView = {
   forwarded: { port: number; url: string }[];
   reserved: { port: number; why: string }[];
 };
+
+/** A page's request that throws is that request's 500, logged: never the daemon's end (it
+ *  carries every workspace's editor, ports and link). */
+export const guarded = (log: (line: string) => void, page: (req: IncomingMessage, res: ServerResponse) => Promise<unknown>) => (req: IncomingMessage, res: ServerResponse) =>
+  void page(req, res).catch((error: unknown) => {
+    log(`a page's request failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (!res.headersSent) res.writeHead(500, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+    res.end("desolate: that request failed; the daemon's log says why\n");
+  });
 
 // ------------------------------------------------------------------ the daemon itself
 /** What code this daemon runs: the host's and the shared files. An updated desolate means
@@ -178,10 +188,10 @@ const serve = async () => {
   // the editor's server itself.
   let editorError = "";
   // The approval page (approve-web.ts): served here, by the host, never by a VM.
-  const approvals = createHttpServer(approvePage(approvalBackend(), log));
+  const approvals = createHttpServer(guarded(log, approvePage(approvalBackend(), log)));
   // The git terminal (git-web.ts): a shell in the git VM, and what the git VM hands over.
   const gitReady = new Set<string>();
-  const gitTerminals = createHttpServer(gitPage((argv) => b.spawn(GIT_VM, argv), log, async (repo) => {
+  const gitTerminals = createHttpServer(guarded(log, gitPage((argv) => b.spawn(GIT_VM, argv), log, async (repo) => {
     // A shell asked for from a link (the dashboard's "Open in git"): the VM and the clone
     // are made on the way, as `desolate git <repo>` would.
     if (!gitReady.has("")) {
@@ -192,7 +202,7 @@ const serve = async () => {
       await ensureGitClone(parseRepo(repo)!);
       gitReady.add(repo);
     }
-  }));
+  })));
   watchGitOut(log, (fields) => events.publish(events.host(fields.domain ? "git-delivery-handed" : "git-push-handed", fields)));
   const editors = createServer((client) => {
     client.on("error", () => client.destroy());
