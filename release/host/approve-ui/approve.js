@@ -79,9 +79,12 @@ const post = async (what, card) => {
 };
 
 // The diff, as text: each line a text node in a span classed by its first character.
+// Characters that reorder or hide what is shown (bidi controls, zero-width ones): in a diff a
+// person approves from, each is shown as itself, named, so the line reads as git stores it.
+const unhidden = (line) => line.replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}⟩`);
 const diffView = (text) => {
   const pre = el("pre", undefined, "diff");
-  for (const line of text.split("\n")) pre.append(el("span", line || " ", line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : ""));
+  for (const line of text.split("\n")) pre.append(el("span", unhidden(line) || " ", line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : ""));
   return pre;
 };
 /** "Show the diff": asked of the host once, for the very text the card shows (its token).
