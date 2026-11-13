@@ -82,6 +82,11 @@ describe("T1 a checkout's HEAD: what it has checked out now, read as data", () =
     assert.deepEqual(readHead(base, main), { branch: "feature/greeting", commit: run(clone, "rev-parse", "HEAD") });
     run(clone, "pack-refs", "--all");
     assert.deepEqual(readHead(base, main), { branch: "feature/greeting", commit: run(clone, "rev-parse", "HEAD") }, "from packed-refs");
+    const packed = path.join(clone, ".git", "packed-refs");
+    const honest = fs.readFileSync(packed, "utf8");
+    fs.writeFileSync(packed, honest + `# ${"x".repeat(300 * 1024)}\n`);
+    assert.deepEqual(readHead(base, main), { branch: "feature/greeting", commit: null }, "a packed-refs over 256 KiB is not read");
+    fs.writeFileSync(packed, honest);
     run(clone, "worktree", "add", "-q", "-b", "w2", ".worktrees/w2", "main");
     assert.deepEqual(readHead(base, tree), { branch: "w2", commit: one });
     run(path.join(clone, ".worktrees/w2"), "switch", "-q", "--detach");

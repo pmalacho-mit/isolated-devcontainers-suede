@@ -12,13 +12,16 @@
 // attention (the terminal keeps the focus until a click), and where the browser can tell
 // (IntersectionObserver v2) a button arms only while it is visibly unobscured.
 "use strict";
-const EMBED = location.pathname === "/embed";
+// Embedded only if it is a frame: the page at /embed opened as a window is not.
+const EMBED = location.pathname === "/embed" && window.top !== window;
 const embedKey = EMBED ? (/^#k=([0-9a-f]{64})$/.exec(location.hash) || [])[1] || "" : "";
 if (EMBED) {
   history.replaceState(null, "", "/embed");
   document.documentElement.classList.add("embed");
 }
 const credential = embedKey ? { "x-desolate-embed": embedKey } : {};
+// In the frame the key alone signs in: the cookie, if this browser has one, stays out.
+const sendCookie = EMBED ? "omit" : "same-origin";
 const VISIBILITY = EMBED && "IntersectionObserver" in window && "isVisible" in IntersectionObserverEntry.prototype;
 let pointerInside = false;
 const READY_MS = 1000;
@@ -70,7 +73,7 @@ const disarmAll = () => { for (const card of cards.values()) disarm(card); };
 setInterval(() => { for (const card of cards.values()) if (!card.armedAt && !card.done) disarm(card); }, 250);
 
 const post = async (what, card) => {
-  const answer = await fetch(`/${what}`, { method: "POST", headers: { "content-type": "application/json", ...credential }, body: JSON.stringify({ nonce: card.push.nonce, token: card.push.token, commit: card.push.commit }), credentials: "same-origin" });
+  const answer = await fetch(`/${what}`, { method: "POST", headers: { "content-type": "application/json", ...credential }, body: JSON.stringify({ nonce: card.push.nonce, token: card.push.token, commit: card.push.commit }), credentials: sendCookie });
   const body = await answer.json().catch(() => ({}));
   if (!answer.ok) throw new Error(body.error || `HTTP ${answer.status}`);
 };
@@ -185,7 +188,7 @@ const render = (pending) => {
 
 const poll = async () => {
   try {
-    const answer = await fetch("/pending", { credentials: "same-origin", headers: credential });
+    const answer = await fetch("/pending", { credentials: sendCookie, headers: credential });
     const body = await answer.json();
     if (!answer.ok) say(body.error || `HTTP ${answer.status}`);
     else render(body.pending);

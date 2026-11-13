@@ -145,8 +145,10 @@ describe("T1 the approval page", () => {
   it("/embed: framed by the git terminal's origin alone, and its key opens only what the page's own requests open", async () => {
     const framed = await call("GET", "/embed", { "sec-fetch-site": "same-site", "sec-fetch-dest": "iframe" });
     assert.equal(framed.status, 200, "loaded as a frame, by the git terminal's page (another site)");
-    assert.equal((await call("GET", "/embed", { "sec-fetch-site": "cross-site", host: "evil.example:31599" })).status, 421, "still by this name only");
-    assert.equal((await call("GET", "/embed?tkn=x", { "sec-fetch-site": "cross-site" })).status, 403, "and only the bare page");
+    assert.equal((await call("GET", "/embed", { "sec-fetch-site": "cross-site", "sec-fetch-dest": "iframe", host: "evil.example:31599" })).status, 421, "still by this name only");
+    assert.equal((await call("GET", "/embed?tkn=x", { "sec-fetch-site": "cross-site", "sec-fetch-dest": "iframe" })).status, 403, "and only the bare page");
+    assert.equal((await call("GET", "/embed", { "sec-fetch-site": "cross-site", "sec-fetch-dest": "document" })).status, 403, "not as a window another site opens");
+    assert.equal((await call("GET", "/embed", {})).status, 403, "nor as anything that does not say it is a frame");
     assert.match(String(framed.headers["content-security-policy"]), /frame-ancestors http:\/\/desolate-git\.localhost:31599(;|$)/, "that one origin, exactly");
     assert.equal(framed.headers["x-frame-options"], undefined, "(X-Frame-Options cannot name an origin: frame-ancestors alone governs /embed)");
     assert.match(String(framed.headers["content-security-policy"]), /script-src 'self'/);

@@ -158,8 +158,12 @@ export const handler = (backend: Backend, log: (line: string) => void) => {
   // nothing, and frame-ancestors says who may show it. Everything it then asks for is a
   // same-origin request, checked as any other.)
   const url = new URL(req.url ?? "/", `http://${APPROVE_HOSTNAME}`);
-  const refused = refusal(APPROVE_HOSTNAME, req.headers, req.method === "GET" && url.pathname === "/embed" && url.search === "");
+  // Only as a frame (Sec-Fetch-Dest: iframe): a window another site opens on /embed would be
+  // the live page, under a pointer that site chose (found by the audit of #93).
+  const asFrame = req.method === "GET" && url.pathname === "/embed" && url.search === "" && req.headers["sec-fetch-dest"] === "iframe";
+  const refused = refusal(APPROVE_HOSTNAME, req.headers, asFrame);
   if (refused) return text(res, refused.status, `refused ${refused.why.replace(/this is the editor of/, "this is the approval page at")}`);
+  if (req.method === "GET" && url.pathname === "/embed" && !asFrame) return text(res, 403, "refused: /embed is the approval page beside the git terminal, and loads only as its frame");
   const token = approveToken();
   const name = cookieName(token);
   const given = url.searchParams.get("tkn");

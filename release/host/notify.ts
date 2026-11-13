@@ -33,6 +33,7 @@ const show = (n: Notice) => {
 
 export const notify = async (out: (line: string) => void) => {
   const { followEvents } = await import("./daemon.ts");
+  const said = new Map<string, number>();
   out("desolate notify: notifications for pushes waiting, offers, agents asking for you, and pushes. Ctrl-C stops.");
   await followEvents(0, (line) => {
     let event: Record<string, unknown>;
@@ -43,6 +44,13 @@ export const notify = async (out: (line: string) => void) => {
     }
     const n = notice(event);
     if (!n) return;
+    // A workspace's own words (its status), at most once a minute each: an agent flipping
+    // its colour must not teach anyone to ignore desolate's notifications.
+    if (event.source === "root" && event.type === "status") {
+      const key = `${String(event.domain)}/${String(event.workspace)}`;
+      if (Date.now() - (said.get(key) ?? 0) < 60_000) return;
+      said.set(key, Date.now());
+    }
     out(`${new Date().toLocaleTimeString()}  ${n.title}: ${n.body}`);
     show(n);
   }, (resume) => resume());

@@ -43,6 +43,24 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
     gives every VM is the Mac's loopback, and from the root the approval page answered.
     Walled off (root/wall.sh); doctor and T4 ask by trying.
 
+**The audit of #92 to #96** (2026-11-13, an independent read of the changes; `mac/security-3`):
+
+- **Medium, fixed: any website could open the live approval page through `/embed`.** The
+  exemption that lets `/embed` load as the git terminal's frame let it load as a window too
+  (`window.open` from any page), placed under a pointer that page chose, with the cookie on
+  its own requests. `/embed` now loads only as a frame (Sec-Fetch-Dest: iframe); the page is
+  "embedded" only when it is a frame, and there signs in by the frame's key alone (the
+  cookie is not sent). T1.
+- **Low to medium, fixed: `--against domain` could hide what a push sends.** The warnings
+  (`.github/`, `.gitmodules`, ...) and the count of commits were worked out over the domain's
+  range, and a domain's own main is the agent's: a workflow hidden there went unwarned. Both
+  are now always over the range a push sends (against origin), and Push is offered only in
+  that view. T2.
+- **Low, fixed: an agent could keep the state service busy** with a large `packed-refs` and a
+  loop on its refs: `packed-refs` is read only up to 256 KiB, and again only when it changed;
+  the daemon's nudges are at most two a second. T1.
+- **Low, fixed: notification spam.** A workspace's status notifies at most once a minute.
+
 ## Open
 
 0. **The root's ordinary user both parses what domains send and pushes** (the audit's F6),
