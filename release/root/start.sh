@@ -112,7 +112,7 @@ LAYOUT=2
 # the release's, which only the host can change (a read-only share).
 CODE=$(cd "$HERE/.." && find root shared -type f \( -name '*.ts' -o -name '*.py' -o -name '*.sh' \) -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
 if [ "$(cat "$SYS/layout" 2>/dev/null)" != "$LAYOUT" ] || [ "$(cat "$SYS/code" 2>/dev/null)" != "$CODE" ]; then
-  for svc in rootd stated; do
+  for svc in rootd stated rootctl; do
     [ -f "$RUN/$svc.pid" ] && { kill -- "-$(cat "$RUN/$svc.pid")" 2>/dev/null || true; }
     rm -f "$RUN/$svc.pid"
   done
@@ -174,7 +174,7 @@ as_user bash -c '
   [ -s registry.json ] || echo "{\"repos\":{}}" >registry.json
   # Layout 1 left these: gitconfig is root'"'"'s now, and the logs were opened by root.
   rm -f gitconfig keyring.log
-  for log in rootd.log stated.log; do [ -O "$log" ] || { [ -f "$log" ] && cat "$log" >"$log.mine" && mv -f "$log.mine" "$log"; } || rm -f "$log"; done
+  for log in rootd.log stated.log rootctl.log; do [ -O "$log" ] || { [ -f "$log" ] && cat "$log" >"$log.mine" && mv -f "$log.mine" "$log"; } || rm -f "$log"; done
   mkdir -p -m 0700 approvals proxy/running
   mkdir -p -m 0755 push-locks
   chmod 0700 approvals proxy/running
@@ -332,12 +332,16 @@ ln -sf "$HERE/git-remote-desolate-push" /usr/local/bin/git-remote-desolate-push
 kept() { # kept <name> <script>
   setsid runuser -u "$USER_NAME" -- env HOME="$USER_HOME" GIT_CONFIG_GLOBAL="$SYS/gitconfig" \
     bash -c 'exec >>"$1/$2.log" 2>&1 || exit 1; name=$2; shift 2; while :; do "$@"; echo "$name: ended with $? at $(date -u +%FT%TZ); starting it again" >&2; sleep 2; done' \
-    _ "$STATE" "$1" $NODE "$HERE/$2" </dev/null >/dev/null 2>&1 &
+    _ "$STATE" "$1" $NODE "$HERE/$2" "${@:3}" </dev/null >/dev/null 2>&1 &
   echo $! >"$RUN/$1.pid"
 }
 alive "$RUN/rootd.pid" || kept rootd rootd.ts
 # The state service: what the dashboard draws from (stated.ts).
 alive "$RUN/stated.pid" || kept stated stated.ts
+# The CLI channel, kept running (rootctl.ts serve): the host's calls skip loading the root's
+# code each time. Its socket's directory is the user's alone; the host asks as that user.
+install -d -m 0700 -o "$USER_NAME" "$RUN/rootctl"
+alive "$RUN/rootctl.pid" || kept rootctl rootctl.ts serve
 echo "$LAYOUT" >"$SYS/layout"
 echo "$CODE" >"$SYS/code"
-echo "root services: keyring, pusher, reviewer, rootd and the state service up"
+echo "root services: keyring, pusher, reviewer, rootd, the state service and the CLI channel up"

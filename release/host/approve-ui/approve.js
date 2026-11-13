@@ -183,7 +183,7 @@ const render = (pending) => {
   // Beside the git terminal: how many wait, so its page shows this frame when one does.
   // (A number, to that one origin.)
   if (EMBED && window.parent !== window) window.parent.postMessage({ desolatePending: waiting }, location.origin.replace("//desolate-approve.", "//desolate-git."));
-  say(waiting ? "" : "Nothing is waiting. This page checks every two seconds.");
+  say(waiting ? "" : "Nothing is waiting. This page checks every second.");
 };
 
 const poll = async () => {
@@ -193,6 +193,6 @@ const poll = async () => {
     if (!answer.ok) say(body.error || `HTTP ${answer.status}`);
     else render(body.pending);
   } catch (error) { say(`the host daemon did not answer: ${error.message}`); }
-  setTimeout(poll, 2000);
+  setTimeout(poll, 1000);
 };
 poll();
