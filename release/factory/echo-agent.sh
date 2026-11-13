@@ -16,7 +16,7 @@ say "wrote TASK.md"
 git add TASK.md
 git -c user.name="echo agent" -c user.email="echo-agent@desolate.invalid" commit -q -m "Task: $first"
 say "committed $(git rev-parse --short HEAD)"
-desolate offer | head -n 1
+desolate offer | sed -n 1p
 desolate status set green "ready: $first" >/dev/null 2>&1 || true
 say "done: offered, and green. Waiting (Ctrl-C ends me)."
 while sleep 3600; do :; done
