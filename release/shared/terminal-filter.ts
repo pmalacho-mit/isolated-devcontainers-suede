@@ -10,7 +10,7 @@
 // tmux used to stand between the two, interpreting all of it itself; with the agent's terminal
 // streamed straight through, this does that part of tmux's job.
 // In-source tests (suede.nests: `npm run test:nests`). Types only: erased when node runs this.
-import type { Expect, Invoke } from "../.suede/nests/dsl.import.meta.vitest.ts";
+import type { Expect, Invoke, Table } from "../.suede/nests/dsl.import.meta.vitest.ts";
 
 const ESC = 0x1b;
 const BEL = 0x07;
@@ -19,7 +19,9 @@ const STRING_OPENERS = new Set([0x5d /* ] OSC */, 0x50 /* P DCS */, 0x5f /* _ AP
 // (Raw 8-bit C1 bytes are not touched: in UTF-8 they are parts of ordinary characters, ✓ is
 // E2 9C 93. A C1 control written AS UTF-8, C2 80 to C2 9F, is dropped below.)
 
-export const terminalFilter = () => {
+export type TerminalFilter = ((chunk: Buffer) => Buffer) & { reset: () => string };
+
+export const terminalFilter = (): TerminalFilter => {
   // "text": passing bytes; "esc": just saw ESC; "csi": inside ESC [ ... (held, to look at);
   // "string": inside a string to drop; "stringEsc": inside one, just saw ESC (ST may follow);
   // "c2": just saw 0xC2, which with 0x80-0x9F is a C1 control written as UTF-8 (U+0080 to
@@ -27,7 +29,9 @@ export const terminalFilter = () => {
   let state: "text" | "esc" | "csi" | "string" | "stringEsc" | "c2" = "text";
   let dropped = 0;
   let csi: number[] = [];
-  return (chunk: Buffer): Buffer => {
+  // On the alternate screen, as far as what passed says (a full-screen program's own).
+  let alternate = false;
+  const filter = (chunk: Buffer): Buffer => {
     const out: number[] = [];
     const emitCsi = (final: number) => {
       const params = Buffer.from(csi).toString("latin1");
@@ -40,6 +44,7 @@ export const terminalFilter = () => {
         out.push(ESC, 0x5b, ...Buffer.from(kept, "latin1"), final);
         return;
       }
+      if ((final === 0x68 /* h */ || final === 0x6c /* l */) && /^\?(\d+;)*(1049|1047|47)(;\d+)*$/.test(params)) alternate = final === 0x68;
       out.push(ESC, 0x5b, ...Buffer.from(params, "latin1"), final);
     };
     for (const byte of chunk) {
@@ -94,12 +99,35 @@ export const terminalFilter = () => {
     }
     return Buffer.from(out);
   };
+  return Object.assign(filter, { reset: () => resetAfter(alternate) });
 };
 
 /** What undoes the modes a full-screen program may leave on: after a detach, your shell's
- *  terminal is yours again (mouse reporting, focus events, the alternate screen, a hidden
- *  cursor, keypad mode, bracketed paste, colours). */
-export const TERMINAL_RESET = "\u001b[?1049l\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?2004h\u001b[?25h\u001b>\u001b[0m";
+ *  terminal is yours again (mouse reporting, focus events, a hidden cursor, keypad mode,
+ *  bracketed paste, colours), and the alternate screen left if the program was on it. Only
+ *  then: leaving it (CSI ?1049l) also restores the cursor saved on the way in, and with
+ *  nothing saved the cursor jumped to the top of the screen, where your prompt then wrote
+ *  over what the agent had printed. */
+export const resetAfter = (alternate: boolean) =>
+  `${alternate ? "\u001b[?1049l" : ""}\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1006l\u001b[?1004l\u001b[?2004h\u001b[?25h\u001b>\u001b[0m`;
+
+/** The reset owed after this output: for the tests below. */
+export const resetOwed = (text: string): boolean => {
+  const filter = terminalFilter();
+  filter(Buffer.from(text, "utf8"));
+  return filter.reset().startsWith("\u001b[?1049l");
+};
+
+declare namespace resetOwed {
+  /** the alternate screen is left only by what entered it, and is not left twice */
+  export type Cases = Table<typeof resetOwed, [
+    [args: [text: "plain output\r\n"], expected: false],
+    [args: [text: "\u001b[?1049h\u001b[2Jtui"], expected: true],
+    [args: [text: "\u001b[?1049hdrawn\u001b[?1049l"], expected: false],
+    [args: [text: "\u001b[?1000;1049h"], expected: true],
+    [args: [text: "\u001b[?25l\u001b[?1004h"], expected: false],
+  ]>;
+}
 
 /** One chunk, filtered alone: for the tests below. */
 export const filtered = (text: string): string => terminalFilter()(Buffer.from(text, "utf8")).toString("utf8");
