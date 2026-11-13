@@ -5,7 +5,7 @@ import { EXIT, refuse } from "../shared/exit.ts";
 import { devHostname, editorHostname, editorHostPort, isBranch, parseRepo } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { readHead } from "../shared/status.ts";
-import { terminalFilter } from "../shared/terminal-filter.ts";
+import { TERMINAL_RESET, terminalFilter } from "../shared/terminal-filter.ts";
 import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
 import { backend, ensureProxyUser, rootctl } from "./stack.ts";
 import type { VmSpec } from "./vm/types.ts";
@@ -333,6 +333,8 @@ export const exec = async (target: string | undefined, command: string[], option
     child.stderr!.on("data", (chunk: Buffer) => process.stderr.write(filter(chunk)));
   } else child.stderr!.pipe(process.stderr);
   const code = await new Promise<number>((resolve) => child.on("close", (status) => resolve(status ?? 1)));
+  // A full-screen program's modes, off again: the terminal is your shell's.
+  if (process.stdout.isTTY) process.stdout.write(TERMINAL_RESET);
   process.stdin.unpipe();
   process.stdin.pause();
   return code;

@@ -22,9 +22,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
+import { printable } from "../host/events.ts";
 
 const CLI = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "cli.sh");
-const say = (line: string): void => void process.stdout.write(`${new Date().toLocaleTimeString()}  ${line}\n`);
+// Everything said here is made printable: a .gitrepo's text, gh's and the VM's errors.
+const say = (line: string): void => void process.stdout.write(`${new Date().toLocaleTimeString()}  ${printable(line, 600)}\n`);
 const desolate = (args: string[]) => {
   const ran = spawnSync(CLI, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
   return { code: ran.status ?? 1, out: ran.stdout ?? "", err: ran.stderr ?? "" };
@@ -84,9 +86,20 @@ const handle = async (project: string, commit: string, onto: string | null) => {
     const short = commit.slice(0, 8);
     const name = `up-${dep.remote.split("/")[1]!.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 20)}-${short}`.replace(/-+/g, "-");
     const branch = `upstream/${project.split("/")[1]}-${short}`;
-    // The domain, with both repositories (made or given them on first use).
-    if (desolate(["domain", domain, "show", "--json"]).code !== 0) desolate(["domain", "create", domain, "--title", "suede upstreaming"]);
-    desolate(["domain", domain, "add", "--repo", project, "--repo", dep.remote]);
+    // The domain must already hold both: which repositories share a domain is the person's to
+    // decide, never a .gitrepo's (a pushed commit's text could name any repository desolate
+    // holds, another domain's private one among them). Found by the audit of the factories.
+    const shown = desolate(["list", domain, "--json"]);
+    let has: string[] = [];
+    try {
+      has = (JSON.parse(shown.out) as { repos: string[] }[])[0]?.repos ?? [];
+    } catch {
+      /* no such domain */
+    }
+    if (!has.includes(project) || !has.includes(dep.remote)) {
+      say(`${project}: ${dep.dir} changed (${dep.remote}), but the domain ${domain} does not hold both. If ${dep.remote} is a dependency you mean to upstream to: desolate domain ${has.length ? `${domain} add` : `create ${domain}`} --repo ${project} --repo ${dep.remote}`);
+      continue;
+    }
     // The project's commit is on the remote now: the mirror is brought up to it first.
     desolate(["fetch", project]);
     say(`${project}: ${dep.dir} changed: ${domain}/${name}, an agent deciding whether it goes to ${dep.remote}`);

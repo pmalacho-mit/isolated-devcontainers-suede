@@ -18,8 +18,11 @@ terminal closing.
 **No tmux, on purpose.** tmux draws the screen itself, so scrolling and copying are tmux's:
 its mouse mode gives you one and takes the other. `desolate agent attach` streams the
 agent's terminal straight to yours, after replaying what it printed recently, so your
-terminal's own scrollback, selection and copy work as for anything else. Ctrl-] lets go;
-Ctrl-C goes to the agent. Many people can attach at once.
+terminal's own scrollback, selection and copy work as for anything else. Ctrl-] lets go
+(and puts back what the agent changed of your terminal's modes); Ctrl-C goes to the agent.
+Many people can attach at once. What the agent prints reaches your terminal filtered: what
+a full-screen program needs passes, and the escape sequences that act beyond the screen
+(the clipboard, files, window operations, concealed text) do not.
 
 **In parallel.** One workspace is one VM, and agents in different workspaces run truly side
 by side (a workspace can hold more than one, by `--name`). A workspace from its domain's
@@ -61,7 +64,8 @@ On your Mac, with your `gh`: every open issue labelled `desolate:run` (`--label`
 workspace `issue-<n>` with a worktree on `issue/<n>` and Claude in it, the issue as its task;
 at most `--max` at once, started side by side. It prints what each agent says as it says it.
 When you push `issue/<n>` (the git terminal, or the dashboard's Push), it opens a draft pull
-request that closes the issue; nothing an agent wrote is ever posted to GitHub. When the
+request titled `Issue #<n>` that closes the issue; nothing an agent wrote, and nothing an
+issue's author could change after the label went on, is posted under your login. When the
 issue is closed, its agent is stopped and its workspace removed (the branch stays). Any other
 agent: `-- <command...>`, which gets the task as its last argument.
 
@@ -78,8 +82,16 @@ with a `.gitrepo` (suede's record of where a dependency came from), the files un
 push touched, a nested dependency's files counted as its own; the project's own `release/` is
 not a dependency. No agent is involved in that.
 
-For each changed dependency whose repository desolate has cloned (`desolate clone <dep>`),
-it makes a workspace in the domain `suede` (`--domain`), with the dependency on
+Which repositories share a domain is yours to decide, never a commit's: set the domain up
+once, with each project and the dependencies you upstream to,
+
+```bash
+desolate domain create suede --repo you/app --repo you/some-dependency
+```
+
+and the factory works only on dependencies the domain already holds (it says what to run for
+any other: a `.gitrepo` in a pushed commit could name any repository desolate holds). For each
+changed one, it makes a workspace in the domain `suede` (`--domain`), with the dependency on
 `upstream/<project>-<commit>` and the project beside it, and an agent whose task names the
 directory, the commits and the dependency's layout (its release branch is its main branch's
 `release/`). The agent decides: if the change belongs upstream it makes it on its branch,

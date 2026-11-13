@@ -13,7 +13,8 @@
 // own VM: `desolate agent list` shows them all.
 import { EXIT, refuse } from "../shared/exit.ts";
 import { parseRepo } from "../shared/names.ts";
-import { terminalFilter } from "../shared/terminal-filter.ts";
+import { TERMINAL_RESET, terminalFilter } from "../shared/terminal-filter.ts";
+import { printable } from "./events.ts";
 import { guest } from "./paths.ts";
 import { backend, rootctl } from "./stack.ts";
 
@@ -44,7 +45,8 @@ export const start = async (where: string | undefined, options: { name?: string;
   if (!checkout || (options.checkout && !parseRepo(options.checkout))) refuse(`${options.checkout} is not checked out in ${w.domain}/${w.workspace}`, `it has: ${w.checkouts.map((c) => c.repo).join(", ")}`, EXIT.usage);
   const name = nameOf(options.name);
   const started = await backend().exec(w.vm, [...HOLDER(), "start", name, checkout!.path, "--", ...command], { timeoutMs: 60_000 });
-  if (started.code !== 0) refuse(`the agent did not start: ${(started.stderr || started.stdout).trim().slice(-300)}`, `desolate agent list ${w.domain}/${w.workspace}`);
+  // (What the VM says is the VM's: made printable before it reaches a terminal.)
+  if (started.code !== 0) refuse(`the agent did not start: ${printable((started.stderr || started.stdout).trim().slice(-600), 300)}`, `desolate agent list ${w.domain}/${w.workspace}`);
   if (json) return out(started.stdout.trim());
   out(`agent ${name} is running in ${w.domain}/${w.workspace} (${checkout!.repo})`);
   out(`  attach: desolate agent attach ${w.domain}/${w.workspace}${name === "agent" ? "" : ` --name ${name}`}   (Ctrl-] detaches; it keeps running)`);
@@ -59,7 +61,17 @@ export const list = async (only: string | undefined, out: Out, json: boolean) =>
   await Promise.all(all.filter((d) => !domain || d.slug === domain).flatMap((d) => d.workspaces.filter((w) => (!workspace || w.workspace === workspace) && running.has(w.vm)).map(async (w) => {
     const listed = await b.exec(w.vm, [...HOLDER(), "list"], { timeoutMs: 30_000 });
     try {
-      for (const agent of JSON.parse(listed.stdout.trim() || "[]") as Agent[]) rows.push({ ...agent, workspace: `${d.slug}/${w.workspace}` });
+      // The VM's account of its agents is the VM's (an agent is root there): only rows of the
+      // expected shape, every string made printable, the command cut short.
+      const iso = (v: unknown) => (typeof v === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(v) ? v : null);
+      for (const a of (JSON.parse(listed.stdout.trim() || "[]") as Agent[]).slice(0, 50)) {
+        if (typeof a?.name !== "string" || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(a.name) || !["running", "exited", "lost"].includes(String(a.state))) continue;
+        rows.push({
+          name: a.name, state: String(a.state), workspace: `${d.slug}/${w.workspace}`,
+          command: [printable((Array.isArray(a.command) ? a.command : []).map(String).join(" "), 120)],
+          started: iso(a.started) ?? "", lastOutput: iso(a.lastOutput), exit: Number.isInteger(a.exit) ? a.exit : null, ...(iso(a.ended) ? { ended: iso(a.ended)! } : {}),
+        });
+      }
     } catch {
       /* no agents there */
     }
@@ -76,7 +88,7 @@ export const stop = async (where: string | undefined, options: { name?: string }
   const w = await target(where);
   const name = nameOf(options.name);
   const stopped = await backend().exec(w.vm, [...HOLDER(), "stop", name], { timeoutMs: 30_000 });
-  if (stopped.code !== 0) refuse((stopped.stderr || stopped.stdout).trim().replace(/^agent-holder: /, ""), `desolate agent list ${w.domain}/${w.workspace}`);
+  if (stopped.code !== 0) refuse(printable((stopped.stderr || stopped.stdout).trim().replace(/^agent-holder: /, ""), 300), `desolate agent list ${w.domain}/${w.workspace}`);
   out(`asked agent ${name} in ${w.domain}/${w.workspace} to stop`);
 };
 
@@ -85,7 +97,8 @@ export const log = async (where: string | undefined, options: { name?: string })
   const name = nameOf(options.name);
   const shown = await backend().exec(w.vm, ["bash", "-c", 'tail -c 2097152 "$HOME/.desolate-agents/$1.log"', "_", name], { timeoutMs: 30_000 });
   if (shown.code !== 0) refuse(`no agent '${name}' in ${w.domain}/${w.workspace}`, `desolate agent list ${w.domain}/${w.workspace}`);
-  process.stdout.write(shown.stdout);
+  // To a terminal, what a screen needs and no more; to a pipe or file, as it was.
+  process.stdout.write(process.stdout.isTTY ? terminalFilter()(Buffer.from(shown.stdout, "utf8")) : shown.stdout);
 };
 
 /** Your terminal, attached: raw, its size passed on, Ctrl-] to let go. */
@@ -111,6 +124,9 @@ export const attach = async (where: string | undefined, options: { name?: string
       process.stdin.pause();
       process.stdout.off("resize", size);
       child.kill();
+      // Whatever modes it left on (mouse reporting, the alternate screen, ...), off: the
+      // terminal is your shell's again.
+      process.stdout.write(TERMINAL_RESET);
       process.stderr.write(`\r\ndesolate: detached from ${name}; it is still running (desolate agent list).\r\n`);
       resolve(code);
     };

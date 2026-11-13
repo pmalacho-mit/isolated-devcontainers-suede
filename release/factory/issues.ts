@@ -23,9 +23,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
+import { printable } from "../host/events.ts";
 
 const CLI = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "cli.sh");
-const say = (line: string): void => void process.stdout.write(`${new Date().toLocaleTimeString()}  ${line}\n`);
+// Everything said here is made printable: issue text, gh's and the VM's errors, an agent's words.
+const say = (line: string): void => void process.stdout.write(`${new Date().toLocaleTimeString()}  ${printable(line, 600)}\n`);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const fail = (message: string, fix: string): never => {
   process.stderr.write(`desolate factory: ${message}\n  fix: ${fix}\n`);
@@ -133,7 +135,9 @@ events.stdout.on("data", (chunk: Buffer) => {
         say(`issue #${n}: pushed; its pull request is ${exists}`);
         continue;
       }
-      const made = gh(["pr", "create", "--repo", repo, "--draft", "--head", String(e.branch), "--title", titles.get(n) ?? `Issue #${n}`, "--body", `Closes #${n}. Pushed through desolate at ${String(e.commit)}.`]);
+      // The title is the issue's number, not its title: an issue's author can edit its text after
+      // the label went on, and this is posted under your login.
+      const made = gh(["pr", "create", "--repo", repo, "--draft", "--head", String(e.branch), "--title", `Issue #${n}`, "--body", `Closes #${n}. Pushed through desolate at ${String(e.commit)}.`]);
       say(made.code === 0 ? `issue #${n}: draft pull request ${made.out.trim()}` : `issue #${n}: pushed, but the pull request was not opened: ${made.err.trim().split("\n").pop()}`);
     }
   }
@@ -143,7 +147,8 @@ process.on("SIGINT", () => process.exit(130));
 
 // ------------------------------------------------------------------ the loop
 const tick = async () => {
-  const listed = gh(["issue", "list", "--repo", repo, "--label", String(values.label), "--state", "open", "--limit", "200", "--json", "number,title,body,url"]);
+  const LIMIT = 200;
+  const listed = gh(["issue", "list", "--repo", repo, "--label", String(values.label), "--state", "open", "--limit", String(LIMIT), "--json", "number,title,body,url"]);
   if (listed.code !== 0) return say(`gh could not list ${repo}'s issues: ${listed.err.trim().split("\n").pop()}`);
   const issues = JSON.parse(listed.out) as Issue[];
   for (const issue of issues) titles.set(issue.number, issue.title);
@@ -154,7 +159,10 @@ const tick = async () => {
 
   // Closed: the agent stopped, the workspace removed (the branch stays in the domain).
   const removed = new Set<string>();
-  for (const row of rows.filter((r) => /^issue-\d+$/.test(r.workspace) && !open.has(r.workspace))) {
+  // Only workspaces this factory made (their checkout of this repository on issue/<n>), and
+  // only from a list that was whole: a list cut at its limit says nothing of the rest.
+  const ours = (r: Row) => /^issue-\d+$/.test(r.workspace) && r.checkouts.some((c) => c.repo === repo && (c as { branch?: string }).branch === `issue/${r.workspace.slice(6)}`);
+  for (const row of issues.length >= LIMIT ? [] : rows.filter((r) => ours(r) && !open.has(r.workspace))) {
     removed.add(`${domain}/${row.workspace}`);
     say(`${row.workspace}: its issue is closed; stopping its agent and removing the workspace (its branch stays)`);
     desolate(["agent", "stop", `${domain}/${row.workspace}`, "--name", "claude"]);

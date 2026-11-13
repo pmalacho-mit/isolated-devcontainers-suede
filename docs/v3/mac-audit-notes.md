@@ -61,6 +61,18 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
   the daemon's nudges are at most two a second. T1.
 - **Low, fixed: notification spam.** A workspace's status notifies at most once a minute.
 
+**The audit of the agents and the factories** (2026-11-13, an independent read; `mac/todos`):
+fixed before merging. High: `desolate agent log` printed an agent's log raw to the terminal;
+filtered. Medium: the VM's account of its agents and its error text reached the terminal raw
+(validated, made printable); the suede factory added whatever repository a pushed `.gitrepo`
+named to its domain, a way for an agent's commit to pull another domain's repository in
+beside it (it now works only on repositories the domain already holds, set up by the person).
+Low: C1 controls written as UTF-8 (`C2 9D` is OSC) passed the filter (dropped); modes an agent
+left on stayed after a detach (reset), window operations and concealed text (dropped); the
+issue factory could remove workspaces not its own, or all of them from a truncated list
+(only its own, only from a whole list); an issue's title, editable after the label, became a
+pull request's title under the person's login (now `Issue #<n>`).
+
 ## Open
 
 0. **The root's ordinary user both parses what domains send and pushes** (the audit's F6),
