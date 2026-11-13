@@ -40,14 +40,23 @@ export const standingOrders = (branch: string) => [
   "If you need a person (a decision, access, a secret): `desolate status set orange \"<the question>\"`, and wait.",
 ].join("\n");
 
-/** A workspace name from a sentence: its first words, lower case, dashed, at most 30. */
-export const nameFor = (text: string) =>
-  text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30).replace(/-+$/, "") || "task";
+/** A workspace name from a sentence: its first words, lower case, dashed, at most 30
+ *  characters, and whole words where it can (a word cut short is dropped). */
+export const nameFor = (text: string) => {
+  const words = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (words.length <= 30) return words || "task";
+  const cut = words.slice(0, 31);
+  const whole = cut.slice(0, cut.lastIndexOf("-"));
+  return whole.length >= 12 ? whole : words.slice(0, 30).replace(/-+$/, "");
+};
 
 declare namespace nameFor {
   export type Names = Table<typeof nameFor, [
     [args: [text: "Add a shout() greeting"], expected: "add-a-shout-greeting"],
     [args: [text: "Fix #12: the login page's 500 on Safari, again"], expected: "fix-12-the-login-page-s-500-on"],
+    [args: [text: "Add a wave() greeting, with a test"], expected: "add-a-wave-greeting-with-a"],
+    [args: [text: "Internationalisation-of-everything-everywhere"], expected: "internationalisation-of"],
+    [args: [text: "Supercalifragilisticexpialidocious-and-more"], expected: "supercalifragilisticexpialidoc"],
     [args: [text: "¿Qué?"], expected: "qu"],
     [args: [text: "!!!"], expected: "task"],
   ]>;
