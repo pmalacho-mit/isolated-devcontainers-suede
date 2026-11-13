@@ -14,6 +14,7 @@
 // which checks every object as it does a domain's and pushes after the person approves on
 // the approval page. The git VM cannot write anything the root reads but what the host
 // copies on.
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -59,6 +60,12 @@ export const ensureGitVm = async (log: (line: string) => void = () => {}) => {
   if ((await b.info(GIT_VM)).status !== "running") await b.start(GIT_VM);
   const provisioned = await b.exec(GIT_VM, ["bash", `${guest.release}/git/provision.sh`], { root: true, timeoutMs: 120_000 });
   if (provisioned.code !== 0) refuse(`the git VM could not be set up: ${(provisioned.stderr || provisioned.stdout).trim().slice(-300)}`, "desolate doctor");
+  // Who you are, for your commits: the Mac's own git identity, unless the git VM has one
+  // already (yours to change there: git config --global user.name ...).
+  const mine = (key: string) => spawnSync("git", ["config", "--global", key], { encoding: "utf8" }).stdout.trim().replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200);
+  const [name, email] = [mine("user.name"), mine("user.email")];
+  if (name || email)
+    await b.exec(GIT_VM, ["bash", "-c", 'for kv in "user.name=$1" "user.email=$2"; do k=${kv%%=*}; v=${kv#*=}; [ -n "$v" ] && ! git config --global "$k" >/dev/null && git config --global "$k" "$v"; done; true', "_", name, email], { timeoutMs: 60_000 });
 };
 
 /** The person's clone of a repository in the git VM: from the mirror, with `root` as a

@@ -1,5 +1,7 @@
 // The desolate command, on the host. It drives everything, holds no key, and runs no git on
 // desolate's repositories (P4).
+import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
 import { parseArgs } from "node:util";
 import { EXIT, Refusal, refuse } from "../shared/exit.ts";
 import { parseRepo } from "../shared/names.ts";
@@ -17,7 +19,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate repos [--json]
   desolate keys [<owner/repo>] [--json]                          which keys the root holds; a key's public half
 
-  desolate domain create <slug> [--title "..."]                  a trust boundary: repositories and secrets
+  desolate domain create <slug> [--title "..."] [--repo <owner/repo>]...
+                                                                 a trust boundary: repositories and secrets
   desolate domain <slug> add --repo <owner/repo>                 give the domain a repository
   desolate domain <slug> env [--from <owner/repo>]               whose devcontainer.json its workspaces run
   desolate domain <slug> net [open | enforce | allow <host>... | deny <host>...]
@@ -26,12 +29,12 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate domain <domain> net recommend                         what it reached that is not on its list
   desolate domain <domain> secret set <NAME> --hosts <h>[,...] [--headers <h>[,...]] | list | off | on [--ttl 30m] | rm
                                                                  a secret: the value on stdin, the name in workspaces
-  desolate up <domain> [--name <workspace>] [--fetch] [--base <ref>]
+  desolate up <domain> [--name <workspace>] [--branch <branch>] [--fetch] [--base <ref>]
               [--checkout <owner/repo>=main|worktree:<branch>]   a workspace: one VM, its checkouts
   desolate list [<domain>] [--json]
   desolate status | board <domain>[/<workspace>] [--json]        how each checkout says its work is going
   desolate ports [<domain>/<workspace>] [--json]                 what is forwarded, at which URL; what is reserved
-  desolate editor <domain>/<workspace> [--json]                  the address of its editor, for your browser
+  desolate editor <domain>/<workspace> [--open] [--json]         the address of its editor, for your browser
   desolate exec <domain>/<workspace> [--checkout <repo>] [--vm] -- <cmd>
                                                                  a command, or an agent, in its devcontainer
                                                                  (or in the VM itself: when it has none, or --vm)
@@ -39,7 +42,7 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate rm <domain>                                           the domain and its clones; not the root's
 
   desolate offers [<domain>] [--json]                            what workspaces have offered: needs you
-  desolate branches [<domain>] [--json]                           every branch each domain has (offered or not)
+  desolate branches [<domain>] [--json]                          every branch each domain has (offered or not)
   desolate review <domain> <owner/repo> <branch> [--diff] [--against origin|domain] [--json]
                                                                  what a push would send; --diff: the diff itself
   desolate push <domain> <owner/repo> <branch> --expect <commit> [--allow-default]
@@ -47,11 +50,11 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
                                                                  host, on your terminal
   desolate events [--replay <n>]                                 what happens, as JSON lines, until stopped: pushed,
                                                                  offered, status, approval-waiting, workspace-up, ...
-  desolate git [<owner/repo>]                                    a shell in the git VM, in your browser: your own
+  desolate git [<owner/repo>] [--open]                           a shell in the git VM, in your browser: your own
                                                                  clones, git and nothing else; pushes wait for approval
-  desolate approve [--web | --selftest]                          approve a raw git push waiting in the root shell
+  desolate approve [--web [--open] | --selftest]                 approve a raw git push waiting in the root shell
                                                                  (--web: the approval page's address, for one click)
-  desolate ui [--json]                                           the dashboard's address, for your browser
+  desolate ui [--open] [--json]                                  the dashboard's address, for your browser
   desolate root shell                                            the root's terminal: git on the root clones
 
   desolate help                                                  this text
@@ -68,6 +71,15 @@ const flags = (argv: string[], options: Record<string, { type: "boolean" | "stri
   } catch (error) {
     throw new Refusal((error as Error).message, "desolate help", EXIT.usage);
   }
+};
+
+/** `--open`: the address in a browser on this Mac. Chrome or Firefox if there is one:
+ *  Safari cannot find desolate's *.localhost names. */
+const openInBrowser = (url: string) => {
+  if (process.platform !== "darwin") return void spawnSync("xdg-open", [url], { stdio: "ignore" });
+  const browser = process.env.DESOLATE_BROWSER ?? ["Google Chrome", "Firefox", "Chromium", "Brave Browser", "Microsoft Edge"].find((app) => fs.existsSync(`/Applications/${app}.app`));
+  const opened = spawnSync("open", browser ? ["-a", browser, url] : [url], { stdio: "ignore" });
+  if (opened.status !== 0 || !browser) process.stderr.write(`desolate: ${browser ? `could not open ${browser}` : "no Chrome or Firefox found: Safari cannot open *.localhost addresses"}; open the address above in Chrome or Firefox\n`);
 };
 
 const main = async (argv: string[]): Promise<number> => {
@@ -118,7 +130,7 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "domain") {
-    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string" }, hosts: { type: "string" }, headers: { type: "string" }, ttl: { type: "string" }, secret: { type: "string" }, from: { type: "string" } });
+    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string", multiple: true }, hosts: { type: "string" }, headers: { type: "string" }, ttl: { type: "string" }, secret: { type: "string" }, from: { type: "string" } });
     const { domainCommand } = await import("./domains.ts");
     await domainCommand(positionals, values, out);
     return EXIT.ok;
@@ -132,9 +144,9 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "up") {
-    const { values, positionals } = flags(rest, { name: { type: "string" }, checkout: { type: "string", multiple: true }, base: { type: "string" }, fetch: { type: "boolean" } });
+    const { values, positionals } = flags(rest, { name: { type: "string" }, checkout: { type: "string", multiple: true }, branch: { type: "string" }, base: { type: "string" }, fetch: { type: "boolean" } });
     const { up } = await import("./workspaces.ts");
-    await up(positionals[0], { name: values.name as string | undefined, checkouts: (values.checkout as string[] | undefined) ?? [], base: values.base as string | undefined, fetch: values.fetch === true }, out, values.json === true);
+    await up(positionals[0], { name: values.name as string | undefined, checkouts: (values.checkout as string[] | undefined) ?? [], branch: values.branch as string | undefined, base: values.base as string | undefined, fetch: values.fetch === true }, out, values.json === true);
     return EXIT.ok;
   }
   if ((verb === "status" || verb === "board") && rest.some((arg) => !arg.startsWith("-"))) {
@@ -180,11 +192,12 @@ const main = async (argv: string[]): Promise<number> => {
     return push(rest);
   }
   if (verb === "ui") {
-    const { values } = flags(rest, {});
+    const { values } = flags(rest, { open: { type: "boolean" } });
     const { ui } = await import("./daemon.ts");
     const shown = await ui();
     if (values.json === true) out(JSON.stringify(shown));
     else out(`dashboard    ${shown.dashboard}\napprovals    ${shown.approvals}`);
+    if (values.open === true) openInBrowser(shown.dashboard);
     return EXIT.ok;
   }
   if (verb === "down") {
@@ -199,9 +212,14 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "editor") {
-    const { values, positionals } = flags(rest, {});
+    const { values, positionals } = flags(rest, { open: { type: "boolean" } });
     const { editor } = await import("./workspaces.ts");
-    await editor(positionals[0], out, values.json === true);
+    let url = "";
+    await editor(positionals[0], (line) => {
+      url = /(http:\/\/\S+)/.exec(line)?.[1] ?? url;
+      out(line);
+    }, values.json === true);
+    if (values.open === true && url) openInBrowser(url);
     return 0;
   }
   if (verb === "approve") {
@@ -211,7 +229,9 @@ const main = async (argv: string[]): Promise<number> => {
       // browser on this Mac, and not to paste anywhere else.
       const { ensureDaemon } = await import("./daemon.ts");
       await ensureDaemon();
-      out(`approvals    ${(await import("./approve-web.ts")).approveAddress()}`);
+      const address = (await import("./approve-web.ts")).approveAddress();
+      out(`approvals    ${address}`);
+      if (rest.includes("--open")) openInBrowser(address);
       return EXIT.ok;
     }
     const { approve } = await import("./push.ts");
@@ -232,14 +252,17 @@ const main = async (argv: string[]): Promise<number> => {
   if (verb === "git") {
     // A shell in the git VM, in a browser tab: the address carries this stack's token, and
     // is the person's to open on this Mac.
-    const repo = rest.find((arg) => !arg.startsWith("--"));
+    const { values: gitValues, positionals: gitArgs } = flags(rest, { open: { type: "boolean" } });
+    const repo = gitArgs[0];
     if (repo !== undefined && !parseRepo(repo)) refuse(`'${repo}' is not a repository`, "desolate git <owner/repo>", EXIT.usage);
     const { ensureGitVm, ensureGitClone } = await import("./git-vm.ts");
     await ensureGitVm((line) => process.stderr.write(`${line}\n`));
     if (repo) await ensureGitClone(parseRepo(repo)!);
     const { ensureDaemon } = await import("./daemon.ts");
     await ensureDaemon();
-    out(`git          ${(await import("./git-web.ts")).gitAddress(repo)}`);
+    const address = (await import("./git-web.ts")).gitAddress(repo);
+    out(`git          ${address}`);
+    if (gitValues.open === true) openInBrowser(address);
     return EXIT.ok;
   }
   if (verb === "root" && rest[0] === "shell") {

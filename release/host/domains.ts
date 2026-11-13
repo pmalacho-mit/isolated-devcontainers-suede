@@ -45,23 +45,34 @@ const trustCa = async (domain: string) => {
   for (const w of d.workspaces) if (running.has(w.vm)) await b.exec(w.vm, ["bash", `${guest.release}/workspace/net/trust-ca.sh`], { root: true, timeoutMs: 120_000 });
 };
 
+/** --repo, given once or more. */
+const repoList = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : typeof value === "string" ? [value] : []);
+
 export const domainCommand = async (args: string[], values: Record<string, unknown>, out: Out): Promise<void> => {
   const json = values.json === true;
   const [first, second] = args;
   if (first === "create") {
-    if (!second) refuse("a domain needs a name", "desolate domain create <slug> [--title \"...\"]", EXIT.usage);
+    if (!second) refuse("a domain needs a name", "desolate domain create <slug> [--title \"...\"] [--repo <owner>/<repo>]...", EXIT.usage);
     const made = await rootctl<{ slug: string; title: string }>("domain.create", { slug: second, title: values.title }, { quiet: true });
     await ensureProxyUser(made.slug);
-    return out(json ? JSON.stringify(made) : `created the domain ${made.slug} ("${made.title}").\nnext: desolate domain ${made.slug} add --repo <owner>/<repo>`);
+    // Its repositories at once: `desolate domain create acme --repo a/x --repo a/y`.
+    const repos = repoList(values.repo);
+    for (const repo of repos) await rootctl("domain.add-repo", { slug: made.slug, repo }, { quiet: true });
+    if (json) return out(JSON.stringify({ ...made, repos }));
+    return out(`created the domain ${made.slug} ("${made.title}")${repos.length ? ` with ${repos.join(", ")}` : ""}.\nnext: ${repos.length ? `desolate up ${made.slug} --branch <branch>` : `desolate domain ${made.slug} add --repo <owner>/<repo>`}`);
   }
   if (!first) refuse("which domain?", "desolate domain create <slug> | desolate domain <slug> add --repo <owner>/<repo> | desolate domain <slug> show", EXIT.usage);
   if (second === "add") {
-    if (typeof values.repo === "string") {
-      const added = await rootctl<{ repo: string; added: boolean; note: string }>("domain.add-repo", { slug: first, repo: values.repo }, { quiet: true });
-      if (json) return out(JSON.stringify(added));
-      out(added.added ? `${added.repo} is now in the domain ${first}: every workspace in it gets a checkout, borrowing the mirror's objects.` : `${added.repo} was already in the domain ${first}.`);
-      if (added.note) out(`note: ${added.note}`);
-      return out(`next: desolate up ${first}`);
+    if (repoList(values.repo).length) {
+      const all = [];
+      for (const repo of repoList(values.repo)) {
+        const added = await rootctl<{ repo: string; added: boolean; note: string }>("domain.add-repo", { slug: first, repo }, { quiet: true });
+        all.push(added);
+        if (json) continue;
+        out(added.added ? `${added.repo} is now in the domain ${first}: every workspace in it gets a checkout, borrowing the mirror's objects.` : `${added.repo} was already in the domain ${first}.`);
+        if (added.note) out(`note: ${added.note}`);
+      }
+      return out(json ? JSON.stringify(all.length === 1 ? all[0] : all) : `next: desolate up ${first}`);
     }
     // The spec's spelling for a secret (section 8): `add --secret NAME --hosts ... [--headers ...]`.
     if (typeof values.secret === "string") return domainCommand([first, "secret", "set", values.secret], values, out);
