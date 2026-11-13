@@ -47,8 +47,11 @@ const button = (label, key, kind, args, quiet = false) =>
 
 // The diff, as text. Each line is a text node in a span whose class comes from the line's
 // first character: nothing in the diff is ever parsed as markup.
+// Characters that reorder or hide what is shown (bidi controls, zero-width ones): in a diff a
+// person reviews, each is shown as itself, named, so the line reads as git stores it.
+const unhidden = (line) => line.replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}⟩`);
 const diffView = (text) => el("pre", { class: "mono diff", "data-diff": "" }, text.split("\n").map((line) =>
-  el("span", { class: line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" }, line || " ")));
+  el("span", { class: line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" }, unhidden(line) || " ")));
 const query = (target, against) => `domain=${encodeURIComponent(target.domain)}&repo=${encodeURIComponent(target.repo)}&branch=${encodeURIComponent(target.branch)}&against=${encodeURIComponent(against)}`;
 const loadDiff = async () => {
   const { offer, against } = reviewing;
