@@ -36,11 +36,19 @@ const gh = (args: string[]) => {
   return { code: ran.status ?? 1, out: ran.stdout ?? "", err: ran.stderr ?? "" };
 };
 
-const { values, positionals } = parseArgs({
-  args: process.argv.slice(2),
-  options: { domain: { type: "string", default: "suede" }, secret: { type: "string", default: "CLAUDE-OAUTH" }, commit: { type: "string" }, from: { type: "string" } },
-  allowPositionals: true,
-});
+const parsed = (() => {
+  try {
+    return parseArgs({
+      args: process.argv.slice(2),
+      options: { domain: { type: "string", default: "suede" }, secret: { type: "string", default: "CLAUDE-OAUTH" }, commit: { type: "string" }, from: { type: "string" } },
+      allowPositionals: true,
+    });
+  } catch (error) {
+    process.stderr.write(`desolate factory: ${(error as Error).message}\n  fix: desolate help\n`);
+    process.exit(64);
+  }
+})();
+const { values, positionals } = parsed;
 const domain = String(values.domain);
 type Repo = { repo: string; pushable: boolean; defaultBranch: string | null };
 type Changed = { dir: string; remote: string | null; branch: string; files: string[] };
