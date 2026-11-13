@@ -29,3 +29,11 @@ html.embed .lede { display: none; }
 html.embed h1 { font-size: 16px; }
 html.embed .card { margin: 10px 0; padding: 12px; }
 html.embed .status { font-size: 13px; }
+/* The diff, on asking: git's text, coloured by each line's first character. */
+pre.diff { margin: 8px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; max-height: 60vh; overflow: auto; white-space: pre; font: 12.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+pre.diff span { display: block; min-width: max-content; }
+pre.diff .add { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+pre.diff .del { background: color-mix(in srgb, var(--danger) 18%, transparent); }
+pre.diff .hunk { color: var(--accent); }
+pre.diff .file { font-weight: 700; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+button.quiet { padding: 4px 10px; font-size: 13px; }

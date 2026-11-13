@@ -78,7 +78,42 @@ const post = async (what, card) => {
   if (!answer.ok) throw new Error(body.error || `HTTP ${answer.status}`);
 };
 
-const summaryOf = (summary) => {
+// The diff, as text: each line a text node in a span classed by its first character.
+const diffView = (text) => {
+  const pre = el("pre", undefined, "diff");
+  for (const line of text.split("\n")) pre.append(el("span", line || " ", line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : ""));
+  return pre;
+};
+/** "Show the diff": asked of the host once, for the very text the card shows (its token).
+ *  Opening it changes the card, so Approve disarms and arms again only as it always does. */
+const diffToggle = (card) => {
+  const box = el("div", undefined, "diffbox");
+  const button = el("button", "Show the diff", "quiet");
+  button.type = "button";
+  let open = false;
+  button.addEventListener("click", async (event) => {
+    if (!event.isTrusted) return;
+    open = !open;
+    button.textContent = open ? "Hide the diff" : "Show the diff";
+    if (!open) box.replaceChildren();
+    else {
+      box.replaceChildren(el("p", "asking desolate's reviewer...", "hint"));
+      try {
+        const answer = await fetch(`/diff?nonce=${card.push.nonce}&token=${card.push.token}`, { credentials: sendCookie, headers: credential });
+        const body = await answer.json();
+        if (!answer.ok) throw new Error(body.error || `HTTP ${answer.status}`);
+        box.replaceChildren(...(body.diff === null ? [el("p", "Too large to show here (over 20 000 lines): read it with git in the git terminal.", "error")] : [diffView(body.diff), ...(body.cut ? [el("p", "Cut at 256 KiB: read the rest with git in the git terminal.", "error")] : [])]));
+      } catch (error) {
+        box.replaceChildren(el("p", `the diff could not be had: ${error.message}`, "error"));
+      }
+    }
+    card.changedAt = performance.now();
+    disarm(card);
+  });
+  return [button, box];
+};
+
+const summaryOf = (summary, card) => {
   const box = document.createDocumentFragment();
   if (!summary || !summary.ok) {
     box.append(el("p", summary && summary.waiting ? "desolate's reviewer is working out what this push would send..." : `desolate's reviewer could not say what this push would send: ${summary && summary.error ? summary.error : "no answer"}. Approve only if you know what it is.`, summary && summary.waiting ? "" : "error"));
@@ -106,6 +141,7 @@ const summaryOf = (summary) => {
     if (summary.moreFiles) fl.append(el("li", `and ${summary.moreFiles} more (every one that runs on the forge is listed above)`));
     box.append(fl);
   }
+  if (summary.hasDiff !== undefined && card) box.append(...diffToggle(card));
   return box;
 };
 
@@ -164,7 +200,7 @@ const render = (pending) => {
     const shown = JSON.stringify(push.summary);
     if (shown !== card.shown) {
       card.shown = shown;
-      card.summary.replaceChildren(summaryOf(push.summary));
+      card.summary.replaceChildren(summaryOf(push.summary, card));
       card.changedAt = performance.now();
       changed = true;
     }
