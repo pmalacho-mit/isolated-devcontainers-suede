@@ -102,6 +102,7 @@ export type Summary = {
   commits?: { commit: string; subject: string; author: string }[]; more?: number;
   files?: { path: string; added: number; removed: number; binary?: boolean; sensitive?: boolean }[]; moreFiles?: number;
   base?: string | null; remote?: string | null; fastForward?: boolean | null; lfs?: number;
+  diff?: string; diffCut?: boolean;
 };
 export type Waiting = { message: string; at: string };
 const SUMMARY = { deadlineMs: 90_000, keepMs: 120_000 } as const;
@@ -197,12 +198,26 @@ export const handler = (backend: Backend, log: (line: string) => void) => {
       if (!push) continue;
       // Everything shown is the parsed text and the reviewer's account; the root's user's own
       // words about a push are not shown at all.
+      // The diff stays here until asked for (/diff): not in a list polled every second.
+      const { diff, ...summary } = summaryOf(push, waiting.message);
       out.push({
         nonce: push.nonce, repo: push.repo, branch: push.branch, commit: push.commit, onto: push.onto,
-        token: pushToken(token, waiting.message), summary: summaryOf(push, waiting.message),
+        token: pushToken(token, waiting.message), summary: { ...summary, hasDiff: diff !== undefined },
       });
     }
     return json(res, 200, { pending: out });
+  }
+  // The diff of a push this page showed: named by its nonce and the token the page was given
+  // for its very text, as an approval is.
+  if (req.method === "GET" && url.pathname === "/diff") {
+    const nonce = url.searchParams.get("nonce") ?? "";
+    const given = url.searchParams.get("token") ?? "";
+    if (!/^[0-9a-f]{32}$/.test(nonce) || !/^[0-9a-f]{64}$/.test(given)) return json(res, 403, { error: "not a push this page showed" });
+    const waiting = (await backend.pending().catch(() => [] as Waiting[])).find((w) => parseApproval(w.message)?.nonce === nonce);
+    if (!waiting || !same(given, pushToken(token, waiting.message))) return json(res, 410, { error: "that push is no longer waiting, or is not the one this page showed" });
+    const shown = summaries.get(digestOf(waiting.message))?.value;
+    if (!shown?.ok) return json(res, 404, { error: "the reviewer has not worked it out yet" });
+    return json(res, 200, { diff: shown.diff ?? null, cut: shown.diffCut === true });
   }
   if (req.method === "POST" && (url.pathname === "/approve" || url.pathname === "/refuse")) {
     if (!/^application\/json(;|$)/.test(String(req.headers["content-type"] ?? ""))) return json(res, 415, { error: "JSON only" });

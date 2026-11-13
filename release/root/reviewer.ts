@@ -189,7 +189,11 @@ export type Summary = {
   commits?: { commit: string; subject: string; author: string }[]; more?: number;
   files?: { path: string; added: number; removed: number; binary?: boolean; sensitive?: boolean }[]; moreFiles?: number;
   base?: string | null; remote?: string | null; fastForward?: boolean | null; lfs?: number;
+  /** The diff itself, as git makes it from objects (no external program, no textconv): what
+   *  the approval page shows on asking. Cut at 256 KiB; not made at all past 20 000 lines. */
+  diff?: string; diffCut?: boolean;
 };
+const DIFF_MOST = { bytes: 256 * 1024, lines: 20_000 } as const;
 
 const summary = async (repo: Repo, branch: string, commit: string, onto: string | null): Promise<Summary> => {
   const dir = ensureRepo(repo);
@@ -229,11 +233,21 @@ const summary = async (repo: Repo, branch: string, commit: string, onto: string 
       if (type === "blob" && Number(size) < 400 && POINTER.test(await gitOk(dir, ["cat-file", "blob", id!]))) lfs += 1;
     }
   }
+  // The diff, for reading before approving: bounded by its size before it is made.
+  const changedLines = files.reduce((n, f) => n + f.added + f.removed, 0);
+  let diff: string | undefined;
+  let diffCut = changedLines > DIFF_MOST.lines;
+  if (!diffCut) {
+    const text = await gitOk(dir, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--diff-algorithm=histogram", "--unified=3", base ?? EMPTY_TREE, commit, "--"], { timeoutMs: 120_000 });
+    diffCut = text.length > DIFF_MOST.bytes;
+    diff = diffCut ? text.slice(0, DIFF_MOST.bytes) : text;
+  }
   const cut = Math.max(LIMIT.files, files.filter((f) => f.sensitive).length);
   const fastForward = onto ? (await gitIn(dir, ["merge-base", "--is-ancestor", onto, commit])).code === 0 : null;
   return {
     ok: true, ...(warnings.length ? { warnings } : {}), commits, more: Math.max(0, counted - commits.length),
     files: files.slice(0, cut), moreFiles: Math.max(0, files.length - cut), base, remote: now, fastForward, lfs,
+    ...(diff !== undefined ? { diff } : {}), diffCut,
   };
 };
 
