@@ -504,12 +504,17 @@ const serve = async () => {
     });
 
   let nudging: NodeJS.Timeout | null = null;
+  // At most two a second: a workspace touching its refs in a loop costs the state service
+  // two looks a second, not one per touch (found by the audit of #92). The first change in a
+  // while is passed on at once.
+  let nudgedAt = 0;
   const nudge = () => {
     if (nudging) return;
     nudging = setTimeout(() => {
       nudging = null;
+      nudgedAt = Date.now();
       rootHttp("POST", "/host/nudge", {}).catch(() => {});
-    }, 60);
+    }, Math.max(60, 500 - (Date.now() - nudgedAt)));
   };
 
   let sentFacts = "";

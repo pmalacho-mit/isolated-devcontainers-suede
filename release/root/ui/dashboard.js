@@ -122,7 +122,7 @@ const reviewPanel = () => {
     el("div", { class: "sub" }, `Against ${review.againstLabel}${review.base ? ` (from ${short(review.base)})` : ""}. `,
       el("button", { class: "quiet", "data-against": other, onclick: () => openReview(offer, other) }, other === "domain" ? `Compare with ${offer.domain}'s ${review.defaultBranch || "default branch"}` : `Compare with origin/${review.defaultBranch || "default branch"}`)),
     el("div", { class: "sub" }, `${reviewing.against === "domain" ? "Beyond that, it has" : "A push would send"} ${review.commits.length} commit(s): ${review.stat || "no file changes"}${review.lfsObjects ? `, and ${review.lfsObjects} LFS object(s)` : ""}.`),
-    review.warnings.map((w) => el("div", { class: "warn" }, `Warning: this push ${w}`)),
+    review.warnings.map((w) => el("div", { class: "warn" }, `Warning: a push of this branch ${w}`)),
     el("pre", { class: "mono" }, review.commits.slice(0, 40).map((c) => `${short(c.commit)}  ${c.subject}`).join("\n")),
     el("pre", { class: "mono" }, review.files.slice(0, 80).join("\n")),
     reviewing.diff && reviewing.diff.loading ? el("div", { class: "sub" }, "reading the diff...") : null,
@@ -133,6 +133,7 @@ const reviewPanel = () => {
     reviewing.diff && reviewing.diff.commit && reviewing.diff.commit !== review.commit ? el("div", { class: "warn" }, "The branch moved while you were reading. Close this and review it again.") : null,
     el("div", { class: "sub" }, "For a richer view (syntax colouring, the whole file), open the branch in a workspace's editor. The diff here is the one to trust: it is made in the root, by git alone."),
     el("div", { class: "buttons" }, !review.pushable ? el("span", { class: "sub" }, "Not pushable: cloned --no-push, so there is no write key for it.")
+      : reviewing.against === "domain" ? el("span", { class: "sub" }, `A push would send ${review.pushCommits} commit(s), counted against origin: compare with origin to push.`)
       : !offered ? el("span", { class: "sub" }, "Not offered at this commit, so not pushed from here. Push it yourself from ", gitLink(review.repo) || "the git terminal", ` (git fetch root, then git push origin root/${offer.domain}/${review.branch}:${review.branch}), or have the agent run `, el("code", {}, "desolate offer"), ".")
       : review.isDefault ? el("span", { class: "sub" }, "This is the default branch. Push it from the host: ", el("code", {}, `desolate push ${offer.domain} ${review.repo} ${review.branch} --expect ${review.commit} --allow-default`))
       : button(`Push exactly ${short(review.commit)}`, key, "offer.push", { domain: offer.domain, repo: review.repo, branch: review.branch, commit: review.commit })),

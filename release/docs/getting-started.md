@@ -1,7 +1,7 @@
 # Getting started with desolate
 
 From nothing to a coding agent working on one of your repositories in a VM of its own, its
-work reviewed by you and pushed with one click. About 20 minutes, most of it waiting for the
+work reviewed by you and pushed with one click. Under half an hour, most of it waiting for the
 first VM images to download.
 
 ![The dashboard: what needs you on top, then each domain's workspaces and their live branches](assets/dashboard.png)
@@ -9,12 +9,14 @@ first VM images to download.
 ## What you need
 
 - **A Mac with Apple silicon** (M1 or later). desolate runs its VMs with Apple's
-  Virtualization.framework, through Lima.
+  Virtualization.framework, through Lima; an Intel Mac is not supported.
 - **Homebrew**, and from it: `brew install lima node gh`
   - Lima **2.3 or newer** (`limactl --version`): older versions let a confined VM's pings out.
   - node **22.18 or newer**: desolate is TypeScript that node runs directly.
   - GitHub's CLI, signed in (`gh auth login`) as someone who can add deploy keys to the
-    repositories you want agents to work on. Without that, see `--no-push` below.
+    repositories you want agents to work on: that is admin on the repository. Without it,
+    see step 3: such a repository can be read and worked on, and you push its branches
+    yourself, outside desolate.
 - **Chrome or Firefox.** desolate's pages live at names under `localhost`
   (`desolate.localhost`, `desolate-git.localhost`, ...). Those browsers resolve them; Safari
   does not.
@@ -26,9 +28,13 @@ You do **not** need Docker on your Mac: the projects' devcontainers run inside t
 
 ```bash
 git clone --branch release https://github.com/pmalacho-mit/isolated-devcontainers-suede ~/desolate
-mkdir -p ~/.local/bin && ln -sf ~/desolate/cli.sh ~/.local/bin/desolate   # ~/.local/bin on your PATH
-source <(desolate completion)                                             # tab completion (add to ~/.zshrc)
+mkdir -p ~/.local/bin && ln -sf ~/desolate/cli.sh ~/.local/bin/desolate
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+desolate help
 ```
+
+Leave the clone where it is: every VM reads desolate's code from it. For tab completion, add
+`source <(desolate completion)` to `~/.zshrc`.
 
 ## 2. Bootstrap the stack
 
@@ -57,9 +63,18 @@ desolate clone you/lib
 desolate domain create acme --repo you/app --repo you/lib
 ```
 
+```
+  read key: registered
+  write key: registered (it asks you before every push)
+cloned you/app: 2 branch(es), default main, 2 LFS object(s); pushable.
+```
+
 - `clone` keeps the keys in the root VM, where nothing an agent runs can reach them, and
-  mirrors the repository (with its LFS files). Use `--no-push` for a repository you only
-  read (one key, read-only), or `--anonymous` for a public one you cannot add keys to.
+  mirrors the repository (with its LFS files). The keys are deploy keys on GitHub, titled
+  `desolate read (host ...)` and `desolate write (host ...)`.
+- Not an admin of the repository? `--no-push` registers a read key only: agents can work on
+  it and you review their branches, but desolate cannot push it. `--anonymous` registers no
+  key at all, for a public repository.
 - A **domain** is a trust boundary: its repositories, its network rules, its secrets.
   Workspaces in one domain can see each other's branches; workspaces in different domains
   share nothing.
@@ -93,8 +108,29 @@ named hosts; `desolate domain acme net enforce` limits even that to a list).
 
 ```bash
 desolate editor acme/agent-1 --open          # VSCodium, running in the VM, in a browser tab
-desolate exec acme/agent-1 -- claude         # or any agent CLI: it runs in the devcontainer
+desolate exec acme/agent-1 -- <an agent CLI> # it runs in the devcontainer, in the first checkout
 ```
+
+**Claude Code, for example.** The agent has to be in the project's environment, and its
+credential must never be:
+
+1. Install it in the devcontainer: add the feature
+   `"ghcr.io/anthropics/devcontainer-features/claude-code:1": {}` to the project's
+   `devcontainer.json`, or run `npm install -g @anthropic-ai/claude-code` in the workspace.
+2. Give the domain your API key as a **secret**: its value stays in the root VM, and the
+   workspace holds only a name, which its proxy replaces with the value on the way to the
+   hosts you name:
+   ```bash
+   desolate domain acme secret set ANTHROPIC-KEY --hosts api.anthropic.com --headers x-api-key   # the key on stdin
+   ```
+3. Start it with the name where the key would go:
+   ```bash
+   desolate exec acme/agent-1 -- env ANTHROPIC_API_KEY=ANTHROPIC-KEY claude
+   ```
+
+Do not log in to Claude interactively inside a workspace: that would put a real credential
+in the VM. If the domain's network is limited to a list (`desolate domain acme net enforce`),
+allow `api.anthropic.com`.
 
 ![The workspace's editor: both repositories in one window, and a terminal inside the devcontainer](assets/editor.png)
 
@@ -124,7 +160,8 @@ the root VM, from the objects alone (nothing in the branch runs):
 
 Two ways, and both end with you approving the exact commit:
 
-- From the dashboard: **Push exactly <commit>**.
+- From the dashboard: **Push exactly <commit>**, then approve it on the approval page
+  (`desolate approve --web --open`; keep that tab) or with `desolate approve` in a terminal.
 - From the **git terminal**, which is git as you use it anywhere, in a VM of its own with no
   network and no keys:
 
@@ -161,11 +198,23 @@ every branch desolate pushes.
 | `desolate list` | every domain and workspace, with the branch each checkout is on now |
 | `desolate branches [<domain>]` | every branch the domains have, offered or not |
 | `desolate review <domain> <repo> <branch> [--diff]` | what a push would send |
-| `desolate stop / start / rm <domain>/<workspace>` | a workspace's VM; `rm` removes it and its worktrees |
+| `desolate stop / start / rm <domain>/<workspace>` | a workspace's VM; `rm` removes the VM (its branches stay in the domain's clones) |
 | `desolate fetch <repo>` | refresh a mirror from its remote |
 | `desolate doctor` | every check, with what to do about each that fails |
-| `desolate down` / `desolate bootstrap` | stop everything / bring it back |
-| `desolate destroy --all` | remove the whole stack and its keys (on GitHub, remove the deploy keys named `desolate ...` yourself) |
+| `desolate down` | stop every VM and the daemon; remove nothing |
+| `desolate bootstrap`, then `desolate start <domain>/<workspace>` | bring it back after `down` or a restart of the Mac |
+
+## Removing it
+
+```bash
+desolate rm acme/agent-1          # a workspace's VM (its branches stay)
+desolate rm acme                  # a domain and its clones
+desolate destroy                  # every VM; your clones and keys stay in ~/.desolate
+desolate destroy --all            # and ~/.desolate: mirrors, clones, the root's keys
+```
+
+Then, on GitHub, delete the deploy keys titled `desolate read (host ...)` and
+`desolate write (host ...)` from each repository you cloned.
 
 ## When something is wrong
 

@@ -108,6 +108,8 @@ export type Review = {
   domain: string; repo: string; branch: string; commit: string; base: string; against: Against; againstLabel: string; defaultBranch: string | null;
   pushable: boolean; isDefault: boolean; commits: { commit: string; subject: string }[]; files: string[];
   stat: string; lfsObjects: number; warnings: string[];
+  /** How many commits a push would send: against origin, whatever the view compares with. */
+  pushCommits: number;
 };
 
 /** What a push would send (section 8: `desolate review`). Read from the root clone only. */
@@ -136,16 +138,23 @@ export const review = async (domain: string, repoArg: unknown, branch: unknown, 
   const log = await gitOk(clone, ["log", "--format=%H%x09%s", "--max-count=200", range]);
   const files = (await gitOk(clone, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit])).split("\0").filter(Boolean);
   const stat = (await gitOk(clone, ["diff", "--no-ext-diff", "--no-textconv", "--shortstat", base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit])).trim();
+  // What a push would actually send is always against origin, whatever the view compares
+  // with: the warnings, and the count of commits a push sends, are worked out over that range
+  // (a domain's own main is the agent's to write: a change hidden there is still sent).
+  const originHead = record.defaultBranch ? `refs/remotes/origin/${record.defaultBranch}` : "";
+  const originBase = against === "origin" ? base : originHead ? (await git(clone, ["merge-base", commit, originHead])).stdout.trim() : "";
+  const pushFiles = against === "origin" ? files : (await gitOk(clone, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", originBase || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", commit])).split("\0").filter(Boolean);
+  const pushCommits = Number((await gitOk(clone, ["rev-list", "--count", originBase ? `${originBase}..${commit}` : commit])).trim()) || 0;
   const warnings: string[] = [];
-  if (files.some((f) => f === ".github" || f.startsWith(".github/"))) warnings.push("changes .github/: a pushed branch's own workflows run on the remote, with the repository's secrets");
-  if (files.some((f) => /(^|\/)\.suede\/core\//.test(f))) warnings.push("changes a vendored .suede/core/: a proposal that rewrites suede's own machinery is worth a second look");
-  if (files.some((f) => f === ".lfsconfig" || f === ".gitattributes" || f === ".gitmodules")) warnings.push("changes .lfsconfig, .gitattributes or .gitmodules: these steer what git does with this repository elsewhere");
+  if (pushFiles.some((f) => f === ".github" || f.startsWith(".github/"))) warnings.push("changes .github/: a pushed branch's own workflows run on the remote, with the repository's secrets");
+  if (pushFiles.some((f) => /(^|\/)\.suede\/core\//.test(f))) warnings.push("changes a vendored .suede/core/: a proposal that rewrites suede's own machinery is worth a second look");
+  if (pushFiles.some((f) => f === ".lfsconfig" || f === ".gitattributes" || f === ".gitmodules")) warnings.push("changes .lfsconfig, .gitattributes or .gitmodules: these steer what git does with this repository elsewhere");
   return {
     domain, repo: id, branch, commit, base, against, againstLabel: record.defaultBranch ? (against === "domain" ? `${domain}'s ${record.defaultBranch}` : `origin/${record.defaultBranch}`) : "nothing (no default branch)",
     defaultBranch: record.defaultBranch, pushable: record.pushable,
     isDefault: branch === record.defaultBranch,
     commits: log.split("\n").filter(Boolean).map((line) => ({ commit: line.slice(0, line.indexOf("\t")), subject: line.slice(line.indexOf("\t") + 1) })),
-    files, stat, lfsObjects: (await lfsOf(repo, commit)).length, warnings,
+    files, stat, lfsObjects: (await lfsOf(repo, commit)).length, warnings, pushCommits,
   };
 };
 

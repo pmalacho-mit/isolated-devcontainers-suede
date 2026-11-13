@@ -71,10 +71,31 @@ export const statusDir = (reposDir: string, c: { repo: string; kind: string; nam
  *  branch names when its ref is a loose file or in packed-refs, or the detached commit. */
 export type Head = { branch: string | null; commit: string | null };
 const COMMIT_LINE = /^([0-9a-f]{40})\n$/;
+/** A clone's packed-refs, at most 256 KiB (a domain's file: a larger one is not read), and
+ *  read again only when it changed (its identity, size and time): the state service looks
+ *  at every checkout every second, and an agent could make this file large. */
+const PACKED_MOST = 256 * 1024;
+const packedCache = new Map<string, { key: string; text: string }>();
+const packedRefs = (reposDir: string, file: string): string => {
+  let key = "";
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.size > PACKED_MOST) return "";
+    key = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return "";
+  }
+  const known = packedCache.get(file);
+  if (known && known.key === key) return known.text;
+  const text = readPlain(reposDir, file, PACKED_MOST, true) ?? "";
+  if (packedCache.size > 500) packedCache.clear();
+  packedCache.set(file, { key, text });
+  return text;
+};
 const refCommit = (reposDir: string, common: string, branch: string): string | null => {
   const loose = readPlain(reposDir, path.join(common, "refs", "heads", branch), 128, true);
   if (loose !== null) return COMMIT_LINE.exec(loose)?.[1] ?? null;
-  const packed = readPlain(reposDir, path.join(common, "packed-refs"), 4 << 20, true) ?? "";
+  const packed = packedRefs(reposDir, path.join(common, "packed-refs"));
   for (const line of packed.split("\n")) {
     const [commit, ref] = line.split(" ");
     if (ref === `refs/heads/${branch}` && isCommit(commit)) return commit;

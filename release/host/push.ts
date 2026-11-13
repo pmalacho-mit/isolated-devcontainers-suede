@@ -45,10 +45,12 @@ export const review = async (args: string[], out: Out, json: boolean, against: "
   const diff = args.includes("--diff");
   const [domain, repo, branch] = args.filter((arg) => arg !== "--diff");
   if (!domain || !repo || !branch) refuse("review what?", "desolate review <domain> <owner/repo> <branch> [--against origin|domain]   (see `desolate branches` and `desolate offers`)", EXIT.usage);
-  const r = await rootctl<Review & { againstLabel?: string }>("review", { domain, repo, branch, against }, { quiet: true });
+  const r = await rootctl<Review & { againstLabel?: string; pushCommits?: number }>("review", { domain, repo, branch, against }, { quiet: true });
   if (json) return out(JSON.stringify(r));
   out(`${r.repo}  ${plain(r.branch)}  at ${r.commit}, against ${r.againstLabel ?? "origin"}`);
-  out(`a push would send ${r.commits.length} commit(s): ${r.stat || "no file changes"}${r.lfsObjects ? `, and ${r.lfsObjects} LFS object(s) first` : ""}`);
+  out(against === "domain"
+    ? `beyond ${r.againstLabel ?? "the domain's default branch"}: ${r.commits.length} commit(s), ${r.stat || "no file changes"}. A push would send ${r.pushCommits} commit(s) (against origin).`
+    : `a push would send ${r.commits.length} commit(s): ${r.stat || "no file changes"}${r.lfsObjects ? `, and ${r.lfsObjects} LFS object(s) first` : ""}`);
   for (const c of r.commits.slice(0, 30)) out(`  ${c.commit.slice(0, 12)}  ${plain(c.subject).slice(0, 100)}`);
   if (r.commits.length > 30) out(`  ... and ${r.commits.length - 30} more`);
   for (const file of r.files.slice(0, 40)) out(`  ${plain(file)}`);
