@@ -138,6 +138,13 @@ export const bootstrap = async (options: { forge?: string; forgeKnownHosts?: str
   if (reconnected > 0) out(`  = running workspaces: ${reconnected}, each with its proxy and link`);
   const { ui } = await import("./daemon.ts");
   out(`  dashboard    ${(await ui()).dashboard}   (and: desolate ui)`);
+  {
+    // What a new workspace gets, from this Mac (shared/size.ts): said, so it is never hidden.
+    const { stackDefaults } = await import("./workspaces.ts");
+    const { describe } = await import("../shared/size.ts");
+    const os = await import("node:os");
+    out(`  workspaces   ${describe(stackDefaults())} each by default (this Mac: ${os.cpus().length} cores, ${Math.round(os.totalmem() / 1024 ** 3)} GB); per domain: desolate domain <d> size, per workspace: desolate up --cpus --memory --disk`);
+  }
 
   out(changed.length === 0 ? "bootstrap: nothing changed; the stack was already up." : `bootstrap: ${changed.length} step(s) done.`);
   const failed = await doctor(out);

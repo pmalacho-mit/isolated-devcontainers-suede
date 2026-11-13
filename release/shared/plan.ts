@@ -21,6 +21,9 @@ export type WorkspacePlan = {
   checkouts: Checkout[];
   /** The repository whose devcontainer.json is the environment, if the domain names one. */
   env?: string;
+  /** The VM's size, as it was made (shared/size.ts). Absent for one made before sizes were
+   *  recorded: it got the defaults of its day. */
+  size?: { cpus: number; memoryMiB: number; diskGiB: number };
   /** Refresh origin/* from the mirror before creating worktrees. */
   fetch: boolean;
   createdAt: string;

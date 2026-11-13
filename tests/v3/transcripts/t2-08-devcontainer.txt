@@ -11,6 +11,7 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
   + root services: keyring
   + root: the approver's public key and the host daemon's token
   dashboard    http://desolate.localhost:31591/?tkn=<token>   (and: desolate ui)
+  workspaces   <size> each by default (this Mac: <cores> cores, <memory> GB); per domain: desolate domain <d> size, per workspace: desolate up --cpus --memory --disk
 bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
@@ -39,6 +40,7 @@ doctor: all checks passed.
 $ desolate up app
 workspace app/w1 is up  [NOT ISOLATED: fake backend]
   acme/app  main checkout (main)  /workspaces/acme/app
+  size         <size>
   devcontainer FAILED: An error occurred setting up the container. (Error: Command failed: docker pull registry.invalid/desolate-test/dev:1) (the whole log: /home/desolate/.desolate-devcontainer/up.log in the workspace)
   editor       http://app-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fapp
   dev servers  http://app-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
@@ -51,6 +53,7 @@ next: desolate editor app/w1 --open      its editor, in your browser
 
 $ desolate start app/w1
 workspace app/w1 is up (<duration>)
+  size         <size>
   devcontainer up (registry.invalid/desolate-test/dev:1, user dev)
 [exit 0]
 
@@ -70,6 +73,7 @@ Needs you:
 
 $ desolate start built/w1
 workspace built/w1 is up (<duration>)
+  size         <size>
   devcontainer up (vsc-built-<oid>-uid, user dev)
 [exit 0]
 
@@ -78,6 +82,7 @@ workspace built/w1 is up (<duration>)
 $ desolate up plain
 workspace plain/w1 is up  [NOT ISOLATED: fake backend]
   acme/plain  main checkout (main)  /workspaces/acme/plain
+  size         <size>
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://plain-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fplain
   dev servers  http://plain-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)

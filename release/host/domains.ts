@@ -78,6 +78,15 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
     if (typeof values.secret === "string") return domainCommand([first, "secret", "set", values.secret], values, out);
     refuse("add what?", `desolate domain ${first} add --repo <owner>/<repo> | add --secret <NAME> --hosts <host>[,...] [--headers <header>[,...]]`, EXIT.usage);
   }
+  if (second === "size") {
+    // desolate domain <d> size [--cpus N] [--memory 8g] [--disk 60g] [--clear]
+    const { sizeFlags, stackDefaults } = await import("./workspaces.ts");
+    const { describe, merge } = await import("../shared/size.ts");
+    const given = values.clear === true ? null : values.cpus !== undefined || values.memory !== undefined || values.disk !== undefined ? sizeFlags(values) : undefined;
+    const set = await rootctl<{ domain: string; size: Partial<import("../shared/size.ts").Size> | null }>("domain.size", { slug: first, size: given }, { quiet: true });
+    if (json) return out(JSON.stringify({ ...set, effective: merge(set.size, stackDefaults()) }));
+    return out(`${first}: new workspaces get ${describe(merge(set.size, stackDefaults()))}${set.size ? "" : " (the stack's defaults, from this Mac)"}. Existing ones keep what they were made with.`);
+  }
   if (second === "env") {
     // desolate domain <d> env [--from <owner/repo>]   (section 4.5, way 1; `compose` is not built)
     if (args[2] === "compose") refuse("composing one environment from several specs is not built yet", `choose one repository's: desolate domain ${first} env --from <owner>/<repo>`);

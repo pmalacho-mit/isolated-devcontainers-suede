@@ -60,7 +60,7 @@ export const rootSpec = (): VmSpec => ({
   sockets: [],
   cpus: 2,
   memoryMiB: 2048,
-  diskGiB: 20,
+  diskGiB: 30, // (the base's: a clone's disk cannot be smaller; 20 was never applied)
   labels: { title: "root" },
 });
 

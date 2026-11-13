@@ -14,6 +14,7 @@ desolate bootstrap: backend vz, instance <instance>
   + root services: keyring
   + root: the approver's public key and the host daemon's token
   dashboard    http://desolate.localhost:31591/?tkn=<token>   (and: desolate ui)
+  workspaces   <size> each by default (this Mac: <cores> cores, <memory> GB); per domain: desolate domain <d> size, per workspace: desolate up --cpus --memory --disk
 bootstrap: 8 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: vz
@@ -65,6 +66,7 @@ next: desolate up a
 $ desolate up a
 workspace a/w1 is up
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  size         <size>
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://a-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fwidgets
   dev servers  http://a-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
@@ -126,6 +128,7 @@ next: desolate up b
 $ desolate up b
 workspace b/w1 is up
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  size         <size>
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://b-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fwidgets
   dev servers  http://b-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)

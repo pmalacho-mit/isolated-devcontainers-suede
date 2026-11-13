@@ -1,10 +1,13 @@
 // Workspaces, from the host: up, list, stop, rm, exec.
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { EXIT, refuse } from "../shared/exit.ts";
 import { devHostname, editorHostname, editorHostPort, isBranch, parseRepo } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { readHead } from "../shared/status.ts";
+import { checkSize, defaultsFor, describe as describeSize, LIMITS, merge, parseDisk, parseMemory } from "../shared/size.ts";
+import type { Size } from "../shared/size.ts";
 import { TERMINAL_RESET, terminalFilter } from "../shared/terminal-filter.ts";
 import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
 import { backend, ensureProxyUser, rootctl } from "./stack.ts";
@@ -45,10 +48,9 @@ export const specOf = (plan: WorkspacePlan, repos: string[]): VmSpec => ({
     }),
   ],
   sockets: [{ host: `${paths.link(plan.vm)}/proxy.sock`, guest: guest.linkSocket }],
-  // Question 9 (resource limits): fixed for now, with the environment as the one knob.
-  cpus: sized("DESOLATE_WORKSPACE_CPUS", 2, 1, 64),
-  memoryMiB: sized("DESOLATE_WORKSPACE_MEMORY_MIB", 4096, 1024, 262_144),
-  diskGiB: 30,
+  // Its size, as the plan records it (shared/size.ts); a plan from before sizes were
+  // recorded (a template's builder, an old workspace started again) gets the stack's defaults.
+  ...(plan.size ?? stackDefaults()),
   labels: { title: `${plan.domain}/${plan.workspace}`, domain: plan.domain, workspace: plan.workspace },
 });
 
@@ -58,6 +60,27 @@ const sized = (name: string, fallback: number, min: number, max: number) => {
   const number = Number(value);
   if (!Number.isInteger(number) || number < min || number > max) refuse(`${name} is '${value}'`, `a whole number from ${min} to ${max}`);
   return number;
+};
+
+/** The stack's defaults: from this Mac (its cores and memory), worked out each time and
+ *  stored nowhere; DESOLATE_WORKSPACE_CPUS, _MEMORY_MIB and _DISK_GIB override them. */
+export const stackDefaults = (): Size => {
+  const mac = defaultsFor(os.cpus().length, Math.floor(os.totalmem() / 1024 / 1024));
+  return {
+    cpus: sized("DESOLATE_WORKSPACE_CPUS", mac.cpus, LIMITS.cpus[0], LIMITS.cpus[1]),
+    memoryMiB: sized("DESOLATE_WORKSPACE_MEMORY_MIB", mac.memoryMiB, LIMITS.memoryMiB[0], LIMITS.memoryMiB[1]),
+    diskGiB: sized("DESOLATE_WORKSPACE_DISK_GIB", mac.diskGiB, LIMITS.diskGiB[0], LIMITS.diskGiB[1]),
+  };
+};
+/** `--cpus 4 --memory 8g --disk 60g`, read and checked. */
+export const sizeFlags = (values: { cpus?: unknown; memory?: unknown; disk?: unknown }): Partial<Size> => {
+  const size: Partial<Size> = {};
+  if (values.cpus !== undefined) size.cpus = Number(values.cpus);
+  if (values.memory !== undefined) size.memoryMiB = parseMemory(values.memory) ?? refuse(`--memory '${String(values.memory)}' is not an amount`, "--memory 8g (or 4096 for MiB)", EXIT.usage);
+  if (values.disk !== undefined) size.diskGiB = parseDisk(values.disk) ?? refuse(`--disk '${String(values.disk)}' is not an amount`, "--disk 60g", EXIT.usage);
+  const why = checkSize(size);
+  if (why) refuse(why, "--cpus <n> --memory <8g> --disk <60g>", EXIT.usage);
+  return size;
 };
 
 /** What a workspace VM printed is the workspace's text. On its way to the person's
@@ -137,7 +160,7 @@ export const urlsOf = (plan: { domain: string; workspace: string }) => ({
   dev: `http://${devHostname(INSTANCE, plan.domain, plan.workspace)}`,
 });
 
-export const up = async (domain: string | undefined, options: { name?: string; checkouts: string[]; branch?: string; base?: string; fetch: boolean }, out: Out, json: boolean) => {
+export const up = async (domain: string | undefined, options: { name?: string; checkouts: string[]; branch?: string; base?: string; fetch: boolean; size?: Partial<Size> }, out: Out, json: boolean) => {
   if (!domain) refuse("which domain?", "desolate up <domain> [--name <workspace>]", EXIT.usage);
   const phases: [string, number][] = [];
   let mark = Date.now();
@@ -171,7 +194,9 @@ export const up = async (domain: string | undefined, options: { name?: string; c
     template = await ensure(domain, view.repos, { specOf, startServices }, say);
     if (template) phase("template");
   }
-  const plan = await rootctl<Workspace>("workspace.plan", { instance: INSTANCE, domain, name: options.name, checkouts: options.checkouts, base: options.base, fetch: options.fetch }, { quiet: true });
+  // Its size: the flags, then the domain's, then the stack's defaults (each part on its own).
+  const size = merge(options.size, (view as DomainView & { size?: Partial<Size> }).size, stackDefaults());
+  const plan = await rootctl<Workspace>("workspace.plan", { instance: INSTANCE, domain, name: options.name, checkouts: options.checkouts, base: options.base, fetch: options.fetch, size }, { quiet: true });
   // (The domain, whether it has a template to make, and the plan, which is two small files:
   // asks of the root, about 0.2 s each. No network: --fetch is its own phase, above.)
   phase("asked the root");
@@ -196,9 +221,10 @@ export const up = async (domain: string | undefined, options: { name?: string; c
   const breakdown = `the start took ${seconds(Date.now() - started)} s: ${phases.map(([name, ms]) => `${name} ${seconds(ms)} s`).join(", ")}`;
   const opened = editorDown ? { error: editorDown } : await editorUrl(plan);
   const urls = { ...urlsOf(plan), ...("url" in opened ? { editorWithToken: opened.url } : { editorError: opened.error }) };
-  if (json) return out(JSON.stringify({ domain, workspace: plan.workspace, vm: plan.vm, isolated: b.isolated, checkouts: plan.checkouts, devcontainer, urls, tookMs: Date.now() - started, phases: Object.fromEntries(phases) }));
+  if (json) return out(JSON.stringify({ domain, workspace: plan.workspace, vm: plan.vm, isolated: b.isolated, checkouts: plan.checkouts, size: plan.size ?? size, devcontainer, urls, tookMs: Date.now() - started, phases: Object.fromEntries(phases) }));
   out(`workspace ${domain}/${plan.workspace} is up${b.isolated ? "" : "  [NOT ISOLATED: fake backend]"}`);
   for (const c of plan.checkouts) out(`  ${c.repo}  ${c.kind === "main" ? `main checkout (${c.branch})` : `worktree ${c.branch} from ${c.base}`}  ${c.path}`);
+  out(`  size         ${describeSize(plan.size ?? size)}`);
   out(`  devcontainer ${devcontainer}`);
   out("url" in opened ? `  editor       ${opened.url}` : `  editor       NOT AVAILABLE: ${opened.error}`);
   out(`  dev servers  ${urls.dev}:<port>   (the port it listens on inside, nothing to declare)`);
@@ -214,7 +240,7 @@ export const list = async (out: Out, json: boolean, only?: string) => {
   const view = domains.map((d) => ({
     domain: d.slug, title: d.title, repos: d.repos,
     workspaces: d.workspaces.map((w) => ({
-      workspace: w.workspace, vm: w.vm, status: vms.get(w.vm) ?? "missing", isolated: b.isolated,
+      workspace: w.workspace, vm: w.vm, status: vms.get(w.vm) ?? "missing", isolated: b.isolated, size: w.size ?? null,
       // What each checkout has checked out now (its HEAD, read here as data), beside what it
       // started on.
       checkouts: w.checkouts.map((c) => {
@@ -230,7 +256,7 @@ export const list = async (out: Out, json: boolean, only?: string) => {
     out(`${d.domain}  "${d.title}"  ${d.repos.length ? d.repos.join(", ") : "(no repositories: desolate domain " + d.domain + " add --repo <owner>/<repo>)"}`);
     if (d.workspaces.length === 0) out(`  (no workspaces: desolate up ${d.domain})`);
     for (const w of d.workspaces)
-      out(`  ${d.domain}/${w.workspace}  ${w.status}${w.isolated ? "" : "  [not isolated]"}  ${w.checkouts.map((c) => `${c.repo}@${c.now}`).join(", ")}`);
+      out(`  ${d.domain}/${w.workspace}  ${w.status}${w.isolated ? "" : "  [not isolated]"}  ${w.checkouts.map((c) => `${c.repo}@${c.now}`).join(", ")}${w.size ? `  (${w.size.cpus} CPU, ${Math.round(w.size.memoryMiB / 1024)} GiB)` : ""}`);
   }
 };
 
@@ -286,6 +312,7 @@ export const start = async (target: string | undefined, out: Out) => {
   const { devcontainer, editorDown } = await startServices(w);
   await rootctl("workspace.state", { domain: w.domain, name: w.workspace, state: "up" }, { quiet: true });
   out(`workspace ${w.domain}/${w.workspace} is up (${((Date.now() - started) / 1000).toFixed(1)} s)`);
+  if (w.size) out(`  size         ${describeSize(w.size)}`);
   out(`  devcontainer ${devcontainer}`);
   if (editorDown) out(`  editor       NOT AVAILABLE: ${editorDown}`);
 };
