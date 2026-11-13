@@ -15,7 +15,7 @@ const el = (tag, attrs = {}, ...children) => {
     else if (key === "onsubmit") node.addEventListener("submit", value);
     else node.setAttribute(key, value === true ? "" : String(value));
   }
-  for (const child of children.flat()) if (child !== null && child !== undefined && child !== false) node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  for (const child of children.flat(Infinity)) if (child !== null && child !== undefined && child !== false) node.append(child instanceof Node ? child : document.createTextNode(String(child)));
   return node;
 };
 /** "Open in git": the git terminal (the host's page, not this one) in a new tab, at the

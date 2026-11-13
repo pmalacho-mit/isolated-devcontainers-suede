@@ -1,0 +1,2 @@
+# Documentation images: in Git LFS, beside the docs that show them.
+docs/assets/** filter=lfs diff=lfs merge=lfs -text

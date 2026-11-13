@@ -1,13 +1,19 @@
-# desolate v3: a VM per workspace
+# desolate: coding agents in VMs of their own, on your Mac
 
 **desolate** (dev + isolate) lets you work alongside coding agents without handing them your
-machine, your credentials or your remotes. v2 did it with containers; v3 makes the **VM** the
-unit of isolation. The design, and the reasons for it, are in
-[`move-to-vms.md`](../move-to-vms.md).
+machine, your credentials or your remotes. Each agent works in a **workspace**: a VM with
+its own checkouts, the project's devcontainer and an editor in a browser tab, no keys, and
+no network but its own proxy. It commits freely and offers its work; you review it in the
+root VM's dashboard, and a push happens only when you approve the exact commit, with one
+click.
 
-> **v3 is being built.** This tree is not yet a replacement for v2 (which is in history at
-> `4f32c77` and on the `release` branch). The [status table](#what-works-today-and-what-does-not)
-> below says exactly what is implemented, and what each claim rests on.
+![The dashboard: what needs you on top, then each domain's workspaces and their live branches](docs/assets/dashboard.png)
+
+**Start here: [docs/getting-started.md](docs/getting-started.md)**: from nothing to an agent
+working on your repository, about 20 minutes. What follows is the reference: the principles,
+the shape of the stack, every command, and what is and is not done. The design and its
+reasons are in [`move-to-vms.md`](https://github.com/pmalacho-mit/isolated-devcontainers-suede/blob/main/move-to-vms.md); the security decisions and their
+audits in [`docs/v3/decisions.md`](https://github.com/pmalacho-mit/isolated-devcontainers-suede/blob/main/docs/v3/decisions.md).
 
 ## Principles
 
@@ -202,7 +208,9 @@ workspace with its status colour, "Needs you" on top, one click to open a worksp
 editor, start, stop, review an offer or push it (a push still waits for your approval on
 the host). Reviewing an offer shows its commits, its files, warnings, and the diff, as text
 git made in the root: nothing in it is run or rendered. It shows the command behind every
-button. Screenshots: [the dashboard](../docs/v3/dashboard.png), [reviewing an offer](../docs/v3/review.png).
+button.
+
+![Reviewing an offer: commits, files, and the diff as text](docs/assets/review.png)
 
 **What the root takes from a workspace** is data, and it is checked before it is the
 root's: a bundle is copied out of the domain's reach and every object in it passes git's
@@ -211,7 +219,7 @@ that names a command, a malformed object: the whole bundle is refused, and you a
 workspace are told why); LFS objects must hash to their names; the small JSON files are
 size-limited and validated; nothing in the outbox is followed if it is a link. The root's
 git is configured so that a checked-out tree cannot make it run anything.
-[`docs/v3/decisions.md`](../docs/v3/decisions.md) has the audit, and what is left by
+[`docs/v3/decisions.md`](https://github.com/pmalacho-mit/isolated-devcontainers-suede/blob/main/docs/v3/decisions.md) has the audit, and what is left by
 nature.
 
 **Devcontainers.** A workspace runs its project's own `devcontainer.json`, unchanged, with
@@ -279,7 +287,7 @@ everything but the hypervisor boundary. "T3" is real VMs on Linux (QEMU through 
 | P3: keys never leave the keyring; a secret's value never leaves the root | yes | T2 | |
 | P4: the root never runs git in a domain's clone | yes | T2 (a booby-trapped clone, a lying outbox) | |
 | What the root takes from a domain is checked data: bundles strictly checked in quarantine, a held and checked outbox directory, verified LFS, git settings that ignore what a tree asks for | yes | T1, T2 (`10-hostile-content`: dangerous objects, a planted repository, links in the outbox, hostile names; each beside a control), T3 (an offer, a dangerous tree and a linked outbox over a real VM's share) | a size quota for a domain's outbox; on the Mac, status files are checked by a second look, not by the kernel |
-| Domains, workspaces, checkouts, worktrees, locks, `--base`, `--fetch` | yes | T2, T3 | a domain's environment, templates, package caches |
+| Domains, workspaces, checkouts, worktrees, locks, `--base`, `--fetch`, `--branch`; a domain's environment built once (templates) and its package caches | yes | T2, T3, T4 | |
 | Offers, the root's view (`git fetch --all`), deliveries between domains | yes | T2 | `desolate upstream` (suede) |
 | Ports: same number, routed by name, reservations | yes | T2 | forwarded connections on real VMs are untested |
 | P5: read-only shares against root in the VM | yes | **T3** (and measured on an M1 for the Mac) | |
@@ -287,9 +295,13 @@ everything but the hypervisor boundary. "T3" is real VMs on Linux (QEMU through 
 | Egress through each workspace's own proxy, per-domain rules, audit by link | yes | T2, T3 | |
 | Secrets: per domain, substituted for the hosts and headers they name, proven by the upstream's certificate, scrubbed from responses, switched off and on (`--ttl`) | yes | T2, T3 | v2's self-test fixture; "learn" as a timed mode |
 | **P1: the editor**: VSCodium's server in every workspace VM (in the project's devcontainer when it can), its own hostname, v2's gate | yes | T2 (HTTP, WebSocket, a real browser), T3 | desolate's workspace extension (`carryover/editor/extension`: mapping `localhost` URLs) is not ported |
-| The project's devcontainer, from its own `devcontainer.json`, inside the workspace VM; `exec` and the editor enter it | yes | T2 (an image, a Dockerfile, a failing spec, no spec, a changed spec) | compose specs start but their ports are not forwarded; features, templates and caches (C2 to C4) are not built or untested |
+| The project's devcontainer, from its own `devcontainer.json` (features included), inside the workspace VM; `exec` and the editor enter it | yes | T2 (an image, a Dockerfile, a failing spec, no spec, a changed spec); on the M1, a public image with a feature | compose specs start but their ports are not forwarded |
 | The root UI: a state service in the root that pushes changes, a dashboard at `desolate.localhost` with the diff of an offer as text; no editor in the root | yes | T2 (the spec's three budgets, a real browser), T3 (the state reaches the dashboard) | a side-by-side diff; `upstream` |
-| The Mac backend (`vz`) | written from the M1's measurements | **never run** | `docs/v3/HANDOFF.md` says how to bring it up |
+| The Mac backend (`vz`) | yes | **T4 on an M1**: read-only shares and forced egress against root in the VM (TCP, UDP, DNS, ICMP), no path between domains, an offer over a real share, the editor, a secret | |
+| Pushes by the pusher alone (it speaks receive-pack; compare-and-swap from the commit you saw) | yes | T1, T2; against github.com | |
+| One-click approval in the browser, beside the git terminal | yes | T1, T2, and in Chrome | Firefox and Safari cannot say whether Approve is covered (Chrome can) |
+| The git VM: your git in a browser tab, no network or keys; a remote per domain; LFS | yes | T2 | |
+| `desolate events` and `desolate notify` | yes | T1, T2 | |
 
 ## Layout
 
