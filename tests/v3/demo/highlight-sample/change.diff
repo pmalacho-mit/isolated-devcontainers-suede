@@ -1,0 +1,140 @@
+diff --git a/api/users.py b/api/users.py
+index 75acd73..8a64633 100644
+--- a/api/users.py
++++ b/api/users.py
+@@ -8,12 +8,12 @@ class User:
+     name: str
+     email: str
+ 
+-    def greeting(self) -> str:
+-        return "Hello, " + self.name
++    def greeting(self, formal: bool = False) -> str:
++        """How to greet them: by name, or formally."""
++        return f"Good day, {self.name}." if formal else f"Hello, {self.name}!"
+ 
+ 
+-def find(users, email):
+-    for user in users:
+-        if user.email == email:
+-            return user
+-    return None
++def find(users: list[User], email: str) -> User | None:
++    # Emails are compared case-insensitively.
++    wanted = email.strip().lower()
++    return next((u for u in users if u.email.lower() == wanted), None)
+diff --git a/crates/core/Cargo.toml b/crates/core/Cargo.toml
+index eaebca8..a69d0a2 100644
+--- a/crates/core/Cargo.toml
++++ b/crates/core/Cargo.toml
+@@ -1,4 +1,7 @@
+ [package]
+ name = "core"
+ version = "0.1.0"
+-edition = "2021"
++edition = "2024"
++
++[dev-dependencies]
++pretty_assertions = "1.4"
+diff --git a/crates/core/src/lib.rs b/crates/core/src/lib.rs
+index 688cc33..288fd50 100644
+--- a/crates/core/src/lib.rs
++++ b/crates/core/src/lib.rs
+@@ -1,10 +1,21 @@
+ use std::collections::HashMap;
+ 
+-/// Counts how often each word appears.
++/// Counts how often each word appears, ignoring case and punctuation.
+ pub fn word_counts(text: &str) -> HashMap<String, usize> {
+-    let mut counts = HashMap::new();
+-    for word in text.split_whitespace() {
+-        *counts.entry(word.to_string()).or_insert(0) += 1;
++    let mut counts: HashMap<String, usize> = HashMap::new();
++    for word in text
++        .split(|c: char| !c.is_alphanumeric())
++        .filter(|w| !w.is_empty())
++    {
++        *counts.entry(word.to_lowercase()).or_default() += 1;
+     }
+     counts
+ }
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn counts_ignore_case() {
++        assert_eq!(super::word_counts("A a, b.")["a"], 2);
++    }
++}
+diff --git a/src/format.js b/src/format.js
+index 35038f1..d86f4e4 100644
+--- a/src/format.js
++++ b/src/format.js
+@@ -1,6 +1,7 @@
+ // Formats a duration for people.
+-export function formatDuration(ms) {
++export function formatDuration(ms, { short = false } = {}) {
+   const seconds = Math.round(ms / 1000);
+-  if (seconds < 60) return seconds + "s";
+-  return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s";
++  if (seconds < 60) return `${seconds}s`;
++  const [m, s] = [Math.floor(seconds / 60), seconds % 60];
++  return short ? `${m}m` : `${m}m ${s}s`;
+ }
+diff --git a/src/store.ts b/src/store.ts
+index f99c13e..81060ad 100644
+--- a/src/store.ts
++++ b/src/store.ts
+@@ -2,18 +2,21 @@ export interface Todo {
+   id: number;
+   title: string;
+   done: boolean;
++  due?: Date;
+ }
+ 
+ export class Store {
+   private items: Todo[] = [];
++  private nextId = 1;
+ 
+-  add(title: string): Todo {
+-    const todo = { id: this.items.length + 1, title, done: false };
++  add(title: string, due?: Date): Todo {
++    const todo: Todo = { id: this.nextId++, title: title.trim(), done: false, due };
+     this.items.push(todo);
+     return todo;
+   }
+ 
+-  remaining(): number {
+-    return this.items.filter((t) => !t.done).length;
++  remaining(now = new Date()): { open: number; overdue: number } {
++    const open = this.items.filter((t) => !t.done);
++    return { open: open.length, overdue: open.filter((t) => t.due !== undefined && t.due < now).length };
+   }
+ }
+diff --git a/web/Counter.svelte b/web/Counter.svelte
+index 05bebba..4817ef7 100644
+--- a/web/Counter.svelte
++++ b/web/Counter.svelte
+@@ -1,15 +1,18 @@
+ <script lang="ts">
+-  let count = 0;
++  let { start = 0, step = 1 }: { start?: number; step?: number } = $props();
++  let count = $state(start);
++  const doubled = $derived(count * 2);
+ 
+   function increment() {
+-    count += 1;
++    count += step;
+   }
+ </script>
+ 
+-<button on:click={increment}>
+-  Clicked {count} times
++<button onclick={increment} disabled={count >= 100}>
++  Clicked {count} {count === 1 ? "time" : "times"} (doubled: {doubled})
+ </button>
+ 
+ <style>
+-  button { padding: 8px 16px; }
++  button { padding: 8px 16px; border-radius: 6px; }
++  button:disabled { opacity: 0.5; }
+ </style>

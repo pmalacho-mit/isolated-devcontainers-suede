@@ -71,3 +71,7 @@ details.branches > summary { cursor: pointer; color: var(--soft); font-size: 13p
    at the bottom of the window while the card is taller than it. */
 #review-card > pre.mono { max-height: 14em; overflow: auto; }
 #review-card > .buttons { position: sticky; bottom: 0; z-index: 1; background: var(--card); padding: 10px 0; margin-top: 8px; border-top: 1px solid var(--line); }
+/* Syntax colour (shared/ui/highlight.js): each token's colours, for light and dark. */
+.hl { color: var(--hl-light, inherit); }
+pre.diff span.hl { display: inline; min-width: 0; }
+@media (prefers-color-scheme: dark) { .hl { color: var(--hl-dark, inherit); } }

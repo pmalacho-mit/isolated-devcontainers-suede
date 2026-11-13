@@ -103,7 +103,7 @@ describe("T2 section 4.8: the root UI", () => {
     const page = await http("GET", "/");
     assert.equal(page.status, 200);
     assert.match(page.headers, /content-security-policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'/i, "its own code only: no inline script, no remote resource");
-    assert.doesNotMatch(page.body, /<script(?![^>]* src="\/ui\.js")|\son[a-z]+="|https?:\/\//i, "no inline script, handler or remote address in the page");
+    assert.doesNotMatch(page.body, /<script(?![^>]* src="\/(ui|highlight)\.js")|\son[a-z]+="|https?:\/\//i, "no inline script, handler or remote address in the page: its own two scripts");
     for (const file of ["/ui.js", "/ui.css"]) assert.equal((await http("GET", file)).status, 200, file);
     const empty = await state();
     assert.deepEqual([empty.repos, empty.domains, empty.offers], [[], [], []]);
@@ -218,7 +218,7 @@ describe("T2 section 4.8: the root UI", () => {
     assert.match(dom, /<div class="card" data-domain="web">[\s\S]*<h3>the web app<\/h3>/, dom.slice(0, 600));
     assert.match(dom, /<li data-workspace="web\/one"><span class="dot orange"/, "the workspace's colour, visible at a glance");
     assert.match(dom, /<section id="needs">[\s\S]*web\/one[\s\S]*need: a decision about &lt;b&gt;the API&lt;\/b&gt; &lt;script&gt;alert\(1\)&lt;\/script&gt;/, "what the workspace said is on the page as text");
-    assert.equal((dom.match(/<script/g) ?? []).length, 1, "and the only script on the page is the dashboard's own");
+    assert.deepEqual(dom.match(/<script[^>]*>/g), ['<script src="/highlight.js">', '<script src="/ui.js">'], "and the only scripts on the page are the dashboard's own (its diff colours, and itself)");
     assert.doesNotMatch(page.stderr, /Refused to|Content Security Policy|Uncaught/i, "nothing the page did was refused by its own policy, and nothing threw");
     assert.match(dom, /<a class="button" href="http:\/\/web-one-editor-[0-9a-f]+\.localhost:\d+\/\?tkn=[0-9a-f]{48}[^"]*" target="_blank" rel="noopener" data-editor="">Open editor<\/a>/);
     assert.doesNotMatch(dom.replace(/href="[^"]*"/g, ""), /tkn=[0-9a-f]{8}/, "a token is in a link's address and never in what is shown");

@@ -248,6 +248,9 @@ const send = (res: ServerResponse, status: number, type: string, content: string
 const json = (res: ServerResponse, status: number, value: unknown) => send(res, status, "application/json; charset=utf-8", JSON.stringify(value));
 const STATIC: Record<string, [string, string]> = {
   "/": ["dashboard.html", "text/html; charset=utf-8"], "/ui.js": ["dashboard.js", "text/javascript; charset=utf-8"], "/ui.css": ["dashboard.css", "text/css; charset=utf-8"],
+  // Syntax colour for the diff (shared/ui/highlight.js says how it is kept to colour).
+  "/highlight.js": ["../../shared/ui/highlight.js", "text/javascript; charset=utf-8"],
+  "/highlight-worker.js": ["../../shared/ui/highlight-worker.js", "text/javascript; charset=utf-8"],
 };
 
 const fromHost = (req: IncomingMessage) => {

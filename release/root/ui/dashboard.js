@@ -50,8 +50,12 @@ const button = (label, key, kind, args, quiet = false) =>
 // Characters that reorder or hide what is shown (bidi controls, zero-width ones): in a diff a
 // person reviews, each is shown as itself, named, so the line reads as git stores it.
 const unhidden = (line) => line.replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}⟩`);
-const diffView = (text) => el("pre", { class: "mono diff", "data-diff": "" }, text.split("\n").map((line) =>
-  el("span", { class: line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" }, unhidden(line) || " ")));
+// Given `tokens` (shared/ui/highlight.js, a line's code in its syntax's colours), each line of
+// code is drawn in colour; its text is the same either way.
+const hasColour = (tokens, i) => Boolean(tokens && tokens[i] && typeof DesolateHighlight !== "undefined");
+const diffView = (text, tokens) => el("pre", { class: "mono diff", "data-diff": "" }, text.split("\n").map((line, i) =>
+  el("span", { class: line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" },
+    hasColour(tokens, i) ? [line[0], ...DesolateHighlight.paint(tokens[i], unhidden)] : unhidden(line) || " ")));
 // Side by side: git's unified text, laid out in two columns by this script (nothing in the
 // root parses anything more). A run of removed lines beside the run of added lines that
 // follows it, line by line; in each such pair, the part that differs is marked (the longest
@@ -79,7 +83,7 @@ const sides = (text) => {
     dels = [];
     adds = [];
   };
-  for (const line of text.split("\n")) {
+  for (const [at, line] of text.split("\n").entries()) {
     const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
     if (line.startsWith("diff --git")) {
       flush();
@@ -92,12 +96,12 @@ const sides = (text) => {
     } else if (/^(index |--- |\+\+\+ |new file|deleted file|similarity|rename |old mode|new mode|Binary)/.test(line)) {
       flush();
       if (/^(new file|deleted file|rename |Binary)/.test(line)) rows.push({ kind: "meta", text: line });
-    } else if (line.startsWith("-")) dels.push({ no: oldNo++, text: line.slice(1) });
-    else if (line.startsWith("+")) adds.push({ no: newNo++, text: line.slice(1) });
+    } else if (line.startsWith("-")) dels.push({ no: oldNo++, text: line.slice(1), at });
+    else if (line.startsWith("+")) adds.push({ no: newNo++, text: line.slice(1), at });
     else if (line.startsWith(" ") || line === "") {
       flush();
       if (line === "" && oldNo === 0) continue;
-      rows.push({ kind: "same", left: { no: oldNo++, text: line.slice(1) }, right: { no: newNo++, text: line.slice(1) } });
+      rows.push({ kind: "same", left: { no: oldNo++, text: line.slice(1), at }, right: { no: newNo++, text: line.slice(1), at } });
     }
   }
   flush();
@@ -151,19 +155,28 @@ const pairs = (dels, adds) => {
   return out;
 };
 /** One side's text, the part that differs from the other side marked. */
-const marked = (mine, theirs) => {
-  if (theirs === undefined) return [mine];
+/** Where one side differs from the other: [start, end) of `mine`, or null. */
+const differing = (mine, theirs) => {
+  if (theirs === undefined) return null;
   let start = 0;
   while (start < mine.length && start < theirs.length && mine[start] === theirs[start]) start++;
   let end = 0;
   while (end < mine.length - start && end < theirs.length - start && mine[mine.length - 1 - end] === theirs[theirs.length - 1 - end]) end++;
-  const middle = mine.slice(start, mine.length - end);
-  return middle ? [mine.slice(0, start), el("mark", {}, middle), mine.slice(mine.length - end)] : [mine];
+  return start < mine.length - end ? [start, mine.length - end] : null;
 };
-const sideBySide = (text) => el("div", { class: "sbs", "data-diff": "" }, sides(text).map((row) => {
+const marked = (mine, theirs) => {
+  const range = differing(mine, theirs);
+  return range ? [mine.slice(0, range[0]), el("mark", {}, mine.slice(range[0], range[1])), mine.slice(range[1])] : [mine];
+};
+const sideBySide = (text, tokens) => el("div", { class: "sbs", "data-diff": "" }, sides(text).map((row) => {
   if (row.kind !== "change" && row.kind !== "same") return el("div", { class: `sbs-${row.kind}` }, row.text);
+  const code = (side, other) => {
+    const pair = row.kind === "change" && row.like;
+    if (hasColour(tokens, side.at)) return DesolateHighlight.paint(tokens[side.at], unhidden, pair ? differing(unhidden(side.text), other && unhidden(other.text)) : null);
+    return pair ? marked(unhidden(side.text), other && unhidden(other.text)) : unhidden(side.text) || " ";
+  };
   const cell = (side, other, cls) => side
-    ? [el("span", { class: `no ${cls}` }, String(side.no)), el("span", { class: `code ${cls}` }, row.kind === "change" && row.like ? marked(unhidden(side.text), other && unhidden(other.text)) : unhidden(side.text) || " ")]
+    ? [el("span", { class: `no ${cls}` }, String(side.no)), el("span", { class: `code ${cls}` }, code(side, other))]
     : [el("span", { class: "no empty" }, ""), el("span", { class: "code empty" }, "")];
   return el("div", { class: "sbs-row" }, cell(row.left, row.right, row.kind === "change" ? "del" : ""), cell(row.right, row.left, row.kind === "change" ? "add" : ""));
 }));
@@ -172,18 +185,18 @@ const sideBySide = (text) => el("div", { class: "sbs", "data-diff": "" }, sides(
 // half a second, and threw away where the person had scrolled to. Drawn again only when the
 // diff, the layout, or how much of it is shown changes. At first at most DIFF_LINES of it.
 const DIFF_LINES = 3000;
-let shownDiff = null; // { diff, layout, all, node }
+let shownDiff = null; // { diff, layout, all, tokens, node }
 const diffElement = (diff) => {
   const all = Boolean(diff.all);
-  if (shownDiff && shownDiff.diff === diff && shownDiff.layout === layout && shownDiff.all === all) return shownDiff.node;
+  if (shownDiff && shownDiff.diff === diff && shownDiff.layout === layout && shownDiff.all === all && shownDiff.tokens === diff.tokens) return shownDiff.node;
   const lines = diff.text.split("\n");
   const cut = !all && lines.length > DIFF_LINES;
   const text = cut ? lines.slice(0, DIFF_LINES).join("\n") : diff.text;
   const node = el("div", { class: "diff-box" },
-    layout === "sides" ? sideBySide(text) : diffView(text),
+    layout === "sides" ? sideBySide(text, diff.tokens) : diffView(text, diff.tokens),
     cut ? el("div", { class: "sub" }, `The first ${DIFF_LINES.toLocaleString()} of ${lines.length.toLocaleString()} lines. `,
       el("button", { class: "quiet small", onclick: () => { diff.all = true; render(); } }, "Show the rest")) : null);
-  shownDiff = { diff, layout, all, node };
+  shownDiff = { diff, layout, all, tokens: diff.tokens, node };
   return node;
 };
 let layout = (() => {
@@ -215,6 +228,15 @@ const loadDiff = async () => {
     reviewing.diff = { error: String(error) };
   }
   render();
+  // Then its colours, when the worker has them (or never: the diff stays plain).
+  const diff = reviewing && reviewing.diff;
+  if (diff && typeof diff.text === "string" && typeof DesolateHighlight !== "undefined")
+    DesolateHighlight.tokensFor(diff.text).then((tokens) => {
+      if (reviewing && reviewing.diff === diff && tokens.some(Boolean)) {
+        diff.tokens = tokens;
+        render();
+      }
+    });
 };
 
 /** Review any branch a domain has (offered or not), against the remote's default branch
