@@ -75,17 +75,21 @@ const events = hub();
 /** What the approval page needs of the stack. The list of waiting pushes is the root's
  *  user's (only each one's message is used, parsed on the host); what a push would send is
  *  the reviewer's, asked as root; the signature is this host's. */
+/** What a push would send, as desolate's reviewer in the root works it out (root/reviewer.ts):
+ *  the approval page shows it, and so do the terminal's prompts. */
+export const reviewerSummary = async (push: { repo: string; branch: string; commit: string; onto: string | null }): Promise<Summary> => {
+  const result = await backend().exec(ROOT_VM, [...NODE, `${guest.release}/root/review-ask.ts`], { root: true, input: JSON.stringify({ repo: push.repo, branch: push.branch, commit: push.commit, onto: push.onto }), timeoutMs: 120_000 });
+  try {
+    return JSON.parse(result.stdout.trim().split("\n").pop() ?? "") as Summary;
+  } catch {
+    return { ok: false, error: `the reviewer could not be asked: ${(result.stderr || result.stdout).trim().slice(-200)}` };
+  }
+};
+
 const approvalBackend = (): ApprovalBackend => {
   return {
     pending: async () => (await rootctl<{ message: string; at: string }[]>("approvals.pending", {}, { quiet: true, timeoutMs: 30_000 })).map((p) => ({ message: p.message, at: p.at })),
-    summary: async (push) => {
-      const result = await backend().exec(ROOT_VM, [...NODE, `${guest.release}/root/review-ask.ts`], { root: true, input: JSON.stringify({ repo: push.repo, branch: push.branch, commit: push.commit, onto: push.onto }), timeoutMs: 120_000 });
-      try {
-        return JSON.parse(result.stdout.trim().split("\n").pop() ?? "") as Summary;
-      } catch {
-        return { ok: false, error: `the reviewer could not be asked: ${(result.stderr || result.stdout).trim().slice(-200)}` };
-      }
-    },
+    summary: reviewerSummary,
     approve: async (message) => {
       if (!parseApproval(message)) throw new Error("not a push approval");
       const { signClicked } = await import("./approver.ts");
@@ -692,6 +696,13 @@ const serve = async () => {
           reconcile();
           await Promise.all([...entries.values()].map(sync));
           reply = { ok: true, ports: view(), editor: { port: editorHostPort(), error: editorError } };
+        } else if (request.op === "approved") {
+          // An approval given at a terminal (desolate approve, desolate push): the same event
+          // the approval page's gives, from the text that was signed (parsed here).
+          const message = (request as { message?: unknown }).message;
+          const push = typeof message === "string" ? parseApproval(message) : null;
+          if (push) events.publish(events.host("approved", { repo: push.repo, branch: push.branch, commit: push.commit, onto: push.onto, via: "terminal" }));
+          reply = { ok: push !== null };
         } else if (request.op === "events") {
           // A stream, not an answer: the last ones asked for, then each as it comes.
           // Once: nothing more the client sends is read. A listener that does not read is
@@ -780,6 +791,9 @@ const ask = (request: Record<string, unknown>, timeoutMs = 60_000): Promise<Reco
   });
 
 const alive = () => ask({ op: "ping" }, 3000).then(() => true, () => false);
+
+/** Tell `desolate events` of an approval given at a terminal. Best effort: no daemon, no event. */
+export const announceApproved = (message: string) => ask({ op: "approved", message }, 3000).catch(() => ({}));
 
 export const ensureDaemon = async () => {
   if (await alive()) {

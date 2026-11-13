@@ -93,7 +93,10 @@ export const fetch = async (repo: Repo, log: (line: string) => void = () => {}) 
     "maintenance.auto": "false",
     // Pinned here, where repository content cannot reach: a `.lfsconfig` in a commit
     // would otherwise choose where LFS goes, and with which key.
-    "lfs.url": url,
+    // Over SSH (a deploy key) git-lfs finds its endpoint itself; over https (--anonymous) the
+    // endpoint is the repository's /info/lfs, and the repository's own address answered
+    // every batch with "Authorization error" (found cloning a public repository on the M1).
+    "lfs.url": url.startsWith("https://") ? `${url.replace(/\/$/, "")}/info/lfs` : url,
     "lfs.locksverify": "false",
     // Nothing is ever pushed INTO the mirror: it holds what the remote published. The hook
     // lives in a directory only root writes.

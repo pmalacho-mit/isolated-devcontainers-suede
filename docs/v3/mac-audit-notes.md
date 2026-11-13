@@ -76,9 +76,10 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
    - **The Mac's loopback: walled off from the root** (#84).
    - **What happened, from whom** (#85): `desolate events`.
    **Still open:** that user still reads every share and holds every editor's token; a bug
-   in git's own parsing that compromises it could mislead the reviewer (not the pusher); the
-   terminal prompt (`desolate push`) shows that user's summary, not the reviewer's;
-   approvals given at the terminal are not events. (Fixed since: an offered branch's new LFS
+   in git's own parsing that compromises it could mislead the reviewer (not the pusher).
+   (Fixed since: the terminal's prompts (`desolate push`, `desolate approve`) show the
+   reviewer's account, as the page does; approvals given at a terminal are events too,
+   `via: "terminal"`; an offered branch's new LFS
    objects, and every LFS file, checked out as pointers in the git VM; `git/lfs-file.ts`.) **Against github.com** (2026-11-12): a branch pushed from the git VM to
    `mitdesolate/desolate-scratch`, approved by the person on the approval page in Chrome:
    the pusher's own receive-pack and its compare-and-swap from `onto` (none: a new branch)

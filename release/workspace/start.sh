@@ -63,6 +63,13 @@ echo "workspace services: up"
 #   - without (the fake backend): `start.sh <uid> <link> docker` starts it, and the host
 #     runs that when a checkout has a devcontainer.json.
 getent group docker >/dev/null && usermod -aG docker "$USER_NAME"
+# containerd's Kubernetes plugin (CRI), which docker does not use, listens on a random
+# loopback port for its streams: desolate saw a listener and forwarded it to the Mac as a
+# dev server (found on the M1). Off, before docker first starts containerd.
+if [ ! -s /etc/containerd/config.toml ] || ! grep -q 'io.containerd.grpc.v1.cri' /etc/containerd/config.toml; then
+  install -d -m 0755 /etc/containerd
+  printf 'version = 2\ndisabled_plugins = ["io.containerd.grpc.v1.cri"]\n' >/etc/containerd/config.toml
+fi
 if [ -d /run/systemd/system ]; then
   systemctl start docker.socket >/dev/null 2>&1 || true
 elif [ "${3:-}" = docker ] && ! docker info >/dev/null 2>&1; then

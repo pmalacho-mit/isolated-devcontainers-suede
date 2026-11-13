@@ -20,7 +20,8 @@ const workspace = (() => {
   try {
     return JSON.parse(fs.readFileSync(path.join(os.homedir(), ".desolate", "workspace.json"), "utf8")) as { workspace: string; domain: string };
   } catch {
-    return { workspace: "unknown", domain: "unknown" };
+    // In the devcontainer: the names its environment carries (devcontainer.ts).
+    return { workspace: process.env.DESOLATE_WORKSPACE_NAME || "unknown", domain: process.env.DESOLATE_DOMAIN || "unknown" };
   }
 })();
 

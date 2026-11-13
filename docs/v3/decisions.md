@@ -830,6 +830,44 @@ Measured on a fresh stack with two repositories and a devcontainer:
   `up` 6 s; every other step is under a second (`DESOLATE_PROGRESS=1 desolate up` prints
   each). The devcontainer needs the checkouts, so the two cannot overlap.
 
+## Agents without tmux, and the factories (decided on the Mac; tested on T2, run on the M1)
+
+**`desolate agent`** keeps a command running in a workspace (`workspace/agent-holder.py`: a
+pty, a 2 MiB replay buffer, a log, a socket in the VM user's own 0700 directory) and attaches
+the person's own terminal to it on request. v2 ran Claude in tmux, whose mouse mode gave
+either scrolling or copy-and-paste, never both; here the terminal draws the stream itself, so
+both are the terminal's own, and the replay puts recent output in its scrollback. Ctrl-]
+detaches. `stop` interrupts the agent through its own terminal, twice (a signal to `docker
+exec`'s client never reaches into the container), and kills the client 3 s later.
+
+**What an agent prints, on the way to the Mac's terminal**, is filtered
+(`shared/terminal-filter.ts`, for `agent attach` and for `exec` to a terminal): text, C0
+controls, CSI and single-character escapes pass (a TUI draws); every OSC, DCS, APC, PM and
+SOS string is dropped (OSC 52 writes the clipboard, iTerm2's OSC 1337 offers files, DCS feeds
+tmux integration and sixel parsers). tmux used to stand there; the emulator is outside every
+boundary. Checked on the M1: an agent's OSC 52 does not arrive, its colours do.
+
+**`desolate factory issues`** (v2's dispatcher, in TypeScript on desolate's primitives):
+labelled issues become workspaces `issue-<n>` on `issue/<n>`, up to `--max` at once, started
+side by side, each with Claude kept running by `desolate agent`; statuses come from `desolate
+events`; a push of `issue/<n>` opens a draft PR naming the issue (never the agent's words); a
+closed issue's workspace is removed (its branch stays). Claude's credential is a domain
+secret on the Authorization header to api.anthropic.com, as in v2.
+
+**`desolate factory suede`** listens for pushes to a default branch (the pusher's event) and
+asks the root which vendored suede dependencies changed (`suede.changed`: each `.gitrepo`
+directory in the pushed commit, the files under it the push touched, a nested dependency's
+files its own, the project's own `release/` excluded). An agent decides, per dependency,
+whether the change belongs upstream, and prepares it on `upstream/<project>-<commit>` in the
+dependency's checkout; the person pushes it. Run on the M1 against this repository's own
+commit that vendored suede.nests.
+
+**Found doing it:** an anonymous clone's mirror pinned `lfs.url` to the repository's address,
+not its `/info/lfs` endpoint, so any public repository with LFS files could not be cloned
+anonymously. containerd's CRI plugin listened on a random loopback port in every workspace,
+which desolate forwarded to the Mac as a dev server: off. An offer made inside a devcontainer
+was "from unknown": the container now carries its workspace's names.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the

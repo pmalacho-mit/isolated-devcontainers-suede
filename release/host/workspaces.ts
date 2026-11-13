@@ -5,6 +5,7 @@ import { EXIT, refuse } from "../shared/exit.ts";
 import { devHostname, editorHostname, editorHostPort, isBranch, parseRepo } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { readHead } from "../shared/status.ts";
+import { terminalFilter } from "../shared/terminal-filter.ts";
 import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
 import { backend, ensureProxyUser, rootctl } from "./stack.ts";
 import type { VmSpec } from "./vm/types.ts";
@@ -321,8 +322,16 @@ export const exec = async (target: string | undefined, command: string[], option
   const child = b.spawn(w.vm, ["bash", `${guest.release}/workspace/enter.sh`, ...(options.vm ? ["--vm"] : []), checkout!.path, "--", ...command]);
   process.stdin.pipe(child.stdin!);
   child.stdin!.on("error", () => {});
-  child.stdout!.pipe(process.stdout);
-  child.stderr!.pipe(process.stderr);
+  // To a terminal (a person running an agent by hand): kept to what a screen needs
+  // (shared/terminal-filter.ts). To a pipe or a file (a script): unchanged.
+  if (process.stdout.isTTY) {
+    const filter = terminalFilter();
+    child.stdout!.on("data", (chunk: Buffer) => process.stdout.write(filter(chunk)));
+  } else child.stdout!.pipe(process.stdout);
+  if (process.stderr.isTTY) {
+    const filter = terminalFilter();
+    child.stderr!.on("data", (chunk: Buffer) => process.stderr.write(filter(chunk)));
+  } else child.stderr!.pipe(process.stderr);
   const code = await new Promise<number>((resolve) => child.on("close", (status) => resolve(status ?? 1)));
   process.stdin.unpipe();
   process.stdin.pause();

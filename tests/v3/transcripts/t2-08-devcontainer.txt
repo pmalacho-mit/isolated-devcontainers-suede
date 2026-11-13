@@ -58,7 +58,7 @@ workspace app/w1 is up (<duration>)
 
 $ desolate offers
 Needs you:
-  app  acme/app  from-container  <id>  from unknown
+  app  acme/app  from-container  <id>  from w1
     review: desolate review app acme/app from-container
 [exit 0]
 

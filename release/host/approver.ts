@@ -85,7 +85,7 @@ export const sign = async (message: string, summary?: string): Promise<string> =
   const which = kind();
   if (!push) throw new Refusal("the root sent something that is not a push approval; nothing was signed", "desolate doctor", EXIT.unconfirmed);
   if (!which) throw new Refusal("this stack has no approver, so no push can be approved", "desolate bootstrap", EXIT.unconfirmed);
-  const shown = ["", "desolate: this push needs your confirmation.", `  repository  ${push.repo}`, `  branch      ${push.branch}`, `  commit      ${push.commit}`, push.onto ? `  onto        ${push.onto}  (the remote's ${push.branch} now: it moves from this to the commit, or not at all)` : `  onto        none: the remote has no ${push.branch} yet`, ...(summary ? [`  sends       ${clean(summary)}`] : []), ""];
+  const shown = ["", "desolate: this push needs your confirmation.", `  repository  ${push.repo}`, `  branch      ${push.branch}`, `  commit      ${push.commit}`, push.onto ? `  onto        ${push.onto}  (the remote's ${push.branch} now: it moves from this to the commit, or not at all)` : `  onto        none: the remote has no ${push.branch} yet`, ...(summary ? [`  sends       ${clean(summary)}`, "              (desolate's reviewer, in the root)"] : []), ""];
   const unconfirmed = (why: string, fix: string) => new Refusal(`${why}\ndesolate: no person confirmed the push, so nothing was pushed`, fix, EXIT.unconfirmed);
 
   if (which === "touchid") {

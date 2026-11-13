@@ -10,6 +10,7 @@
 import { EXIT, refuse } from "../shared/exit.ts";
 import { editorHostPort, ROOT_HOSTNAME } from "../shared/names.ts";
 import { sign } from "./approver.ts";
+import { parseApproval } from "../shared/approval.ts";
 import { guest } from "./paths.ts";
 import { backend, ROOT_VM, rootctl } from "./stack.ts";
 
@@ -84,11 +85,31 @@ export const push = async (args: string[]): Promise<number> => {
     return refuse("the root did not describe the push", "desolate doctor");
   }
   for (const warning of plan.warnings) process.stderr.write(`desolate: WARNING: this push ${plain(warning)}\n`);
-  const signature = await sign(plan.message, plan.summary);
+  const signature = await sign(plan.message, await reviewed(plan.message));
+  void (await import("./daemon.ts")).announceApproved(plan.message);
   return backend().attach(ROOT_VM, [...PUSH, "run", ...args, "--message", Buffer.from(plan.message).toString("base64"), "--signature", signature], { cwd: guest.rootClones });
 };
 
 /** `desolate approve`: answer the raw `git push` that is waiting in the root's terminal. */
+/** The reviewer's account of a push, in one line for the terminal's prompt: what the
+ *  approval page shows, from the root's reviewer, not the root's ordinary user (which reads
+ *  what domains write). */
+const reviewed = async (message: string): Promise<string> => {
+  const push = parseApproval(message);
+  if (!push) return "";
+  const { reviewerSummary } = await import("./daemon.ts");
+  const s = await reviewerSummary(push);
+  if (!s.ok) return `desolate's reviewer could not say what this push would send (${s.error ?? "no answer"}): approve only if you know`;
+  const commits = (s.commits?.length ?? 0) + (s.more ?? 0);
+  const files = (s.files?.length ?? 0) + (s.moreFiles ?? 0);
+  return [
+    s.fastForward === false ? "REPLACES the remote's branch (commits only the remote has are dropped);" : "",
+    `${commits} commit(s) the remote does not have, ${files} file(s)${s.lfs ? `, ${s.lfs} of them LFS` : ""}`,
+    ...(s.warnings ?? []).map((w) => `; warning: ${w}`),
+    s.files?.some((f) => f.sensitive) ? "; changes what runs on the forge" : "",
+  ].join(" ").trim();
+};
+
 export const approve = async (out: Out): Promise<number> => {
   const pending = await rootctl<{ message: string; summary: string }[]>("approvals.pending", {}, { quiet: true });
   if (pending.length === 0) {
@@ -96,7 +117,8 @@ export const approve = async (out: Out): Promise<number> => {
     return 0;
   }
   for (const request of pending) {
-    const signature = await sign(request.message, request.summary);
+    const signature = await sign(request.message, await reviewed(request.message));
+    void (await import("./daemon.ts")).announceApproved(request.message);
     await rootctl("approvals.answer", { message: request.message, signature }, { quiet: true });
     out("approved; the push waiting in the root continues.");
   }

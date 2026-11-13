@@ -111,26 +111,21 @@ desolate editor acme/agent-1 --open          # VSCodium, running in the VM, in a
 desolate exec acme/agent-1 -- <an agent CLI> # it runs in the devcontainer, in the first checkout
 ```
 
-**Claude Code, for example.** The agent has to be in the project's environment, and its
-credential must never be:
+**Claude Code, for example**, kept running so you can attach to it from your own terminal
+(no tmux: your terminal's scrollback and copy work):
 
-1. Install it in the devcontainer: add the feature
-   `"ghcr.io/anthropics/devcontainer-features/claude-code:1": {}` to the project's
-   `devcontainer.json`, or run `npm install -g @anthropic-ai/claude-code` in the workspace.
-2. Give the domain your API key as a **secret**: its value stays in the root VM, and the
-   workspace holds only a name, which its proxy replaces with the value on the way to the
-   hosts you name:
-   ```bash
-   desolate domain acme secret set ANTHROPIC-KEY --hosts api.anthropic.com --headers x-api-key   # the key on stdin
-   ```
-3. Start it with the name where the key would go:
-   ```bash
-   desolate exec acme/agent-1 -- env ANTHROPIC_API_KEY=ANTHROPIC-KEY claude
-   ```
+```bash
+claude setup-token        # on your Mac, once: a subscription token
+desolate domain acme secret set CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization   # paste it
+desolate agent start acme/agent-1 --name claude -- \
+  env CLAUDE_CODE_OAUTH_TOKEN=CLAUDE-OAUTH claude --permission-mode auto "Greet by name"
+desolate agent attach acme/agent-1 --name claude      # Ctrl-] detaches; it keeps running
+```
 
-Do not log in to Claude interactively inside a workspace: that would put a real credential
-in the VM. If the domain's network is limited to a list (`desolate domain acme net enforce`),
-allow `api.anthropic.com`.
+The token never enters the workspace: it holds the name `CLAUDE-OAUTH`, which its proxy
+replaces on the way to api.anthropic.com. Claude Code must be in the project's environment
+(the devcontainer feature `ghcr.io/anthropics/devcontainer-features/claude-code:1`). More,
+including agents for labelled GitHub issues, in parallel: [agents.md](agents.md).
 
 ![The workspace's editor: both repositories in one window, and a terminal inside the devcontainer](assets/editor.png)
 

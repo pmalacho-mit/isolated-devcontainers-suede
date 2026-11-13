@@ -75,7 +75,7 @@ export const CACHE_ENV: Record<string, string> = {
   GOMODCACHE: "/desolate/cache/go-mod",
 };
 /** The spec desolate hands the CLI: the project's, plus what the header lists. */
-export const overrideOf = (spec: Record<string, unknown>, checkout: string, home: string): Record<string, unknown> => {
+export const overrideOf = (spec: Record<string, unknown>, checkout: string, home: string, who: { domain: string; workspace: string } = { domain: "", workspace: "" }): Record<string, unknown> => {
   const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
   const env = (value: unknown): Record<string, unknown> => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
   const compose = spec.dockerComposeFile !== undefined;
@@ -102,6 +102,10 @@ export const overrideOf = (spec: Record<string, unknown>, checkout: string, home
     // their roots from the environment are pointed at it.
     SSL_CERT_FILE: ENV_CA, NODE_EXTRA_CA_CERTS: ENV_CA, REQUESTS_CA_BUNDLE: ENV_CA, CURL_CA_BUNDLE: ENV_CA, GIT_SSL_CAINFO: ENV_CA,
     DESOLATE_WORKSPACE: "1",
+    // Which workspace this is, for `desolate offer` and the rest inside the container (the
+    // VM's ~/.desolate/workspace.json is not in the container's home).
+    DESOLATE_DOMAIN: who.domain,
+    DESOLATE_WORKSPACE_NAME: who.workspace,
     // The domain's package caches (C4), where the container can see them: not for a compose
     // spec, whose services are not given the mount.
     ...(compose ? {} : CACHE_ENV),
@@ -144,7 +148,7 @@ const main = async () => {
   }
   const home = os.homedir();
   fs.mkdirSync(`${home}/.desolate-editor`, { recursive: true, mode: 0o700 });
-  const merged = overrideOf(spec, checkout.path, home);
+  const merged = overrideOf(spec, checkout.path, home, { domain: plan.domain, workspace: plan.workspace });
   const text = JSON.stringify(merged, null, 2);
   const dir = `${home}/.desolate-devcontainer`;
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
