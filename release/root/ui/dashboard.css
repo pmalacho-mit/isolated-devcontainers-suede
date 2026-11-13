@@ -53,3 +53,16 @@ pre.diff .file { font-weight: 700; border-top: 1px solid var(--line); margin-top
 button.small { font-size: 12px; padding: 1px 8px; }
 details.branches { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
 details.branches > summary { cursor: pointer; color: var(--soft); font-size: 13px; padding: 4px 0; }
+/* Side by side: two columns, each with its line numbers; changed text marked within a line. */
+.sbs { font: 12.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
+.sbs-row { display: grid; grid-template-columns: 3.5em minmax(0, 1fr) 3.5em minmax(0, 1fr); }
+.sbs-row .no { color: var(--soft); text-align: right; padding: 0 8px 0 4px; user-select: none; border-right: 1px solid var(--line); }
+.sbs-row .code { white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 8px; }
+.sbs-row .code.del, .sbs-row .no.del { background: color-mix(in srgb, var(--red) 13%, transparent); }
+.sbs-row .code.add, .sbs-row .no.add { background: color-mix(in srgb, var(--green) 13%, transparent); }
+.sbs-row .code.del mark { background: color-mix(in srgb, var(--red) 38%, transparent); color: inherit; border-radius: 2px; }
+.sbs-row .code.add mark { background: color-mix(in srgb, var(--green) 38%, transparent); color: inherit; border-radius: 2px; }
+.sbs-row .empty { background: color-mix(in srgb, var(--soft) 7%, transparent); }
+.sbs-file { font-weight: 700; padding: 6px 8px; border-top: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; }
+.sbs-hunk { color: var(--accent); padding: 2px 8px; background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.sbs-meta { color: var(--soft); padding: 2px 8px; font-style: italic; }

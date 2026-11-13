@@ -52,6 +52,79 @@ const button = (label, key, kind, args, quiet = false) =>
 const unhidden = (line) => line.replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}⟩`);
 const diffView = (text) => el("pre", { class: "mono diff", "data-diff": "" }, text.split("\n").map((line) =>
   el("span", { class: line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" }, unhidden(line) || " ")));
+// Side by side: git's unified text, laid out in two columns by this script (nothing in the
+// root parses anything more). A run of removed lines beside the run of added lines that
+// follows it, line by line; in each such pair, the part that differs is marked (the longest
+// common start and end are not), so a one-word change reads as one word.
+const sides = (text) => {
+  const rows = [];
+  let oldNo = 0;
+  let newNo = 0;
+  let dels = [];
+  let adds = [];
+  const flush = () => {
+    for (let i = 0; i < Math.max(dels.length, adds.length); i++) rows.push({ kind: "change", left: dels[i], right: adds[i] });
+    dels = [];
+    adds = [];
+  };
+  for (const line of text.split("\n")) {
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (line.startsWith("diff --git")) {
+      flush();
+      rows.push({ kind: "file", text: line.replace(/^diff --git a\/(.*) b\/.*$/, "$1") });
+    } else if (hunk) {
+      flush();
+      oldNo = Number(hunk[1]);
+      newNo = Number(hunk[2]);
+      rows.push({ kind: "hunk", text: line });
+    } else if (/^(index |--- |\+\+\+ |new file|deleted file|similarity|rename |old mode|new mode|Binary)/.test(line)) {
+      flush();
+      if (/^(new file|deleted file|rename |Binary)/.test(line)) rows.push({ kind: "meta", text: line });
+    } else if (line.startsWith("-")) dels.push({ no: oldNo++, text: line.slice(1) });
+    else if (line.startsWith("+")) adds.push({ no: newNo++, text: line.slice(1) });
+    else if (line.startsWith(" ") || line === "") {
+      flush();
+      if (line === "" && oldNo === 0) continue;
+      rows.push({ kind: "same", left: { no: oldNo++, text: line.slice(1) }, right: { no: newNo++, text: line.slice(1) } });
+    }
+  }
+  flush();
+  return rows;
+};
+/** One side's text, the part that differs from the other side marked. */
+const marked = (mine, theirs) => {
+  if (theirs === undefined) return [mine];
+  let start = 0;
+  while (start < mine.length && start < theirs.length && mine[start] === theirs[start]) start++;
+  let end = 0;
+  while (end < mine.length - start && end < theirs.length - start && mine[mine.length - 1 - end] === theirs[theirs.length - 1 - end]) end++;
+  const middle = mine.slice(start, mine.length - end);
+  return middle ? [mine.slice(0, start), el("mark", {}, middle), mine.slice(mine.length - end)] : [mine];
+};
+const sideBySide = (text) => el("div", { class: "sbs", "data-diff": "" }, sides(text).map((row) => {
+  if (row.kind !== "change" && row.kind !== "same") return el("div", { class: `sbs-${row.kind}` }, row.text);
+  const cell = (side, other, cls) => side
+    ? [el("span", { class: `no ${cls}` }, String(side.no)), el("span", { class: `code ${cls}` }, row.kind === "change" ? marked(side.text, other?.text) : side.text || " ")]
+    : [el("span", { class: "no empty" }, ""), el("span", { class: "code empty" }, "")];
+  return el("div", { class: "sbs-row" }, cell(row.left, row.right, row.kind === "change" ? "del" : ""), cell(row.right, row.left, row.kind === "change" ? "add" : ""));
+}));
+let layout = (() => {
+  try {
+    return localStorage.getItem("desolate-diff-layout") === "unified" ? "unified" : "sides";
+  } catch {
+    return "sides";
+  }
+})();
+const setLayout = (value) => {
+  layout = value;
+  try {
+    localStorage.setItem("desolate-diff-layout", value);
+  } catch {
+    /* a page without storage keeps it for now */
+  }
+  render();
+};
+
 const query = (target, against) => `domain=${encodeURIComponent(target.domain)}&repo=${encodeURIComponent(target.repo)}&branch=${encodeURIComponent(target.branch)}&against=${encodeURIComponent(against)}`;
 const loadDiff = async () => {
   const { offer, against } = reviewing;
@@ -133,7 +206,8 @@ const reviewPanel = () => {
     // The diff is shown only if it is of the commit the Push button names.
     reviewing.diff && reviewing.diff.text !== undefined && reviewing.diff.commit === review.commit ? [
       el("div", { class: "sub" }, el("button", { class: "quiet small", "data-whitespace": "", onclick: () => { reviewing.whitespace = reviewing.whitespace === "ignore" ? "show" : "ignore"; loadDiff(); } }, reviewing.whitespace === "ignore" ? "Show whitespace changes" : "Ignore whitespace changes")),
-      diffView(reviewing.diff.text),
+      el("div", { class: "sub" }, el("button", { class: "quiet small", "data-layout": "", onclick: () => setLayout(layout === "sides" ? "unified" : "sides") }, layout === "sides" ? "Unified" : "Side by side")),
+      layout === "sides" ? sideBySide(reviewing.diff.text) : diffView(reviewing.diff.text),
       reviewing.diff.truncated ? el("div", { class: "warn" }, "The diff is longer than is shown here. Read the rest with git, in `desolate root shell`, before you push.") : null] : null,
     reviewing.diff && reviewing.diff.commit && reviewing.diff.commit !== review.commit ? el("div", { class: "warn" }, "The branch moved while you were reading. Close this and review it again.") : null,
     el("div", { class: "sub" }, "For a richer view (syntax colouring, the whole file), open the branch in a workspace's editor. The diff here is the one to trust: it is made in the root, by git alone."),
