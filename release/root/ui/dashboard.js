@@ -63,7 +63,19 @@ const sides = (text) => {
   let dels = [];
   let adds = [];
   const flush = () => {
-    for (let i = 0; i < Math.max(dels.length, adds.length); i++) rows.push({ kind: "change", left: dels[i], right: adds[i] });
+    // Each removed line beside the added line most like it, in order (so a line inserted
+    // above a changed one does not shift every pair after it). Between those, what is left
+    // of each side is beside what is left of the other, unmarked: they are not alike.
+    let d0 = 0;
+    let a0 = 0;
+    for (const [d, a] of [...pairs(dels, adds), [dels.length, adds.length]]) {
+      const lefts = dels.slice(d0, d);
+      const rights = adds.slice(a0, a);
+      for (let k = 0; k < Math.max(lefts.length, rights.length); k++) rows.push({ kind: "change", left: lefts[k], right: rights[k], like: false });
+      if (d < dels.length) rows.push({ kind: "change", left: dels[d], right: adds[a], like: true });
+      d0 = d + 1;
+      a0 = a + 1;
+    }
     dels = [];
     adds = [];
   };
@@ -91,6 +103,42 @@ const sides = (text) => {
   flush();
   return rows;
 };
+/** How alike two lines are, 0 to 1: their common start and end, against the longer. */
+const likeness = (a, b) => {
+  const most = Math.max(a.length, b.length);
+  if (most === 0) return 1;
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start++;
+  let end = 0;
+  while (end < a.length - start && end < b.length - start && a[a.length - 1 - end] === b[b.length - 1 - end]) end++;
+  return (start + end) / most;
+};
+/** Which removed line goes beside which added one: pairs [d, a] in order, alike enough,
+ *  as many and as alike as can be (a small dynamic program; a long run is paired as it comes). */
+const pairs = (dels, adds) => {
+  const n = dels.length;
+  const m = adds.length;
+  if (n === 0 || m === 0) return [];
+  if (n * m > 40_000) return Array.from({ length: Math.min(n, m) }, (_, k) => [k, k]);
+  const score = (d, a) => {
+    const like = likeness(dels[d].text.trim(), adds[a].text.trim());
+    return like >= 0.4 ? like : 0;
+  };
+  const best = Array.from({ length: n + 1 }, () => new Float64Array(m + 1));
+  for (let d = n - 1; d >= 0; d--)
+    for (let a = m - 1; a >= 0; a--) {
+      const here = score(d, a);
+      best[d][a] = Math.max(best[d + 1][a], best[d][a + 1], here > 0 ? here + best[d + 1][a + 1] : 0);
+    }
+  const out = [];
+  for (let d = 0, a = 0; d < n && a < m; ) {
+    const here = score(d, a);
+    if (here > 0 && best[d][a] === here + best[d + 1][a + 1]) out.push([d++, a++]);
+    else if (best[d][a] === best[d + 1][a]) d++;
+    else a++;
+  }
+  return out;
+};
 /** One side's text, the part that differs from the other side marked. */
 const marked = (mine, theirs) => {
   if (theirs === undefined) return [mine];
@@ -104,7 +152,7 @@ const marked = (mine, theirs) => {
 const sideBySide = (text) => el("div", { class: "sbs", "data-diff": "" }, sides(text).map((row) => {
   if (row.kind !== "change" && row.kind !== "same") return el("div", { class: `sbs-${row.kind}` }, row.text);
   const cell = (side, other, cls) => side
-    ? [el("span", { class: `no ${cls}` }, String(side.no)), el("span", { class: `code ${cls}` }, row.kind === "change" ? marked(side.text, other?.text) : side.text || " ")]
+    ? [el("span", { class: `no ${cls}` }, String(side.no)), el("span", { class: `code ${cls}` }, row.kind === "change" && row.like ? marked(side.text, other?.text) : side.text || " ")]
     : [el("span", { class: "no empty" }, ""), el("span", { class: "code empty" }, "")];
   return el("div", { class: "sbs-row" }, cell(row.left, row.right, row.kind === "change" ? "del" : ""), cell(row.right, row.left, row.kind === "change" ? "add" : ""));
 }));
