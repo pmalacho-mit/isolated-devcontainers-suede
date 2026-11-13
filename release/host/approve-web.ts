@@ -19,13 +19,25 @@
 // script, keeps no opener (Cross-Origin-Opener-Policy), and its button arms only after the
 // page has been visible and focused for a second and the pointer then moves onto it: a click
 // that was already on its way when a window opened under it lands on nothing.
+//
+// ONE EXCEPTION TO "CANNOT BE FRAMED": /embed, beside the git terminal. Only the git
+// terminal's own origin may frame it (frame-ancestors names it exactly), so a `git push`
+// and its approval are on one screen. A cookie does not reach a frame under another site
+// (SameSite), so there the credential is a key derived from the token, given to the frame in
+// its address's fragment (never sent to a server) by the git terminal's page, which only the
+// person's browser can open, and sent back as a header: another origin can neither send that
+// header here (no preflight is ever granted) nor pass the same-origin checks below. In the
+// frame, the pointer over it counts as the page's attention (focus stays with the terminal
+// until a click), and where the browser can say so (IntersectionObserver v2, Chrome) Approve
+// arms only while the button is visibly unobscured: if script ever ran on the git terminal's
+// origin, it could not lay the frame under something else and borrow a click.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as path from "node:path";
 import { parseApproval } from "../shared/approval.ts";
 import type { PushApproval } from "../shared/approval.ts";
-import { APPROVE_HOSTNAME, editorHostPort } from "../shared/names.ts";
+import { APPROVE_HOSTNAME, editorHostPort, GIT_HOSTNAME } from "../shared/names.ts";
 import { refusal } from "../workspace/editor-gate.ts";
 import { paths, RELEASE_DIR } from "./paths.ts";
 
@@ -46,6 +58,13 @@ export const approveToken = (): string => {
   return made;
 };
 export const approveAddress = () => `http://${APPROVE_HOSTNAME}:${editorHostPort()}/?tkn=${approveToken()}`;
+/** The key the embedded page sends (x-desolate-embed): derived, so it opens /embed's API and
+ *  is not the address's token. */
+const embedKey = (token: string) => createHmac("sha256", Buffer.from(token, "hex")).update("embed beside the git terminal").digest("hex");
+/** The embedded page's address, for the git terminal's page only (git-web.ts). */
+export const embedAddress = () => `http://${APPROVE_HOSTNAME}:${editorHostPort()}/embed#k=${embedKey(approveToken())}`;
+/** The one origin that may frame /embed. */
+const embedder = () => `http://${GIT_HOSTNAME}:${editorHostPort()}`;
 
 const cookieName = (token: string) => `desolate_approve_${createHash("sha256").update(token).digest("hex").slice(0, 12)}`;
 const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -135,11 +154,14 @@ export const handler = (backend: Backend, log: (line: string) => void) => {
   };
   return async (req: IncomingMessage, res: ServerResponse) => {
   // This name only, this origin only: a page on any other name is refused before anything.
-  const refused = refusal(APPROVE_HOSTNAME, req.headers);
+  // (Save /embed's own page, which another site loads, as a frame: it is static and holds
+  // nothing, and frame-ancestors says who may show it. Everything it then asks for is a
+  // same-origin request, checked as any other.)
+  const url = new URL(req.url ?? "/", `http://${APPROVE_HOSTNAME}`);
+  const refused = refusal(APPROVE_HOSTNAME, req.headers, req.method === "GET" && url.pathname === "/embed" && url.search === "");
   if (refused) return text(res, refused.status, `refused ${refused.why.replace(/this is the editor of/, "this is the approval page at")}`);
   const token = approveToken();
   const name = cookieName(token);
-  const url = new URL(req.url ?? "/", `http://${APPROVE_HOSTNAME}`);
   const given = url.searchParams.get("tkn");
   if (req.method === "GET" && url.pathname === "/" && given !== null) {
     if (!same(given, token)) return text(res, 403, "refused: that is not this stack's approval address; `desolate approve --web` prints it");
@@ -147,7 +169,15 @@ export const handler = (backend: Backend, log: (line: string) => void) => {
     return res.end();
   }
   const cookie = new RegExp(`(?:^|;\\s*)${name}=([0-9a-f]{48})(?:;|$)`).exec(String(req.headers.cookie ?? ""))?.[1];
-  const signedIn = cookie !== undefined && same(cookie, token);
+  const embedded = String(req.headers["x-desolate-embed"] ?? "");
+  const signedIn = (cookie !== undefined && same(cookie, token)) || (/^[0-9a-f]{64}$/.test(embedded) && same(embedded, embedKey(token)));
+  if (req.method === "GET" && url.pathname === "/embed") {
+    // The same page, framed beside the git terminal: by that origin alone.
+    const { "x-frame-options": _deny, ...rest } = SECURITY;
+    const content = fs.readFileSync(path.join(UI, "approve.html"));
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-length": content.length, ...rest, "content-security-policy": SECURITY["content-security-policy"]!.replace("frame-ancestors 'none'", `frame-ancestors ${embedder()}`) });
+    return res.end(content);
+  }
   if (req.method === "GET" && STATIC[url.pathname]) {
     const [file, type] = STATIC[url.pathname]!;
     return send(res, 200, type, fs.readFileSync(path.join(UI, file)));

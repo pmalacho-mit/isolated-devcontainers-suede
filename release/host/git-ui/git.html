@@ -11,7 +11,10 @@
 <script src="/git.js" defer></script>
 </head>
 <body>
-<header><strong>git VM</strong> <span id="where"></span> <span id="status" class="status"></span></header>
-<div id="terminal"></div>
+<header><strong>git VM</strong> <span id="where"></span> <span id="status" class="status"></span><span class="grow"></span><button type="button" id="toggle" hidden>Approvals</button></header>
+<div class="row">
+  <div id="terminal"></div>
+  <aside id="approvals" hidden><iframe id="frame" title="pushes waiting for your approval" referrerpolicy="no-referrer"></iframe></aside>
+</div>
 </body>
 </html>

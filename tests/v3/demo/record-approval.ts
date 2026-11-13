@@ -1,6 +1,8 @@
-// A short screen recording of the person's part of a push: the git terminal, `git push`,
-// the approval page, one click. On a throwaway stack (the fake backend and the stand-in
-// forge of the tests), so the click approves nothing real.
+// A short screen recording of the person's part of a push: the git terminal, `git push`, and
+// the approval beside it in the same tab (the approval page, framed), one click. On a
+// throwaway stack (the fake backend and the stand-in forge of the tests), so the click
+// approves nothing real. It is also the check that the framed page arms and signs in a real
+// browser: a trusted click, routed into the frame, after the pointer moved onto Approve.
 //
 //   DESOLATE_TIER=T2 TMPDIR=$HOME/t node tests/v3/demo/record-approval.ts <out.mp4>
 //
@@ -29,7 +31,6 @@ stack.seed("acme/widgets", (dir) => {
 if (bootstrap(stack).code !== 0) throw new Error("bootstrap failed");
 if (stack.quiet("clone", "acme/widgets").code !== 0) throw new Error("clone failed");
 const gitUrl = /(http:\S+)/.exec(stack.desolate("git", "acme/widgets").stdout)![1]!;
-const approveUrl = /approvals {4}(http:\S+)/.exec(stack.desolate("approve", "--web").stdout)![1]!;
 say("stack up");
 
 // ---------------------------------------------------------------- Chrome, over CDP
@@ -97,9 +98,11 @@ const sessionTargets = new Map<string, string>();
 
 const evaluate = async (sessionId: string, expression: string) =>
   ((await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, sessionId)) as { result?: { value?: unknown } }).result?.value;
-/** A caption across the bottom of the page: for the video only (it is DOM the page did not make). */
+/** A caption across the bottom of the page: for the video only (it is DOM the page did not make).
+ *  Never over the approval frame: Chrome counts a frame with anything over any part of it as
+ *  covered, and its Approve then does not arm (which is the point). */
 const caption = (sessionId: string, text: string) =>
-  evaluate(sessionId, `(() => { let c = document.getElementById("demo-caption"); if (!c) { c = document.createElement("div"); c.id = "demo-caption"; c.style.cssText = "position:fixed;left:0;right:0;bottom:0;padding:14px 20px;background:rgba(20,60,110,.94);color:#fff;font:600 19px system-ui,sans-serif;z-index:99999;box-shadow:0 -2px 12px rgba(0,0,0,.25)"; document.body.appendChild(c); } c.textContent = ${JSON.stringify(text)}; })()`);
+  evaluate(sessionId, `(() => { let c = document.getElementById("demo-caption"); if (!c) { c = document.createElement("div"); c.id = "demo-caption"; c.style.cssText = "position:fixed;left:0;right:" + (document.getElementById("approvals") ? "461px" : "0") + ";bottom:0;padding:14px 20px;background:rgba(20,60,110,.94);color:#fff;font:600 19px system-ui,sans-serif;z-index:99999"; document.body.appendChild(c); } c.textContent = ${JSON.stringify(text)}; })()`);
 const textOf = (sessionId: string) => evaluate(sessionId, "document.body.innerText") as Promise<string>;
 const until = async (sessionId: string, pattern: RegExp, ms = 60_000) => {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(300)) if (pattern.test(String(await textOf(sessionId)))) return;
@@ -144,35 +147,47 @@ try {
   await type(term.sessionId, "echo 'a small change' > note.txt && git add note.txt && git commit -qm 'A small change' && git log --oneline -2");
   await enter(term.sessionId);
   await sleep(2500);
-  await caption(term.sessionId, "4 · git push origin <branch> — it waits for you on the approval page");
+  await caption(term.sessionId, "4 · git push origin <branch>: the approval opens beside the terminal");
   await type(term.sessionId, "git push origin HEAD:refs/heads/a-small-change");
   await enter(term.sessionId);
   await until(term.sessionId, /handed to the root/);
-  await sleep(2500);
 
-  // 2. The approval page.
-  const page = await tab(approveUrl);
-  sessionTargets.set(page.sessionId, page.targetId);
-  await record(page.sessionId);
-  await until(page.sessionId, /a-small-change/);
-  await caption(page.sessionId, "5 · the approval page (desolate approve --web): what the push names, and what it would send");
-  await until(page.sessionId, /1 commit\(s\) the remote does not have/);
-  await sleep(3500);
-  // Approve arms only for a pointer that moves onto it, a moment after the page has your
-  // attention.
-  const box = (await evaluate(page.sessionId, "(() => { const r = document.querySelector('.arm').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")) as [number, number];
-  await caption(page.sessionId, "6 · move onto Approve (it arms only for a pointer that moves onto it), then click");
-  await mouseTo(page.sessionId, [W / 2, 120], box, 40);
-  await sleep(900);
-  await mouseTo(page.sessionId, box, [box[0] + 6, box[1] + 2], 6);
-  await sleep(1200);
-  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: box[0] + 6, y: box[1] + 2, button: "left", clickCount: 1 }, page.sessionId);
-  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: box[0] + 6, y: box[1] + 2, button: "left", clickCount: 1 }, page.sessionId);
-  await until(page.sessionId, /approved: the push continues/);
+  // 2. The approval page, framed beside the terminal (its own origin): found as a target of
+  // its own, to read where its button is and what it says.
+  let frameSession = "";
+  for (let i = 0; i < 60 && !frameSession; i++) {
+    const { targetInfos } = (await send("Target.getTargets")) as { targetInfos: { targetId: string; type: string; url: string }[] };
+    const frame = targetInfos.find((t) => t.type === "iframe" && /desolate-approve\.localhost:\d+\/embed/.test(t.url));
+    if (frame) frameSession = ((await send("Target.attachToTarget", { targetId: frame.targetId, flatten: true })) as { sessionId: string }).sessionId;
+    else await sleep(250);
+  }
+  if (!frameSession) throw new Error("the approval frame never appeared beside the terminal");
+  await until(frameSession, /a-small-change/);
+  await caption(term.sessionId, "5 · beside it: what the push names, and what it would send (worked out in the root)");
+  await until(frameSession, /1 commit\(s\) the remote does not have/);
   await sleep(2500);
+  // Approve arms only for a pointer that moves onto it, a moment after the pointer came over
+  // the frame (the terminal keeps the focus), and only while the button is visibly unobscured.
+  const inFrame = (await evaluate(frameSession, "(() => { const r = document.querySelector('.arm').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")) as [number, number];
+  const frameAt = (await evaluate(term.sessionId, "(() => { const r = document.getElementById('frame').getBoundingClientRect(); return [r.x, r.y]; })()")) as [number, number];
+  const box: [number, number] = [frameAt[0] + inFrame[0], frameAt[1] + inFrame[1]];
+  await caption(term.sessionId, "6 · move onto Approve (it arms only for a pointer that moves onto it), then click");
+  await mouseTo(term.sessionId, [frameAt[0] + 60, 120], [frameAt[0] + 80, 160], 10);
+  await sleep(1300);
+  await mouseTo(term.sessionId, [frameAt[0] + 80, 160], box, 30);
+  await sleep(500);
+  await mouseTo(term.sessionId, box, [box[0] + 6, box[1] + 2], 6);
+  await sleep(700);
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: box[0] + 6, y: box[1] + 2, button: "left", clickCount: 1 }, term.sessionId);
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: box[0] + 6, y: box[1] + 2, button: "left", clickCount: 1 }, term.sessionId);
+  await until(frameSession, /approved: the push continues/).catch(async (error: Error) => {
+    const shot = (await send("Page.captureScreenshot", { format: "png" }, term.sessionId)) as { data?: string };
+    if (shot.data) fs.writeFileSync(`${out}.failed.png`, Buffer.from(shot.data, "base64"));
+    say(`the button at ${JSON.stringify(box)}; the frame's state: ${JSON.stringify(await evaluate(frameSession, "JSON.stringify({ pointerInside, attentiveSince, now: performance.now(), visibility: VISIBILITY, cards: [...cards.values()].map((c) => ({ visible: c.visible, armedAt: c.armedAt, changedAt: c.changedAt })), focus: document.hasFocus(), visible: document.visibilityState })"))}`);
+    throw error;
+  });
 
-  // 3. Back in the terminal: pushed.
-  await record(term.sessionId);
+  // 3. The terminal, in the same tab: pushed.
   await caption(term.sessionId, "7 · pushed: the remote's branch is exactly that commit (desolate events says so too)");
   await until(term.sessionId, /\[new branch\]/, 90_000);
   await sleep(4000);

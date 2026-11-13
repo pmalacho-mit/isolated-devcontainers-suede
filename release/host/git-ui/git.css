@@ -1,6 +1,13 @@
 :root { --bg: #111110; --fg: #e8e8e4; --muted: #9a9a94; color-scheme: dark; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
 body { display: flex; flex-direction: column; }
-header { padding: 6px 12px; border-bottom: 1px solid #2a2a28; }
+header { padding: 6px 12px; border-bottom: 1px solid #2a2a28; display: flex; align-items: center; gap: 8px; }
+.grow { flex: 1; }
+header button { font: inherit; font-size: 13px; padding: 2px 10px; border-radius: 6px; border: 1px solid #3a3a36; background: #20201e; color: var(--fg); cursor: pointer; }
+header button.waiting { border-color: #6fc196; color: #6fc196; font-weight: 600; }
+.row { flex: 1; min-height: 0; display: flex; }
+#approvals { width: min(460px, 45vw); border-left: 1px solid #2a2a28; display: flex; }
+#approvals[hidden] { display: none; }
+#approvals iframe { flex: 1; border: 0; background: #161615; }
 .status { color: var(--muted); margin-left: 12px; }
-#terminal { flex: 1; min-height: 0; padding: 4px 8px; }
+#terminal { flex: 1; min-width: 0; min-height: 0; padding: 4px 8px; }

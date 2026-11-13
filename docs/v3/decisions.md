@@ -739,6 +739,38 @@ itself fell to a domain's content, the git VM could plant a branch (never checke
 `root/<branch>`) in another domain. It could already read every domain's work. Deliveries are
 events (`git-delivery-handed`). Recorded in mac-audit-notes as accepted, with the reason.
 
+## Push and approve in one tab: the approval page, framed by the git terminal alone (decided on the Mac; tested on T1, in Chrome)
+
+The approval page cannot be framed, so a push from the git terminal meant a second tab. Now
+the git terminal's page frames the approval page's `/embed` beside the shell, shown when a
+push waits. Merging the two into one page would have put the approval on the origin whose
+page draws what agents wrote (the terminal): a bug there would be script that can approve.
+They stay two origins, and:
+
+- `/embed` names exactly one frame ancestor, the git terminal's origin; `/` stays
+  `frame-ancestors 'none'` and `X-Frame-Options: DENY`.
+- A SameSite=Strict cookie does not reach a frame under another site (the two `*.localhost`
+  names are two sites), so the frame's credential is a key derived from the page's token,
+  handed to it in the address's fragment (never sent to a server) by the git terminal's
+  page, which only the person's browser can load (`/approvals-frame`, behind the terminal's
+  own cookie). The frame sends it as a header. The git terminal's page knows the key and
+  cannot use it: from its origin, a request with that header needs a preflight this server
+  never grants, and is not same-origin (both checked; T1).
+- Attention: focus stays in the terminal until a click, so in the frame the pointer over it
+  counts. Arming is otherwise unchanged (card unchanged for a second, the pointer moves onto
+  Approve, a third of a second).
+- Clickjacking: the parent is desolate's own page, so the threat is script on the git
+  terminal's origin (an xterm.js bug fed by what an agent wrote). Where the browser can say
+  (IntersectionObserver v2: Chrome), Approve arms only while the button is reported visible
+  and unobscured, so a frame made transparent or laid under something arms nothing. (Chrome
+  works this out for a cross-origin frame as a whole: anything drawn over any part of the
+  frame, even far from the button, keeps it from arming. Found when the demo's caption bar
+  crossed the bottom of the frame.) Firefox
+  and Safari cannot say; there that residual risk stands (it needs a script bug in the
+  terminal page first).
+- The frame tells the parent one number (how many pushes wait), to that origin only; the
+  parent believes only that origin, and only a number.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the

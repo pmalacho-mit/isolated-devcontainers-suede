@@ -78,6 +78,12 @@ describe("T1 the git terminal", () => {
     const html = await call("GET", "/", { cookie });
     assert.match(String(html.headers["content-security-policy"]), /script-src 'self'/);
     assert.match(String(html.headers["content-security-policy"]), /frame-ancestors 'none'/);
+    assert.match(String(html.headers["content-security-policy"]), /; frame-src http:\/\/desolate-approve\.localhost:31598$/, "it frames the approval page and nothing else");
+    // The approval page's address for its frame: to this page's own script only.
+    assert.equal((await call("GET", "/approvals-frame", { "sec-fetch-site": "same-origin" })).status, 401, "no cookie");
+    assert.equal((await call("GET", "/approvals-frame", { cookie, "sec-fetch-site": "same-site" })).status, 403, "another page's request");
+    const frame = await call("GET", "/approvals-frame", { cookie, "sec-fetch-site": "same-origin" });
+    assert.match(JSON.parse(frame.body).url, /^http:\/\/desolate-approve\.localhost:31598\/embed#k=[0-9a-f]{64}$/);
     assert.equal((await post("/session", {}, { cookie: "" })).status, 401, "no cookie");
     assert.equal((await post("/session", {}, { origin: "http://dev-w1-abc123.localhost:31598" })).status, 403, "another origin");
     assert.equal((await post("/session", {}, { "sec-fetch-site": "same-site" })).status, 403, "a request a workspace's page started");

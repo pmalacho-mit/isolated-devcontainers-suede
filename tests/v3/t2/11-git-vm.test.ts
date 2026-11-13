@@ -112,7 +112,7 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
     await screen(/\/git\/acme\/widgets[\s\S]*## main\.\.\.origin\/main/);
     // A commit, and a push of it, typed as anyone would.
     await type("echo from-the-git-vm > note.txt && git add note.txt && git -c user.name=person -c user.email=p@example.invalid commit -qm 'from the git VM' && git push origin HEAD:refs/heads/from-git\n");
-    await screen(/handed to the root\. Approve it on the approval page/);
+    await screen(/handed to the root\. Approve it beside this terminal/);
     const commit = stack.inVm(gitVm(), ["git", "-C", "/git/acme/widgets", "rev-parse", "HEAD"]).stdout.trim();
     assert.equal(forgeRefs("acme/widgets")["from-git"], undefined, "nothing reached the remote before the approval");
 
