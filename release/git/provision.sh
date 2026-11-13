@@ -32,6 +32,10 @@ cat >/etc/gitconfig <<'G'
 [safe]
 	directory = *
 	bareRepository = explicit
+# A branch made from another remote's (git switch -c x acme/feature): no upstream set. Its
+# remote's refs live under refs/remotes/, and git named the upstream acme/refs/remotes/acme/...
+[branch]
+	autoSetupMerge = false
 [advice]
 	detachedHead = false
 [init]

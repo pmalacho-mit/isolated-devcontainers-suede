@@ -11,6 +11,7 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
   + root services: keyring
   + root: the approver's public key and the host daemon's token
   dashboard    http://desolate.localhost:31591/?tkn=<token>   (and: desolate ui)
+  workspaces   <size> each by default (this Mac: <cores> cores, <memory> GB); per domain: desolate domain <d> size, per workspace: desolate up --cpus --memory --disk
 bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
@@ -37,7 +38,7 @@ doctor: all checks passed.
 ## an honest offer
 
 $ desolate review dev acme/widgets honest --diff
-acme/widgets  honest  at <commit>
+acme/widgets  honest  at <commit>, against origin/main
 a push would send 1 commit(s): 1 file changed, 1 insertion(+)
   <id>  an honest change
   README.md
@@ -56,7 +57,7 @@ to push exactly this: desolate push dev acme/widgets honest --expect <commit>
 ## content that hopes to be run
 
 $ desolate review dev acme/widgets planted --diff
-acme/widgets  planted  at <commit>
+acme/widgets  planted  at <commit>, against origin/main
 a push would send 1 commit(s): 9 files changed, 21 insertions(+)
   <id>  planted
   .gitattributes
@@ -147,7 +148,7 @@ to push exactly this: desolate push dev acme/widgets planted --expect <commit>
 ## hostile names and messages
 
 $ desolate review dev acme/widgets escapes
-acme/widgets  escapes  at <commit>
+acme/widgets  escapes  at <commit>, against origin/main
 a push would send 1 commit(s): 1 file changed, 1 insertion(+)
   <id>  title?[2J?]0;owned? <script>alert(1)</script>
   README.md

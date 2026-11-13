@@ -11,6 +11,7 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
   + root services: keyring
   + root: the approver's public key and the host daemon's token
   dashboard    http://desolate.localhost:31591/?tkn=<token>   (and: desolate ui)
+  workspaces   <size> each by default (this Mac: <cores> cores, <memory> GB); per domain: desolate domain <d> size, per workspace: desolate up --cpus --memory --disk
 bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)

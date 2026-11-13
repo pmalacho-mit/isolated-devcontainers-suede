@@ -47,15 +47,18 @@ const button = (label, key, kind, args, quiet = false) =>
 
 // The diff, as text. Each line is a text node in a span whose class comes from the line's
 // first character: nothing in the diff is ever parsed as markup.
+// Characters that reorder or hide what is shown (bidi controls, zero-width ones): in a diff a
+// person reviews, each is shown as itself, named, so the line reads as git stores it.
+const unhidden = (line) => line.replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}⟩`);
 const diffView = (text) => el("pre", { class: "mono diff", "data-diff": "" }, text.split("\n").map((line) =>
-  el("span", { class: line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" }, line || " ")));
+  el("span", { class: line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "" }, unhidden(line) || " ")));
 const query = (target, against) => `domain=${encodeURIComponent(target.domain)}&repo=${encodeURIComponent(target.repo)}&branch=${encodeURIComponent(target.branch)}&against=${encodeURIComponent(against)}`;
 const loadDiff = async () => {
   const { offer, against } = reviewing;
   reviewing.diff = { loading: true };
   render();
   try {
-    const response = await fetch(`/diff?${query(offer, against)}`);
+    const response = await fetch(`/diff?${query(offer, against)}${reviewing.whitespace === "ignore" ? "&whitespace=ignore" : ""}`);
     reviewing.diff = await response.json();
   } catch (error) {
     reviewing.diff = { error: String(error) };
@@ -128,7 +131,9 @@ const reviewPanel = () => {
     reviewing.diff && reviewing.diff.loading ? el("div", { class: "sub" }, "reading the diff...") : null,
     reviewing.diff && reviewing.diff.error ? el("div", { class: "warn" }, reviewing.diff.error) : null,
     // The diff is shown only if it is of the commit the Push button names.
-    reviewing.diff && reviewing.diff.text !== undefined && reviewing.diff.commit === review.commit ? [diffView(reviewing.diff.text),
+    reviewing.diff && reviewing.diff.text !== undefined && reviewing.diff.commit === review.commit ? [
+      el("div", { class: "sub" }, el("button", { class: "quiet small", "data-whitespace": "", onclick: () => { reviewing.whitespace = reviewing.whitespace === "ignore" ? "show" : "ignore"; loadDiff(); } }, reviewing.whitespace === "ignore" ? "Show whitespace changes" : "Ignore whitespace changes")),
+      diffView(reviewing.diff.text),
       reviewing.diff.truncated ? el("div", { class: "warn" }, "The diff is longer than is shown here. Read the rest with git, in `desolate root shell`, before you push.") : null] : null,
     reviewing.diff && reviewing.diff.commit && reviewing.diff.commit !== review.commit ? el("div", { class: "warn" }, "The branch moved while you were reading. Close this and review it again.") : null,
     el("div", { class: "sub" }, "For a richer view (syntax colouring, the whole file), open the branch in a workspace's editor. The diff here is the one to trust: it is made in the root, by git alone."),
