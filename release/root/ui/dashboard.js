@@ -163,7 +163,7 @@ const marked = (mine, theirs) => {
 const sideBySide = (text) => el("div", { class: "sbs", "data-diff": "" }, sides(text).map((row) => {
   if (row.kind !== "change" && row.kind !== "same") return el("div", { class: `sbs-${row.kind}` }, row.text);
   const cell = (side, other, cls) => side
-    ? [el("span", { class: `no ${cls}` }, String(side.no)), el("span", { class: `code ${cls}` }, row.kind === "change" && row.like ? marked(side.text, other?.text) : side.text || " ")]
+    ? [el("span", { class: `no ${cls}` }, String(side.no)), el("span", { class: `code ${cls}` }, row.kind === "change" && row.like ? marked(unhidden(side.text), other && unhidden(other.text)) : unhidden(side.text) || " ")]
     : [el("span", { class: "no empty" }, ""), el("span", { class: "code empty" }, "")];
   return el("div", { class: "sbs-row" }, cell(row.left, row.right, row.kind === "change" ? "del" : ""), cell(row.right, row.left, row.kind === "change" ? "add" : ""));
 }));
