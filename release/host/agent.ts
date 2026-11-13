@@ -126,7 +126,12 @@ export const attach = async (where: string | undefined, options: { name?: string
       process.stdin.setRawMode(false);
       process.stdin.pause();
       process.stdout.off("resize", size);
+      // Let go of the holder's client at once: its pipes, and the process (the backend's
+      // shell may take its time to end, and must not keep this one, and your prompt, waiting).
+      for (const stream of [child.stdin, child.stdout, child.stderr]) stream?.destroy();
+      child.unref();
       child.kill();
+      process.stdin.unref?.();
       // Whatever modes it left on (mouse reporting, the alternate screen, ...), off: the
       // terminal is your shell's again.
       process.stdout.write(filter.reset());
