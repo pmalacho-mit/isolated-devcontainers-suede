@@ -21,11 +21,17 @@ const fail = (message: string, fix: string): never => {
 const dash = process.argv.indexOf("--", 2);
 const own = dash >= 0 ? process.argv.slice(2, dash) : process.argv.slice(2);
 const custom = dash >= 0 ? process.argv.slice(dash + 1) : [];
-const { values, positionals } = parseArgs({
-  args: own,
-  options: { name: { type: "string" }, branch: { type: "string" }, checkout: { type: "string" }, secret: { type: "string", default: "CLAUDE-OAUTH" }, attach: { type: "boolean" } },
-  allowPositionals: true,
-});
+const { values, positionals } = (() => {
+  try {
+    return parseArgs({
+      args: own,
+      options: { name: { type: "string" }, branch: { type: "string" }, checkout: { type: "string" }, secret: { type: "string", default: "CLAUDE-OAUTH" }, attach: { type: "boolean" } },
+      allowPositionals: true,
+    });
+  } catch (error) {
+    return fail((error as Error).message, 'desolate task <domain> "<what to do>" [--name <w>] [--branch <b>] [--attach] [-- <agent...>]');
+  }
+})();
 const [domain, ...words] = positionals;
 const sentence = words.join(" ").trim();
 if (!domain || !sentence) fail("a task is a domain and what to do", 'desolate task acme "Add a shout() greeting"');
