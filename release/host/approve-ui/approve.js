@@ -82,9 +82,18 @@ const post = async (what, card) => {
 // Characters that reorder or hide what is shown (bidi controls, zero-width ones): in a diff a
 // person approves from, each is shown as itself, named, so the line reads as git stores it.
 const unhidden = (line) => line.replace(/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, (c) => `⟨U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}⟩`);
-const diffView = (text) => {
+const kindOf = (line) => line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "";
+/** git's text, a line a span; given `tokens` (shared/ui/highlight.js), each line of code in
+ *  its syntax's colours, its text unchanged. */
+const diffView = (text, tokens) => {
   const pre = el("pre", undefined, "diff");
-  for (const line of text.split("\n")) pre.append(el("span", unhidden(line) || " ", line.startsWith("diff --git") ? "file" : line.startsWith("@@") ? "hunk" : line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : ""));
+  text.split("\n").forEach((line, i) => {
+    const span = el("span", undefined, kindOf(line));
+    const code = tokens && tokens[i];
+    if (code && typeof DesolateHighlight !== "undefined") span.append(document.createTextNode(line[0]), ...DesolateHighlight.paint(code, unhidden));
+    else span.textContent = unhidden(line) || " ";
+    pre.append(span);
+  });
   return pre;
 };
 /** "Show the diff": asked of the host once, for the very text the card shows (its token).
@@ -106,6 +115,20 @@ const diffToggle = (card) => {
         const body = await answer.json();
         if (!answer.ok) throw new Error(body.error || `HTTP ${answer.status}`);
         box.replaceChildren(...(body.diff === null ? [el("p", "Too large to show here (over 20 000 lines): read it with git in the git terminal.", "error")] : [diffView(body.diff), ...(body.cut ? [el("p", "Cut at 256 KiB: read the rest with git in the git terminal.", "error")] : [])]));
+        // Then its colours, when the worker has them (or never: the diff stays plain). The
+        // text is the same; the card is redrawn all the same, so Approve disarms again.
+        if (body.diff !== null && typeof DesolateHighlight !== "undefined") {
+          const shown = box.querySelector("pre.diff");
+          DesolateHighlight.tokensFor(body.diff).then((tokens) => {
+            if (!open || !shown.isConnected || !tokens.some(Boolean)) return;
+            const coloured = diffView(body.diff, tokens);
+            coloured.scrollTop = shown.scrollTop;
+            shown.replaceWith(coloured);
+            coloured.scrollTop = shown.scrollTop;
+            card.changedAt = performance.now();
+            disarm(card);
+          });
+        }
       } catch (error) {
         box.replaceChildren(el("p", `the diff could not be had: ${error.message}`, "error"));
       }

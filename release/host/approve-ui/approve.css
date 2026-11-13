@@ -42,3 +42,6 @@ pre.diff .del { background: color-mix(in srgb, var(--danger) 18%, transparent); 
 pre.diff .hunk { color: var(--accent); }
 pre.diff .file { font-weight: 700; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
 button.quiet { padding: 4px 10px; font-size: 13px; }
+/* Syntax colour (shared/ui/highlight.js): each token's colours, for light and dark. */
+pre.diff .hl { display: inline; min-width: 0; color: var(--hl-light, inherit); }
+@media (prefers-color-scheme: dark) { pre.diff .hl { color: var(--hl-dark, inherit); } }

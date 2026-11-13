@@ -93,6 +93,9 @@ const STATIC: Record<string, [string, string]> = {
   "/": ["approve.html", "text/html; charset=utf-8"],
   "/approve.js": ["approve.js", "text/javascript; charset=utf-8"],
   "/approve.css": ["approve.css", "text/css; charset=utf-8"],
+  // Syntax colour for the diff (shared/ui/highlight.js says how it is kept to colour).
+  "/highlight.js": ["../../shared/ui/highlight.js", "text/javascript; charset=utf-8"],
+  "/highlight-worker.js": ["../../shared/ui/highlight-worker.js", "text/javascript; charset=utf-8"],
 };
 
 /** What a push would send, as the reviewer in the root computed it: shown as data. */
