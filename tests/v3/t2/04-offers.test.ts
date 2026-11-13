@@ -257,7 +257,7 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     assert.equal(forgeRefs("acme/widgets")["raw-push"], undefined);
     const approved = stack.person("Type the branch name", "raw-push", "approve");
     assert.equal(approved.code, 0, approved.stdout);
-    assert.match(approved.stdout, /repository {2}acme\/widgets\s+branch {6}raw-push\s+commit {6}[0-9a-f]{40}\s+onto {8}none: the remote has no raw-push yet\s+sends {7}\d+ commit\(s\) the remote does not have, \d+ file\(s\)\s+\(desolate's reviewer, in the root\)/, "the reviewer's account, not the root's ordinary user's");
+    assert.match(approved.stdout, /repository {2}acme\/widgets\s+branch {6}raw-push\s+commit {6}[0-9a-f]{40}\s+onto {8}none: the remote has no raw-push yet\s+sends {7}\d+ commit\(s\) the remote does not have, \d+ file\(s\)(, \d+ of them LFS)?\s+\(desolate's reviewer, in the root\)/, "the reviewer's account, not the root's ordinary user's");
     let landed = false;
     for (let i = 0; i < 80 && !landed; i++) {
       landed = forgeRefs("acme/widgets")["raw-push"] === commit;
