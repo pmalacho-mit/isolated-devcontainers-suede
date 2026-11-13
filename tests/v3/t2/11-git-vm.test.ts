@@ -61,6 +61,10 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
     const made = stack.desolate("git", "acme/widgets");
     assert.equal(made.code, 0, made.stderr);
     assert.match(made.stdout, /^git {10}http:\/\/desolate-git\.localhost:\d+\/\?tkn=[0-9a-f]{48}&repo=acme%2Fwidgets\n$/);
+    // Fetching works, from the mirror and from the root's clone (it did not, once: an empty
+    // setting made upload-pack try to run nothing).
+    const fetched = stack.inVm(gitVm(), ["bash", "-lc", "cd /git/acme/widgets && git fetch origin 2>&1 && git fetch root 2>&1 && echo FETCHED"]);
+    assert.match(fetched.stdout, /FETCHED/, fetched.stdout + fetched.stderr);
     const inside = stack.inVm(gitVm(), ["bash", "-lc", "cd /git/acme/widgets && git log --oneline -1 && git config remote.origin.pushurl && git config --get-all remote.root.fetch"]);
     assert.equal(inside.code, 0, inside.stderr);
     assert.match(inside.stdout, /seed\ndesolate-out::acme\/widgets\n\+refs\/remotes\/\*:refs\/remotes\/root\/\*\n/);

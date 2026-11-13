@@ -1,0 +1,52 @@
+<!doctype html>
+<!-- The promo's own stage: title cards and a terminal that replays real command output.
+     Driven by promo.ts over the DevTools protocol; never served by desolate. -->
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../../../release/host/git-ui/vendor/xterm.css">
+<script src="../../../../release/host/git-ui/vendor/xterm.js"></script>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1115; color: #e8e8e4; font-family: -apple-system, system-ui, sans-serif; }
+  #card { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 0 80px; background: radial-gradient(ellipse at top, #1b2a44, #0f1115 70%); }
+  #card h1 { font-size: 58px; margin: 0 0 18px; letter-spacing: -0.5px; }
+  #card p { font-size: 25px; margin: 6px 0; color: #b9c2d0; max-width: 1000px; line-height: 1.4; }
+  #card .small { font-size: 18px; color: #8792a2; margin-top: 28px; }
+  #term-wrap { position: fixed; inset: 0; display: none; flex-direction: column; }
+  #term-head { padding: 10px 16px; background: #1a1d23; border-bottom: 1px solid #2a2e36; font-size: 15px; color: #aeb4bf; }
+  #term-head b { color: #e8e8e4; }
+  #term { flex: 1; padding: 10px 14px; }
+</style></head>
+<body>
+<div id="card"><h1 id="card-title"></h1><div id="card-lines"></div></div>
+<div id="term-wrap"><div id="term-head"></div><div id="term"></div></div>
+<script>
+  const term = new Terminal({ fontFamily: "Menlo, monospace", fontSize: 15, cursorBlink: true, convertEol: true, scrollback: 2000, theme: { background: "#0f1115" } });
+  term.open(document.getElementById("term"));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  window.card = (title, lines, small) => {
+    document.getElementById("term-wrap").style.display = "none";
+    const card = document.getElementById("card");
+    card.style.display = "flex";
+    document.getElementById("card-title").textContent = title;
+    const box = document.getElementById("card-lines");
+    box.replaceChildren(...lines.map((l) => Object.assign(document.createElement("p"), { textContent: l })), ...(small ? [Object.assign(document.createElement("p"), { className: "small", textContent: small })] : []));
+  };
+  window.terminal = (head) => {
+    document.getElementById("card").style.display = "none";
+    document.getElementById("term-wrap").style.display = "flex";
+    document.getElementById("term-head").innerHTML = "";
+    const b = document.createElement("b"); b.textContent = head.title; document.getElementById("term-head").append(b, document.createTextNode("  " + (head.sub || "")));
+    term.reset();
+    setTimeout(() => { term.resize(Math.floor((innerWidth - 30) / 9.03), Math.floor((innerHeight - 70) / 18)); }, 0);
+  };
+  // One command: typed, then its real output, as it was captured.
+  window.run = async (prompt, command, output, typeMs = 28) => {
+    term.write(`\x1b[1;32m${prompt}\x1b[0m `);
+    for (const ch of command) { term.write(ch); await sleep(typeMs); }
+    term.write("\r\n");
+    await sleep(350);
+    for (const line of output.replace(/\n$/, "").split("\n")) { term.write(line + "\r\n"); await sleep(18); }
+    return true;
+  };
+  window.note = (text) => term.write(`\x1b[2m${text}\x1b[0m\r\n`);
+</script>
+</body></html>
