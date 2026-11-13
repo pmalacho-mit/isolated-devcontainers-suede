@@ -84,8 +84,11 @@ desolate domain dev secret set MYAPP-OPENAI-KEY --hosts api.openai.com --headers
                                                      # the value on stdin; workspaces send the name
 desolate ports                                       # each dev server's URL, at the port it has inside
 desolate status dev/issue-12 --json                  # what the agent says of its work
+desolate list                                        # each workspace, and the branch each checkout is on now
 desolate offers                                      # what workspaces have offered: needs you
+desolate branches dev                                # every branch the domain has, offered or not
 desolate review dev acme/widgets issue/12 --diff     # what a push would send, and its diff as text
+desolate review dev acme/widgets issue/12 --against domain   # ... or beside the domain's own main
 desolate push dev acme/widgets issue/12 --expect <commit>   # asks you, on your terminal
 desolate git acme/widgets                            # git in your browser: a shell in the git VM (below)
 desolate events                                      # what happens, as JSON lines, for your own scripts
@@ -95,8 +98,12 @@ desolate approve --web                               # or: the approval page's a
 ```
 
 Inside a workspace: `git fetch` (from the mirror: no key, no network), `desolate fetch`
-(ask the root to refresh the mirror first), `desolate offer` (mark a branch ready for you),
-`/desolate/status set green "ready: ..."`. See [`AGENTS.md`](AGENTS.md), which is what an
+(ask the root to refresh the mirror first), `desolate offer` (mark a branch ready for you).
+Offering is not how work reaches the root: every commit on every branch is written out as
+the agent makes it, and the root imports it within seconds (`desolate branches`, the
+dashboard's Branches, `git fetch <domain>` in the git VM). An offer says "this is ready", and
+brings the branch's new LFS objects with it. And `desolate status set green "ready: ..."`
+says how the work is going. See [`AGENTS.md`](AGENTS.md), which is what an
 agent in a workspace should read.
 
 Everything up to a push can be scripted (`--json` on what a harness reads; exit codes 75 busy,
@@ -133,9 +140,13 @@ on your Mac, can approve.
 
 **Git in your browser.** `desolate git <owner/repo>` prints the address of a terminal the host
 serves in a browser tab: bash, in the git VM, in a clone of your own at `/git/<owner>/<repo>`.
-It is git as you use it anywhere: `git fetch` (from the mirror), `git fetch root` (what the
-domains offered, as `root/<domain>/<branch>`), diff, log, rebase, commit, and `git push origin
-<branch>`, which waits for you on the approval page and then goes out through the root. The
+It is git as you use it anywhere: `git fetch` (from the mirror), `git fetch <domain>` (every
+branch that domain's workspaces made, as `<domain>/<branch>`; `git fetch root` has all
+domains', as `root/<domain>/<branch>`), diff, log, rebase, commit, and `git push origin
+<branch>`, which waits for you on the approval page and then goes out through the root.
+`git push <domain> <branch>` delivers a branch to a domain instead (its workspaces see
+`root/<branch>`; nothing leaves the machine, so nothing is asked), and `desolate fetch` has
+the root refresh the mirror from the remote first, then fetches every remote. The
 git VM has no network, no key, and nothing of a project's that runs: no devcontainer, no
 direnv, no clone's hooks; `less` shows colour and nothing else raw, and vim reads no
 modelines. The root's clones and the mirrors are read-only to it. What it pushes, the root
@@ -153,7 +164,7 @@ from, which is how far to believe it:
 |---|---|---|
 | `pusher` | `pushed`, `push-failed`, `push-uncertain` | the remote's own answer: `pushed` means the branch is at that commit |
 | `host` | `approved`, `refused`, `workspace-up`, `workspace-down`, `git-push-handed` | the host's own doing |
-| `root` | `offered`, `offer-gone`, `bundle-refused`, `status`, `approval-waiting` | an agent's word, relayed: safe to print, not to trust |
+| `root` | `offered`, `offer-gone`, `bundle-refused`, `status`, `head` (a checkout switched branch or its branch moved), `approval-waiting` | an agent's word, relayed: safe to print, not to trust |
 
 For example, a pull request for every branch pushed (the `gh` here is yours, on the Mac; no
 VM has it):

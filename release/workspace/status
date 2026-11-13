@@ -1,12 +1,12 @@
 #!/bin/sh
 # desolate-status -- say how this target's work is going: a colour and a line.
 #
-#   /desolate/status set <color> <message...>
-#   /desolate/status clear
-#   /desolate/status show
-#   /desolate/status path
-#   /desolate/status note [text...]    (no text: read it from stdin; --clear removes it)
-#   /desolate/status board
+#   desolate status set <color> <message...>
+#   desolate status clear
+#   desolate status show
+#   desolate status path
+#   desolate status note [text...]    (no text: read it from stdin; --clear removes it)
+#   desolate status board
 #
 # Colours: gray, blue, green, yellow, orange, red. What they mean is up to
 # whoever reads them; a useful convention is blue working, orange needs a

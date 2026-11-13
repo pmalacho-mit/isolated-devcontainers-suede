@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isBranch, isCommit, isLfsOid, parseRepo } from "../shared/names.ts";
 import { readJson, writeJson } from "../shared/json.ts";
+import { readPlain } from "../shared/status.ts";
 import { domainPath, ROOT } from "./layout.ts";
 
 export const outbox = (domain: string) => path.join(domainPath(domain), "outbox");
@@ -286,4 +287,27 @@ export const dropLfs = (domain: string, repo: string, oid: string) => {
   } finally {
     dir.close();
   }
+};
+
+/** Every branch a domain has, by its own list (the workspace writes it beside each bundle:
+ *  workspace/sync.ts): the domain's word, read as data, each name one desolate would carry.
+ *  What it holds is not believed from this: a review brings the branch into the root clone
+ *  and reads it there. */
+const BRANCHES_PER_REPO = 200;
+export const branchesOf = (slug: string, repoList: string[]) => {
+  const out: { repo: string; branch: string; commit: string }[] = [];
+  const base = outbox(slug);
+  for (const repo of repoList) {
+    const text = readPlain(base, path.join(base, "sync", repo, "refs.json"), 256 * 1024, true);
+    if (text === null) continue;
+    let refs: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(text) as { refs?: unknown };
+      if (parsed.refs && typeof parsed.refs === "object" && !Array.isArray(parsed.refs)) refs = parsed.refs as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    for (const [branch, commit] of Object.entries(refs).slice(0, BRANCHES_PER_REPO)) if (isBranch(branch) && isCommit(commit)) out.push({ repo, branch, commit });
+  }
+  return out;
 };

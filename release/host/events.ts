@@ -53,7 +53,7 @@ type State = {
   offers?: { domain?: unknown; workspace?: unknown; repo?: unknown; branch?: unknown; commit?: unknown }[];
   refused?: { domain?: unknown; repo?: unknown; why?: unknown }[];
   approvals?: { repo?: unknown; branch?: unknown; commit?: unknown }[];
-  domains?: { slug?: unknown; workspaces?: { workspace?: unknown; says?: { status?: { color?: unknown; message?: unknown; updated?: unknown } | null } }[] }[];
+  domains?: { slug?: unknown; workspaces?: { workspace?: unknown; checkouts?: { repo?: unknown; head?: { branch?: unknown; commit?: unknown } | null }[]; says?: { status?: { color?: unknown; message?: unknown; updated?: unknown } | null } }[] }[];
 };
 
 /** What changed between two of the root's states, as events (source "root"). */
@@ -81,6 +81,18 @@ export const stateEvents = (before: State | null, after: State): Event[] => {
     const old = saidBefore.get(k);
     if (!old || old.updated !== s.updated || old.color !== s.color || old.message !== s.message)
       out.push(event("status", "root", { domain: slugOrNull(s.domain), workspace: slugOrNull(s.workspace), color: /^(gray|blue|green|yellow|orange|red)$/.test(String(s.color)) ? s.color : null, message: printable(s.message, 200) }));
+  }
+  // What each checkout has checked out: a `git switch`, or a commit moving its branch.
+  const heads = (state: State | null) => {
+    const map = new Map<string, { domain: unknown; workspace: unknown; repo: unknown; branch: unknown; commit: unknown }>();
+    for (const d of state?.domains ?? []) for (const w of d.workspaces ?? []) for (const c of w.checkouts ?? []) if (c.head) map.set(key(d.slug, w.workspace, c.repo), { domain: d.slug, workspace: w.workspace, repo: c.repo, branch: c.head.branch, commit: c.head.commit });
+    return map;
+  };
+  const headsBefore = heads(before);
+  for (const [k, h] of heads(after)) {
+    const old = headsBefore.get(k);
+    if (!old || old.branch !== h.branch || old.commit !== h.commit)
+      out.push(event("head", "root", { domain: slugOrNull(h.domain), workspace: slugOrNull(h.workspace), repo: repoOrNull(h.repo), branch: branchOrNull(h.branch), commit: commitOrNull(h.commit), was: old ? { branch: branchOrNull(old.branch), commit: commitOrNull(old.commit) } : null }));
   }
   return out.slice(0, PER_CHANGE);
 };

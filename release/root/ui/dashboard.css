@@ -50,3 +50,6 @@ pre.diff .add { background: color-mix(in srgb, var(--green) 16%, transparent); }
 pre.diff .del { background: color-mix(in srgb, var(--red) 16%, transparent); }
 pre.diff .hunk { color: var(--accent); }
 pre.diff .file { font-weight: 700; border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; }
+button.small { font-size: 12px; padding: 1px 8px; }
+details.branches { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+details.branches > summary { cursor: pointer; color: var(--soft); font-size: 13px; padding: 4px 0; }

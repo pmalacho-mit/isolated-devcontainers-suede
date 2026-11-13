@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { refuse } from "../shared/exit.ts";
-import { gitVmName, isBranch, isCommit, isLfsOid, parseRepo, repoId } from "../shared/names.ts";
+import { gitVmName, isBranch, isCommit, isLfsOid, isSlug, parseRepo, repoId } from "../shared/names.ts";
 import type { Repo } from "../shared/names.ts";
 import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
 import { backend, rootctl } from "./stack.ts";
@@ -67,6 +67,19 @@ export const ensureGitClone = async (repo: Repo) => {
   const id = repoId(repo);
   const mirror = guest.mirror(repo);
   const dir = `${guest.git}/${repo.owner}/${repo.name}`;
+  // A remote for each domain that has this repository: `git fetch <domain>` brings what its
+  // workspaces wrote (<domain>/<branch>), and `git push <domain> <branch>` delivers a branch
+  // to it (its workspaces see root/<branch>). (A domain named like a remote already here is
+  // reached through `root` alone.)
+  const domainList = (await rootctl<{ slug: string; repos: string[] }[]>("domain.list", {}, { quiet: true }).catch(() => []))
+    .filter((d) => d.repos.includes(id) && isSlug(d.slug) && d.slug !== "origin" && d.slug !== "root").map((d) => d.slug);
+  const perDomain = domainList.flatMap((d) => [
+    `git remote get-url ${d} >/dev/null 2>&1 || git remote add ${d} "$4"`,
+    `git config remote.${d}.url "$4"`,
+    `git config --replace-all remote.${d}.fetch '+refs/remotes/${d}/*:refs/remotes/${d}/*'`,
+    `git config remote.${d}.pushurl "desolate-out::$3@${d}"`,
+    `git config remote.${d}.uploadpack "git -c core.alternateRefsCommand=true upload-pack"`,
+  ]);
   const script = [
     "set -euo pipefail",
     `if [ ! -d "$2/.git" ]; then mkdir -p "$(dirname "$2")"; GIT_LFS_SKIP_SMUDGE=1 git clone --no-local --quiet "$1" "$2"; fi`,
@@ -88,6 +101,7 @@ export const ensureGitClone = async (repo: Repo) => {
     // every fetch failed: "unable to fork git-pack-objects".)
     `git config remote.origin.uploadpack "git -c core.alternateRefsCommand=true upload-pack"`,
     `git config remote.root.uploadpack "git -c core.alternateRefsCommand=true upload-pack"`,
+    ...perDomain,
     "git lfs pull >/dev/null 2>&1 || true",
   ].join("\n");
   const made = await backend().exec(GIT_VM, ["bash", "-c", script, "_", mirror, dir, id, `${guest.rootClones}/${repo.owner}/${repo.name}`], { timeoutMs: 1_800_000 });
@@ -159,12 +173,14 @@ const answer = (id: string, value: Record<string, unknown>) => {
 
 /** One request the git VM left: read safely, its files copied where the root reads them,
  *  handed to the root, and the answer left where the git VM reads it. */
+const FETCH_GAP_MS = 5000;
+const fetchedAt = new Map<string, number>();
 const take = async (id: string, log: (line: string) => void, announce: (fields: Record<string, unknown>) => void = () => {}) => {
   const out = paths.gitOut;
   const opened = openPlain(path.join(out, `${id}.json`), LIMIT.request);
   fs.rmSync(path.join(out, `${id}.json`), { force: true });
   if (!opened) return;
-  let asked: { repo?: unknown; branch?: unknown; commit?: unknown; forced?: unknown; lfs?: unknown };
+  let asked: { op?: unknown; repo?: unknown; branch?: unknown; commit?: unknown; forced?: unknown; lfs?: unknown; domain?: unknown };
   try {
     const text = Buffer.alloc(opened.size);
     fs.readSync(opened.fd, text, 0, opened.size, 0);
@@ -175,6 +191,22 @@ const take = async (id: string, log: (line: string) => void, announce: (fields: 
     fs.closeSync(opened.fd);
   }
   const repo = parseRepo(asked.repo);
+  // `desolate fetch` in the git VM: the root refreshes the mirror (with its read key), and
+  // the git VM then fetches from it. At most once every few seconds a repository.
+  if (asked.op === "fetch") {
+    if (!repo) return answer(id, { fetched: false, error: "the git VM's request is not one desolate makes" });
+    const last = fetchedAt.get(repoId(repo)) ?? 0;
+    if (Date.now() - last < FETCH_GAP_MS) return answer(id, { fetched: true, said: [`${repoId(repo)}: refreshed a moment ago`] });
+    fetchedAt.set(repoId(repo), Date.now());
+    try {
+      await rootctl("repo.fetch", { repo: repoId(repo) }, { quiet: true, timeoutMs: 10 * 60_000 });
+      return answer(id, { fetched: true });
+    } catch (error) {
+      return answer(id, { fetched: false, error: (error as Error).message });
+    }
+  }
+  const domain = asked.domain === undefined ? null : isSlug(asked.domain) ? String(asked.domain) : false;
+  if (domain === false) return answer(id, { pushed: false, error: "the git VM's request names no domain desolate would make" });
   const lfs = Array.isArray(asked.lfs) ? asked.lfs : [];
   if (!repo || !isBranch(asked.branch) || !isCommit(asked.commit) || lfs.length > LIMIT.objects || !lfs.every(isLfsOid) || new Set(lfs).size !== lfs.length)
     return answer(id, { pushed: false, error: "the git VM's request is not one desolate makes" });
@@ -204,9 +236,9 @@ const take = async (id: string, log: (line: string) => void, announce: (fields: 
         }
       }
     }
-    log(`git VM: a push of ${repoId(repo)} ${String(asked.branch)} at ${String(asked.commit)}, handed to the root`);
-    announce({ repo: repoId(repo), branch: asked.branch, commit: asked.commit });
-    const reply = await rootctl<{ pushed: boolean; error?: string; said?: string[] }>("git.push", { repo: repoId(repo), branch: asked.branch, commit: asked.commit, forced: asked.forced === true, bundle: `${name}.bundle`, lfs }, { quiet: true, timeoutMs: 20 * 60_000 });
+    log(`git VM: ${domain ? `a delivery to ${domain}` : "a push"} of ${repoId(repo)} ${String(asked.branch)} at ${String(asked.commit)}, handed to the root`);
+    announce({ repo: repoId(repo), branch: asked.branch, commit: asked.commit, ...(domain ? { domain } : {}) });
+    const reply = await rootctl<{ pushed: boolean; error?: string; said?: string[] }>("git.push", { repo: repoId(repo), branch: asked.branch, commit: asked.commit, forced: asked.forced === true, bundle: `${name}.bundle`, lfs, ...(domain ? { domain } : {}) }, { quiet: true, timeoutMs: 20 * 60_000 });
     answer(id, reply);
   } catch (error) {
     answer(id, { pushed: false, error: (error as Error).message });
@@ -251,9 +283,25 @@ export const watchGitOut = (log: (line: string) => void, announce: (fields: Reco
           /* nothing more to say */
         }
       })
-      .finally(() => (busy = false));
+      .finally(() => {
+        busy = false;
+        // One that landed while this was taken: its event came and went.
+        scan();
+      });
   };
-  const timer = setInterval(scan, 1000);
+  // The share's files are the Mac's, so a request the git VM writes is a file event here:
+  // taken as it lands. The look every few seconds is for an event missed (or a watch that
+  // failed), not the way requests arrive.
+  try {
+    const watcher = fs.watch(paths.gitOut, (_event, file) => {
+      if (file === null || /\.json$/.test(String(file))) scan();
+    });
+    watcher.on("error", () => watcher.close());
+    watcher.unref();
+  } catch {
+    /* no outbox yet: the look below finds requests */
+  }
+  const timer = setInterval(scan, 5000);
   timer.unref();
   scan();
 };

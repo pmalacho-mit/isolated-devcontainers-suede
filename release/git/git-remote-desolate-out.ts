@@ -22,18 +22,30 @@ const OUT = "/desolate/out";
 const ANSWERS = "/desolate/answers";
 const WAIT_MS = 20 * 60_000;
 const POINTER = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize (\d+)\n$/;
-const repo = process.argv[3] ?? "";
+// `desolate-out::<owner>/<repo>`: a push to the remote (origin), approved by the person.
+// `desolate-out::<owner>/<repo>@<domain>`: a delivery to that domain (a remote named for it):
+// the branch appears in its workspaces as root/<branch>, as `git push <domain>` in the root's
+// terminal does. Nothing leaves the machine, so nothing is asked.
+const [repo = "", domain = null] = (process.argv[3] ?? "").split("@") as [string?, string?];
 const fail = (message: string): never => {
   process.stderr.write(`git-remote-desolate-out: ${message}\n`);
   process.exit(1);
 };
 if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) fail(`'${repo}' is not a repository`);
+if (domain !== null && !/^[a-z0-9][a-z0-9-]{0,39}$/.test(domain)) fail(`'${domain}' is not a domain`);
 const mirror = `/desolate/mirrors/${repo}.git`;
 const git = (args: string[], input?: string) => spawnSync("git", args, { encoding: "utf8", input, maxBuffer: 256 * 1024 * 1024 });
 const gitDir = git(["rev-parse", "--absolute-git-dir"]).stdout.trim();
 
 /** The remote's branches, as the mirror last saw them. */
-const remoteRefs = () => git(["--git-dir", mirror, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads"]).stdout.split("\n").filter(Boolean);
+const mirrorRefs = () => git(["--git-dir", mirror, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads"]).stdout.split("\n").filter(Boolean);
+/** A domain's branches, as the root holds them (its clone's refs/remotes/<domain>/*), read the
+ *  way `git fetch <domain>` reads them: upload-pack, with nothing of the root's config that
+ *  could name a command. */
+const domainRefs = (slug: string) =>
+  git(["ls-remote", "--upload-pack=git -c core.alternateRefsCommand=true upload-pack", `/desolate/root/${repo}`, `refs/remotes/${slug}/*`]).stdout.split("\n").filter(Boolean)
+    .map((line) => line.replace(`\trefs/remotes/${slug}/`, " refs/heads/")).filter((line) => /^[0-9a-f]{40} refs\/heads\/\S+$/.test(line));
+const remoteRefs = () => (domain === null ? mirrorRefs() : domainRefs(domain));
 
 /** The LFS objects a commit's history adds to what the mirror has. */
 const lfsOf = (commit: string, have: string[]) => {
@@ -60,7 +72,8 @@ const pushOne = async (spec: string): Promise<string> => {
   if (!/^[0-9a-f]{40}$/.test(commit)) return `error ${target} no such commit`;
   const id = randomBytes(8).toString("hex");
   const ref = `refs/desolate/out/${id}`;
-  const have = remoteRefs().map((line) => line.split(" ")[0]!).filter((tip) => git(["cat-file", "-e", `${tip}^{commit}`]).status === 0);
+  // What need not travel: what the mirror has (a domain's clone borrows the mirror too).
+  const have = mirrorRefs().map((line) => line.split(" ")[0]!).filter((tip) => git(["cat-file", "-e", `${tip}^{commit}`]).status === 0);
   try {
     git(["update-ref", ref, commit]);
     const bundle = path.join(OUT, `${id}.bundle`);
@@ -79,9 +92,11 @@ const pushOne = async (spec: string): Promise<string> => {
       lfs.push(oid);
     }
     const request = path.join(OUT, `${id}.json`);
-    fs.writeFileSync(`${request}.part`, JSON.stringify({ repo, branch, commit, forced, lfs }));
+    fs.writeFileSync(`${request}.part`, JSON.stringify({ repo, branch, commit, forced, lfs, ...(domain === null ? {} : { domain }) }));
     fs.renameSync(`${request}.part`, request);
-    process.stderr.write(`desolate: handed to the root. Approve it on the approval page (on the Mac: desolate approve --web prints its address).\n  ${repo}  ${branch}  ${commit}\n`);
+    process.stderr.write(domain === null
+      ? `desolate: handed to the root. Approve it on the approval page (on the Mac: desolate approve --web prints its address).\n  ${repo}  ${branch}  ${commit}\n`
+      : `desolate: handed to the root, for ${domain}: its workspaces see it as root/${branch} within seconds.\n  ${repo}  ${branch}  ${commit}\n`);
     const result = path.join(ANSWERS, `${id}.json`);
     for (const until = Date.now() + WAIT_MS; Date.now() < until; ) {
       if (fs.existsSync(result)) {

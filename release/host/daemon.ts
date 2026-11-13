@@ -188,7 +188,7 @@ const serve = async () => {
       gitReady.add(repo);
     }
   }));
-  watchGitOut(log, (fields) => events.publish(events.host("git-push-handed", fields)));
+  watchGitOut(log, (fields) => events.publish(events.host(fields.domain ? "git-delivery-handed" : "git-push-handed", fields)));
   const editors = createServer((client) => {
     client.on("error", () => client.destroy());
     void sniffSocket(client, 400).then(({ sniffed, head }) => {
@@ -355,10 +355,15 @@ const serve = async () => {
     const checkouts = (r as Registered & { checkouts?: Checkouts }).checkouts ?? [];
     // The folder the editor opens: the first checkout (as `desolate editor` prints it).
     if (typeof checkouts[0]?.path === "string" && /^\/workspaces\/[A-Za-z0-9._\/-]+$/.test(checkouts[0].path)) entry.folder = checkouts[0].path;
-    for (const c of checkouts)
+    const base = paths.domainRepos(r.domain);
+    const watch = (dir: string, recursive: boolean, wanted: (file: string | null) => boolean) => {
       try {
-        const watcher = fs.watch(statusDir(paths.domainRepos(r.domain), c), (_event, file) => {
-          if (file === null || String(file).startsWith("desolate-")) nudge();
+        // The domain's own tree: a directory there may be a link anywhere on the Mac, which
+        // a watch (recursive above all) would follow. Nothing is read through one, but
+        // only a real directory inside the domain's tree is watched.
+        if (!fs.lstatSync(dir).isDirectory() || fs.realpathSync(dir) !== path.join(fs.realpathSync(base), path.relative(base, dir))) return;
+        const watcher = fs.watch(dir, { recursive }, (_event, file) => {
+          if (wanted(file === null ? null : String(file))) nudge();
         });
         // The directory is the workspace's: it can vanish or be replaced at any moment. A
         // watcher that fails is closed; it must never be an error nobody listens to,
@@ -367,6 +372,25 @@ const serve = async () => {
         entry.watchers.push(watcher);
       } catch {
         /* no such checkout yet: the state service's own slow look covers it */
+      }
+    };
+    const repos = new Set<string>();
+    for (const c of checkouts) {
+      // Its status or note, or what it has checked out (HEAD: a `git switch`, a commit on a
+      // detached HEAD, a rebase starting or ending).
+      watch(statusDir(base, c), false, (file) => file === null || file.startsWith("desolate-") || file === "HEAD");
+      repos.add(c.repo);
+    }
+    // A commit moves a branch: a file under refs/heads (or packed-refs). A share's files are
+    // the Mac's, so their changes are the Mac's file events, whichever VM made them. Only
+    // on macOS is a recursive watch one cheap subscription (FSEvents); elsewhere the state
+    // service's look every second covers it.
+    if (process.platform === "darwin")
+      for (const repo of repos) {
+        if (typeof repo !== "string" || !parseRepo(repo)) continue;
+        const common = path.join(base, repo, ".git");
+        watch(path.join(common, "refs", "heads"), true, () => true);
+        watch(common, false, (file) => file === null || file === "packed-refs");
       }
     openLink(entry);
     events.publish(events.host("workspace-up", { domain: r.domain, workspace: r.workspace, vm: r.vm }));

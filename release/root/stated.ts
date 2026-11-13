@@ -41,9 +41,10 @@ import { hostArgv } from "../shared/actions.ts";
 import { parseApproval } from "../shared/approval.ts";
 import { isBranch, isCommit, isSlug, parseRepo, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
 import { statusView } from "../shared/status.ts";
+import type { Head } from "../shared/status.ts";
 import { refusal } from "../workspace/editor-gate.ts";
 import * as domains from "./domains.ts";
-import { refusalsOf } from "./outbox.ts";
+import { branchesOf, refusalsOf } from "./outbox.ts";
 import { safeIn } from "./git.ts";
 import { APPROVALS, clonePath, domainPath, GITCONFIG, ROOT } from "./layout.ts";
 import * as offers from "./offers.ts";
@@ -105,17 +106,31 @@ const pendingApprovals = () => {
   return out;
 };
 
+/** The last HEAD each checkout was seen on: a read that caught one half written (null) shows
+ *  that instead, so a `git switch` is one change and not two. */
+const heads = new Map<string, Head>();
+const settled = (key: string, head: Head | null): Head | null => {
+  if (head) heads.set(key, head);
+  return head ?? heads.get(key) ?? null;
+};
+
 const snapshot = () => {
   const list = domains.domains().map((d) => ({
     slug: d.slug, title: d.title, repos: d.repos,
+    branches: branchesOf(d.slug, d.repos),
     net: proxy.policy(d.slug).mode,
     secrets: secrets.list(d.slug).map((s) => ({ name: s.name, on: s.on })),
-    workspaces: domains.workspaces(d.slug).map((w) => ({
-      workspace: w.workspace, vm: w.vm, state: w.state,
-      checkouts: w.checkouts.map((c) => ({ repo: c.repo, branch: c.branch, kind: c.kind })),
-      says: statusView(path.join(domainPath(d.slug), "repos"), w),
-      host: facts.workspaces?.[w.vm] ?? null,
-    })),
+    workspaces: domains.workspaces(d.slug).map((w) => {
+      const says = statusView(path.join(domainPath(d.slug), "repos"), w);
+      return {
+        workspace: w.workspace, vm: w.vm, state: w.state,
+        // `branch` is what the checkout started on; `head`, what it has checked out now (its
+        // HEAD, read as data: the host's daemon nudges when one changes).
+        checkouts: w.checkouts.map((c, i) => ({ repo: c.repo, branch: c.branch, kind: c.kind, head: settled(`${d.slug}/${w.workspace}/${c.repo}`, says.checkouts[i]?.head ?? null) })),
+        says,
+        host: facts.workspaces?.[w.vm] ?? null,
+      };
+    }),
   }));
   return {
     stack: facts.stack ?? null,
@@ -345,14 +360,14 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
   }
   if (req.method === "GET" && url.pathname === "/review") {
     try {
-      return json(res, 200, await offers.review(domains.slugOf(url.searchParams.get("domain"), "domain"), url.searchParams.get("repo"), url.searchParams.get("branch")));
+      return json(res, 200, await offers.review(domains.slugOf(url.searchParams.get("domain"), "domain"), url.searchParams.get("repo"), url.searchParams.get("branch"), url.searchParams.get("against")));
     } catch (error) {
       return json(res, 400, { error: (error as Error).message });
     }
   }
   if (req.method === "GET" && url.pathname === "/diff") {
     try {
-      return json(res, 200, await offers.diff(domains.slugOf(url.searchParams.get("domain"), "domain"), url.searchParams.get("repo"), url.searchParams.get("branch")));
+      return json(res, 200, await offers.diff(domains.slugOf(url.searchParams.get("domain"), "domain"), url.searchParams.get("repo"), url.searchParams.get("branch"), url.searchParams.get("against")));
     } catch (error) {
       return json(res, 400, { error: (error as Error).message });
     }

@@ -13,11 +13,12 @@ import type { Forge } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { withReviewer } from "./review-client.ts";
 import { parseApproval } from "../shared/approval.ts";
-import { APPROVALS, clonePath, FORGE, GIT_IN, GITCONFIG, KEYRING, PINNED_FORGE, PUSHER, REVIEWER, ROOT } from "./layout.ts";
+import { APPROVALS, clonePath, domainPath, FORGE, GIT_IN, GITCONFIG, KEYRING, PINNED_FORGE, PUSHER, REVIEWER, ROOT } from "./layout.ts";
+import { readHead } from "../shared/status.ts";
 import { proxyUserOf } from "./proxy/as-proxy.ts";
 import { SECRETS_DIR } from "./proxy/secret-store.ts";
 import * as domains from "./domains.ts";
-import { refusalsOf } from "./outbox.ts";
+import { branchesOf, refusalsOf } from "./outbox.ts";
 import * as offers from "./offers.ts";
 import * as proxy from "./proxy/manage.ts";
 import * as secrets from "./proxy/secrets.ts";
@@ -123,14 +124,29 @@ export const ops: Record<string, Op> = {
   async "offers.list"(args) {
     return offers.allOffers(typeof args.domain === "string" ? domains.slugOf(args.domain, "domain") : undefined);
   },
+  /** Every branch each domain has (by the domain's own list), which of them are offered,
+   *  and which workspace has each checked out: `desolate branches`. */
+  async "branches.list"(args) {
+    const only = typeof args.domain === "string" ? domains.slugOf(args.domain, "domain") : undefined;
+    return domains.domains().filter((d) => !only || d.slug === only).flatMap((d) => {
+      const offered = offers.offersOf(d.slug);
+      const reposDir = path.join(domainPath(d.slug), "repos");
+      const heads = domains.workspaces(d.slug).flatMap((w) => w.checkouts.map((c) => ({ workspace: w.workspace, repo: c.repo, head: readHead(reposDir, c) })));
+      return branchesOf(d.slug, d.repos).map((b) => ({
+        domain: d.slug, ...b,
+        offered: offered.some((o) => o.repo === b.repo && o.branch === b.branch && o.commit === b.commit),
+        checkedOutIn: heads.filter((h) => h.repo === b.repo && h.head?.branch === b.branch).map((h) => h.workspace),
+      }));
+    });
+  },
   async "offers.refused"(args) {
     return domains.domains().filter((d) => typeof args.domain !== "string" || d.slug === args.domain).flatMap((d) => refusalsOf(d.slug));
   },
   async "review.diff"(args) {
-    return offers.diff(domains.slugOf(args.domain, "domain"), args.repo, args.branch);
+    return offers.diff(domains.slugOf(args.domain, "domain"), args.repo, args.branch, args.against);
   },
   async "review"(args) {
-    return offers.review(domains.slugOf(args.domain, "domain"), args.repo, args.branch);
+    return offers.review(domains.slugOf(args.domain, "domain"), args.repo, args.branch, args.against);
   },
 
   /** Raw pushes in the root's terminal that are waiting for `desolate approve`. What the
@@ -207,6 +223,17 @@ export const ops: Record<string, Op> = {
             return { pushed: false, error: `the LFS object ${oid.slice(0, 12)} does not hash to its name`, said };
           }
           fs.renameSync(part, to);
+        }
+        if (args.domain !== undefined) {
+          // A delivery (`git push <domain>` in the git VM): the root's own `git push <domain>`
+          // in its clone (git-remote-desolate), to a domain that has this repository.
+          const slug = domains.slugOf(args.domain, "domain");
+          const id = `${repo.owner}/${repo.name}`;
+          if (!domains.domain(slug).repos.includes(id)) return { pushed: false, error: `${id} is not in the domain '${slug}'`, said };
+          const delivered = await gitIn(clone, ["push", "--porcelain", slug, `${commit}:refs/heads/${branch}`]);
+          if (delivered.code !== 0) return { pushed: false, error: `not delivered: ${delivered.stderr.trim().split("\n").pop() ?? ""}`, said };
+          said.push(`delivered to ${slug}: its workspaces see it as root/${branch}${Array.isArray(args.lfs) && args.lfs.length ? " (its new LFS objects stay in the root: a delivery carries commits)" : ""}`);
+          return { pushed: true, said };
         }
         const failed = await pushCommit(repo, commit, branch, args.forced === true, "a git push from the git VM", (line) => said.push(line));
         return failed ? { pushed: false, error: failed, said } : { pushed: true, said };
