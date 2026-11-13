@@ -61,6 +61,7 @@ desolate clone acme/consumer --no-push               # a read key only: never wr
 desolate domain create dev --title "widgets work" --repo acme/widgets --repo acme/consumer
 desolate up dev --name issue-12 --branch issue/12 --fetch   # a worktree on issue/12 in each repository
                                                      # (or per repository: --checkout acme/widgets=worktree:issue/12)
+desolate domain dev size --cpus 4 --memory 12g       # its workspaces' size (default: from your Mac)
 desolate ui --open                                   # the dashboard, in Chrome or Firefox (not Safari)
 desolate editor dev/issue-12 --open                  # its editor (VSCodium, in its VM), in a tab:
                                                      # every checkout of the workspace in one window

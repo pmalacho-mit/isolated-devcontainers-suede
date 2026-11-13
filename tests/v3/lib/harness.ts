@@ -120,7 +120,10 @@ export const newStack = (label: string): Stack => {
       .replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, "<time>")
       .replace(/\b\d+(\.\d+)? ?(ms|s)\b/g, "<duration>")
       .replace(/dsl-<instance>-[0-9a-f]{10}/g, "dsl-<instance>-<vm>")
-      .replace(/-[0-9a-f]{6}\.localhost/g, "-<hex>.localhost");
+      .replace(/-[0-9a-f]{6}\.localhost/g, "-<hex>.localhost")
+      // A workspace's default size comes from the machine running the tests.
+      .replace(/\(this Mac: \d+ cores, \d+ GB\)/g, "(this Mac: <cores> cores, <memory> GB)")
+      .replace(/\d+ CPUs?, \d+ (GiB|MiB) memory, \d+ GiB disk/g, "<size>");
   // Root in the root VM is reached as the host reaches it (host/vm/lima.ts): ssh as root
   // with Lima's key. Its login user has no sudo there.
   const quote = (arg: string) => `'${arg.replace(/'/g, "'\\''")}'`;

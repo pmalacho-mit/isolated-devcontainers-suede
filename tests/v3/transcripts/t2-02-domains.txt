@@ -11,6 +11,7 @@ desolate bootstrap: backend fake (NOT ISOLATED: containers standing in for VMs; 
   + root services: keyring
   + root: the approver's public key and the host daemon's token
   dashboard    http://desolate.localhost:31591/?tkn=<token>   (and: desolate ui)
+  workspaces   <size> each by default (this Mac: <cores> cores, <memory> GB); per domain: desolate domain <d> size, per workspace: desolate up --cpus --memory --disk
 bootstrap: 7 step(s) done.
   ok   home: <home>
   ok   backend gives isolation: fake: containers stand in for VMs. NOTHING here is isolated (allowed: DESOLATE_TEST_RUN=1)
@@ -55,6 +56,7 @@ $ desolate up nests-dev
 workspace nests-dev/w1 is up  [NOT ISOLATED: fake backend]
   acme/consumer  main checkout (main)  /workspaces/acme/consumer
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  size         <size>
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://nests-dev-w1-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Fw1.code-workspace
   dev servers  http://nests-dev-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
@@ -74,6 +76,7 @@ $ desolate up nests-dev --name issue-12 --checkout acme/widgets=worktree:issue/1
 workspace nests-dev/issue-12 is up  [NOT ISOLATED: fake backend]
   acme/consumer  worktree issue-12 from main  /workspaces/acme/consumer/.worktrees/issue-12
   acme/widgets  worktree issue/12 from main  /workspaces/acme/widgets/.worktrees/issue-12
+  size         <size>
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://nests-dev-issue-12-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Fissue-12.code-workspace
   dev servers  http://nests-dev-issue-12-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
@@ -88,6 +91,7 @@ $ desolate up nests-dev --name fresh --fetch --base origin/main --checkout acme/
 workspace nests-dev/fresh is up  [NOT ISOLATED: fake backend]
   acme/consumer  worktree fresh from origin/main  /workspaces/acme/consumer/.worktrees/fresh
   acme/widgets  worktree issue/13 from origin/main  /workspaces/acme/widgets/.worktrees/issue-13
+  size         <size>
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://nests-dev-fresh-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Ffresh.code-workspace
   dev servers  http://nests-dev-fresh-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
@@ -119,6 +123,7 @@ $ desolate up other
 workspace other/w1 is up  [NOT ISOLATED: fake backend]
   acme/private  main checkout (main)  /workspaces/acme/private
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  size         <size>
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://other-w1-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Fw1.code-workspace
   dev servers  http://other-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
@@ -136,11 +141,11 @@ issue/12
 
 $ desolate list
 nests-dev  "suede.nests agentic development"  acme/consumer, acme/widgets
-  nests-dev/fresh  running  [not isolated]  acme/consumer@fresh, acme/widgets@issue/13
-  nests-dev/issue-12  running  [not isolated]  acme/consumer@issue-12, acme/widgets@issue/12
-  nests-dev/w1  running  [not isolated]  acme/consumer@main, acme/widgets@main
+  nests-dev/fresh  running  [not isolated]  acme/consumer@fresh, acme/widgets@issue/13  (4 CPU, 8 GiB)
+  nests-dev/issue-12  running  [not isolated]  acme/consumer@issue-12, acme/widgets@issue/12  (4 CPU, 8 GiB)
+  nests-dev/w1  running  [not isolated]  acme/consumer@main, acme/widgets@main  (4 CPU, 8 GiB)
 other  "another boundary"  acme/private, acme/widgets
-  other/w1  running  [not isolated]  acme/private@main, acme/widgets@main
+  other/w1  running  [not isolated]  acme/private@main, acme/widgets@main  (4 CPU, 8 GiB)
 [exit 0]
 
 ## stop, start, rm
@@ -156,6 +161,7 @@ desolate: the main checkout of acme/widgets is held by the workspace 'nests-dev/
 
 $ desolate start nests-dev/w1
 workspace nests-dev/w1 is up (<duration>)
+  size         <size>
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
 [exit 0]
 
@@ -167,6 +173,7 @@ $ desolate up nests-dev --name taker --checkout acme/widgets=main
 workspace nests-dev/taker is up  [NOT ISOLATED: fake backend]
   acme/consumer  main checkout (main)  /workspaces/acme/consumer
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
+  size         <size>
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://nests-dev-taker-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Ftaker.code-workspace
   dev servers  http://nests-dev-taker-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)

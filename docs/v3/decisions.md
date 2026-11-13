@@ -868,6 +868,21 @@ anonymously. containerd's CRI plugin listened on a random loopback port in every
 which desolate forwarded to the Mac as a dev server: off. An offer made inside a devcontainer
 was "from unknown": the container now carries its workspace's names.
 
+## Workspace sizes: from the Mac, per domain, per workspace (decided on the Mac; run on the M1)
+
+A workspace's CPUs, memory and disk come from, in order: `desolate up --cpus --memory
+--disk`, the domain's (`desolate domain <d> size`), and the stack's defaults, which are worked
+out from the Mac each time and stored nowhere (half its cores, 2 to 4; a quarter of its
+memory, 3 to 8 GiB; 30 GiB), the old environment variables overriding them. The size used is
+recorded in the workspace's plan, so `desolate list`, `up` and the dashboard say what each VM
+has; bootstrap says what the defaults come to. Measured on the M1 (10 cores, 64 GB): defaults
+4 CPUs and 8 GiB; a domain at 3 CPUs and 50 GiB, `up --memory 6g`: the VM had 3 CPUs, 5.9 GiB
+usable and a 48 GiB root filesystem.
+
+Disk is at least 30 GiB: every VM is cloned from a 30 GiB base and Lima refuses to shrink a
+clone's disk. So the root's (20) and the git VM's (10) declared sizes had never been applied;
+they say 30 now, which is what they always had.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the
@@ -1064,9 +1079,9 @@ enters the container. The gate always stays in the VM.
 A docker daemon runs only where one is wanted. In a real VM `docker.socket` is started, so
 the first `docker` command starts the daemon; on the fake backend the host starts it when a
 checkout has a spec. (Measured the hard way: with a daemon in every workspace, the real-VM
-tier's third VM was killed for memory in the 8 GB sandbox.) A workspace's size is 2 CPUs
+tier's third VM was killed for memory in the 8 GB sandbox.) A workspace's size was 2 CPUs
 and 4 GiB, with `DESOLATE_WORKSPACE_CPUS` and `DESOLATE_WORKSPACE_MEMORY_MIB` as the one
-knob so far (question 9).
+knob (question 9; since answered: "Workspace sizes", below).
 
 Not done: the environment is not frozen and features are not pinned; no templates (C3) or
 caches (C2, C4), so each workspace builds its own environment; compose specs' ports are not

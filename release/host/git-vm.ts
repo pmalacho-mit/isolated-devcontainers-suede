@@ -43,7 +43,7 @@ export const gitSpec = (): VmSpec => ({
   sockets: [],
   cpus: 2,
   memoryMiB: 1536,
-  diskGiB: 10,
+  diskGiB: 30, // (the base's: a clone's disk cannot be smaller; 10 was never applied)
   labels: { title: "git" },
 });
 

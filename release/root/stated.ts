@@ -123,7 +123,7 @@ const snapshot = () => {
     workspaces: domains.workspaces(d.slug).map((w) => {
       const says = statusView(path.join(domainPath(d.slug), "repos"), w);
       return {
-        workspace: w.workspace, vm: w.vm, state: w.state,
+        workspace: w.workspace, vm: w.vm, state: w.state, size: w.size ?? null,
         // `branch` is what the checkout started on; `head`, what it has checked out now (its
         // HEAD, read as data: the host's daemon nudges when one changes).
         checkouts: w.checkouts.map((c, i) => ({ repo: c.repo, branch: c.branch, kind: c.kind, head: settled(`${d.slug}/${w.workspace}/${c.repo}`, says.checkouts[i]?.head ?? null) })),

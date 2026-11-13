@@ -6,6 +6,8 @@ import { EXIT, refuse } from "../shared/exit.ts";
 import { readJson, writeJson } from "../shared/json.ts";
 import { isBranch, isSlug, parseRepo, repoId, workspaceVmName } from "../shared/names.ts";
 import { checkoutPath } from "../shared/plan.ts";
+import { checkSize } from "../shared/size.ts";
+import type { Size } from "../shared/size.ts";
 import type { Checkout, WorkspacePlan } from "../shared/plan.ts";
 import { git, gitOk } from "./git.ts";
 import { clonePath, domainPath, mirrorPath, ROOT } from "./layout.ts";
@@ -13,7 +15,7 @@ import { recordOf, registry } from "./repos.ts";
 
 /** `env`: the repository whose devcontainer.json is the domain's environment (section 4.5,
  *  way 1). Unset: the first checkout that has one. */
-export type Domain = { slug: string; title: string; repos: string[]; createdAt: string; env?: string };
+export type Domain = { slug: string; title: string; repos: string[]; createdAt: string; env?: string; size?: Partial<Size> };
 
 const file = (slug: string) => path.join(domainPath(slug), "domain.json");
 const workspacesDir = (slug: string) => path.join(domainPath(slug), "workspaces");
@@ -48,6 +50,25 @@ export const create = (slugArg: unknown, title: unknown) => {
 
 /** `desolate domain <d> env [--from <owner/repo>]`: which repository's spec this domain's
  *  workspaces are built from. Written here, by the root, outside every repository. */
+/** The size this domain's new workspaces get (shared/size.ts): set, cleared (null), or
+ *  only read. Existing workspaces keep what they were made with. */
+export const setSize = (slugArg: unknown, sizeArg: unknown) => {
+  const d = domain(slugOf(slugArg, "domain"));
+  if (sizeArg === null) {
+    delete d.size;
+    writeJson(file(d.slug), d);
+  } else if (sizeArg !== undefined) {
+    const given = sizeArg as Partial<Size>;
+    const size: Partial<Size> = {};
+    for (const key of ["cpus", "memoryMiB", "diskGiB"] as const) if (given[key] !== undefined) size[key] = Number(given[key]);
+    const why = checkSize(size);
+    if (why) refuse(why, `desolate domain ${d.slug} size --cpus <n> --memory <8g> --disk <60g>`, EXIT.usage);
+    d.size = { ...d.size, ...size };
+    writeJson(file(d.slug), d);
+  }
+  return { domain: d.slug, size: d.size ?? null };
+};
+
 export const setEnv = (slugArg: unknown, repoArg: unknown) => {
   const d = domain(slugOf(slugArg, "domain"));
   if (repoArg !== undefined) {
@@ -96,7 +117,7 @@ type Wanted = { repo: string; kind: "main" | "worktree"; branch?: string };
 
 /** Decide what a new workspace is: its checkouts, and that nobody else holds them. One
  *  workspace holds a given checkout at a time, the main checkout included (section 5.2). */
-export const plan = (args: { instance: string; domain: unknown; name: unknown; checkouts: unknown; base: unknown; fetch: unknown }): Workspace => {
+export const plan = (args: { instance: string; domain: unknown; name: unknown; checkouts: unknown; base: unknown; fetch: unknown; size?: unknown }): Workspace => {
   const d = domain(slugOf(args.domain, "domain"));
   if (d.repos.length === 0) refuse(`the domain '${d.slug}' has no repositories yet`, `desolate domain ${d.slug} add --repo <owner>/<repo>`);
   const existing = workspaces(d.slug);
@@ -146,8 +167,12 @@ export const plan = (args: { instance: string; domain: unknown; name: unknown; c
     return worktree(workspaceName);
   });
 
+  // The size the host worked out (flags, this domain's, the stack's defaults), checked here too.
+  const size = args.size as Size | undefined;
+  if (size !== undefined && (checkSize(size) || [size.cpus, size.memoryMiB, size.diskGiB].some((v) => v === undefined))) refuse(`the size is not one desolate makes: ${checkSize(size) ?? "a part is missing"}`, "desolate up <domain> --cpus <n> --memory <8g> --disk <60g>", EXIT.usage);
   const value: Workspace = {
     ...(d.env ? { env: d.env } : {}),
+    ...(size ? { size: { cpus: size.cpus, memoryMiB: size.memoryMiB, diskGiB: size.diskGiB } } : {}),
     domain: d.slug, workspace: workspaceName, vm: workspaceVmName(args.instance, d.slug, workspaceName),
     title: d.title, checkouts, fetch: args.fetch === true, createdAt: new Date().toISOString(), state: "planned",
   };

@@ -1,0 +1,99 @@
+minimumLimaVersion: 2.0.0
+vmType: vz
+arch: aarch64
+mountType: virtiofs
+cpus: 2
+memory: 2048MiB
+disk: 20GiB
+containerd:
+  system: false
+  user: false
+portForwards: [{guestIP: 0.0.0.0, guestPortRange: [1, 65535], proto: tcp, ignore: true}, {guestIP: 0.0.0.0, guestPortRange: [1, 65535], proto: udp, ignore: true}, {guestIP: 127.0.0.1, guestPortRange: [1, 65535], proto: tcp, ignore: true}, {guestIP: 127.0.0.1, guestPortRange: [1, 65535], proto: udp, ignore: true}]
+networks: []
+mounts:
+- location: /Users/desolate/isolated-devcontainers-suede/release
+  mountPoint: /desolate/release
+  writable: false
+- location: /Users/desolate/size-desolate/mirrors
+  mountPoint: /desolate/mirrors
+  writable: true
+- location: /Users/desolate/size-desolate/root
+  mountPoint: /desolate/root
+  writable: true
+- location: /Users/desolate/size-desolate/domains
+  mountPoint: /desolate/domains
+  writable: true
+images:
+# Try to use release-yyyyMMdd image if available. Note that release-yyyyMMdd will be removed after several months.
+
+- location: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img"
+  arch: "x86_64"
+  digest: "sha256:04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
+  variant: "server"
+- location: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img"
+  arch: "aarch64"
+  digest: "sha256:50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e"
+  variant: "server"
+- location: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-riscv64.img"
+  arch: "riscv64"
+  digest: "sha256:2d48190b4de1a809879c7b2137381a24b52a3a23a65b4d4a7b3f6d7ae774b7e9"
+  variant: "server"
+- location: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-armhf.img"
+  arch: "armv7l"
+  digest: "sha256:892d1f6228c85fb39638b07ccebf6c392fa5d9c84c956eeb7aa042c52a124483"
+  variant: "server"
+- location: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-s390x.img"
+  arch: "s390x"
+  digest: "sha256:7c26ebd895d4bea3d49a3d8281803daab164a3228e680d4b761101fef6934013"
+  variant: "server"
+- location: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-ppc64el.img"
+  arch: "ppc64le"
+  digest: "sha256:204cc31acb0cc3400857e4f550d0ee5dec74bbeff989df39d8d4264f2d559ced"
+  variant: "server"
+# Fallback to the latest release image.
+# Hint: run `limactl prune` to invalidate the cache
+
+- location: https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img
+  arch: x86_64
+  variant: "server"
+
+- location: https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img
+  arch: aarch64
+  variant: "server"
+
+- location: https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-riscv64.img
+  arch: riscv64
+  variant: "server"
+
+- location: https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-armhf.img
+  arch: armv7l
+  variant: "server"
+
+- location: https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-s390x.img
+  arch: s390x
+  variant: "server"
+
+- location: https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-ppc64el.img
+  arch: ppc64le
+  variant: "server"
+
+# Try to use release-yyyyMMdd minimal image if available.
+- location: "https://cloud-images.ubuntu.com/minimal/releases/noble/release-20261105/ubuntu-24.04-minimal-cloudimg-amd64.img"
+  arch: "x86_64"
+  digest: "sha256:406630c08b5e545fcc7209854b129d47e3af822db128c9f19336593b5a2d3fe0"
+  variant: "minimal"
+- location: "https://cloud-images.ubuntu.com/minimal/releases/noble/release-20261105/ubuntu-24.04-minimal-cloudimg-arm64.img"
+  arch: "aarch64"
+  digest: "sha256:3dc8370d923978d4b610fa7964d1b36ba040eefb43198809ca5bc8ac51777b18"
+  variant: "minimal"
+
+# Fallback minimal images
+- location: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+  arch: "x86_64"
+  variant: "minimal"
+
+- location: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-arm64.img"
+  arch: "aarch64"
+  variant: "minimal"
+ssh:
+  localPort: 51726

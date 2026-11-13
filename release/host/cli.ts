@@ -22,6 +22,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate domain create <slug> [--title "..."] [--repo <owner/repo>]...
                                                                  a trust boundary: repositories and secrets
   desolate domain <slug> add --repo <owner/repo>                 give the domain a repository
+  desolate domain <slug> size [--cpus <n>] [--memory <8g>] [--disk <60g>] [--clear]
+                                                                 what its new workspaces get (shown: the effective size)
   desolate domain <slug> env [--from <owner/repo>]               whose devcontainer.json its workspaces run
   desolate domain <slug> net [open | enforce | allow <host>... | deny <host>...]
                                                                  the domain's network rules, at its proxies
@@ -30,6 +32,7 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate domain <domain> secret set <NAME> --hosts <h>[,...] [--headers <h>[,...]] | list | off | on [--ttl 30m] | rm
                                                                  a secret: the value on stdin, the name in workspaces
   desolate up <domain> [--name <workspace>] [--branch <branch>] [--fetch] [--base <ref>]
+              [--cpus <n>] [--memory <8g>] [--disk <60g>]   (defaults: from this Mac; per domain: domain <d> size)
               [--checkout <owner/repo>=main|worktree:<branch>]   a workspace: one VM, its checkouts
   desolate list [<domain>] [--json]
   desolate status | board <domain>[/<workspace>] [--json]        how each checkout says its work is going
@@ -142,7 +145,7 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "domain") {
-    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string", multiple: true }, hosts: { type: "string" }, headers: { type: "string" }, ttl: { type: "string" }, secret: { type: "string" }, from: { type: "string" } });
+    const { values, positionals } = flags(rest, { title: { type: "string" }, repo: { type: "string", multiple: true }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" }, clear: { type: "boolean" }, hosts: { type: "string" }, headers: { type: "string" }, ttl: { type: "string" }, secret: { type: "string" }, from: { type: "string" } });
     const { domainCommand } = await import("./domains.ts");
     await domainCommand(positionals, values, out);
     return EXIT.ok;
@@ -156,9 +159,9 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "up") {
-    const { values, positionals } = flags(rest, { name: { type: "string" }, checkout: { type: "string", multiple: true }, branch: { type: "string" }, base: { type: "string" }, fetch: { type: "boolean" } });
-    const { up } = await import("./workspaces.ts");
-    await up(positionals[0], { name: values.name as string | undefined, checkouts: (values.checkout as string[] | undefined) ?? [], branch: values.branch as string | undefined, base: values.base as string | undefined, fetch: values.fetch === true }, out, values.json === true);
+    const { values, positionals } = flags(rest, { name: { type: "string" }, checkout: { type: "string", multiple: true }, branch: { type: "string" }, base: { type: "string" }, fetch: { type: "boolean" }, cpus: { type: "string" }, memory: { type: "string" }, disk: { type: "string" } });
+    const { up, sizeFlags } = await import("./workspaces.ts");
+    await up(positionals[0], { name: values.name as string | undefined, checkouts: (values.checkout as string[] | undefined) ?? [], branch: values.branch as string | undefined, base: values.base as string | undefined, fetch: values.fetch === true, size: sizeFlags(values) }, out, values.json === true);
     return EXIT.ok;
   }
   if ((verb === "status" || verb === "board") && rest.some((arg) => !arg.startsWith("-"))) {

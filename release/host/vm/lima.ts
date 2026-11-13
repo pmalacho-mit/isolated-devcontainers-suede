@@ -30,6 +30,8 @@ import type { Backend, Check, ExecOptions, Listener, VmInfo, VmSpec, VmStatus } 
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const LIMA_HOME = path.join(paths.home, "lima");
+/** The base VM's disk, which every desolate VM is cloned from: the smallest any of them has. */
+export const BASE_DISK_GIB = 30;
 const LIMACTL = process.env.DESOLATE_LIMACTL ?? "limactl";
 const PREFIX = `dsl-${INSTANCE}-`;
 const BASE = `${PREFIX}base`;
@@ -118,6 +120,9 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
     `.mounts = ${yq(spec.shares.map((share) => ({ location: share.host, mountPoint: share.guest, writable: share.writable })))}`,
     `.cpus = ${spec.cpus ?? 2}`,
     `.memory = ${yq(`${spec.memoryMiB ?? 2048}MiB`)}`,
+    // A clone's disk can grow and never shrink (Lima refuses): every VM is cloned from the
+    // base's BASE_DISK_GIB, so a size above it grows the disk and anything else is the base's.
+    ...(spec.diskGiB && spec.diskGiB > BASE_DISK_GIB ? [`.disk = ${yq(`${spec.diskGiB}GiB`)}`] : []),
     `.ssh.localPort = ${sshPort}`,
     // No automatic forwards of guest ports onto the host: Lima publishes a guest's port 80
     // on every interface (measured). desolate's forwarder is the only way in.
@@ -131,7 +136,7 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       `vmType: ${kind}`, `arch: ${arch}`,
       // qemu: 9p, whose read-only is QEMU's. vz: virtiofs, whose read-only is the host's.
       `mountType: ${kind === "qemu" ? "9p" : "virtiofs"}`,
-      "cpus: 2", "memory: 2GiB", "disk: 30GiB", "mounts: []",
+      "cpus: 2", "memory: 2GiB", `disk: ${BASE_DISK_GIB}GiB`, "mounts: []",
       "containerd:\n  system: false\n  user: false",
       `portForwards: ${yq(NO_FORWARDS)}`,
       "networks: []",
