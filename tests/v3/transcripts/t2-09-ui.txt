@@ -54,7 +54,8 @@ desolate: this push needs your confirmation.
   branch      fix
   commit      <commit>
   onto        none: the remote has no fix yet
-  sends       a raw git push from the root's terminal
+  sends       1 commit(s) the remote does not have, 1 file(s)
+              (desolate's reviewer, in the root)
 Type the branch name (fix) to push, or anything else to refuse: fix
 approved; the push waiting in the root continues.
 [exit 0]

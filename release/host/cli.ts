@@ -50,6 +50,16 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
                                                                  host, on your terminal
   desolate events [--replay <n>]                                 what happens, as JSON lines, until stopped: pushed,
                                                                  offered, status, approval-waiting, workspace-up, ...
+  desolate agent start <domain>/<workspace> [--name <n>] [--checkout <repo>] -- <command...>
+                                                                 an agent kept running in a workspace (no tmux)
+  desolate agent attach|log|stop <domain>/<workspace> [--name <n>]   your terminal on it; Ctrl-] detaches
+  desolate agent list [<domain>[/<workspace>]] [--json]          every agent, in every workspace
+  desolate factory issues --repo <owner/repo> --domain <d> [--max 3]
+                                                                 labelled issues -> workspaces with agents, in parallel
+  desolate factory suede [--domain suede]                        pushes to a default branch -> an agent on each
+                                                                 vendored suede dependency they changed
+  desolate suede changed <owner/repo> <commit> [--from <commit>] [--json]
+                                                                 which vendored suede dependencies a commit changed
   desolate notify                                                notifications on this Mac: a push waiting, an offer,
                                                                  an agent asking for you, a push done; until stopped
   desolate git [<owner/repo>] [--open]                           a shell in the git VM, in your browser: your own
@@ -250,6 +260,38 @@ const main = async (argv: string[]): Promise<number> => {
     // process does not pile lines up either, it stops when stdout does.)
     process.stdout.on("error", () => process.exit(0));
     await followEvents(replay, (line) => process.stdout.write(`${line}\n`), (resume) => process.stdout.once("drain", resume));
+  }
+  if (verb === "agent") {
+    // `--` ends desolate's own flags: everything after it is the agent's command.
+    const dash = rest.indexOf("--");
+    const own = dash >= 0 ? rest.slice(0, dash) : rest;
+    const command = dash >= 0 ? rest.slice(dash + 1) : [];
+    const { values, positionals } = flags(own, { name: { type: "string" }, checkout: { type: "string" } });
+    const agents = await import("./agent.ts");
+    const [sub, where] = positionals;
+    if (sub === "start") await agents.start(where, { name: values.name as string | undefined, checkout: values.checkout as string | undefined }, command, out, values.json === true);
+    else if (sub === "attach") return agents.attach(where, { name: values.name as string | undefined });
+    else if (sub === "list") await agents.list(where, out, values.json === true);
+    else if (sub === "stop") await agents.stop(where, { name: values.name as string | undefined }, out);
+    else if (sub === "log") await agents.log(where, { name: values.name as string | undefined });
+    else refuse("desolate agent what?", "desolate agent start|attach|list|log|stop <domain>/<workspace> [--name <n>]", EXIT.usage);
+    return EXIT.ok;
+  }
+  if (verb === "factory") {
+    // Harnesses on top of desolate (release/factory/): they drive this CLI and your gh.
+    const [which, ...args] = rest;
+    if (which !== "issues" && which !== "suede") refuse("desolate factory what?", "desolate factory issues --repo <owner/repo> --domain <d> | desolate factory suede [--domain <d>]", EXIT.usage);
+    const { RELEASE_DIR } = await import("./paths.ts");
+    const child = (await import("node:child_process")).spawn(process.execPath, ["--disable-warning=ExperimentalWarning", `${RELEASE_DIR}/factory/${which}.ts`, ...args], { stdio: "inherit" });
+    return new Promise<number>((resolve) => child.on("close", (code) => resolve(code ?? 1)));
+  }
+  if (verb === "suede" && rest[0] === "changed") {
+    const { values, positionals } = flags(rest.slice(1), { from: { type: "string" } });
+    const { rootctl } = await import("./stack.ts");
+    const changed = await rootctl<{ dir: string; remote: string | null; branch: string; files: string[] }[]>("suede.changed", { repo: positionals[0], to: positionals[1], from: values.from ?? null }, { quiet: true });
+    if (values.json === true) out(JSON.stringify(changed));
+    else for (const c of changed) out(`  ${c.dir}  ${c.remote ?? "(no remote)"} ${c.branch}  ${c.files.length ? `${c.files.length} file(s) changed` : "unchanged"}`);
+    return EXIT.ok;
   }
   if (verb === "notify") {
     flags(rest, {});

@@ -102,6 +102,8 @@ cannot take is approving a push, so a script's work ends at an offer.
 - [docs/reference.md](docs/reference.md): how approval works, the git terminal, `desolate events`,
   what the root takes from a workspace, devcontainers, secrets, the macOS firewall dialog, what
   is and is not done, and where the code is.
+- [docs/agents.md](docs/agents.md): agents kept running and attached to (no tmux), Claude Code,
+  and the factories: GitHub issues to agents in parallel, and suede upstreaming.
 - [AGENTS.md](AGENTS.md): what an agent in a workspace reads.
 - [docs/incidents.md](docs/incidents.md): ways desolate has been wrong, and what each taught.
 

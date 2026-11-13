@@ -101,7 +101,8 @@ desolate: this push needs your confirmation.
   branch      issue/12
   commit      <commit>
   onto        none: the remote has no issue/12 yet
-  sends       1 commit(s), 2 files changed, 4 insertions(+), 1 LFS object(s)
+  sends       1 commit(s) the remote does not have, 2 file(s), 1 of them LFS
+              (desolate's reviewer, in the root)
 Type the branch name (issue/12) to push, or anything else to refuse: yes
 desolate: not confirmed
 desolate: no person confirmed the push, so nothing was pushed
@@ -116,7 +117,8 @@ desolate: this push needs your confirmation.
   branch      issue/12
   commit      <commit>
   onto        none: the remote has no issue/12 yet
-  sends       1 commit(s), 2 files changed, 4 insertions(+), 1 LFS object(s)
+  sends       1 commit(s) the remote does not have, 2 file(s), 1 of them LFS
+              (desolate's reviewer, in the root)
 Type the branch name (issue/12) to push, or anything else to refuse: issue/12
 uploading 1 LFS object(s)
 pushed acme/widgets issue/12 at <commit> (1 commit(s), 1 LFS object(s) first).
@@ -144,7 +146,8 @@ desolate: this push needs your confirmation.
   branch      raw-push
   commit      <commit>
   onto        none: the remote has no raw-push yet
-  sends       a raw git push from the root's terminal
+  sends       0 commit(s) the remote does not have, 2 file(s), 1 of them LFS
+              (desolate's reviewer, in the root)
 Type the branch name (raw-push) to push, or anything else to refuse: raw-push
 approved; the push waiting in the root continues.
 [exit 0]

@@ -137,7 +137,7 @@ const reviewPanel = () => {
       : !offered ? el("span", { class: "sub" }, "Not offered at this commit, so not pushed from here. Push it yourself from ", gitLink(review.repo) || "the git terminal", ` (git fetch root, then git push origin root/${offer.domain}/${review.branch}:${review.branch}), or have the agent run `, el("code", {}, "desolate offer"), ".")
       : review.isDefault ? el("span", { class: "sub" }, "This is the default branch. Push it from the host: ", el("code", {}, `desolate push ${offer.domain} ${review.repo} ${review.branch} --expect ${review.commit} --allow-default`))
       : button(`Push exactly ${short(review.commit)}`, key, "offer.push", { domain: offer.domain, repo: review.repo, branch: review.branch, commit: review.commit })),
-    el("div", { class: "sub" }, "Pushing asks for your approval on the host: run ", el("code", {}, "desolate approve"), " there when this says it is waiting."));
+    el("div", { class: "sub" }, "Pushing waits for your approval on the host: on the approval page (", el("code", {}, "desolate approve --web --open"), "), or ", el("code", {}, "desolate approve"), " in a terminal."));
 };
 
 /** A checkout as it is NOW (its HEAD, which the host watches), not as it started. */

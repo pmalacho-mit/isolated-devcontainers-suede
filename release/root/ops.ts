@@ -4,7 +4,8 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isBranch, isCommit } from "../shared/names.ts";
+import { isBranch, isCommit, parseRepo } from "../shared/names.ts";
+const parseRepoName = (value: string) => (parseRepo(value) ? value : null);
 import { writeJson } from "../shared/json.ts";
 import { git as gitIn, repoOf, writeKnownHosts } from "./git.ts";
 import { bundleRefusal } from "./intake.ts";
@@ -141,6 +142,41 @@ export const ops: Record<string, Op> = {
   },
   async "offers.refused"(args) {
     return domains.domains().filter((d) => typeof args.domain !== "string" || d.slug === args.domain).flatMap((d) => refusalsOf(d.slug));
+  },
+  /** Which vendored suede dependencies a push changed (`desolate suede changed`, the suede
+   *  factory): each directory with a .gitrepo in the commit, the repository and branch it
+   *  names, and the files under it the push touched. In the root's own clone; read as data
+   *  (a .gitrepo is a few lines of text, and only its remote and branch are taken). */
+  async "suede.changed"(args) {
+    const repo = repoOf(args.repo);
+    const to = String(args.to ?? "");
+    const from = args.from === undefined || args.from === null ? null : String(args.from);
+    if (!isCommit(to) || (from !== null && !isCommit(from))) throw new Error("suede.changed names commits by their full ids");
+    const clone = clonePath(repo);
+    // (Pushed a moment ago: the clone may be a fetch from the mirror behind.)
+    if ((await gitIn(clone, ["cat-file", "-e", `${to}^{commit}`])).code !== 0) await gitIn(clone, ["fetch", "--quiet", "origin"]);
+    if ((await gitIn(clone, ["cat-file", "-e", `${to}^{commit}`])).code !== 0) throw new Error(`the root does not have ${to.slice(0, 12)}: desolate fetch ${repo.owner}/${repo.name}`);
+    const base = from ?? ((await gitIn(clone, ["rev-parse", "--verify", "--quiet", `${to}~1`])).stdout.trim() || "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+    const records = (await gitIn(clone, ["ls-tree", "-r", "--name-only", "-z", to])).stdout.split("\0").filter((f) => f.endsWith("/.gitrepo") && !f.split("/").includes("node_modules"));
+    const changed = (await gitIn(clone, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", base, to])).stdout.split("\0").filter(Boolean);
+    const out = [];
+    const dirs = records.map((record) => record.slice(0, -"/.gitrepo".length));
+    // A file is the innermost dependency's: a subrepo vendored inside another is its own.
+    const ownerOf = (file: string) => dirs.filter((d) => file.startsWith(`${d}/`)).sort((a, b) => b.length - a.length)[0];
+    for (const record of records.slice(0, 200)) {
+      const dir = record.slice(0, -"/.gitrepo".length);
+      const text = (await gitIn(clone, ["cat-file", "blob", `${to}:${record}`])).stdout.slice(0, 4096);
+      const remote = /^\s*remote\s*=\s*(\S+)/m.exec(text)?.[1] ?? "";
+      const branch = /^\s*branch\s*=\s*(\S+)/m.exec(text)?.[1] ?? "release";
+      // git@github.com:owner/name.git or https://github.com/owner/name(.git)
+      const named = /github\.com[:/]([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(remote);
+      const id = named && parseRepoName(`${named[1]}/${named[2]}`);
+      // The project's own release/ (its .gitrepo names the project itself) is publishing, not
+      // a dependency.
+      if (id === `${repo.owner}/${repo.name}`) continue;
+      out.push({ dir, remote: id, branch: isBranch(branch) ? branch : "release", files: changed.filter((f) => ownerOf(f) === dir && f !== record).slice(0, 2000) });
+    }
+    return out;
   },
   async "review.diff"(args) {
     return offers.diff(domains.slugOf(args.domain, "domain"), args.repo, args.branch, args.against);
