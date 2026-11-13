@@ -771,6 +771,24 @@ They stay two origins, and:
 - The frame tells the parent one number (how many pushes wait), to that origin only; the
   parent believes only that origin, and only a number.
 
+## Small things the second promo found (decided on the Mac; tested on T2, seen on the M1)
+
+- **No devcontainer lockfile in an agent's checkout.** A spec with features makes the
+  devcontainer CLI write `devcontainer-lock.json` beside it, and the agent's `git add -A`
+  committed it. desolate passes `--no-lockfile` unless the project keeps a lockfile of its own
+  (then the CLI verifies it, as the project asked).
+- **A domain with several repositories opens as one editor window.** The workspace's init
+  (in its VM, with the domain's trust) writes `/workspaces/.desolate/<workspace>.code-workspace`
+  with every checkout; `desolate editor` and the dashboard open it. The host writes nothing
+  into a share a domain controls.
+- **Git LFS in the container.** A repository that keeps files in LFS, in a container without
+  git-lfs, cannot commit them there. desolate says so where it reports the devcontainer
+  (`desolate up`, the dashboard) and names the feature to add; it does not change the
+  project's environment.
+- `desolate up` ends with the next two commands; its first phase is called what it is
+  ("asked the root": the domain, the template check, the plan; about 0.2 s each, no network).
+- `desolate clone`'s hint teaches `domain create --repo`.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the

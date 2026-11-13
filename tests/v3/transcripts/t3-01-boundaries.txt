@@ -47,7 +47,7 @@ $ desolate clone acme/widgets
   read key: registered
   write key: registered (it asks you before every push)
 cloned acme/widgets: 1 branch(es), default main, 1 LFS object(s); pushable.
-next: desolate domain create <slug> && desolate domain <slug> add --repo acme/widgets
+next: desolate domain create <slug> --repo acme/widgets   (or, to a domain you have: desolate domain <slug> add --repo acme/widgets)
 fetching acme/widgets with the read key
 [exit 0]
 
@@ -67,7 +67,9 @@ workspace a/w1 is up
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://a-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fwidgets
   dev servers  http://a-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor a/w1 --open      its editor, in your browser
+      desolate exec a/w1 -- <agent>       an agent (or any command), in its devcontainer
 [exit 0]
 
 ## root in the VM against the read-only shares
@@ -82,7 +84,7 @@ a: any public host is reachable (open). Its workspaces still reach nothing inter
 ## an offer, and hostile content, over a real share
 
 $ desolate review a acme/widgets offered --diff
-acme/widgets  offered  at <commit>
+acme/widgets  offered  at <commit>, against origin/main
 a push would send 2 commit(s): 1 file changed, 2 insertions(+)
   <id>  an honest change
   <id>  change
@@ -126,7 +128,9 @@ workspace b/w1 is up
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://b-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fwidgets
   dev servers  http://b-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor b/w1 --open      its editor, in your browser
+      desolate exec b/w1 -- <agent>       an agent (or any command), in its devcontainer
 [exit 0]
 
 ## destroy

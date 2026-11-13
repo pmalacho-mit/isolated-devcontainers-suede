@@ -32,7 +32,8 @@ const sh = (command: string, args: string[], options: { input?: string; allowFai
   if (ran.status !== 0 && !options.allowFail) throw new Error(`${command} ${args.join(" ")} failed (${ran.status}): ${text.slice(-1500)}`);
   return masked(text);
 };
-const desolate = (...args: string[]) => sh(CLI, args);
+/** desolate, its two streams in the order they were written (as a terminal shows them). */
+const desolate = (...args: string[]) => sh("bash", ["-c", '"$0" "$@" 2>&1', CLI, ...args]);
 /** As the agent, in its workspace's checkout of the app (in its devcontainer). */
 const agent = (script: string) => sh(CLI, ["exec", "acme/agent-1", "--checkout", APP, "--", "bash", "-lc", script]);
 const BRANCH = "feature/greet-by-name";
@@ -96,7 +97,9 @@ const film = async () => {
   let last = Date.now();
   while (filming) {
     const now = Date.now();
-    if (rolling) clock += now - last;
+    // (At most one frame's worth: a gap is the event loop held by a command run on the Mac,
+    // with the camera off, even if it is rolling again by the time this looks.)
+    if (rolling) clock += Math.min(now - last, 250);
     last = now;
     if (rolling && onScreen) {
       const shot = (await send("Page.captureScreenshot", { format: "jpeg", quality: 84 }, onScreen.sessionId)) as { data?: string };
@@ -189,6 +192,10 @@ try {
   const editor = await tab(address(/(http:\S+tkn=[0-9a-f]+\S*)/, "editor", "acme/agent-1"));
   await until(editor, /EXPLORER|Explorer/, 180_000);
   await sleep(6000);
+  // (The empty secondary side bar, closed: more room for the code.)
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: 1257, y: 53, button: "left", clickCount: 1 }, editor.sessionId);
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: 1257, y: 53, button: "left", clickCount: 1 }, editor.sessionId);
+  await sleep(800);
   await show(editor);
   await caption(editor, "agent-1's editor: VSCodium, in its VM. Its terminal is inside the project's devcontainer.");
   roll();
@@ -228,6 +235,20 @@ def p(w,h,c):
   k=lambda t,d: struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
   return b'\\x89PNG\\r\\n\\x1a\\n'+k(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+k(b'IDAT',zlib.compress(r,9))+k(b'IEND',b'')
 open('assets/banner.png','wb').write(p(640,160,(230,120,40)))"`);
+  // The changed file, in the editor (it reloads from disk); then back to the terminal.
+  await press(editor, "F1", "F1", 112);
+  await sleep(500);
+  await press(editor, "Backspace", "Backspace", 8);
+  await typeInto(editor, "src/greet.js");
+  await sleep(900);
+  await enter(editor);
+  await sleep(1500);
+  await press(editor, "F1", "F1", 112);
+  await sleep(500);
+  await typeInto(editor, "Terminal: Focus Terminal");
+  await sleep(600);
+  await enter(editor);
+  await sleep(600);
   await caption(editor, "The agent edits, and runs the project's tests where the project says they run");
   await inTerminal("git status -s && npm test 2>&1 | tail -8", 7000);
   const before = agent("git rev-parse HEAD").trim();
@@ -298,7 +319,7 @@ done
   await caption(gitTab, "Each domain is a remote: what its workspaces wrote, as acme/<branch>");
   await gitCommand(`git log --oneline -2 acme/${BRANCH} && git diff --stat main acme/${BRANCH}`, /files? changed/, 2500);
   await caption(gitTab, "git push origin: the approval opens beside the terminal");
-  await gitCommand(`git push origin acme/${BRANCH}:${BRANCH}`, /handed to the root/, 300);
+  await gitCommand(`git push origin acme/${BRANCH}:refs/heads/${BRANCH}`, /handed to the root/, 300);
   // The approval page, framed beside the terminal: found as a target of its own.
   let frame = "";
   for (let i = 0; i < 120 && !frame; i++) {

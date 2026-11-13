@@ -42,7 +42,9 @@ workspace web/one is up  [NOT ISOLATED: fake backend]
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://web-one-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fapp
   dev servers  http://web-one-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor web/one --open      its editor, in your browser
+      desolate exec web/one -- <agent>       an agent (or any command), in its devcontainer
 [exit 0]
 
 ## names that are not the editor's

@@ -148,6 +148,30 @@ the security findings, open and closed.
 - **T2 on a Mac is partial** (the fake backend's link is a host socket Colima cannot reach):
   `tests/v3/README.md`.
 
+### 2e. Working it end to end (2026-11-13, an agent on the M1)
+
+Five steps, each audited (PRs #84 to #91): the pusher (the one user that reaches a write
+key; it speaks receive-pack and parses nothing), one-click approval in the browser, the git
+VM with a terminal in a browser tab, the root VM walled off from the Mac's loopback, and
+`desolate events`. Then a promo video of the whole flow, which found three bugs (#89–#91), and
+the ergonomics that the video showed were missing (#92, #93, and `mac/ergonomics-2`):
+
+- each checkout's live branch (its HEAD, from the Mac's file events) on the dashboard, in
+  `desolate list` and as `head` events;
+- every branch a domain makes reaches the root as it is written, reviewable without an offer
+  (`desolate branches`, the dashboard's Branches, `--against domain`);
+- `desolate status` inside a workspace;
+- in the git VM, a remote per domain (`git fetch acme`, `git push acme <branch>` delivers) and
+  `desolate fetch`;
+- push and approve in one tab: the approval page framed beside the git terminal, by that
+  origin alone;
+- `domain create --repo`, `up --branch`, `--open`, the Mac's git identity in the git VM;
+- no devcontainer lockfile written into an agent's checkout.
+
+Dummy repositories for demos: `mitdesolate/desolate-promo-app` (LFS, a devcontainer with the
+git-lfs feature, a test) and `mitdesolate/desolate-promo-lib`. The recording script is
+`tests/v3/demo/promo/promo.ts`; the approval-only one is `tests/v3/demo/record-approval.ts`.
+
 ### What has never been run
 
 - **The `vz` backend.** `release/host/vm/lima.ts` was written from the M1's Phase 0 results

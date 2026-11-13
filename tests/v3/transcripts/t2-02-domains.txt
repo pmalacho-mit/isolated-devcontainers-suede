@@ -56,9 +56,11 @@ workspace nests-dev/w1 is up  [NOT ISOLATED: fake backend]
   acme/consumer  main checkout (main)  /workspaces/acme/consumer
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
-  editor       http://nests-dev-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fconsumer
+  editor       http://nests-dev-w1-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Fw1.code-workspace
   dev servers  http://nests-dev-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor nests-dev/w1 --open      its editor, in your browser
+      desolate exec nests-dev/w1 -- <agent>       an agent (or any command), in its devcontainer
 [exit 0]
 
 ## a second workspace in the domain
@@ -73,9 +75,11 @@ workspace nests-dev/issue-12 is up  [NOT ISOLATED: fake backend]
   acme/consumer  worktree issue-12 from main  /workspaces/acme/consumer/.worktrees/issue-12
   acme/widgets  worktree issue/12 from main  /workspaces/acme/widgets/.worktrees/issue-12
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
-  editor       http://nests-dev-issue-12-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fconsumer%2F.worktrees%2Fissue-12
+  editor       http://nests-dev-issue-12-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Fissue-12.code-workspace
   dev servers  http://nests-dev-issue-12-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor nests-dev/issue-12 --open      its editor, in your browser
+      desolate exec nests-dev/issue-12 -- <agent>       an agent (or any command), in its devcontainer
 [exit 0]
 
 ## fetch, then start from the remote's main
@@ -85,9 +89,11 @@ workspace nests-dev/fresh is up  [NOT ISOLATED: fake backend]
   acme/consumer  worktree fresh from origin/main  /workspaces/acme/consumer/.worktrees/fresh
   acme/widgets  worktree issue/13 from origin/main  /workspaces/acme/widgets/.worktrees/issue-13
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
-  editor       http://nests-dev-fresh-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fconsumer%2F.worktrees%2Ffresh
+  editor       http://nests-dev-fresh-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Ffresh.code-workspace
   dev servers  http://nests-dev-fresh-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: mirrors refreshed <duration>, planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: mirrors refreshed <duration>, asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor nests-dev/fresh --open      its editor, in your browser
+      desolate exec nests-dev/fresh -- <agent>       an agent (or any command), in its devcontainer
 fetching acme/consumer with the read key
 fetching acme/widgets with the read key
 [exit 0]
@@ -114,9 +120,11 @@ workspace other/w1 is up  [NOT ISOLATED: fake backend]
   acme/private  main checkout (main)  /workspaces/acme/private
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
-  editor       http://other-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fprivate
+  editor       http://other-w1-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Fw1.code-workspace
   dev servers  http://other-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor other/w1 --open      its editor, in your browser
+      desolate exec other/w1 -- <agent>       an agent (or any command), in its devcontainer
 [exit 0]
 
 ## exec and list
@@ -160,9 +168,11 @@ workspace nests-dev/taker is up  [NOT ISOLATED: fake backend]
   acme/consumer  main checkout (main)  /workspaces/acme/consumer
   acme/widgets  main checkout (main)  /workspaces/acme/widgets
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
-  editor       http://nests-dev-taker-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fconsumer
+  editor       http://nests-dev-taker-editor-<hex>.localhost:31591/?tkn=<token>&workspace=%2Fworkspaces%2F.desolate%2Ftaker.code-workspace
   dev servers  http://nests-dev-taker-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor nests-dev/taker --open      its editor, in your browser
+      desolate exec nests-dev/taker -- <agent>       an agent (or any command), in its devcontainer
 [exit 0]
 
 ## remove a domain

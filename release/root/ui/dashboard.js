@@ -183,7 +183,7 @@ const branchList = (d) => {
       el("div", { class: "what" },
         el("div", { class: "name" }, el("span", { class: "mono" }, b.branch), " ", el("span", { class: "sub" }, b.repo)),
         el("div", { class: "line" }, el("span", { class: "mono" }, short(b.commit)), offered(b) ? " · offered" : "", where(b).length ? ` · checked out in ${where(b).join(", ")}` : "")),
-      el("div", { class: "buttons" }, el("button", { class: "quiet", onclick: () => openReview({ domain: d.slug, repo: b.repo, branch: b.branch }) }, "Review"))))));
+      el("div", { class: "buttons" }, el("button", { class: "quiet", onclick: () => openReview({ domain: d.slug, repo: b.repo, branch: b.branch }) }, "Review"), gitLink(b.repo))))));
 };
 const branchesOpen = new Set();
 
