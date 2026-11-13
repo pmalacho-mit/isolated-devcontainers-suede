@@ -233,4 +233,21 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
     const fetched = stack.inVm(gitVm(), ["bash", "-lc", "cd /git/acme/widgets && desolate fetch 2>&1; echo EXIT=$?"]);
     assert.match(fetched.stdout, /asking the root to refresh acme\/widgets[\s\S]*Fetching origin[\s\S]*Fetching dev[\s\S]*EXIT=0/, fetched.stdout);
   });
+
+  it("an offered branch's new LFS file checks out in the git VM, from the root's store, whole", async () => {
+    // (git-lfs's own file transfer runs git inside the bare mirror, which the git VM's
+    // safe.bareRepository refuses: no LFS file was ever checked out there. desolate's agent,
+    // git/lfs-file.ts, reads the mirror's store and the root clone's.)
+    const ws = (script: string) => stack.desolate("exec", "dev/w1", "--checkout", "acme/widgets", "--", "bash", "-lc", script);
+    const made = ws("git switch -q -c lfs/art && git lfs track '*.bin' >/dev/null && head -c 40000 /dev/urandom > art.bin && git add .gitattributes art.bin && git -c user.name=a -c user.email=a@a commit -qm art && sha256sum art.bin | cut -d' ' -f1 && desolate offer >/dev/null && echo OFFERED");
+    assert.match(made.stdout, /OFFERED/, made.stdout + made.stderr);
+    const oid = made.stdout.trim().split("\n")[0]!;
+    assert.equal(stack.desolate("git", "acme/widgets").code, 0);
+    let got = "";
+    for (let i = 0; i < 40 && !got.includes(oid); i++) {
+      got = stack.inVm(gitVm(), ["bash", "-lc", "cd /git/acme/widgets && git fetch -q dev 2>&1; git switch -q -c look dev/lfs/art 2>&1 && sha256sum art.bin; git switch -q main 2>/dev/null; git branch -q -D look 2>/dev/null; true"]).stdout;
+      if (!got.includes(oid)) await sleep(500);
+    }
+    assert.match(got, new RegExp(`^${oid}  art\\.bin$`, "m"), `the file itself, not its pointer: ${got}`);
+  });
 });

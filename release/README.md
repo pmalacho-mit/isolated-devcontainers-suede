@@ -92,6 +92,7 @@ desolate review dev acme/widgets issue/12 --against domain   # ... or beside the
 desolate push dev acme/widgets issue/12 --expect <commit>   # asks you, on your terminal
 desolate git acme/widgets --open                     # git in your browser: a shell in the git VM (below)
 desolate events                                      # what happens, as JSON lines, for your own scripts
+desolate notify                                      # ... or as notifications: a push waiting, an agent asking
 desolate root shell                                  # ordinary git on your clones: fetch --all, diff, push
 desolate approve                                     # ... and this approves a `git push origin` made there
 desolate approve --web                               # or: the approval page's address, for one click

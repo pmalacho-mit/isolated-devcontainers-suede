@@ -60,8 +60,8 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
    **Still open:** that user still reads every share and holds every editor's token; a bug
    in git's own parsing that compromises it could mislead the reviewer (not the pusher); the
    terminal prompt (`desolate push`) shows that user's summary, not the reviewer's;
-   approvals given at the terminal are not events; an offered branch's new LFS objects check
-   out as pointers in the git VM. **Against github.com** (2026-11-12): a branch pushed from the git VM to
+   approvals given at the terminal are not events. (Fixed since: an offered branch's new LFS
+   objects, and every LFS file, checked out as pointers in the git VM; `git/lfs-file.ts`.) **Against github.com** (2026-11-12): a branch pushed from the git VM to
    `mitdesolate/desolate-scratch`, approved by the person on the approval page in Chrome:
    the pusher's own receive-pack and its compare-and-swap from `onto` (none: a new branch)
    took, and the branch on GitHub is that commit. `desolate events` said `git-push-handed`,

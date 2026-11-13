@@ -69,4 +69,5 @@ mkdir -p /etc/vim
 printf 'set nomodeline\nset modelines=0\n' >/etc/vim/vimrc.local
 ln -sf /desolate/release/git/git-remote-desolate-out /usr/local/bin/git-remote-desolate-out
 ln -sf /desolate/release/git/desolate /usr/local/bin/desolate
+ln -sf /desolate/release/git/desolate-lfs-file /usr/local/bin/desolate-lfs-file
 echo "git VM: ready"

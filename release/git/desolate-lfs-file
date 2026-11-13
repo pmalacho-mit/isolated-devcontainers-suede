@@ -1,0 +1,3 @@
+#!/bin/sh
+# git-lfs's transfer agent in the git VM: see lfs-file.ts.
+exec node --disable-warning=ExperimentalWarning /desolate/release/git/lfs-file.ts "$@"
