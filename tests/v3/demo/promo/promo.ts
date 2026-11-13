@@ -155,6 +155,7 @@ const replay = async (prompt: string, shown: string, output: string, after = 160
 const MAC = "you@mac ~ %";
 
 let prOutput = "";
+let listenerPid = 0;
 try {
   // ------------------------------------------------------------ 0. what this is
   await card("desolate", ["Coding agents, each in a VM of its own, on your Mac.", "They commit and offer. You review, approve with one click, and it is pushed."], "Everything here ran for real: Lima on an M1, a real GitHub repository. Waits are cut.", 5500);
@@ -238,6 +239,7 @@ done
   const prLog = path.join(os.tmpdir(), "open-prs.log");
   fs.writeFileSync(prLog, "");
   const listener = spawn("bash", [scriptReal], { env: process.env, stdio: ["ignore", fs.openSync(prLog, "a"), fs.openSync(prLog, "a")], detached: true });
+  listenerPid = listener.pid ?? 0;
   await terminal("Terminal on your Mac", "");
   await replay(MAC, "cat open-prs.sh", fs.readFileSync(script, "utf8"), 2500);
   await replay(MAC, "./open-prs.sh &", "[1] " + String(listener.pid), 1500);
@@ -298,11 +300,6 @@ done
   await terminal("Terminal on your Mac", "the script heard the pusher");
   await replay("", "", prOutput || "(no pull request yet)", 2000);
   if (number) await replay(MAC, `gh pr view ${number} --repo ${APP}`, sh("gh", ["pr", "view", number, "--repo", APP]), 4500);
-  try {
-    process.kill(-listener.pid!);
-  } catch {
-    /* gone */
-  }
 
   // ------------------------------------------------------------ 10. what kept it safe
   await card("What kept it safe", [
@@ -311,6 +308,13 @@ done
     "The approval is a click on a page your Mac serves; nothing in a VM can make it.",
   ], "desolate · github.com/pmalacho-mit/isolated-devcontainers-suede (v3)", 8000);
 } finally {
+  // The events listener, whatever happened: it is a process group of its own.
+  if (listenerPid)
+    try {
+      process.kill(-listenerPid);
+    } catch {
+      /* gone */
+    }
   filming = false;
   await filmed;
   socket.close();

@@ -813,7 +813,11 @@ export const ui = async (): Promise<{ dashboard: string; approvals: string }> =>
  *  not replayed, but `replay` asks for the last ones the daemon still holds). */
 export const followEvents = async (replay: number, onLine: (line: string) => boolean | void, drained?: (resume: () => void) => void): Promise<never> => {
   for (let first = true; ; first = false) {
-    await ensureDaemon();
+    // The daemon is started once, here. A daemon that went away later (desolate down,
+    // destroy) is waited for, never started again: a listener left running must not bring
+    // back a stack that was taken down (found: one did, in a home destroy then deleted).
+    if (first) await ensureDaemon();
+    else while (!(await alive())) await sleep(2000);
     await new Promise<void>((resolve) => {
       const connection = connect(SOCKET);
       let buffer = "";
