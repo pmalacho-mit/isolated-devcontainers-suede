@@ -84,7 +84,7 @@ a: any public host is reachable (open). Its workspaces still reach nothing inter
 ## an offer, and hostile content, over a real share
 
 $ desolate review a acme/widgets offered --diff
-acme/widgets  offered  at <commit>
+acme/widgets  offered  at <commit>, against origin/main
 a push would send 2 commit(s): 1 file changed, 2 insertions(+)
   <id>  an honest change
   <id>  change
