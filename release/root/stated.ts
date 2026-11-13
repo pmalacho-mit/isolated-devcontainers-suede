@@ -367,7 +367,7 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
   }
   if (req.method === "GET" && url.pathname === "/diff") {
     try {
-      return json(res, 200, await offers.diff(domains.slugOf(url.searchParams.get("domain"), "domain"), url.searchParams.get("repo"), url.searchParams.get("branch"), url.searchParams.get("against")));
+      return json(res, 200, await offers.diff(domains.slugOf(url.searchParams.get("domain"), "domain"), url.searchParams.get("repo"), url.searchParams.get("branch"), url.searchParams.get("against"), url.searchParams.get("whitespace")));
     } catch (error) {
       return json(res, 400, { error: (error as Error).message });
     }

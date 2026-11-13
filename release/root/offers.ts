@@ -165,11 +165,14 @@ export const review = async (domain: string, repoArg: unknown, branch: unknown, 
  *  is the content's, so whoever shows it shows it as text. Capped: a diff too long to read
  *  is cut, and says so. */
 export const DIFF_LIMIT = 1024 * 1024;
-export const diff = async (domain: string, repoArg: unknown, branch: unknown, against: unknown = "origin"): Promise<{ repo: string; branch: string; commit: string; base: string; against: Against; text: string; truncated: boolean }> => {
+export const diff = async (domain: string, repoArg: unknown, branch: unknown, against: unknown = "origin", whitespace: unknown = "show"): Promise<{ repo: string; branch: string; commit: string; base: string; against: Against; whitespace: "show" | "ignore"; text: string; truncated: boolean }> => {
   const r = await review(domain, repoArg, branch, against);
   const clone = clonePath(parseRepo(r.repo)!);
   if (!ownedByRoot(clone)) throw new Error("not a root clone");
-  const child = spawn("git", [...safeIn(clone), "-C", clone, "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--unified=3", r.base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", r.commit, "--"],
+  const child = spawn("git", [...safeIn(clone), "-C", clone, "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--unified=3",
+    // histogram: hunks that follow the code's own structure (git's, no new parser); -w on asking,
+    // for a change that is mostly re-indentation.
+    "--diff-algorithm=histogram", ...(whitespace === "ignore" ? ["-w"] : []), r.base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", r.commit, "--"],
     { stdio: ["ignore", "pipe", "ignore"], env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: "C.UTF-8", GIT_CONFIG_GLOBAL: GITCONFIG, GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", GIT_EXTERNAL_DIFF: "" } });
   const chunks: Buffer[] = [];
   let size = 0;
@@ -191,5 +194,5 @@ export const diff = async (domain: string, repoArg: unknown, branch: unknown, ag
   });
   await new Promise<void>((resolve) => child.on("close", () => resolve()));
   clearTimeout(timer);
-  return { repo: r.repo, branch: r.branch, commit: r.commit, base: r.base, against: r.against, text: Buffer.concat(chunks).toString("utf8"), truncated };
+  return { repo: r.repo, branch: r.branch, commit: r.commit, base: r.base, against: r.against, whitespace: whitespace === "ignore" ? "ignore" : "show", text: Buffer.concat(chunks).toString("utf8"), truncated };
 };

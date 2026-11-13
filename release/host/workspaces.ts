@@ -343,7 +343,8 @@ export const exec = async (target: string | undefined, command: string[], option
   const checkout = options.checkout ? w.checkouts.find((c) => c.repo === options.checkout) : w.checkouts[0];
   if (!checkout) refuse(`${options.checkout} is not checked out in ${w.domain}/${w.workspace}`, `it has: ${w.checkouts.map((c) => c.repo).join(", ")}`);
   const b = backend();
-  if ((await b.info(w.vm)).status !== "running") refuse(`${w.domain}/${w.workspace} is not running`, `desolate start ${w.domain}/${w.workspace}`);
+  // (Not asked first whether the VM runs: that is a round trip on every exec. A stopped VM's
+  // exec fails at once, and is said as such below.)
   // In the project's devcontainer when the workspace has one that is up, else in the VM
   // itself (enter.sh decides, inside the VM); --vm asks for the VM itself.
   const child = b.spawn(w.vm, ["bash", `${guest.release}/workspace/enter.sh`, ...(options.vm ? ["--vm"] : []), checkout!.path, "--", ...command]);
@@ -359,7 +360,10 @@ export const exec = async (target: string | undefined, command: string[], option
     const filter = terminalFilter();
     child.stderr!.on("data", (chunk: Buffer) => process.stderr.write(filter(chunk)));
   } else child.stderr!.pipe(process.stderr);
+  let lima = "";
+  child.stderr!.on("data", (chunk: Buffer) => { if (lima.length < 2000) lima += chunk.toString("utf8"); });
   const code = await new Promise<number>((resolve) => child.on("close", (status) => resolve(status ?? 1)));
+  if (code !== 0 && /instance .* is stopped|is not running/i.test(lima)) process.stderr.write(`desolate: ${w.domain}/${w.workspace} is not running\n  fix: desolate start ${w.domain}/${w.workspace}\n`);
   // A full-screen program's modes, off again: the terminal is your shell's.
   if (process.stdout.isTTY) process.stdout.write(TERMINAL_RESET);
   process.stdin.unpipe();
