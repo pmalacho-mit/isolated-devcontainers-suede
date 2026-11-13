@@ -12,6 +12,10 @@ import { isBranch, parseRepo, repoId } from "../shared/names.ts";
 import { run } from "../shared/run.ts";
 import { branches, domainRepos, importDeliveries, request, stageLfs, syncRepo } from "./sync.ts";
 
+// Its output piped into something that stops reading (`desolate offer | head -1`): done,
+// not a crash (an agent's script with pipefail died on it).
+process.stdout.on("error", (error: NodeJS.ErrnoException) => (error.code === "EPIPE" ? process.exit(0) : process.exit(1)));
+
 const fail = (message: string, fix: string): never => {
   process.stderr.write(`desolate: ${message}\n  fix: ${fix}\n`);
   process.exit(1);

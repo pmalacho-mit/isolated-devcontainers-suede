@@ -348,6 +348,8 @@ const main = async (argv: string[]): Promise<number> => {
   throw new Refusal(`desolate has no command '${verb}'`, "desolate help", EXIT.usage);
 };
 
+// Piped into something that stops reading (`desolate list | head -1`): done, not a crash.
+process.stdout.on("error", (error: NodeJS.ErrnoException) => process.exit(error.code === "EPIPE" ? 0 : EXIT.failed));
 try {
   process.exitCode = await main(process.argv.slice(2));
 } catch (error) {
