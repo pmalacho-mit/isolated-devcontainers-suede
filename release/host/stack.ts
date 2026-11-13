@@ -66,8 +66,56 @@ export const rootSpec = (): VmSpec => ({
 
 const NODE = ["node", "--disable-warning=ExperimentalWarning"];
 
-/** One request over the CLI channel. The root's refusals arrive as Refusals, with their fix. */
+/** The CLI channel's service in the root (root/rootctl.ts serve): one request a connection. */
+const ROOTCTL_SOCKET = "/run/desolate/rootctl/rootctl.sock";
+type Reply<T> = { ok: boolean; result?: T; error?: string; fix?: string; code?: number };
+
+/** The request, over the service: its progress shown as it comes, its answer, or null when
+ *  the service is not there or its code is stale (the caller then asks the old way). */
+const viaService = <T>(op: string, args: Record<string, unknown>, options: { quiet?: boolean; timeoutMs?: number }): Promise<Reply<T> | null> =>
+  new Promise((resolve) => {
+    // (socat's -t: how long it waits for the answer after sending the request.)
+    const child = backend().spawn(ROOT_VM, ["socat", "-t", "86400", "-", `UNIX-CONNECT:${ROOTCTL_SOCKET}`]);
+    let buffer = "";
+    let reply: Reply<T> | null = null;
+    let accepted = false;
+    const timer = setTimeout(() => child.kill("SIGKILL"), options.timeoutMs ?? 900_000);
+    child.stdout!.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, end);
+        buffer = buffer.slice(end + 1);
+        try {
+          const message = JSON.parse(line) as { accepted?: boolean; progress?: unknown; reply?: Reply<T>; stale?: boolean };
+          if (message.accepted) accepted = true;
+          if (typeof message.progress === "string" && !options.quiet) process.stderr.write(`${message.progress}\n`);
+          if (message.reply) reply = message.reply;
+        } catch {
+          /* not a line of the service's */
+        }
+      }
+    });
+    child.stderr!.on("data", () => {});
+    child.stdin!.on("error", () => {});
+    child.on("error", () => resolve(null));
+    child.on("close", () => {
+      clearTimeout(timer);
+      // Taken and not answered: the operation may have run. Said, not asked again.
+      if (!reply && accepted) resolve({ ok: false, error: `the root took '${op}' and its answer was lost: it may have run`, fix: "desolate doctor; then look before asking again", code: 1 });
+      else resolve(reply);
+    });
+    child.stdin!.end(JSON.stringify({ op, args }) + "\n");
+  });
+
+/** One request over the CLI channel. The root's refusals arrive as Refusals, with their fix.
+ *  Asked of the root's CLI service when it is up (a fraction of the time), else by running
+ *  rootctl.ts once (a fresh stack, a service restarting on new code). */
 export const rootctl = async <T = unknown>(op: string, args: Record<string, unknown> = {}, options: { quiet?: boolean; timeoutMs?: number } = {}): Promise<T> => {
+  const served = process.env.DESOLATE_ROOTCTL === "exec" ? null : await viaService<T>(op, args, options);
+  if (served) {
+    if (!served.ok) throw new Refusal(served.error ?? "the root refused", served.fix ?? "", served.code ?? 1);
+    return served.result as T;
+  }
   const result = await backend().exec(ROOT_VM, [...NODE, `${guest.release}/root/rootctl.ts`], {
     input: JSON.stringify({ op, args }),
     inheritStderr: !options.quiet,

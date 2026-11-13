@@ -16,9 +16,17 @@ if [ "$VM" = 0 ] && [ -s "$STATE" ] && [ "$(jq -r .state "$STATE" 2>/dev/null)" 
   if [ "$(docker inspect -f '{{.State.Running}}' "$ID" 2>/dev/null)" = true ]; then
     # A compose service sees the project where its own spec mounted it, not at the VM's path.
     [ "$(jq -r .compose "$STATE")" = true ] && DIR=$(jq -r .folder "$STATE")
-    # `devcontainer exec` and not `docker exec`: it gives the command the environment the
-    # spec describes (remoteEnv, the user's own shell environment), as the ecosystem's
-    # tools do. It starts in the spec's folder; the directory asked for is entered here.
+    # The environment the spec describes (remoteEnv, the user's own shell environment), as
+    # `devcontainer exec` gives it: worked out once, when the container came up
+    # (devcontainer.ts), and given here to `docker exec`, which takes 20 ms where the CLI
+    # takes 300 to 400 (measured on the M1). Without it, the devcontainer CLI itself.
+    EXEC_ENV=$HOME/.desolate-devcontainer/exec-env.json
+    if [ -s "$EXEC_ENV" ] && [ "$(jq -r .containerId "$EXEC_ENV")" = "$ID" ]; then
+      ARGS=(-i -u "$(jq -r .user "$EXEC_ENV")" -w "$DIR")
+      [ -t 0 ] && [ -t 1 ] && ARGS+=(-t -e "TERM=${TERM:-xterm-256color}")
+      while IFS= read -r -d '' entry; do ARGS+=(-e "$entry"); done < <(jq -j '.env[] + "\u0000"' "$EXEC_ENV")
+      exec docker exec "${ARGS[@]}" "$ID" "$@"
+    fi
     exec devcontainer exec --workspace-folder "$(jq -r .checkout "$STATE")" --config "$(jq -r .config "$STATE")" \
       --override-config "$(jq -r .override "$STATE")" \
       sh -c 'cd "$1" && shift && exec "$@"' sh "$DIR" "$@"

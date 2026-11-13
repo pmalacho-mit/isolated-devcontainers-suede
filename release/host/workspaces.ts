@@ -66,25 +66,38 @@ const said = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "?
 
 export const startServices = async (plan: WorkspacePlan) => {
   const b = backend();
+  // Each step's time, for whoever is watching (DESOLATE_PROGRESS): where a start goes.
+  let at = Date.now();
+  const step = (name: string) => {
+    if (process.env.DESOLATE_PROGRESS) process.stderr.write(`progress:   ${name} (${((Date.now() - at) / 1000).toFixed(1)} s)\n`);
+    at = Date.now();
+  };
   // The workspace's own proxy, in the root, as its domain's proxies' user; then its link,
   // which leads there and nowhere else.
   await ensureProxyUser(plan.domain);
   const proxy = await rootctl<{ socket: string }>("proxy.start", { vm: plan.vm, domain: plan.domain, workspace: plan.workspace }, { quiet: true });
   const { connectWorkspace } = await import("./daemon.ts");
+  step("its proxy");
   await connectWorkspace({ ...plan, proxy: proxy.socket });
+  step("its link");
   const services = await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest], { root: true, timeoutMs: 300_000 });
+  step("its services (start.sh)");
   if (services.code !== 0) throw new Error(`the workspace's services did not start: ${said((services.stderr || services.stdout).trim().slice(-600))}`);
   // start.sh puts the user in the docker group; what the host runs next must have it.
   await b.refreshSessions?.(plan.vm, services.stdout.includes("desolate: sessions raised"));
   const init = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/init.ts`, plan.workspace], { timeoutMs: 900_000 });
+  step("its checkouts (init.ts)");
   if (init.code !== 0) throw new Error(`the workspace could not make its checkouts: ${said((init.stderr || init.stdout).trim().slice(-800))}`);
   // A docker daemon only where one is wanted: a checkout with a spec (start.sh says how).
   if (plan.checkouts.some((c) => locateSpec(paths.domainRepos(plan.domain), c))) await b.exec(plan.vm, ["bash", `${guest.release}/workspace/start.sh`, String(process.getuid!()), b.link(plan.vm).guest, "docker"], { root: true, timeoutMs: 300_000 });
   // The project's devcontainer, then the editor (which runs in it when it can). Neither
   // fails the workspace: without them it is the VM itself, and `up` says which it is.
+  step("docker");
   const dev = await b.exec(plan.vm, [...NODE, `${guest.release}/workspace/devcontainer.ts`, plan.workspace], { timeoutMs: 3_700_000 });
+  step("the devcontainer"); 
   const devcontainer = said(/^devcontainer: (.*)$/m.exec(dev.stdout)?.[1]?.trim().slice(0, 500) ?? `FAILED: ${(dev.stderr || dev.stdout).trim().slice(-300) || "it said nothing"}`);
   const editor = await b.exec(plan.vm, ["bash", "-lc", `bash ${guest.release}/workspace/editor.sh ${editorHostname(INSTANCE, plan.domain, plan.workspace)}`], { timeoutMs: 300_000 });
+  step("the editor");
   return { editorDown: editor.code === 0 ? null : said((editor.stderr || editor.stdout).trim().split("\n").slice(-2).join(" ").slice(0, 300)) || "the editor did not start", devcontainer };
 };
 

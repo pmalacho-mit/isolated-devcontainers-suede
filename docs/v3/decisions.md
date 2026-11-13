@@ -801,6 +801,35 @@ uncertain. An agent's words appear under its workspace's name ("dev/w1 says: ...
 printable, and reach osascript as an argument, never as script: a status message cannot
 pose as desolate, or run anything.
 
+## Performance: where the time went, and what was cut (measured on the M1, 2026-11-13)
+
+Measured on a fresh stack with two repositories and a devcontainer:
+
+| | before | after |
+|---|---|---|
+| a call to the root (`rootctl`) | 240 ms | 78 ms |
+| `desolate list` / `offers` / `branches` | 0.45 / 0.63 / 0.43 s | 0.27 / 0.27 / 0.23 s |
+| `desolate exec` into a devcontainer | 0.84 s | 0.34 s |
+| `desolate editor` | 0.90 s | 0.42 s |
+| a push's card on the approval page | up to 2 s | up to 1 s |
+
+- **The root's CLI channel is kept running** (`rootctl.ts serve`, kept by start.sh like rootd):
+  140 ms of every call was loading the root's code. A request is one connection to a socket
+  only the root's ordinary user can open (the same user that ran rootctl before: nothing new
+  can ask). The service says it took a request before running it, so the host never asks
+  again the old way for something that may have run; it steps aside when the root's code
+  changed under it, and the host then asks the old way, with the new code. (First cut: node
+  closed a connection when the host half-closed it, and every slower operation's answer was
+  lost; found by doctor.)
+- **`exec` and the editor's terminals enter the devcontainer with `docker exec`**, given the
+  environment `devcontainer exec` would give (remoteEnv and its probe of the user's login
+  shell), worked out once when the container comes up: 20 ms instead of 300 to 400. Checked:
+  the same environment, line for line, as the CLI's. Without that file, the CLI as before.
+- **What was not cut:** a workspace from its domain's template takes about 20 s, of which the
+  VM's boot is 10 to 13 s (Lima and Virtualization.framework) and the devcontainer CLI's
+  `up` 6 s; every other step is under a second (`DESOLATE_PROGRESS=1 desolate up` prints
+  each). The devcontainer needs the checkouts, so the two cannot overlap.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the
