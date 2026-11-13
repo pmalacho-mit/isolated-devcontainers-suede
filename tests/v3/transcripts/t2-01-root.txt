@@ -112,7 +112,7 @@ $ desolate clone acme/widgets
   read key: registered
   write key: registered (it asks you before every push)
 cloned acme/widgets: 1 branch(es), default main, 1 LFS object(s); pushable.
-next: desolate domain create <slug> && desolate domain <slug> add --repo acme/widgets
+next: desolate domain create <slug> --repo acme/widgets   (or, to a domain you have: desolate domain <slug> add --repo acme/widgets)
 fetching acme/widgets with the read key
 [exit 0]
 
@@ -182,7 +182,7 @@ doctor: all checks passed.
 $ desolate clone acme/consumer --no-push
   read key: registered
 cloned acme/consumer: 1 branch(es), default main, 0 LFS object(s); read-only (no write key).
-next: desolate domain create <slug> && desolate domain <slug> add --repo acme/consumer
+next: desolate domain create <slug> --repo acme/consumer   (or, to a domain you have: desolate domain <slug> add --repo acme/consumer)
 fetching acme/consumer with the read key
 [exit 0]
 

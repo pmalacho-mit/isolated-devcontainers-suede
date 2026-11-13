@@ -41,7 +41,7 @@ export const STATE = "/run/desolate/devcontainer.json";
 export type State =
   | { state: "none"; why: string }
   | { state: "failed"; why: string; config: string }
-  | { state: "up"; containerId: string; remoteUser: string; folder: string; config: string; override: string; checkout: string; hostNetwork: boolean; glibc: boolean; compose: boolean; extensions: string[]; image: string };
+  | { state: "up"; containerId: string; remoteUser: string; folder: string; config: string; override: string; checkout: string; hostNetwork: boolean; glibc: boolean; compose: boolean; extensions: string[]; image: string; note?: string };
 
 export const locate = (dir: string): string | undefined => {
   const nested = path.join(dir, ".devcontainer", "devcontainer.json");
@@ -123,7 +123,7 @@ const main = async () => {
   const plan = readJson<WorkspacePlan | null>(`/desolate/inbox/workspaces/${name}.json`, null);
   const done = (state: State) => {
     writeJson(STATE, state);
-    process.stdout.write(state.state === "up" ? `devcontainer: up (${state.image}, user ${state.remoteUser}${state.compose ? ", compose" : ""})\n` : `devcontainer: ${state.state === "none" ? "none" : "FAILED"}: ${state.why}\n`);
+    process.stdout.write(state.state === "up" ? `devcontainer: up (${state.image}, user ${state.remoteUser}${state.compose ? ", compose" : ""})${state.note ? `; note: ${state.note}` : ""}\n` : `devcontainer: ${state.state === "none" ? "none" : "FAILED"}: ${state.why}\n`);
   };
   if (!plan) return done({ state: "none", why: `the root sent no plan for the workspace '${name}'` });
   // The domain's environment: the repository it names, else the first checkout with a spec.
@@ -154,7 +154,12 @@ const main = async () => {
   const changed = fs.existsSync(override) && readJson<string>(path.join(dir, "digest.json"), "") !== digest;
   fs.writeFileSync(override, text);
   writeJson(path.join(dir, "digest.json"), digest);
-  const up = await run("devcontainer", ["up", "--workspace-folder", checkout.path, "--config", config, "--override-config", override, ...(changed ? ["--remove-existing-container"] : [])], { timeoutMs: 3_600_000, env: { ...process.env, DOCKER_BUILDKIT: "1" } });
+  // A spec with features makes the CLI write a lockfile beside it, into the checkout, where
+  // an agent's `git add -A` takes it (seen in the promo). Unless the project keeps a
+  // lockfile of its own (then it is verified, as the project asked), none is written.
+  const lockfile = path.join(path.dirname(config), path.basename(config).startsWith(".") ? ".devcontainer-lock.json" : "devcontainer-lock.json");
+  const noLockfile = fs.existsSync(lockfile) ? [] : ["--no-lockfile"];
+  const up = await run("devcontainer", ["up", "--workspace-folder", checkout.path, "--config", config, "--override-config", override, ...noLockfile, ...(changed ? ["--remove-existing-container"] : [])], { timeoutMs: 3_600_000, env: { ...process.env, DOCKER_BUILDKIT: "1" } });
   fs.writeFileSync(path.join(dir, "up.log"), `${up.stderr}\n${up.stdout}`);
   let result: { outcome?: string; containerId?: string; remoteUser?: string; remoteWorkspaceFolder?: string; message?: string; description?: string } = {};
   try {
@@ -174,7 +179,18 @@ const main = async () => {
   const [network, image] = inspect.stdout.trim().split(" ");
   // The editor's server is a glibc program: it can run in the container only on glibc.
   const glibc = (await run("docker", ["exec", id, "sh", "-c", "ls /lib/ld-linux-*.so.* /lib64/ld-linux-*.so.* 2>/dev/null | head -1"])).stdout.trim() !== "";
-  done({ state: "up", containerId: id, remoteUser: result.remoteUser ?? "root", folder: result.remoteWorkspaceFolder ?? checkout.path, config, override, checkout: checkout.path, hostNetwork: network === "host", glibc, compose: spec.dockerComposeFile !== undefined, extensions: extensionsOf(spec), image: String(spec.image ?? (spec.dockerComposeFile !== undefined ? "compose" : image ?? "built")).slice(0, 120) });
+  // A repository that keeps files in Git LFS, in a container without git-lfs: committing such
+  // a file fails there ("git-lfs: command not found"). Said, not changed: the environment is
+  // the project's.
+  let usesLfs = false;
+  try {
+    usesLfs = /filter=lfs/.test(fs.readFileSync(path.join(checkout.path, ".gitattributes"), "utf8"));
+  } catch {
+    /* no .gitattributes */
+  }
+  const lfsMissing = usesLfs && (await run("docker", ["exec", id, "sh", "-c", "git lfs version"])).code !== 0;
+  done({ state: "up", containerId: id, remoteUser: result.remoteUser ?? "root", folder: result.remoteWorkspaceFolder ?? checkout.path, config, override, checkout: checkout.path, hostNetwork: network === "host", glibc, compose: spec.dockerComposeFile !== undefined, extensions: extensionsOf(spec), image: String(spec.image ?? (spec.dockerComposeFile !== undefined ? "compose" : image ?? "built")).slice(0, 120),
+    ...(lfsMissing ? { note: "this repository keeps files in Git LFS and the container has no git-lfs, so committing them fails there; add the feature ghcr.io/devcontainers/features/git-lfs:1 to its devcontainer.json" } : {}) });
 };
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) await main();

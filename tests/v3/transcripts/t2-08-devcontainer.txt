@@ -42,7 +42,9 @@ workspace app/w1 is up  [NOT ISOLATED: fake backend]
   devcontainer FAILED: An error occurred setting up the container. (Error: Command failed: docker pull registry.invalid/desolate-test/dev:1) (the whole log: /home/desolate/.desolate-devcontainer/up.log in the workspace)
   editor       http://app-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fapp
   dev servers  http://app-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor app/w1 --open      its editor, in your browser
+      desolate exec app/w1 -- <agent>       an agent (or any command), in its devcontainer
 [exit 0]
 
 ## the devcontainer comes up
@@ -79,7 +81,9 @@ workspace plain/w1 is up  [NOT ISOLATED: fake backend]
   devcontainer none: no checkout has a devcontainer.json; this workspace is the VM itself
   editor       http://plain-w1-editor-<hex>.localhost:31591/?tkn=<token>&folder=%2Fworkspaces%2Facme%2Fplain
   dev servers  http://plain-w1-<hex>.localhost:<port>   (the port it listens on inside, nothing to declare)
-the start took <duration>: planned <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+the start took <duration>: asked the root <duration>, VM booted <duration>, services, checkouts, devcontainer and editor <duration>
+next: desolate editor plain/w1 --open      its editor, in your browser
+      desolate exec plain/w1 -- <agent>       an agent (or any command), in its devcontainer
 [exit 0]
 
 ## the spec changes

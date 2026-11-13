@@ -274,7 +274,7 @@ const serve = async () => {
       // rest is cut to a line.
       entry.editorToken = typeof reply.editorToken === "string" && /^[0-9a-f]{48}$/.test(reply.editorToken) ? reply.editorToken : "";
       entry.devcontainer = typeof reply.devcontainer === "string" ? reply.devcontainer.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 400) : "";
-      if (typeof reply.folder === "string" && /^\/workspaces\/[A-Za-z0-9._\/-]+$/.test(reply.folder)) entry.folder = reply.folder;
+      if (!entry.folder.startsWith("workspace:") && typeof reply.folder === "string" && /^\/workspaces\/[A-Za-z0-9._\/-]+$/.test(reply.folder)) entry.folder = reply.folder;
       if (!reply.ok || !Array.isArray(reply.listeners)) throw new Error(reply.error ?? `exit ${result.code}`);
       // Fail closed on what the VM says: integers, 1024 and up, and a sane number of them.
       // The editor's two in-VM ports are never dev-server ports: a dev hostname must not
@@ -355,6 +355,8 @@ const serve = async () => {
     const checkouts = (r as Registered & { checkouts?: Checkouts }).checkouts ?? [];
     // The folder the editor opens: the first checkout (as `desolate editor` prints it).
     if (typeof checkouts[0]?.path === "string" && /^\/workspaces\/[A-Za-z0-9._\/-]+$/.test(checkouts[0].path)) entry.folder = checkouts[0].path;
+    // More than one checkout: the workspace file with all of them (workspace/init.ts).
+    if (checkouts.length > 1) entry.folder = `workspace:/workspaces/.desolate/${r.workspace}.code-workspace`;
     const base = paths.domainRepos(r.domain);
     const watch = (dir: string, recursive: boolean, wanted: (file: string | null) => boolean) => {
       try {
@@ -525,7 +527,7 @@ const serve = async () => {
         status: vm.status,
         ...(entry ? {
           devcontainer: entry.devcontainer || undefined,
-          editor: entry.editorToken && !editorError ? `http://${editorHostname(INSTANCE, entry.domain, entry.workspace)}:${port}/?tkn=${entry.editorToken}${entry.folder ? `&folder=${encodeURIComponent(entry.folder)}` : ""}` : undefined,
+          editor: entry.editorToken && !editorError ? `http://${editorHostname(INSTANCE, entry.domain, entry.workspace)}:${port}/?tkn=${entry.editorToken}${entry.folder.startsWith("workspace:") ? `&workspace=${encodeURIComponent(entry.folder.slice(10))}` : entry.folder ? `&folder=${encodeURIComponent(entry.folder)}` : ""}` : undefined,
           ports: [...entry.listeners].sort((x, y) => x - y).filter((p) => !hostHeld.has(p)).map((p) => ({ port: p, url: `http://${devHostname(INSTANCE, entry.domain, entry.workspace)}:${p}` })),
         } : {}),
       };

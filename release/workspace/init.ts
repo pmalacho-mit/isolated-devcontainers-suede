@@ -93,4 +93,14 @@ if (who.code !== 0) {
 }
 fs.mkdirSync(path.join(os.homedir(), ".desolate"), { recursive: true });
 fs.writeFileSync(path.join(os.homedir(), ".desolate", "workspace.json"), JSON.stringify(plan, null, 2));
+// More than one checkout: a VSCodium workspace with all of them, which `desolate editor`
+// opens (a domain's task that spans repositories is one window). In the domain's own share,
+// where the editor sees it from the VM and from the devcontainer alike.
+if (plan.checkouts.length > 1) {
+  const dir = "/workspaces/.desolate";
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${plan.workspace}.code-workspace`);
+  fs.rmSync(file, { force: true });
+  fs.writeFileSync(file, JSON.stringify({ folders: plan.checkouts.map((c) => ({ path: c.path, name: c.kind === "worktree" ? `${c.repo.split("/")[1]} (${c.branch})` : c.repo.split("/")[1] })), settings: {} }, null, 2), { flag: "wx" });
+}
 process.stdout.write(JSON.stringify({ ok: true, made, checkouts: plan.checkouts.map((c) => ({ repo: c.repo, branch: c.branch, path: c.path })) }) + "\n");

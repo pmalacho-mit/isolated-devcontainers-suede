@@ -58,7 +58,7 @@ export const clone = async (name: string | undefined, options: { push: boolean; 
   const fetched = await rootctl<Record<string, unknown>>("repo.fetch", { repo });
   if (json) return out(JSON.stringify({ ...prepared, keys: prepared.keys.map((k) => k.role), ...fetched }));
   out(`cloned ${repo}: ${fetched.branches} branch(es), default ${fetched.defaultBranch ?? "none"}, ${fetched.lfsObjects} LFS object(s); ${prepared.pushable ? "pushable" : prepared.anonymous ? "read-only, fetched anonymously" : "read-only (no write key)"}.`);
-  out(`next: desolate domain create <slug> && desolate domain <slug> add --repo ${repo}`);
+  out(`next: desolate domain create <slug> --repo ${repo}   (or, to a domain you have: desolate domain <slug> add --repo ${repo})`);
 };
 
 export const fetch = async (name: string | undefined, out: Out, json: boolean) => {

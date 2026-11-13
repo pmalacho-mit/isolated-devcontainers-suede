@@ -77,7 +77,8 @@ desolate domain create dev --title "widgets work" --repo acme/widgets --repo acm
 desolate up dev --name issue-12 --branch issue/12 --fetch   # a worktree on issue/12 in each repository
                                                      # (or per repository: --checkout acme/widgets=worktree:issue/12)
 desolate ui --open                                   # the dashboard, in Chrome or Firefox (not Safari)
-desolate editor dev/issue-12 --open                  # its editor (VSCodium, in its VM), in a tab
+desolate editor dev/issue-12 --open                  # its editor (VSCodium, in its VM), in a tab:
+                                                     # every checkout of the workspace in one window
 desolate exec dev/issue-12 -- <an agent, or any command>     # in its devcontainer (--vm: the VM itself)
 desolate domain dev secret set MYAPP-OPENAI-KEY --hosts api.openai.com --headers authorization
                                                      # the value on stdin; workspaces send the name

@@ -96,8 +96,11 @@ export const editorUrl = async (w: Workspace): Promise<{ url: string } | { error
   const { editorPort } = await import("./daemon.ts");
   const { port, error } = await editorPort();
   if (error) return { error: `the editor's port is not available on this machine: ${error}. Free it, or set DESOLATE_EDITOR_PORT, then: desolate bootstrap` };
+  // One checkout: its folder. More: the workspace file the workspace's init wrote, with all
+  // of them (workspace/init.ts).
   const folder = w.checkouts[0]?.path;
-  return { url: `http://${editorHostname(INSTANCE, w.domain, w.workspace)}:${port}/?tkn=${token.stdout.trim()}${folder ? `&folder=${encodeURIComponent(folder)}` : ""}` };
+  const where = w.checkouts.length > 1 ? `&workspace=${encodeURIComponent(`/workspaces/.desolate/${w.workspace}.code-workspace`)}` : folder ? `&folder=${encodeURIComponent(folder)}` : "";
+  return { url: `http://${editorHostname(INSTANCE, w.domain, w.workspace)}:${port}/?tkn=${token.stdout.trim()}${where}` };
 };
 
 export const editor = async (target: string | undefined, out: Out, json: boolean) => {
@@ -155,9 +158,9 @@ export const up = async (domain: string | undefined, options: { name?: string; c
     if (template) phase("template");
   }
   const plan = await rootctl<Workspace>("workspace.plan", { instance: INSTANCE, domain, name: options.name, checkouts: options.checkouts, base: options.base, fetch: options.fetch }, { quiet: true });
-  // (Three asks of the root: the domain, whether it has a template to make, and the plan,
-  // which is two small files. No network: --fetch is its own phase, above.)
-  phase(template ? "planned" : "asked the root (domain, template check, plan)");
+  // (The domain, whether it has a template to make, and the plan, which is two small files:
+  // asks of the root, about 0.2 s each. No network: --fetch is its own phase, above.)
+  phase("asked the root");
   try {
     if (template) await b.clone(template, specOf(plan, view.repos));
     else await b.create(specOf(plan, view.repos));
@@ -186,6 +189,8 @@ export const up = async (domain: string | undefined, options: { name?: string; c
   out("url" in opened ? `  editor       ${opened.url}` : `  editor       NOT AVAILABLE: ${opened.error}`);
   out(`  dev servers  ${urls.dev}:<port>   (the port it listens on inside, nothing to declare)`);
   out(breakdown);
+  out(`next: desolate editor ${domain}/${plan.workspace} --open      its editor, in your browser`);
+  out(`      desolate exec ${domain}/${plan.workspace} -- <agent>       an agent (or any command), in its devcontainer`);
 };
 
 export const list = async (out: Out, json: boolean, only?: string) => {
