@@ -13,13 +13,13 @@
 // shell's output, bytes an agent may have written: the page's xterm.js has links that do
 // nothing, no clipboard, and no title (git-ui/git.js).
 import type { ChildProcess } from "node:child_process";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as path from "node:path";
 import { APPROVE_HOSTNAME, editorHostPort, GIT_HOSTNAME, parseRepo } from "../shared/names.ts";
 import { embedAddress } from "./approve-web.ts";
-import { refusal } from "../workspace/editor-gate.ts";
+import { refusal, sameSecret } from "../shared/gate.ts";
 import { guest, paths, RELEASE_DIR } from "./paths.ts";
 
 export const TOKEN_FILE = path.join(paths.state, "git-token");
@@ -42,7 +42,6 @@ export const gitToken = (): string => {
 export const gitAddress = (repo?: string) => `http://${GIT_HOSTNAME}:${editorHostPort()}/?tkn=${gitToken()}${repo ? `&repo=${encodeURIComponent(repo)}` : ""}`;
 
 const cookieName = (token: string) => `desolate_git_${createHash("sha256").update(token).digest("hex").slice(0, 12)}`;
-const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 export const SECURITY: Record<string, string> = {
   // xterm.js makes <style> elements of its own: styles may be inline, scripts may not.
@@ -115,7 +114,7 @@ export const handler = (spawn: (argv: string[]) => ChildProcess, log: (line: str
     const url = new URL(req.url ?? "/", `http://${GIT_HOSTNAME}`);
     const given = url.searchParams.get("tkn");
     if (req.method === "GET" && url.pathname === "/" && given !== null) {
-      if (!same(given, token)) return send(res, 403, "text/plain; charset=utf-8", "desolate: refused: that is not this stack's git terminal address; `desolate git` prints it\n");
+      if (!sameSecret(given, token)) return send(res, 403, "text/plain; charset=utf-8", "desolate: refused: that is not this stack's git terminal address; `desolate git` prints it\n");
       const repo = url.searchParams.get("repo");
       res.writeHead(303, { location: repo && parseRepo(repo) ? `/?repo=${encodeURIComponent(repo)}` : "/", "set-cookie": `${name}=${token}; HttpOnly; SameSite=Strict; Path=/`, "content-length": 0, ...SECURITY });
       return res.end();
@@ -125,7 +124,7 @@ export const handler = (spawn: (argv: string[]) => ChildProcess, log: (line: str
       const [file, type] = STATIC[url.pathname]!;
       return send(res, 200, type, fs.readFileSync(path.join(UI, file)));
     }
-    if (cookie === undefined || !same(cookie, token)) return json(res, 401, { error: "open the git terminal at the address `desolate git` prints, on this Mac's terminal: it carries this stack's token" });
+    if (cookie === undefined || !sameSecret(cookie, token)) return json(res, 401, { error: "open the git terminal at the address `desolate git` prints, on this Mac's terminal: it carries this stack's token" });
     if (String(req.headers["sec-fetch-site"] ?? "") !== "same-origin") return json(res, 403, { error: "a request this page did not make" });
 
     // The approval page's address for the frame beside the terminal (its key in the
@@ -134,7 +133,7 @@ export const handler = (spawn: (argv: string[]) => ChildProcess, log: (line: str
     const match = /^\/session\/([0-9a-f]{16})\/(stream|input|resize)$/.exec(url.pathname);
     if (req.method === "GET" && match?.[2] === "stream") {
       const s = sessions.get(match[1]!);
-      if (!s || !same(url.searchParams.get("token") ?? "", s.token)) return json(res, 404, { error: "no such shell" });
+      if (!s || !sameSecret(url.searchParams.get("token") ?? "", s.token)) return json(res, 404, { error: "no such shell" });
       s.seen = Date.now();
       res.writeHead(200, { "content-type": "text/event-stream", ...SECURITY, connection: "keep-alive" });
       for (const chunk of s.kept) res.write(`data: ${chunk.toString("base64")}\n\n`);
@@ -175,7 +174,7 @@ export const handler = (spawn: (argv: string[]) => ChildProcess, log: (line: str
       return json(res, 200, { id: s.id, token: s.token });
     }
     const s = match ? sessions.get(match[1]!) : undefined;
-    if (!s || !same(String(asked.token ?? ""), s.token)) return json(res, 404, { error: "no such shell" });
+    if (!s || !sameSecret(String(asked.token ?? ""), s.token)) return json(res, 404, { error: "no such shell" });
     s.seen = Date.now();
     if (s.ended) return json(res, 410, { error: "the shell ended" });
     if (match![2] === "input") {

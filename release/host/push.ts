@@ -7,6 +7,7 @@
 //   3. the root hands the signature to its keyring, which lets the write key sign for
 //      that one push.
 // Nothing in a VM can do step 2, so nothing in a VM can push.
+import { printable, printableLines } from "../shared/text.ts";
 import { EXIT, refuse } from "../shared/exit.ts";
 import { editorHostPort, ROOT_HOSTNAME } from "../shared/names.ts";
 import { sign } from "./approver.ts";
@@ -20,7 +21,7 @@ type Review = { repo: string; branch: string; commit: string; pushable: boolean;
 
 /** Text from a repository (a branch name, a commit subject) is shown as text: control
  *  characters that could repaint a terminal are replaced. */
-const plain = (text: string) => text.replace(/[\x00-\x1f\x7f-\x9f]/g, "?");
+const plain = (text: string) => printable(text, Infinity);
 
 export const offers = async (domain: string | undefined, out: Out, json: boolean) => {
   const list = await rootctl<Offer[]>("offers.list", { domain }, { quiet: true });
@@ -62,7 +63,7 @@ export const review = async (args: string[], out: Out, json: boolean, against: "
     // anything that could repaint a terminal is replaced.
     const d = await rootctl<{ text: string; truncated: boolean }>("review.diff", { domain, repo, branch, against }, { quiet: true });
     out("");
-    out(d.text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "?").trimEnd());
+    out(printableLines(d.text).trimEnd());
     if (d.truncated) out("... the diff is longer than is shown here. The whole of it: desolate root shell, then git diff.");
   } else {
     out(`read the diff: desolate review ${domain} ${r.repo} ${plain(r.branch)} --diff${against === "domain" ? " --against domain" : ""}`);

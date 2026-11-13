@@ -24,6 +24,7 @@
 //
 // WHAT IS NOT CARRIED. Whatever is one workspace's: its editor's connection token (each
 // clone makes its own, so no two editors share one), who it is, its logs, its containers.
+import { printable } from "../shared/text.ts";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -71,7 +72,7 @@ export const ensure = async (domain: string, repos: string[], build: Builder, sa
   try {
     return await ensureOrThrow(domain, repos, build, say);
   } catch (error) {
-    say(`  no template: ${(error as Error).message.replace(/[\x00-\x1f\x7f-\x9f]/g, "?").slice(0, 300)}. This workspace is made from desolate's base.`);
+    say(`  no template: ${printable((error as Error).message)}. This workspace is made from desolate's base.`);
     return null;
   }
 };
@@ -104,7 +105,7 @@ const ensureOrThrow = async (domain: string, repos: string[], build: Builder, sa
     if (scrubbed.code !== 0) throw new Error(`it could not be emptied of what was the builder's: ${scrubbed.stderr.trim().slice(-200)}`);
     made = true;
   } catch (error) {
-    say(`  no template: ${(error as Error).message.replace(/[\x00-\x1f\x7f-\x9f]/g, "?").slice(0, 300)}. This workspace is made from desolate's base.`);
+    say(`  no template: ${printable((error as Error).message)}. This workspace is made from desolate's base.`);
   } finally {
     await disconnectWorkspace(name).catch(() => {});
     await rootctl("proxy.stop", { vm: name }, { quiet: true }).catch(() => {});

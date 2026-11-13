@@ -14,7 +14,7 @@
 import { EXIT, refuse } from "../shared/exit.ts";
 import { parseRepo } from "../shared/names.ts";
 import { TERMINAL_RESET, terminalFilter } from "../shared/terminal-filter.ts";
-import { printable } from "./events.ts";
+import { printable } from "../shared/text.ts";
 import { guest } from "./paths.ts";
 import { backend, rootctl } from "./stack.ts";
 

@@ -2,6 +2,7 @@
 // clone's git directory, written from inside a workspace by /desolate/status. The host and
 // the root both read those files AS DATA and never run git there (P4). What they say is
 // shown, never acted on.
+import { printable, printableLines } from "./text.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isBranch, isCommit } from "./names.ts";
@@ -54,13 +55,13 @@ export const readStatus = (base: string, file: string): Status | null => {
     if (text === null) return null;
     const data = JSON.parse(text) as Partial<Status>;
     if (!COLORS.includes(String(data.color))) return null;
-    return { color: String(data.color), message: String(data.message ?? "").replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 200), updated: String(data.updated ?? "").slice(0, 40) };
+    return { color: String(data.color), message: printable(data.message, 200, " "), updated: String(data.updated ?? "").slice(0, 40) };
   } catch {
     return null;
   }
 };
 export const readNote = (base: string, file: string): string =>
-  (readPlain(base, file, 16384, false) ?? "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, " ").trimEnd();
+  printableLines(readPlain(base, file, 16384, false) ?? "", " ").trimEnd();
 /** Where a checkout's status lives, under a domain's `repos` directory. */
 export const statusDir = (reposDir: string, c: { repo: string; kind: string; name: string }) =>
   c.kind === "main" ? path.join(reposDir, c.repo, ".git") : path.join(reposDir, c.repo, ".git", "worktrees", c.name);

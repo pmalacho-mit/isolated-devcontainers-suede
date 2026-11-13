@@ -6,7 +6,7 @@
 // its workspace's name: a notification is not desolate saying so. It is passed to osascript
 // as an argument, never as script.
 import { spawn } from "node:child_process";
-import { printable } from "./events.ts";
+import { printable } from "../shared/text.ts";
 // In-source tests (suede.nests: `npm run test:nests`). Types only: erased when node runs this.
 import type { Expect, Invoke } from "../.suede/nests/dsl.import.meta.vitest.ts";
 

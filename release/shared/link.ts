@@ -18,15 +18,15 @@
 // cannot turn into the token or into the guest's answer.
 //
 // (Backends whose link is a unix socket in a directory only the VM is shown need none.)
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import type { Socket } from "node:net";
+import { sameSecret } from "./gate.ts";
 
 const PREFIX = "DESOLATE-LINK2 ";
 const TOKEN = /^[0-9a-f]{32}$/;
 const NONCE = /^[0-9a-f]{32}$/;
 const proof = (token: string, side: "host" | "guest", guestNonce: string, hostNonce: string) =>
   createHmac("sha256", Buffer.from(token, "hex")).update(`${side} ${guestNonce} ${hostNonce}`).digest("hex");
-const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
 /** Read one line (without its newline) of at most `max` bytes; what follows it is `rest`. */
 const line = (socket: Socket, max: number, timeoutMs: number): Promise<{ text: string; rest: Buffer } | null> =>
@@ -69,7 +69,7 @@ export const open = async (socket: Socket, token: string, timeoutMs = 10_000): P
   socket.write(`${PREFIX}${guestNonce}\n`);
   const answer = await line(socket, 200, timeoutMs);
   const match = answer && /^([0-9a-f]{32}) ([0-9a-f]{64})$/.exec(answer.text);
-  if (!answer || !match || answer.rest.length > 0 || !same(match[2]!, proof(token, "host", guestNonce, match[1]!))) {
+  if (!answer || !match || answer.rest.length > 0 || !sameSecret(match[2]!, proof(token, "host", guestNonce, match[1]!))) {
     socket.destroy();
     return false;
   }
@@ -95,6 +95,6 @@ export const accept = async (socket: Socket, token: string, timeoutMs = 10_000):
   const hostNonce = randomBytes(16).toString("hex");
   socket.write(`${hostNonce} ${proof(token, "host", guestNonce, hostNonce)}\n`);
   const second = await line(socket, 100, Math.max(1, deadline - Date.now()));
-  if (!second || !same(second.text, proof(token, "guest", guestNonce, hostNonce))) return fail();
+  if (!second || !sameSecret(second.text, proof(token, "guest", guestNonce, hostNonce))) return fail();
   return second.rest;
 };

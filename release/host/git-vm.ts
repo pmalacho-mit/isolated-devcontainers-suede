@@ -14,6 +14,7 @@
 // which checks every object as it does a domain's and pushes after the person approves on
 // the approval page. The git VM cannot write anything the root reads but what the host
 // copies on.
+import { copyOut, openPlain } from "../shared/copy.ts";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -129,50 +130,12 @@ export const ensureGitClone = async (repo: Repo) => {
 // a file of its own; answers go to a directory only the host writes (read-only to the git VM).
 const GIT_IN = path.join(paths.rootClones, ".git-in");
 const LIMIT = { request: 64 * 1024, bundle: 2 * 1024 ** 3, lfs: 5 * 1024 ** 3, objects: 2000 } as const;
-const NOFOLLOW = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
-
-/** A plain file in the out-box, opened without following a link; null if it is not one. */
-const openPlain = (file: string, most: number): { fd: number; size: number } | null => {
-  let fd: number;
-  try {
-    fd = fs.openSync(file, NOFOLLOW);
-  } catch {
-    return null;
-  }
-  const stat = fs.fstatSync(fd);
-  if (!stat.isFile() || stat.size > most) {
-    fs.closeSync(fd);
-    return null;
-  }
-  return { fd, size: stat.size };
-};
-
 /** A directory the host made, in a share the root's user can write: a real directory, not
  *  a link it left there. */
 const ownDirectory = (dir: string) => {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const stat = fs.lstatSync(dir);
   if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(dir) !== path.resolve(dir)) throw new Error(`${dir} is not the host's own directory`);
-};
-
-/** Copy from a descriptor into a new file of the host's (never an existing one), hashing on
- *  the way; at most `size` bytes, what the descriptor said it held. */
-const copyOut = (from: { fd: number; size: number }, to: string): string => {
-  const out = fs.openSync(to, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
-  const hash = createHash("sha256");
-  const buffer = Buffer.alloc(1024 * 1024);
-  try {
-    for (let done = 0; done < from.size; ) {
-      const read = fs.readSync(from.fd, buffer, 0, Math.min(buffer.length, from.size - done), done);
-      if (read === 0) throw new Error("the file got shorter while it was copied");
-      hash.update(buffer.subarray(0, read));
-      fs.writeSync(out, buffer, 0, read);
-      done += read;
-    }
-  } finally {
-    fs.closeSync(out);
-  }
-  return hash.digest("hex");
 };
 
 /** The answer the git VM's helper waits for: in the host's own directory. */

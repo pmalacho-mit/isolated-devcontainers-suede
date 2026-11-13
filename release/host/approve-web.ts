@@ -31,14 +31,14 @@
 // until a click), and where the browser can say so (IntersectionObserver v2, Chrome) Approve
 // arms only while the button is visibly unobscured: if script ever ran on the git terminal's
 // origin, it could not lay the frame under something else and borrow a click.
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as path from "node:path";
 import { parseApproval } from "../shared/approval.ts";
 import type { PushApproval } from "../shared/approval.ts";
 import { APPROVE_HOSTNAME, editorHostPort, GIT_HOSTNAME } from "../shared/names.ts";
-import { refusal } from "../workspace/editor-gate.ts";
+import { refusal, sameSecret } from "../shared/gate.ts";
 import { paths, RELEASE_DIR } from "./paths.ts";
 
 export const TOKEN_FILE = path.join(paths.state, "approve-token");
@@ -67,7 +67,6 @@ export const embedAddress = () => `http://${APPROVE_HOSTNAME}:${editorHostPort()
 const embedder = () => `http://${GIT_HOSTNAME}:${editorHostPort()}`;
 
 const cookieName = (token: string) => `desolate_approve_${createHash("sha256").update(token).digest("hex").slice(0, 12)}`;
-const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 /** A push's own token: tied to the credential and to the very text the page showed. The
  *  list of waiting pushes is the root's user's: if it lists another text under the same
  *  nonce by the time of the click, the token no longer matches and nothing is signed. */
@@ -168,13 +167,13 @@ export const handler = (backend: Backend, log: (line: string) => void) => {
   const name = cookieName(token);
   const given = url.searchParams.get("tkn");
   if (req.method === "GET" && url.pathname === "/" && given !== null) {
-    if (!same(given, token)) return text(res, 403, "refused: that is not this stack's approval address; `desolate approve --web` prints it");
+    if (!sameSecret(given, token)) return text(res, 403, "refused: that is not this stack's approval address; `desolate approve --web` prints it");
     res.writeHead(303, { location: "/", "set-cookie": `${name}=${token}; HttpOnly; SameSite=Strict; Path=/`, "content-length": 0, ...SECURITY });
     return res.end();
   }
   const cookie = new RegExp(`(?:^|;\\s*)${name}=([0-9a-f]{48})(?:;|$)`).exec(String(req.headers.cookie ?? ""))?.[1];
   const embedded = String(req.headers["x-desolate-embed"] ?? "");
-  const signedIn = (cookie !== undefined && same(cookie, token)) || (/^[0-9a-f]{64}$/.test(embedded) && same(embedded, embedKey(token)));
+  const signedIn = (cookie !== undefined && sameSecret(cookie, token)) || (/^[0-9a-f]{64}$/.test(embedded) && sameSecret(embedded, embedKey(token)));
   if (req.method === "GET" && url.pathname === "/embed") {
     // The same page, framed beside the git terminal: by that origin alone.
     const { "x-frame-options": _deny, ...rest } = SECURITY;
@@ -222,7 +221,7 @@ export const handler = (backend: Backend, log: (line: string) => void) => {
     const waiting = (await backend.pending()).find((w) => parseApproval(w.message)?.nonce === nonce);
     const push = waiting ? parseApproval(waiting.message) : null;
     if (!waiting || !push) return json(res, 410, { error: "that push is no longer waiting (each waits two minutes)" });
-    if (!same(given, pushToken(token, waiting.message))) return json(res, 409, { error: "that push is not the one this page showed: it changed, so nothing was signed; look at it again" });
+    if (!sameSecret(given, pushToken(token, waiting.message))) return json(res, 409, { error: "that push is not the one this page showed: it changed, so nothing was signed; look at it again" });
     if (asked.commit !== push.commit) return json(res, 409, { error: "that is not the commit this push names" });
     try {
       if (url.pathname === "/approve") {

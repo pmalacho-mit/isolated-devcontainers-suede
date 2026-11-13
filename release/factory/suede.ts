@@ -22,7 +22,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { printable } from "../host/events.ts";
+import { printable } from "../shared/text.ts";
 
 const CLI = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "cli.sh");
 // Everything said here is made printable: a .gitrepo's text, gh's and the VM's errors.

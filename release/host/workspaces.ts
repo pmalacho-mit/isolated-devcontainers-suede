@@ -1,4 +1,5 @@
 // Workspaces, from the host: up, list, stop, rm, exec.
+import { printableLines } from "../shared/text.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -86,7 +87,7 @@ export const sizeFlags = (values: { cpus?: unknown; memory?: unknown; disk?: unk
 /** What a workspace VM printed is the workspace's text. On its way to the person's
  *  terminal it is text: nothing in it may move the cursor, retitle the window or write the
  *  clipboard. (`desolate exec` is different: there the person asked for the VM's output.) */
-const said = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "?");
+const said = (text: string) => printableLines(text);
 
 export const startServices = async (plan: WorkspacePlan) => {
   const b = backend();

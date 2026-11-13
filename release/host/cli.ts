@@ -1,5 +1,6 @@
 // The desolate command, on the host. It drives everything, holds no key, and runs no git on
 // desolate's repositories (P4).
+import { printable } from "../shared/text.ts";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { parseArgs } from "node:util";
@@ -155,7 +156,7 @@ const main = async (argv: string[]): Promise<number> => {
     const { rootctl } = await import("./stack.ts");
     const entries = await rootctl<{ time: string; domain: string; workspace: string; host: string; port: number; verdict: string; reason?: string; secrets?: string[] }[]>("net.log", { domain: positionals[0] }, { quiet: true });
     if (values.json === true) out(JSON.stringify(entries));
-    else for (const e of entries) out(`${e.time}  domain=${e.domain} workspace=${e.workspace}  ${e.verdict}  ${String(e.host).replace(/[^\x21-\x7e]/g, "?")}:${e.port}${Array.isArray(e.secrets) ? `  [${e.secrets.join(", ").replace(/[^\x21-\x7e ]/g, "?")}]` : ""}${e.reason ? `  (${e.reason})` : ""}`);
+    else for (const e of entries) out(`${e.time}  domain=${e.domain} workspace=${e.workspace}  ${e.verdict}  ${String(e.host).replace(/[^\x21-\x7e]/g, "?")}:${e.port}${Array.isArray(e.secrets) ? `  [${e.secrets.join(", ").replace(/[^\x21-\x7e ]/g, "?")}]` : ""}${e.reason ? `  (${printable(e.reason)})` : ""}`);
     return EXIT.ok;
   }
   if (verb === "up") {

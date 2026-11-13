@@ -14,28 +14,12 @@
 //             control characters, no bidirectional overrides), not true.
 //
 // One JSON object per line: {"v":1,"at","type","source",...}.
+import { printable } from "../shared/text.ts";
 import { isBranch, isCommit, isSlug, parseRepo } from "../shared/names.ts";
 // In-source tests (suede.nests: `npm run test:nests`). Types only: erased when node runs this.
 import type { Table } from "../.suede/nests/dsl.import.meta.vitest.ts";
 
 export type Event = { v: 1; at: string; type: string; source: "host" | "pusher" | "root" } & Record<string, unknown>;
-
-/** Text another wrote, safe to print in a terminal: no control characters, no
- *  bidirectional overrides or invisible formatting, and not too long. */
-export const printable = (value: unknown, max = 300): string =>
-  [...String(value ?? "").slice(0, max * 4).normalize("NFC").replace(/[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/gu, "?")].slice(0, max).join("");
-declare namespace printable {
-  /** text kept; what a terminal would act on (controls, bidirectional overrides, invisible
-   *  formatting) replaced; cut to length */
-  export type Cases = Table<typeof printable, [
-    [args: [value: "issue/12 ✓ café"], expected: "issue/12 ✓ café"],
-    [args: [value: "a\u0000b\u001bc"], expected: "a?b?c"],
-    [args: [value: "ready \u202edlrow"], expected: "ready ?dlrow"],
-    [args: [value: "zero\u200bwidth"], expected: "zero?width"],
-    [args: [value: "xxxxxxxxxx", max: 4], expected: "xxxx"],
-    [args: [value: undefined], expected: ""],
-  ]>;
-}
 
 /** A root-sourced name, only if it is one desolate would make (else null): a script may pass
  *  it on as an argument (`gh --head "$branch"`), and no valid one starts with `-`. */
