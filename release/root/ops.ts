@@ -1,5 +1,7 @@
 // Every operation the host can ask of the root. A fixed table: the CLI channel carries an
 // operation's name and JSON arguments, never a command line.
+import { pendingIn } from "./approvals.ts";
+import { takeHashed } from "../shared/copy.ts";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -27,6 +29,9 @@ import * as repos from "./repos.ts";
 
 type Log = (line: string) => void;
 export type Op = (args: Record<string, unknown>, log: Log) => Promise<unknown>;
+
+/** The largest LFS object a push may carry: what the host takes from the git VM. */
+const LFS_MOST = 5 * 1024 ** 3;
 
 export const ops: Record<string, Op> = {
   async ping() {
@@ -191,17 +196,7 @@ export const ops: Record<string, Op> = {
   /** Raw pushes in the root's terminal that are waiting for `desolate approve`. What the
    *  person is shown comes from the message the host parses itself, not from this list. */
   async "approvals.pending"() {
-    const pending: { message: string; summary: string; at: string }[] = [];
-    for (const file of fs.existsSync(APPROVALS) ? fs.readdirSync(APPROVALS).filter((name) => name.endsWith(".json")).sort() : []) {
-      try {
-        const entry = JSON.parse(fs.readFileSync(`${APPROVALS}/${file}`, "utf8")) as { message: string; summary: string; at: string };
-        if (!parseApproval(entry.message) || Date.now() - Date.parse(entry.at) > 120_000) fs.rmSync(`${APPROVALS}/${file}`, { force: true });
-        else pending.push({ message: entry.message, summary: String(entry.summary).slice(0, 200), at: entry.at });
-      } catch {
-        fs.rmSync(`${APPROVALS}/${file}`, { force: true });
-      }
-    }
-    return pending;
+    return pendingIn(APPROVALS, Date.now(), true).map(({ message, summary, at }) => ({ message, summary, at }));
   },
   /** A `git push` made in the git VM (host/git-vm.ts), handed over by the host: its bundle
    *  is checked like a domain's (intake.ts), taken in, and pushed as a raw push is, after
@@ -237,31 +232,10 @@ export const ops: Record<string, Op> = {
         for (const oid of Array.isArray(args.lfs) ? (args.lfs as unknown[]) : []) {
           if (typeof oid !== "string" || !/^[0-9a-f]{64}$/.test(oid)) return { pushed: false, error: "an LFS object is not named by its sha256", said };
           const from = path.join(GIT_IN, `${file.slice(0, 16)}.lfs`, oid);
-          const stat = fs.lstatSync(from);
-          if (!stat.isFile()) return { pushed: false, error: "an LFS object is not a plain file", said };
-          // Hashed while copied: what is hashed is what is kept.
           const to = path.join(gitDir, "lfs", "objects", oid.slice(0, 2), oid.slice(2, 4), oid);
-          if (fs.existsSync(to)) continue;
           fs.mkdirSync(path.dirname(to), { recursive: true });
-          const part = `${to}.part-${process.pid}`;
-          const input = fs.openSync(from, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-          const output = fs.openSync(part, "wx", 0o644);
-          const hash = createHash("sha256");
-          const buffer = Buffer.alloc(1024 * 1024);
-          try {
-            for (let read = fs.readSync(input, buffer); read > 0; read = fs.readSync(input, buffer)) {
-              hash.update(buffer.subarray(0, read));
-              fs.writeSync(output, buffer, 0, read);
-            }
-          } finally {
-            fs.closeSync(input);
-            fs.closeSync(output);
-          }
-          if (hash.digest("hex") !== oid) {
-            fs.rmSync(part, { force: true });
-            return { pushed: false, error: `the LFS object ${oid.slice(0, 12)} does not hash to its name`, said };
-          }
-          fs.renameSync(part, to);
+          const why = takeHashed(from, to, oid, LFS_MOST);
+          if (why) return { pushed: false, error: `the LFS object ${oid.slice(0, 12)}: ${why}`, said };
         }
         if (args.domain !== undefined) {
           // A delivery (`git push <domain>` in the git VM): the root's own `git push <domain>`

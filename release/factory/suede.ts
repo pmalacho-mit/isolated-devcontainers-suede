@@ -22,7 +22,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { printable } from "../host/events.ts";
+import { printable } from "../shared/text.ts";
 
 const CLI = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "cli.sh");
 // Everything said here is made printable: a .gitrepo's text, gh's and the VM's errors.
@@ -36,11 +36,19 @@ const gh = (args: string[]) => {
   return { code: ran.status ?? 1, out: ran.stdout ?? "", err: ran.stderr ?? "" };
 };
 
-const { values, positionals } = parseArgs({
-  args: process.argv.slice(2),
-  options: { domain: { type: "string", default: "suede" }, secret: { type: "string", default: "CLAUDE-OAUTH" }, commit: { type: "string" }, from: { type: "string" } },
-  allowPositionals: true,
-});
+const parsed = (() => {
+  try {
+    return parseArgs({
+      args: process.argv.slice(2),
+      options: { domain: { type: "string", default: "suede" }, secret: { type: "string", default: "CLAUDE-OAUTH" }, commit: { type: "string" }, from: { type: "string" } },
+      allowPositionals: true,
+    });
+  } catch (error) {
+    process.stderr.write(`desolate factory: ${(error as Error).message}\n  fix: desolate help\n`);
+    process.exit(64);
+  }
+})();
+const { values, positionals } = parsed;
 const domain = String(values.domain);
 type Repo = { repo: string; pushable: boolean; defaultBranch: string | null };
 type Changed = { dir: string; remote: string | null; branch: string; files: string[] };

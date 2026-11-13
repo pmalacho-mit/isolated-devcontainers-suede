@@ -80,7 +80,7 @@ if [ -n "$EXTENSIONS" ]; then
   )
 fi
 # The gate is restarted if the name it answers to, or its own code, has changed.
-GATE_ID="$NAME $(sha256sum "$HERE/editor-gate.ts" | cut -c1-16)"
+GATE_ID="$NAME $(cat "$HERE/editor-gate.ts" "$HERE/../shared/gate.ts" | sha256sum | cut -c1-16)"
 if ! listening "$GATE_PORT" || [ "$(cat "$DATA/gate.host" 2>/dev/null)" != "$GATE_ID" ]; then
   [ -s "$DATA/gate.pid" ] && kill "$(cat "$DATA/gate.pid")" 2>/dev/null || true
   for _ in $(seq 1 20); do listening "$GATE_PORT" || break; sleep 0.1; done

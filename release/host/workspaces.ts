@@ -1,4 +1,5 @@
 // Workspaces, from the host: up, list, stop, rm, exec.
+import { printableLines } from "../shared/text.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,7 +9,7 @@ import type { WorkspacePlan } from "../shared/plan.ts";
 import { readHead } from "../shared/status.ts";
 import { checkSize, defaultsFor, describe as describeSize, LIMITS, merge, parseDisk, parseMemory } from "../shared/size.ts";
 import type { Size } from "../shared/size.ts";
-import { TERMINAL_RESET, terminalFilter } from "../shared/terminal-filter.ts";
+import { terminalFilter } from "../shared/terminal-filter.ts";
 import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
 import { backend, ensureProxyUser, rootctl } from "./stack.ts";
 import type { VmSpec } from "./vm/types.ts";
@@ -86,7 +87,7 @@ export const sizeFlags = (values: { cpus?: unknown; memory?: unknown; disk?: unk
 /** What a workspace VM printed is the workspace's text. On its way to the person's
  *  terminal it is text: nothing in it may move the cursor, retitle the window or write the
  *  clipboard. (`desolate exec` is different: there the person asked for the VM's output.) */
-const said = (text: string) => text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "?");
+const said = (text: string) => printableLines(text);
 
 export const startServices = async (plan: WorkspacePlan) => {
   const b = backend();
@@ -352,10 +353,9 @@ export const exec = async (target: string | undefined, command: string[], option
   child.stdin!.on("error", () => {});
   // To a terminal (a person running an agent by hand): kept to what a screen needs
   // (shared/terminal-filter.ts). To a pipe or a file (a script): unchanged.
-  if (process.stdout.isTTY) {
-    const filter = terminalFilter();
-    child.stdout!.on("data", (chunk: Buffer) => process.stdout.write(filter(chunk)));
-  } else child.stdout!.pipe(process.stdout);
+  const shown = terminalFilter();
+  if (process.stdout.isTTY) child.stdout!.on("data", (chunk: Buffer) => process.stdout.write(shown(chunk)));
+  else child.stdout!.pipe(process.stdout);
   if (process.stderr.isTTY) {
     const filter = terminalFilter();
     child.stderr!.on("data", (chunk: Buffer) => process.stderr.write(filter(chunk)));
@@ -365,7 +365,7 @@ export const exec = async (target: string | undefined, command: string[], option
   const code = await new Promise<number>((resolve) => child.on("close", (status) => resolve(status ?? 1)));
   if (code !== 0 && /instance .* is stopped|is not running/i.test(lima)) process.stderr.write(`desolate: ${w.domain}/${w.workspace} is not running\n  fix: desolate start ${w.domain}/${w.workspace}\n`);
   // A full-screen program's modes, off again: the terminal is your shell's.
-  if (process.stdout.isTTY) process.stdout.write(TERMINAL_RESET);
+  if (process.stdout.isTTY) process.stdout.write(shown.reset());
   process.stdin.unpipe();
   process.stdin.pause();
   return code;

@@ -2,7 +2,8 @@
 // script's terminal of what an agent wrote.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { hub, printable, pusherEvent, stateEvents } from "../../../release/host/events.ts";
+import { hub, pusherEvent, stateEvents } from "../../../release/host/events.ts";
+import { printable } from "../../../release/shared/text.ts";
 
 const A = "a".repeat(40);
 const B = "b".repeat(40);

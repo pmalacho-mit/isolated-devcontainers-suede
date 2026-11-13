@@ -31,8 +31,10 @@
 //   the host    with the token the host installed as root at bootstrap.
 // Repository content (branch names, commit subjects, statuses, notes) leaves here as JSON
 // strings and is put on the page as text, never as HTML.
+import { pendingIn } from "./approvals.ts";
+import { printable } from "../shared/text.ts";
 import { spawn } from "node:child_process";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -42,7 +44,7 @@ import { parseApproval } from "../shared/approval.ts";
 import { isBranch, isCommit, isSlug, parseRepo, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
 import { statusView } from "../shared/status.ts";
 import type { Head } from "../shared/status.ts";
-import { refusal } from "../workspace/editor-gate.ts";
+import { refusal, sameSecret } from "../shared/gate.ts";
 import * as domains from "./domains.ts";
 import { branchesOf, refusalsOf } from "./outbox.ts";
 import { safeIn } from "./git.ts";
@@ -71,7 +73,6 @@ const hostToken = () => readToken(TOKEN_FILE);
  *  workspace's editor address with its token (found on the M1; release/docs/incidents.md). */
 const UI_TOKEN_FILE = "/etc/desolate/ui-token";
 const uiToken = () => readToken(UI_TOKEN_FILE);
-const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 /** A cookie's name of this stack's own: cookies are kept per host name, not per port, and
  *  two stacks on one machine (a test beside the real one) share `desolate.localhost`. */
 const cookieName = (token: string) => `desolate_ui_${createHash("sha256").update(token).digest("hex").slice(0, 12)}`;
@@ -92,19 +93,8 @@ const actions: Action[] = [];
 const waiters = new Set<() => void>();
 const queued = () => actions.filter((action) => action.state === "queued" && action.kind !== "offer.push");
 
-const pendingApprovals = () => {
-  const out: { repo: string; branch: string; commit: string; summary: string }[] = [];
-  try {
-    for (const file of fs.readdirSync(APPROVALS)) {
-      const entry = JSON.parse(fs.readFileSync(path.join(APPROVALS, file), "utf8")) as { message: string; summary?: string; at: string };
-      const parsed = parseApproval(entry.message);
-      if (parsed && Date.now() - Date.parse(entry.at) < 120_000) out.push({ repo: parsed.repo, branch: parsed.branch, commit: parsed.commit, summary: String(entry.summary ?? "").slice(0, 200) });
-    }
-  } catch {
-    /* none */
-  }
-  return out;
-};
+const pendingApprovals = () =>
+  pendingIn(APPROVALS).map(({ approval, summary }) => ({ repo: approval.repo, branch: approval.branch, commit: approval.commit, summary }));
 
 /** The last HEAD each checkout was seen on: a read that caught one half written (null) shows
  *  that instead, so a `git switch` is one change and not two. */
@@ -208,7 +198,7 @@ const push = (args: Record<string, string>, record: (command: string) => Action)
   action.lines.push("waiting for your approval on the host: run `desolate approve` in a terminal there");
   const child = spawn("git", [...safeIn(clonePath(repo)), "-C", clonePath(repo), "push", "--porcelain", "origin", `${args.commit}:refs/heads/${args.branch}`], { env: { ...process.env, GIT_CONFIG_GLOBAL: GITCONFIG, GIT_TERMINAL_PROMPT: "0" }, stdio: ["ignore", "pipe", "pipe"] });
   const take = (chunk: Buffer) => {
-    for (const line of chunk.toString().split("\n").map((l) => l.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").trim()).filter(Boolean)) action.lines.push(line.slice(0, 300));
+    for (const line of chunk.toString().split("\n").map((l) => printable(l, 300, " ").trim()).filter(Boolean)) action.lines.push(line.slice(0, 300));
     if (action.lines.length > 60) action.lines.splice(0, action.lines.length - 60);
     changed();
   };
@@ -232,7 +222,10 @@ const body = (req: IncomingMessage, limit = 262_144): Promise<unknown> =>
     let text = "";
     req.on("data", (chunk) => {
       text += chunk;
-      if (text.length > limit) reject(new Error("too large"));
+      if (text.length > limit) {
+        reject(new Error("too large"));
+        req.destroy();
+      }
     });
     req.on("end", () => {
       try {
@@ -246,6 +239,7 @@ const body = (req: IncomingMessage, limit = 262_144): Promise<unknown> =>
 const SECURITY = {
   "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "cache-control": "no-store", "cross-origin-resource-policy": "same-origin",
+  "x-frame-options": "DENY", "cross-origin-opener-policy": "same-origin", "permissions-policy": "camera=(), microphone=(), geolocation=(), clipboard-read=()",
 };
 const send = (res: ServerResponse, status: number, type: string, content: string) => {
   res.writeHead(status, { "content-type": type, "content-length": Buffer.byteLength(content), ...SECURITY });
@@ -259,7 +253,7 @@ const STATIC: Record<string, [string, string]> = {
 const fromHost = (req: IncomingMessage) => {
   const token = hostToken();
   const given = /^Bearer ([0-9a-f]{48})$/.exec(String(req.headers.authorization ?? ""))?.[1];
-  return token !== null && given !== undefined && timingSafeEqual(Buffer.from(given), Buffer.from(token));
+  return token !== null && given !== undefined && sameSecret(given, token);
 };
 
 const handle = async (req: IncomingMessage, res: ServerResponse) => {
@@ -282,7 +276,7 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
       if (action) {
         action.state = report.done ? (report.code === 0 ? "done" : "failed") : "running";
         if (report.done) action.code = report.code;
-        for (const line of report.lines ?? []) action.lines.push(String(line).replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 300));
+        for (const line of report.lines ?? []) action.lines.push(printable(line, 300, " "));
         if (action.lines.length > 60) action.lines.splice(0, action.lines.length - 60);
         changed();
       }
@@ -333,7 +327,7 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
   const name = cookieName(ui);
   const given = url.searchParams.get("tkn");
   if (req.method === "GET" && url.pathname === "/" && given !== null) {
-    if (!same(given, ui)) return send(res, 403, "text/plain; charset=utf-8", "desolate: refused: that is not this dashboard's address; `desolate ui` prints it\n");
+    if (!sameSecret(given, ui)) return send(res, 403, "text/plain; charset=utf-8", "desolate: refused: that is not this dashboard's address; `desolate ui` prints it\n");
     // Exchanged for a cookie the page's own script cannot read, sent to this name only,
     // and never on a request another site starts; the token leaves the address bar.
     const rest = url.search.slice(1).split("&").filter((part) => part !== "" && !part.startsWith("tkn=")).join("&");
@@ -341,7 +335,7 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
     return res.end();
   }
   const cookie = new RegExp(`(?:^|;\\s*)${name}=([0-9a-f]{48})(?:;|$)`).exec(String(req.headers.cookie ?? ""))?.[1];
-  if (!cookie || !same(cookie, ui)) return send(res, 401, "text/plain; charset=utf-8", "desolate: open the dashboard at the address `desolate ui` prints: it carries this dashboard's token\n");
+  if (!cookie || !sameSecret(cookie, ui)) return send(res, 401, "text/plain; charset=utf-8", "desolate: open the dashboard at the address `desolate ui` prints: it carries this dashboard's token\n");
   if (req.method === "GET" && STATIC[url.pathname]) {
     const [file, type] = STATIC[url.pathname]!;
     return send(res, 200, type, fs.readFileSync(path.join(HERE, "ui", file), "utf8"));

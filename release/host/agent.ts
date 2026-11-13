@@ -13,8 +13,8 @@
 // own VM: `desolate agent list` shows them all.
 import { EXIT, refuse } from "../shared/exit.ts";
 import { parseRepo } from "../shared/names.ts";
-import { TERMINAL_RESET, terminalFilter } from "../shared/terminal-filter.ts";
-import { printable } from "./events.ts";
+import { terminalFilter } from "../shared/terminal-filter.ts";
+import { printable } from "../shared/text.ts";
 import { guest } from "./paths.ts";
 import { backend, rootctl } from "./stack.ts";
 
@@ -114,6 +114,9 @@ export const attach = async (where: string | undefined, options: { name?: string
   process.stdin.resume();
   size();
   process.stdout.on("resize", size);
+  // What the agent prints, kept to what a screen needs (shared/terminal-filter.ts): your
+  // terminal emulator is outside every boundary. (It knows what the reset owes, too.)
+  const filter = terminalFilter();
   const done = new Promise<number>((resolve) => {
     let over = false;
     const finish = (code: number) => {
@@ -123,10 +126,15 @@ export const attach = async (where: string | undefined, options: { name?: string
       process.stdin.setRawMode(false);
       process.stdin.pause();
       process.stdout.off("resize", size);
+      // Let go of the holder's client at once: its pipes, and the process (the backend's
+      // shell may take its time to end, and must not keep this one, and your prompt, waiting).
+      for (const stream of [child.stdin, child.stdout, child.stderr]) stream?.destroy();
+      child.unref();
       child.kill();
+      process.stdin.unref?.();
       // Whatever modes it left on (mouse reporting, the alternate screen, ...), off: the
       // terminal is your shell's again.
-      process.stdout.write(TERMINAL_RESET);
+      process.stdout.write(filter.reset());
       process.stderr.write(`\r\ndesolate: detached from ${name}; it is still running (desolate agent list).\r\n`);
       resolve(code);
     };
@@ -138,9 +146,6 @@ export const attach = async (where: string | undefined, options: { name?: string
       }
       send(`i ${chunk.toString("base64")}`);
     });
-    // What the agent prints, kept to what a screen needs (shared/terminal-filter.ts): your
-    // terminal emulator is outside every boundary.
-    const filter = terminalFilter();
     child.stdout!.on("data", (chunk: Buffer) => process.stdout.write(filter(chunk)));
     child.on("close", () => finish(0));
   });

@@ -13,6 +13,7 @@
 // THE LINK. Each workspace's only way out is one stream to its own proxy in the root. The
 // daemon owns the host end of it and carries each connection to that workspace's proxy and
 // nowhere else: which link a connection arrived on is what attributes it.
+import { printable } from "../shared/text.ts";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
@@ -277,7 +278,7 @@ const serve = async () => {
       // For the dashboard. Shown as text and built into an address: a token is 48 hex, the
       // rest is cut to a line.
       entry.editorToken = typeof reply.editorToken === "string" && /^[0-9a-f]{48}$/.test(reply.editorToken) ? reply.editorToken : "";
-      entry.devcontainer = typeof reply.devcontainer === "string" ? reply.devcontainer.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").slice(0, 400) : "";
+      entry.devcontainer = typeof reply.devcontainer === "string" ? printable(reply.devcontainer, 400, " ") : "";
       if (!entry.folder.startsWith("workspace:") && typeof reply.folder === "string" && /^\/workspaces\/[A-Za-z0-9._\/-]+$/.test(reply.folder)) entry.folder = reply.folder;
       if (!reply.ok || !Array.isArray(reply.listeners)) throw new Error(reply.error ?? `exit ${result.code}`);
       // Fail closed on what the VM says: integers, 1024 and up, and a sane number of them.

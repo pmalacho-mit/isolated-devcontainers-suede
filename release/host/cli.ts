@@ -1,5 +1,6 @@
 // The desolate command, on the host. It drives everything, holds no key, and runs no git on
 // desolate's repositories (P4).
+import { printable } from "../shared/text.ts";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { parseArgs } from "node:util";
@@ -155,7 +156,7 @@ const main = async (argv: string[]): Promise<number> => {
     const { rootctl } = await import("./stack.ts");
     const entries = await rootctl<{ time: string; domain: string; workspace: string; host: string; port: number; verdict: string; reason?: string; secrets?: string[] }[]>("net.log", { domain: positionals[0] }, { quiet: true });
     if (values.json === true) out(JSON.stringify(entries));
-    else for (const e of entries) out(`${e.time}  domain=${e.domain} workspace=${e.workspace}  ${e.verdict}  ${String(e.host).replace(/[^\x21-\x7e]/g, "?")}:${e.port}${Array.isArray(e.secrets) ? `  [${e.secrets.join(", ").replace(/[^\x21-\x7e ]/g, "?")}]` : ""}${e.reason ? `  (${e.reason})` : ""}`);
+    else for (const e of entries) out(`${e.time}  domain=${e.domain} workspace=${e.workspace}  ${e.verdict}  ${String(e.host).replace(/[^\x21-\x7e]/g, "?")}:${e.port}${Array.isArray(e.secrets) ? `  [${e.secrets.join(", ").replace(/[^\x21-\x7e ]/g, "?")}]` : ""}${e.reason ? `  (${printable(e.reason)})` : ""}`);
     return EXIT.ok;
   }
   if (verb === "up") {
@@ -170,7 +171,7 @@ const main = async (argv: string[]): Promise<number> => {
     await status(positionals[0], out, values.json === true);
     return EXIT.ok;
   }
-  if (verb === "list" || verb === "status") {
+  if (verb === "list" || verb === "status" || verb === "board") {
     const { values, positionals } = flags(rest, {});
     const { list } = await import("./workspaces.ts");
     await list(out, values.json === true, positionals[0]);
@@ -216,6 +217,7 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "down") {
+    if (flags(rest, {}).positionals.length > 0) refuse("desolate down takes no arguments: it stops every VM (and removes nothing)", "desolate down", EXIT.usage);
     const { down } = await import("./bootstrap.ts");
     await down(out);
     return EXIT.ok;
@@ -238,15 +240,16 @@ const main = async (argv: string[]): Promise<number> => {
     return 0;
   }
   if (verb === "approve") {
-    if (rest.includes("--selftest")) return (await import("./approver.ts")).selftest(out);
-    if (rest.includes("--web")) {
+    const { values } = flags(rest, { selftest: { type: "boolean" }, web: { type: "boolean" }, open: { type: "boolean" } });
+    if (values.selftest === true) return (await import("./approver.ts")).selftest(out);
+    if (values.web === true) {
       // The page's address carries this stack's token: it is the person's to open in a
       // browser on this Mac, and not to paste anywhere else.
       const { ensureDaemon } = await import("./daemon.ts");
       await ensureDaemon();
       const address = (await import("./approve-web.ts")).approveAddress();
       out(`approvals    ${address}`);
-      if (rest.includes("--open")) openInBrowser(address);
+      if (values.open === true) openInBrowser(address);
       return EXIT.ok;
     }
     const { approve } = await import("./push.ts");
@@ -255,9 +258,9 @@ const main = async (argv: string[]): Promise<number> => {
   if (verb === "events") {
     // JSON lines, one per event, until stopped: for a script to act on (events.ts says how
     // far each kind of event can be believed).
-    const at = rest.indexOf("--replay");
-    const replay = at >= 0 ? Number(rest[at + 1]) : 0;
-    if (at >= 0 && (!Number.isInteger(replay) || replay < 0)) refuse("--replay takes a number", "desolate events --replay 20", EXIT.usage);
+    const { values } = flags(rest, { replay: { type: "string" } });
+    const replay = values.replay === undefined ? 0 : Number(values.replay);
+    if (!Number.isInteger(replay) || replay < 0) refuse("--replay takes a number", "desolate events --replay 20", EXIT.usage);
     const { followEvents } = await import("./daemon.ts");
     // (A reader that stops reading is let go by the daemon, with a "lagged" line: this
     // process does not pile lines up either, it stops when stdout does.)
@@ -318,6 +321,7 @@ const main = async (argv: string[]): Promise<number> => {
     return EXIT.ok;
   }
   if (verb === "root" && rest[0] === "shell") {
+    flags(rest.slice(1), {});
     const { rootShell } = await import("./push.ts");
     return rootShell();
   }
@@ -344,6 +348,8 @@ const main = async (argv: string[]): Promise<number> => {
   throw new Refusal(`desolate has no command '${verb}'`, "desolate help", EXIT.usage);
 };
 
+// Piped into something that stops reading (`desolate list | head -1`): done, not a crash.
+process.stdout.on("error", (error: NodeJS.ErrnoException) => process.exit(error.code === "EPIPE" ? 0 : EXIT.failed));
 try {
   process.exitCode = await main(process.argv.slice(2));
 } catch (error) {

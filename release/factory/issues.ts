@@ -23,7 +23,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
-import { printable } from "../host/events.ts";
+import { printable } from "../shared/text.ts";
 
 const CLI = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "cli.sh");
 // Everything said here is made printable: issue text, gh's and the VM's errors, an agent's words.
@@ -46,15 +46,23 @@ const gh = (args: string[]) => {
   return { code: ran.status ?? 1, out: ran.stdout ?? "", err: ran.stderr ?? "" };
 };
 
-const { values, positionals } = parseArgs({
-  args: process.argv.slice(2),
-  options: {
-    repo: { type: "string" }, domain: { type: "string" }, label: { type: "string", default: "desolate:run" },
-    max: { type: "string", default: "3" }, interval: { type: "string", default: "30" },
-    secret: { type: "string", default: "CLAUDE-OAUTH" }, once: { type: "boolean" },
-  },
-  allowPositionals: true,
-});
+const parsed = (() => {
+  try {
+    return parseArgs({
+      args: process.argv.slice(2),
+      options: {
+        repo: { type: "string" }, domain: { type: "string" }, label: { type: "string", default: "desolate:run" },
+        max: { type: "string", default: "3" }, interval: { type: "string", default: "30" },
+        secret: { type: "string", default: "CLAUDE-OAUTH" }, once: { type: "boolean" },
+      },
+      allowPositionals: true,
+    });
+  } catch (error) {
+    process.stderr.write(`desolate factory: ${(error as Error).message}\n  fix: desolate help\n`);
+    process.exit(64);
+  }
+})();
+const { values, positionals } = parsed;
 const repo = values.repo ?? fail("which repository?", "--repo <owner/repo>");
 const domain = values.domain ?? fail("which domain?", "--domain <domain> (it must have the repository: desolate domain create <d> --repo <owner/repo>)");
 const max = Math.max(1, Number(values.max) || 3);
