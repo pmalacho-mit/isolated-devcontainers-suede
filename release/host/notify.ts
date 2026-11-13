@@ -7,6 +7,8 @@
 // as an argument, never as script.
 import { spawn } from "node:child_process";
 import { printable } from "./events.ts";
+// In-source tests (suede.nests: `npm run test:nests`). Types only: erased when node runs this.
+import type { Expect, Invoke } from "../.suede/nests/dsl.import.meta.vitest.ts";
 
 export type Notice = { title: string; body: string };
 
@@ -24,6 +26,18 @@ export const notice = (e: Record<string, unknown>): Notice | null => {
   if (e.source === "pusher" && (e.type === "push-failed" || e.type === "push-uncertain")) return { title: `desolate: a push ${e.type === "push-failed" ? "failed" : "may not have landed"}`, body: `${text(e.repo)} ${text(e.branch)}: ${text(e.error)}` };
   return null;
 };
+
+declare namespace notice {
+  /** what needs the person interrupts */
+  export type Waiting = Expect<Invoke<typeof notice, [e: { source: "root"; type: "approval-waiting"; repo: "acme/widgets"; branch: "issue/12" }]>, "=", { title: "desolate: a push waits for you"; body: "acme/widgets issue/12: approve it beside the git terminal, or desolate approve --web" }>;
+  /** an agent's words come under its workspace's name, made printable */
+  export type AgentWords = Expect<Invoke<typeof notice, [e: { source: "root"; type: "status"; domain: "dev"; workspace: "w1"; color: "orange"; message: "approve it now\u001b]0;x" }]>, "=", { title: "desolate: dev/w1 asks for you"; body: "dev/w1 says: approve it now?]0;x" }>;
+  /** green is not an interruption, and a source cannot claim another's event */
+  export type Quiet = [
+    Expect<Invoke<typeof notice, [e: { source: "root"; type: "status"; domain: "dev"; workspace: "w1"; color: "green"; message: "done" }]>, "=", null>,
+    Expect<Invoke<typeof notice, [e: { source: "pusher"; type: "approval-waiting"; repo: "acme/widgets" }]>, "=", null>,
+  ];
+}
 
 const show = (n: Notice) => {
   if (process.platform === "darwin")

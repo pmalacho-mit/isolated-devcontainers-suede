@@ -1,0 +1,63 @@
+name: subrepo-downstream-to-main
+#
+# Lives on the `release` branch, because that is where a consumer's
+# `git subrepo push` lands. Fires ONCE, on the initial push of a downstream/**
+# branch (a release-shaped subrepo split).
+#
+# It checks out `main` and runs two scripts from there: one rebuilds the
+# submission as a main-shaped PR head, the other opens the PR. Both are tested
+# directly against local repositories, so this file stays a caller.
+on:
+  push:
+    branches:
+      - "downstream/**"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: suede-downstream-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  open-pull-request:
+    # Only the consumer's initial, branch-creating push runs. The force-push
+    # below is created:false and is skipped, so there is no loop.
+    if: ${{ github.event.created }}
+    runs-on: ubuntu-latest
+    env:
+      SUBMISSION_REF: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Configure git identity
+        run: |
+          git config --global user.email "action@github.com"
+          git config --global user.name "suede-bot"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Rebuild the submission as a main-shaped PR head
+        id: rebuild
+        run: bash .suede/core/rebuild-pr-branch.sh
+        # outputs: base_commit, submission_commit, conflicted, has_changes
+        # side effect: leaves the rebuilt commit on local branch pull-request-head
+
+      - name: Remove the branch if it proposes nothing new
+        if: ${{ steps.rebuild.outputs.has_changes == 'false' }}
+        run: git push origin --delete "$SUBMISSION_REF" || true
+
+      - name: Reuse the trigger branch as the PR head (force-push)
+        if: ${{ steps.rebuild.outputs.has_changes == 'true' }}
+        run: git push --force origin "pull-request-head:refs/heads/${SUBMISSION_REF}"
+
+      - name: Open the pull request
+        if: ${{ steps.rebuild.outputs.has_changes == 'true' }}
+        env:
+          BASE_COMMIT: ${{ steps.rebuild.outputs.base_commit }}
+          SUBMISSION_COMMIT: ${{ steps.rebuild.outputs.submission_commit }}
+          CONFLICTED: ${{ steps.rebuild.outputs.conflicted }}
+        run: bash .suede/core/open-pull-request.sh

@@ -1,0 +1,130 @@
+{
+  "name": "namespace-tests",
+  "displayName": "Namespace Tests",
+  "description": "Type-level tests in the editor: run them from the line you wrote them on.",
+  "version": "0.30.0",
+  "publisher": "pmalacho-mit",
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "categories": [
+    "Testing"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "namespace-tests.runTest",
+        "title": "Namespace Tests: Run Test"
+      },
+      {
+        "command": "namespace-tests.extract",
+        "title": "Namespace Tests: Extract Test to a File"
+      },
+      {
+        "command": "namespace-tests.showCollector",
+        "title": "Namespace Tests: Show What Vitest Sees"
+      },
+      {
+        "command": "namespace-tests.display",
+        "title": "Namespace Tests: Display Result"
+      },
+      {
+        "command": "namespace-tests.runExtracted",
+        "title": "Namespace Tests: Run Extracted Test"
+      },
+      {
+        "command": "namespace-tests.debugExtracted",
+        "title": "Namespace Tests: Debug Extracted Test"
+      },
+      {
+        "command": "namespace-tests.deleteExtracted",
+        "title": "Namespace Tests: Delete Extracted Test"
+      },
+      {
+        "command": "namespace-tests.showFailure",
+        "title": "Namespace Tests: Show Failure"
+      },
+      {
+        "command": "namespace-tests.showServed",
+        "title": "Namespace Tests: Show What Vitest Runs"
+      }
+    ],
+    "menus": {
+      "testing/item/context": [
+        {
+          "command": "namespace-tests.extract",
+          "group": "inline"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "namespace-tests.runExtracted",
+          "when": "resourceFilename =~ /\\.temp\\.ts$/"
+        },
+        {
+          "command": "namespace-tests.debugExtracted",
+          "when": "resourceFilename =~ /\\.temp\\.ts$/"
+        },
+        {
+          "command": "namespace-tests.deleteExtracted",
+          "when": "resourceFilename =~ /\\.temp\\.ts$/"
+        },
+        {
+          "command": "namespace-tests.runTest",
+          "when": "false"
+        },
+        {
+          "command": "namespace-tests.showFailure",
+          "when": "false"
+        },
+        {
+          "command": "namespace-tests.showCollector",
+          "when": "editorLangId == typescript"
+        },
+        {
+          "command": "namespace-tests.showServed",
+          "when": "resourceFilename =~ /\\.temp\\.ts$/"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Namespace Tests",
+      "properties": {
+        "namespace-tests.autoRun": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run a file's tests when it is opened or saved."
+        },
+        "namespace-tests.minimalCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Command that prints one test as a standalone file. Empty means find the library in the workspace."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "install-extension": "node install.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "@types/vscode": "~1.88.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pmalacho-mit/typescript-namespace-tests-suede"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Runs your tests and the namespace-tests command line, and parses with your project's own TypeScript."
+    }
+  }
+}

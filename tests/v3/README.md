@@ -42,6 +42,29 @@ How the tests are built (move-to-vms.md section 13):
 - **The editor is the real one**: the pinned VSCodium server in the base image. `t2/06`
   drives it over HTTP and WebSocket, and from headless Chrome.
 
+## In-source tests (suede.nests)
+
+Beside T1's node:test files, some of `release/` carries its tests in itself: `declare
+namespace` blocks under a function, whose types say what it does (`release/shared/names.ts`,
+`release/host/events.ts`, `release/host/notify.ts`):
+
+```ts
+declare namespace isBranch {
+  export type Refuses = Table<typeof isBranch, [
+    [args: [value: "--upload-pack=touch x"], expected: false],
+    ...
+  ]>;
+}
+```
+
+They are [suede.nests](https://github.com/pmalacho-mit/suede.nests), vendored at
+`release/.suede/nests` and run by Vitest (`npm run test:nests`, and as part of `make test`).
+Node never sees them: a declared namespace and an `import type` are erased. The DSL must be
+imported by its own path in each file (`../.suede/nests/dsl.import.meta.vitest.ts`), never
+re-exported: that path is how Vitest finds the file. Vitest is pinned at 5.0.3 (5.1 hands
+plugins root-relative ids, and the library's generated test modules are then "not found");
+install with `npm install --legacy-peer-deps` (npm's peer resolution crashes on Vitest 5.0.3).
+
 ## What a machine needs
 
 - **T1:** node >= 22.18, `npm install` (for TypeScript). `shellcheck` if you have it.

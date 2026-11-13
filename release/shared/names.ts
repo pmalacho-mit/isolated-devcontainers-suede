@@ -2,6 +2,8 @@
 // validated once, here, and nothing downstream re-interprets it (move-to-vms.md section 2;
 // v2's `owner/repo` as `owner__repo` needed a whole rule set, so v3 never encodes one).
 import { createHash } from "node:crypto";
+// In-source tests (suede.nests: `npm run test:nests`). Types only: erased when node runs this.
+import type { Expect, Invoke, Table } from "../.suede/nests/dsl.import.meta.vitest.ts";
 
 export const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 /** GitHub's own rules, narrowed: no leading dot or dash, no "..", no ".git" suffix. */
@@ -22,6 +24,34 @@ export const parseRepo = (value: unknown): Repo | null => {
   return { owner, name };
 };
 
+declare namespace isSlug {
+  /** what a domain or workspace may be called: it becomes a VM name, a hostname and a path */
+  export type Names = Table<typeof isSlug, [
+    [args: [value: "acme"], expected: true],
+    [args: [value: "issue-12"], expected: true],
+    [args: [value: "Acme"], expected: false],
+    [args: [value: "-acme"], expected: false],
+    [args: [value: "acme-"], expected: false],
+    [args: [value: "a--b"], expected: false],
+    [args: [value: "a.b"], expected: false],
+    [args: [value: "x234567890123456789012345678901234567890"], expected: true],
+    [args: [value: "x2345678901234567890123456789012345678901"], expected: false],
+  ]>;
+}
+
+declare namespace parseRepo {
+  /** owner/name, and nothing that could leave the directory it names */
+  export type Accepts = Expect<Invoke<typeof parseRepo, [value: "acme/widgets"]>, "=", { owner: "acme"; name: "widgets" }>;
+  export type Refuses = Table<typeof parseRepo, [
+    [args: [value: "acme"], expected: null],
+    [args: [value: "acme/widgets/x"], expected: null],
+    [args: [value: "../widgets"], expected: null],
+    [args: [value: "acme/.."], expected: null],
+    [args: [value: "acme/widgets.git"], expected: null],
+    [args: [value: "-acme/widgets"], expected: null],
+  ]>;
+}
+
 export const repoId = (repo: Repo) => `${repo.owner}/${repo.name}`;
 
 /** A branch name desolate will carry across an owner boundary. Stricter than git's
@@ -34,8 +64,38 @@ export const isBranch = (value: unknown): value is string =>
   !value.includes("..") && !value.includes("//") && !value.endsWith("/") &&
   !value.endsWith(".lock") && !value.endsWith(".") && !value.includes("@{");
 
+declare namespace isBranch {
+  /** a branch an agent may name and the root may carry: safe as an argv word and in a refspec */
+  export type Carries = Table<typeof isBranch, [
+    [args: [value: "main"], expected: true],
+    [args: [value: "feature/greet-by-name"], expected: true],
+    [args: [value: "v1.2_rc-3"], expected: true],
+  ]>;
+  export type Refuses = Table<typeof isBranch, [
+    [args: [value: "--upload-pack=touch x"], expected: false],
+    [args: [value: "a..b"], expected: false],
+    [args: [value: "a//b"], expected: false],
+    [args: [value: "feature/"], expected: false],
+    [args: [value: "x.lock"], expected: false],
+    [args: [value: "x@{1}"], expected: false],
+    [args: [value: "a b"], expected: false],
+    [args: [value: "a;rm -rf"], expected: false],
+    [args: [value: ""], expected: false],
+  ]>;
+}
+
 export const isCommit = (value: unknown): value is string =>
   typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
+
+declare namespace isCommit {
+  /** a full object id, lower case: never an abbreviation, never a ref */
+  export type Ids = Table<typeof isCommit, [
+    [args: [value: "0123456789abcdef0123456789abcdef01234567"], expected: true],
+    [args: [value: "0123456789ABCDEF0123456789ABCDEF01234567"], expected: false],
+    [args: [value: "0123456"], expected: false],
+    [args: [value: "HEAD"], expected: false],
+  ]>;
+}
 
 export const isLfsOid = (value: unknown): value is string =>
   typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
