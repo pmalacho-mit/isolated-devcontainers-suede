@@ -103,7 +103,8 @@ const sides = (text) => {
   flush();
   return rows;
 };
-/** How alike two lines are, 0 to 1: their common start and end, against the longer. */
+/** How alike two lines are, 0 to 1: the better of their common start and end against the
+ *  longer, and the words they share (a line rewritten in its middle keeps its words). */
 const likeness = (a, b) => {
   const most = Math.max(a.length, b.length);
   if (most === 0) return 1;
@@ -111,9 +112,19 @@ const likeness = (a, b) => {
   while (start < a.length && start < b.length && a[start] === b[start]) start++;
   let end = 0;
   while (end < a.length - start && end < b.length - start && a[a.length - 1 - end] === b[b.length - 1 - end]) end++;
-  return (start + end) / most;
+  const words = (line) => line.match(/[\p{L}\p{N}_$]+/gu) ?? [];
+  const mine = words(a);
+  const theirs = new Map();
+  for (const word of words(b)) theirs.set(word, (theirs.get(word) ?? 0) + 1);
+  let shared = 0;
+  for (const word of mine) if ((theirs.get(word) ?? 0) > 0) {
+    shared++;
+    theirs.set(word, theirs.get(word) - 1);
+  }
+  const total = mine.length + words(b).length;
+  return Math.max((start + end) / most, total ? (2 * shared) / total : 0);
 };
-/** Which removed line goes beside which added one: pairs [d, a] in order, alike enough,
+/** Which removed line goes beside which added one: pairs [d, a] in order, alike enough (half),
  *  as many and as alike as can be (a small dynamic program; a long run is paired as it comes). */
 const pairs = (dels, adds) => {
   const n = dels.length;
@@ -122,7 +133,7 @@ const pairs = (dels, adds) => {
   if (n * m > 40_000) return Array.from({ length: Math.min(n, m) }, (_, k) => [k, k]);
   const score = (d, a) => {
     const like = likeness(dels[d].text.trim(), adds[a].text.trim());
-    return like >= 0.4 ? like : 0;
+    return like >= 0.5 ? like : 0;
   };
   const best = Array.from({ length: n + 1 }, () => new Float64Array(m + 1));
   for (let d = n - 1; d >= 0; d--)
