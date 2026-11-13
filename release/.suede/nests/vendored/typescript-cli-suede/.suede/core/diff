@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# .suede/core/diff — ships INSIDE a suede dependency:
+#     <repo>/<dependency>/.suede/core/diff
+#
+# What your copy of this dependency differs from, in either direction:
+#
+#     bash <dependency>/.suede/core/diff          # what you would propose
+#     bash <dependency>/.suede/core/diff --sync   # what you would receive
+#
+# Default: the commit this dependency's `.gitrepo` names on the left, your
+# working tree on the right - so `+` lines are yours, and what you are looking
+# at is what `upstream` would propose.
+#
+# --sync: your working tree on the left, the current tip of the remote's
+# release branch on the right - so `+` lines are incoming, and what you are
+# looking at is what `sync` would bring you.
+#
+# Like `sync` and `upstream` it takes no target: the dependency is the one
+# containing this script. Anything else you pass goes to `git diff`, so
+# `--stat`, `--name-only`, `-w` and the rest work as usual.
+#
+# Your side is the files as they are on disk - uncommitted edits and new files
+# included, and whatever your .gitignore excludes left out. `.gitrepo` is
+# dropped from both sides: it is local bookkeeping and always differs.
+#
+# Needs `git` and network access to the dependency's remote. git-subrepo is
+# not required.
+#
+# Exit: 0 no difference, 1 there is one (as `git diff` reports it), 2 the
+# command could not run at all.
+
+set -euo pipefail
+
+usage() { grep '^#' "$0" | grep -v '^#!/' | sed 's/^# \?//'; exit 0; }
+
+# 2, not 1: 1 is `git diff`'s "there is a difference", which is an answer
+# rather than a failure, and a caller has to be able to tell them apart.
+die() { printf 'diff: %s\n' "$*" >&2; exit 2; }
+note() { printf 'diff: %s\n' "$*" >&2; }
+
+SYNC=0
+ARGS=()
+for argument in "$@"; do
+  case "$argument" in
+    -h|--help) usage ;;
+    --sync)    SYNC=1 ;;
+    # The two sides are ours to name, so a `--` of yours would only collide
+    # with the one below. Dropping it lets `diff -- --stat` mean what it looks
+    # like it means.
+    --)        ;;
+    *)         ARGS+=("$argument") ;;
+  esac
+done
+
+command -v git >/dev/null 2>&1 || die "git not found"
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd -P)" \
+  || die "cannot resolve script location"
+
+# The dependency root is exactly two levels up (<dep>/.suede/core/diff), and
+# `pwd -P` above has already resolved whatever symlink the caller came through.
+DEP_DIR="$(cd "$SELF_DIR/../.." >/dev/null 2>&1 && pwd -P)" \
+  || die "cannot resolve dependency root above $SELF_DIR"
+[[ -f "$DEP_DIR/.gitrepo" ]] \
+  || die "no .gitrepo at $DEP_DIR - is this inside an installed suede dependency?"
+
+git -C "$DEP_DIR" rev-parse --show-toplevel >/dev/null 2>&1 \
+  || die "$DEP_DIR is not inside a git repository"
+
+field() { git config -f "$DEP_DIR/.gitrepo" --get "subrepo.$1" 2>/dev/null || true; }
+REMOTE="$(field remote)"
+COMMIT="$(field commit)"
+BRANCH="$(field branch)"
+BRANCH="${BRANCH:-release}"
+[[ -n "$REMOTE" ]] || die "$DEP_DIR/.gitrepo names no remote"
+[[ -n "$COMMIT" || "$SYNC" == 1 ]] || die "$DEP_DIR/.gitrepo names no commit"
+
+WORKSPACE="$(mktemp -d)"
+trap 'rm -rf "$WORKSPACE"' EXIT
+
+# Your side, built from what git can see rather than from the directory: that
+# is what keeps build output and other ignored files out of a diff meant to
+# show what you would propose, while still including edits you have not
+# committed and files you have only just added.
+copy_working_tree() { # <destination>
+  local destination="$1" file
+  while IFS= read -r -d '' file; do
+    [[ "$file" == ".gitrepo" ]] && continue
+    mkdir -p "$destination/$(dirname "$file")"
+    cp -pP "$DEP_DIR/$file" "$destination/$file"
+  done < <(git -C "$DEP_DIR" ls-files -z --cached --others --exclude-standard)
+}
+
+# The other side, materialised from the remote. No history is kept - this is
+# the same degit-shaped fetch the installer does, for the same reason: the tree
+# is all anyone needs to compare against. Sets REFERENCE_COMMIT to whatever was
+# checked out, which is the only way to learn the branch tip once `.git` is
+# gone.
+REFERENCE_COMMIT=""
+fetch_reference() { # <destination> <commit-or-empty-for-branch-tip>
+  local destination="$1" commit="$2"
+  git init --quiet "$destination"
+  git -C "$destination" remote add origin "$REMOTE"
+  if [[ -z "$commit" ]]; then
+    git -C "$destination" fetch --quiet --depth 1 origin "refs/heads/$BRANCH" \
+      || die "could not reach $REMOTE ($BRANCH)"
+    git -C "$destination" checkout --quiet --detach FETCH_HEAD
+  else
+    # Fetching a bare SHA is refused by some servers; the branch always works.
+    git -C "$destination" fetch --quiet --depth 1 origin "$commit" 2>/dev/null \
+      || git -C "$destination" fetch --quiet origin "refs/heads/$BRANCH" \
+      || die "could not reach $REMOTE ($BRANCH)"
+    git -C "$destination" checkout --quiet --detach "$commit" 2>/dev/null \
+      || die "$REMOTE has no commit $commit on $BRANCH"
+  fi
+  REFERENCE_COMMIT="$(git -C "$destination" rev-parse HEAD)"
+  rm -rf "$destination/.git" "$destination/.gitrepo"
+}
+
+if [[ "$SYNC" == 1 ]]; then
+  fetch_reference "$WORKSPACE/remote" ""
+  LEFT="local"; RIGHT="remote"
+  # A sync merges rather than overwrites, so spell out which half of the diff
+  # is the incoming change and which half is simply yours. Both are worth
+  # seeing before pulling; confusing them is what makes a pull a surprise.
+  if [[ "$REFERENCE_COMMIT" == "$COMMIT" ]]; then
+    note "already pinned at the tip of $BRANCH (${REFERENCE_COMMIT:0:7}) - a sync would bring nothing, so all of this is yours"
+  else
+    note "pinned ${COMMIT:0:7} -> tip of $BRANCH ${REFERENCE_COMMIT:0:7}"
+    note "+ is what the tip has and you do not (incoming); - is what you have and it does not (yours, which a sync keeps)"
+  fi
+else
+  fetch_reference "$WORKSPACE/pinned" "$COMMIT"
+  LEFT="pinned"; RIGHT="local"
+  note "against pinned ${COMMIT:0:7} on $BRANCH - + is yours, and is what \`upstream\` would propose"
+fi
+copy_working_tree "$WORKSPACE/local"
+
+STATUS=0
+( cd "$WORKSPACE" && git diff --no-index ${ARGS[@]+"${ARGS[@]}"} -- "$LEFT" "$RIGHT" ) || STATUS=$?
+# `git diff` says nothing when there is nothing to say, which for a command you
+# ran to find out reads the same as a command that failed to look.
+[[ "$STATUS" == 0 ]] && note "no differences"
+exit "$STATUS"

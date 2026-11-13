@@ -2,7 +2,7 @@
   "name": "isolated-devcontainers-suede",
   "private": true,
   "type": "module",
-  "description": "Dev-only manifest. NOT shipped -- release/ is the shipped tree and carries no package.json. It pins ESM resolution for the .ts files node runs during tests, pins the TypeScript that type-checks them, and gives the suite memorable entry points.",
+  "description": "Dev-only manifest. NOT shipped -- release/ is the shipped tree and carries no package.json. It pins ESM resolution for the .ts files node runs during tests, pins the TypeScript that type-checks them, and gives the suite memorable entry points. Vitest is pinned at 5.0.3: 5.1 hands plugins root-relative ids, which suede.nests's collector does not resolve (its generated test modules are 'not found').",
   "engines": {
     "node": ">=22.18"
   },
@@ -12,13 +12,21 @@
     "test:t2": "./tests/v3/run.sh t2",
     "test:t3": "./tests/v3/run.sh t3",
     "test:all": "./tests/v3/run.sh all",
-    "lint:types": "tsc --noEmit -p ."
+    "lint:types": "tsc --noEmit -p .",
+    "test:nests": "vitest run"
   },
   "devDependencies": {
     "@devcontainers/cli": "^0.88.0",
+    "@jridgewell/sourcemap-codec": "^1.6.0",
     "@types/node": "^26.1.2",
+    "@types/picomatch": "^4.0.3",
     "@types/vscode": "1.116.0",
+    "@typescript/typescript6": "^6.0.2",
+    "es-module-lexer": "^2.3.2",
     "esbuild": "0.28.2",
-    "typescript": "^5.7.2"
+    "picomatch": "^4.0.7",
+    "typescript": "^5.7.2",
+    "vite": "^8.3.8",
+    "vitest": "5.0.3"
   }
 }

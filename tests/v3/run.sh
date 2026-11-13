@@ -37,6 +37,12 @@ t1() {
     # silently disagree. Not installing typescript must not look like a pass.
     need "typescript is not installed, so nothing checks that the TypeScript agrees with itself" "npm install"
   fi
+  # In-source tests (suede.nests): the `declare namespace` blocks beside the code in release/.
+  if [ -x node_modules/.bin/vitest ]; then
+    node_modules/.bin/vitest run --reporter=dot || failed=1
+  else
+    need "vitest is not installed, so the in-source tests (suede.nests) cannot run" "npm install"
+  fi
   for script in release/cli.sh release/image/*.sh release/root/*.sh release/root/hooks/* release/root/keyring-askpass release/root/git-remote-desolate release/workspace/*.sh release/workspace/desolate release/host/vm/*.sh tests/v3/*.sh tests/v3/forge/*.sh tests/probes/v3/*.sh; do
     bash -n "$script" || { echo "syntax: $script" >&2; failed=1; }
   done

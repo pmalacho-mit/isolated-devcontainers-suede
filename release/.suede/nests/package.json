@@ -1,0 +1,26 @@
+{
+  "name": "nests",
+  "workspaces": [
+    "vscode-extension"
+  ],
+  "private": true,
+  "description": "Tests written as TypeScript types beside the code they test, run by Vitest and erased from every build.",
+  "dependencies": {
+    "@jridgewell/sourcemap-codec": "^1.6.0",
+    "@typescript/typescript6": "^6.0.2",
+    "es-module-lexer": "^2.3.2",
+    "picomatch": "^4.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.0",
+    "@types/picomatch": "^4.0.3"
+  },
+  "peerDependencies": {
+    "vitest": "^5.0.1"
+  },
+  "scripts": {
+    "install-extension": "node vscode-extension/install.mjs",
+    "build-extension": "cd vscode-extension && node build.mjs",
+    "clean-cache": "node cli.mts --clean-cache"
+  }
+}
