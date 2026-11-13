@@ -167,6 +167,25 @@ const sideBySide = (text) => el("div", { class: "sbs", "data-diff": "" }, sides(
     : [el("span", { class: "no empty" }, ""), el("span", { class: "code empty" }, "")];
   return el("div", { class: "sbs-row" }, cell(row.left, row.right, row.kind === "change" ? "del" : ""), cell(row.right, row.left, row.kind === "change" ? "add" : ""));
 }));
+// The diff's element, kept across redraws: the dashboard redraws on every change of state (a
+// workspace's status, an action's progress), and a long diff drawn again each time cost up to
+// half a second, and threw away where the person had scrolled to. Drawn again only when the
+// diff, the layout, or how much of it is shown changes. At first at most DIFF_LINES of it.
+const DIFF_LINES = 3000;
+let shownDiff = null; // { diff, layout, all, node }
+const diffElement = (diff) => {
+  const all = Boolean(diff.all);
+  if (shownDiff && shownDiff.diff === diff && shownDiff.layout === layout && shownDiff.all === all) return shownDiff.node;
+  const lines = diff.text.split("\n");
+  const cut = !all && lines.length > DIFF_LINES;
+  const text = cut ? lines.slice(0, DIFF_LINES).join("\n") : diff.text;
+  const node = el("div", { class: "diff-box" },
+    layout === "sides" ? sideBySide(text) : diffView(text),
+    cut ? el("div", { class: "sub" }, `The first ${DIFF_LINES.toLocaleString()} of ${lines.length.toLocaleString()} lines. `,
+      el("button", { class: "quiet small", onclick: () => { diff.all = true; render(); } }, "Show the rest")) : null);
+  shownDiff = { diff, layout, all, node };
+  return node;
+};
 let layout = (() => {
   try {
     return localStorage.getItem("desolate-diff-layout") === "unified" ? "unified" : "sides";
@@ -266,7 +285,7 @@ const reviewPanel = () => {
     reviewing.diff && reviewing.diff.text !== undefined && reviewing.diff.commit === review.commit ? [
       el("div", { class: "sub" }, el("button", { class: "quiet small", "data-whitespace": "", onclick: () => { reviewing.whitespace = reviewing.whitespace === "ignore" ? "show" : "ignore"; loadDiff(); } }, reviewing.whitespace === "ignore" ? "Show whitespace changes" : "Ignore whitespace changes")),
       el("div", { class: "sub" }, el("button", { class: "quiet small", "data-layout": "", onclick: () => setLayout(layout === "sides" ? "unified" : "sides") }, layout === "sides" ? "Unified" : "Side by side")),
-      layout === "sides" ? sideBySide(reviewing.diff.text) : diffView(reviewing.diff.text),
+      diffElement(reviewing.diff),
       reviewing.diff.truncated ? el("div", { class: "warn" }, "The diff is longer than is shown here. Read the rest with git, in `desolate root shell`, before you push.") : null] : null,
     reviewing.diff && reviewing.diff.commit && reviewing.diff.commit !== review.commit ? el("div", { class: "warn" }, "The branch moved while you were reading. Close this and review it again.") : null,
     el("div", { class: "sub" }, "For a richer view (syntax colouring, the whole file), open the branch in a workspace's editor. The diff here is the one to trust: it is made in the root, by git alone."),
@@ -369,9 +388,12 @@ const render = () => {
   const needs = needsYou();
   document.getElementById("needs").hidden = needs.length === 0;
   document.getElementById("needs-list").replaceChildren(...needs);
+  // (Where the diff was scrolled to, kept: its element is the same one, moved.)
+  const scrolled = shownDiff && shownDiff.node.isConnected ? [...shownDiff.node.querySelectorAll("[data-diff]")].map((n) => [n, n.scrollTop, n.scrollLeft]) : [];
   const panel = reviewPanel();
   document.getElementById("review").hidden = !panel;
   document.getElementById("review").replaceChildren(...(panel ? [panel] : []));
+  for (const [node, top, left] of scrolled) if (node.isConnected) { node.scrollTop = top; node.scrollLeft = left; }
   const first = firstRun();
   document.getElementById("first-run").hidden = !first;
   document.getElementById("first-run").replaceChildren(...(first ? [first] : []));

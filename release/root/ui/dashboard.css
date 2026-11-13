@@ -44,7 +44,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 12px; }
 ol.steps li.done { color: var(--soft); }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; background: var(--bg); padding: 1px 5px; border-radius: 4px; }
 .warn { color: var(--orange); }
-pre.diff { max-height: 70vh; white-space: pre; overflow: auto; line-height: 1.35; }
+pre.diff { max-height: 60vh; white-space: pre; overflow: auto; line-height: 1.35; }
 pre.diff span { display: block; min-width: max-content; }
 pre.diff .add { background: color-mix(in srgb, var(--green) 16%, transparent); }
 pre.diff .del { background: color-mix(in srgb, var(--red) 16%, transparent); }
@@ -54,7 +54,7 @@ button.small { font-size: 12px; padding: 1px 8px; }
 details.branches { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
 details.branches > summary { cursor: pointer; color: var(--soft); font-size: 13px; padding: 4px 0; }
 /* Side by side: two columns, each with its line numbers; changed text marked within a line. */
-.sbs { font: 12.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
+.sbs { font: 12.5px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 60vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
 .sbs-row { display: grid; grid-template-columns: 3.5em minmax(0, 1fr) 3.5em minmax(0, 1fr); }
 .sbs-row .no { color: var(--soft); text-align: right; padding: 0 8px 0 4px; user-select: none; border-right: 1px solid var(--line); }
 .sbs-row .code { white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 8px; }
@@ -66,3 +66,8 @@ details.branches > summary { cursor: pointer; color: var(--soft); font-size: 13p
 .sbs-file { font-weight: 700; padding: 6px 8px; border-top: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; }
 .sbs-hunk { color: var(--accent); padding: 2px 8px; background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .sbs-meta { color: var(--soft); padding: 2px 8px; font-style: italic; }
+
+/* A review of a large branch: its lists scroll in their own boxes, and the Push button stays
+   at the bottom of the window while the card is taller than it. */
+#review-card > pre.mono { max-height: 14em; overflow: auto; }
+#review-card > .buttons { position: sticky; bottom: 0; z-index: 1; background: var(--card); padding: 10px 0; margin-top: 8px; border-top: 1px solid var(--line); }
