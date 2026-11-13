@@ -189,7 +189,7 @@ def p(w,h,c):
   return b'\\\\x89PNG\\\\r\\\\n\\\\x1a\\\\n'+k(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+k(b'IDAT',zlib.compress(r,9))+k(b'IEND',b'')
 open('assets/banner.png','wb').write(p(640,160,(230,120,40)))"`;
   agent(edit);
-  await replay(AGENT, "$EDITOR src/greet.js   # and a new banner, assets/banner.png", agent("cat src/greet.js; ls -l assets"));
+  await replay(AGENT, "cat src/greet.js; ls assets   # after its edit, and a new banner", agent("cat src/greet.js; ls assets"));
   await replay(AGENT, `git add -A && git commit -m "Greet by name, and a banner"`, agent(`git add -A && git -c user.name="agent-1" -c user.email=agent-1@acme.invalid commit -m "Greet by name, and a banner" 2>&1`));
   await replay(AGENT, "git lfs ls-files", agent("git lfs ls-files"));
   await replay(AGENT, "desolate offer", agent("desolate offer 2>&1"));
@@ -230,8 +230,10 @@ open('assets/banner.png','wb').write(p(640,160,(230,120,40)))"`;
 ${CLI.replace(os.homedir(), "~")} events | while read -r line; do
   [ "$(jq -r '.source + " " + .type' <<<"$line")" = "pusher pushed" ] || continue
   repo=$(jq -r .repo <<<"$line"); branch=$(jq -r .branch <<<"$line")
+  commit=$(jq -r .commit <<<"$line")
+  title=$(gh api "repos/$repo/commits/$commit" --jq '.commit.message' | head -1)
   echo "pushed $branch to $repo: opening a pull request"
-  gh pr create --repo "$repo" --head "$branch" --fill
+  gh pr create --repo "$repo" --head "$branch" --title "$title" --body "Pushed through desolate at $commit."
 done
 `.replace(`${CLI.replace(os.homedir(), "~")} events`, "desolate events"), { mode: 0o755 });
   const scriptReal = path.join(os.tmpdir(), "open-prs-real.sh");

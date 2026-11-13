@@ -161,8 +161,9 @@ VM has it):
 ```bash
 desolate events | while read -r line; do
   [ "$(jq -r '.source + " " + .type' <<<"$line")" = "pusher pushed" ] || continue
-  repo=$(jq -r .repo <<<"$line"); branch=$(jq -r .branch <<<"$line")
-  gh pr create --repo "$repo" --head "$branch" --fill 2>/dev/null || true
+  repo=$(jq -r .repo <<<"$line"); branch=$(jq -r .branch <<<"$line"); commit=$(jq -r .commit <<<"$line")
+  title=$(gh api "repos/$repo/commits/$commit" --jq '.commit.message' | head -1)
+  gh pr create --repo "$repo" --head "$branch" --title "$title" --body "Pushed through desolate at $commit." || true
 done
 ```
 
