@@ -6,7 +6,21 @@
 // pointer has then MOVED over the button (a card shifted under a still pointer arms
 // nothing), and (4) a third of a second has passed since. Any change to the page (a card
 // added, gone, or its summary arriving) disarms every button. Keys do not approve.
+//
+// Embedded beside the git terminal (/embed, approve-web.ts): the key from the address's
+// fragment is the credential (sent as a header), the pointer over the frame counts as
+// attention (the terminal keeps the focus until a click), and where the browser can tell
+// (IntersectionObserver v2) a button arms only while it is visibly unobscured.
 "use strict";
+const EMBED = location.pathname === "/embed";
+const embedKey = EMBED ? (/^#k=([0-9a-f]{64})$/.exec(location.hash) || [])[1] || "" : "";
+if (EMBED) {
+  history.replaceState(null, "", "/embed");
+  document.documentElement.classList.add("embed");
+}
+const credential = embedKey ? { "x-desolate-embed": embedKey } : {};
+const VISIBILITY = EMBED && "IntersectionObserver" in window && "isVisible" in IntersectionObserverEntry.prototype;
+let pointerInside = false;
 const READY_MS = 1000;
 const DWELL_MS = 300;
 const list = document.getElementById("list");
@@ -14,21 +28,38 @@ const status = document.getElementById("status");
 const template = document.getElementById("card");
 const cards = new Map(); // the push's token (over its exact text) -> card
 
-let attentiveSince = document.visibilityState === "visible" && document.hasFocus() ? performance.now() : 0;
+const attending = () => document.visibilityState === "visible" && (document.hasFocus() || (EMBED && pointerInside));
+let attentiveSince = attending() ? performance.now() : 0;
+// Losing attention disarms. Gaining it does not (a page that just got it cannot arm for a
+// second anyway), and must not: in a frame, the click on Approve is also what focuses it.
 const attention = () => {
-  const now = document.visibilityState === "visible" && document.hasFocus();
-  if (!now) attentiveSince = 0;
-  else if (attentiveSince === 0) attentiveSince = performance.now();
-  disarmAll();
+  const now = attending();
+  if (!now) {
+    attentiveSince = 0;
+    disarmAll();
+  } else if (attentiveSince === 0) attentiveSince = performance.now();
 };
 document.addEventListener("visibilitychange", attention);
 window.addEventListener("focus", attention);
 window.addEventListener("blur", attention);
+if (EMBED) {
+  document.documentElement.addEventListener("pointerenter", () => { pointerInside = true; attention(); });
+  document.documentElement.addEventListener("pointerleave", () => { pointerInside = false; attention(); });
+}
+// Each card's Approve, as the browser sees it: drawn, whole, and under nothing.
+const watcher = VISIBILITY ? new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    const card = [...cards.values()].find((c) => c.wrap === entry.target);
+    if (!card) continue;
+    card.visible = entry.isVisible && entry.intersectionRatio >= 0.99;
+    if (!card.visible) disarm(card);
+  }
+}, { threshold: [0, 1], trackVisibility: true, delay: 100 }) : null;
 
 const say = (text) => { status.textContent = text; };
 const el = (tag, text, cls) => { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (cls) node.className = cls; return node; };
 
-const ready = (card) => attentiveSince !== 0 && performance.now() - attentiveSince >= READY_MS && performance.now() - card.changedAt >= READY_MS;
+const ready = (card) => attentiveSince !== 0 && performance.now() - attentiveSince >= READY_MS && performance.now() - card.changedAt >= READY_MS && card.visible !== false;
 const disarm = (card) => {
   card.armedAt = 0;
   if (card.done) return;
@@ -39,7 +70,7 @@ const disarmAll = () => { for (const card of cards.values()) disarm(card); };
 setInterval(() => { for (const card of cards.values()) if (!card.armedAt && !card.done) disarm(card); }, 250);
 
 const post = async (what, card) => {
-  const answer = await fetch(`/${what}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nonce: card.push.nonce, token: card.push.token, commit: card.push.commit }), credentials: "same-origin" });
+  const answer = await fetch(`/${what}`, { method: "POST", headers: { "content-type": "application/json", ...credential }, body: JSON.stringify({ nonce: card.push.nonce, token: card.push.token, commit: card.push.commit }), credentials: "same-origin" });
   const body = await answer.json().catch(() => ({}));
   if (!answer.ok) throw new Error(body.error || `HTTP ${answer.status}`);
 };
@@ -81,10 +112,11 @@ const add = (push) => {
   element.querySelector(".branch").textContent = push.branch;
   element.querySelector(".commit").textContent = push.commit;
   element.querySelector(".onto").textContent = push.onto ? `The remote's ${push.branch} moves from ${push.onto} to this commit, or not at all.` : `The remote has no ${push.branch}: this creates it.`;
-  const card = { element, push, button: element.querySelector(".approve"), hint: element.querySelector(".hint"), summary: element.querySelector(".summary"), changedAt: performance.now(), armedAt: 0, done: false, busy: false, shown: "" };
+  const wrap = element.querySelector(".arm");
+  const card = { element, push, wrap, visible: VISIBILITY ? false : undefined, button: element.querySelector(".approve"), hint: element.querySelector(".hint"), summary: element.querySelector(".summary"), changedAt: performance.now(), armedAt: 0, done: false, busy: false, shown: "" };
+  if (watcher) watcher.observe(wrap);
   // (A disabled button gets no pointer events in every browser: these are on its wrapper,
   // and the button lets them through while disabled: approve.css.)
-  const wrap = element.querySelector(".arm");
   wrap.addEventListener("pointermove", (event) => {
     if (card.done || card.busy || card.armedAt || !ready(card)) return;
     if (event.movementX === 0 && event.movementY === 0) return;
@@ -145,12 +177,15 @@ const render = (pending) => {
   if (changed) disarmAll();
   const waiting = [...cards.values()].filter((card) => !card.gone).length;
   document.title = waiting ? `(${waiting}) desolate: pushes waiting` : "desolate: no pushes waiting";
+  // Beside the git terminal: how many wait, so its page shows this frame when one does.
+  // (A number, to that one origin.)
+  if (EMBED && window.parent !== window) window.parent.postMessage({ desolatePending: waiting }, location.origin.replace("//desolate-approve.", "//desolate-git."));
   say(waiting ? "" : "Nothing is waiting. This page checks every two seconds.");
 };
 
 const poll = async () => {
   try {
-    const answer = await fetch("/pending", { credentials: "same-origin" });
+    const answer = await fetch("/pending", { credentials: "same-origin", headers: credential });
     const body = await answer.json();
     if (!answer.ok) say(body.error || `HTTP ${answer.status}`);
     else render(body.pending);

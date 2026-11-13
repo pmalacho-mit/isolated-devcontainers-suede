@@ -2,7 +2,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { EXIT, refuse } from "../shared/exit.ts";
-import { devHostname, editorHostname, editorHostPort, parseRepo } from "../shared/names.ts";
+import { devHostname, editorHostname, editorHostPort, isBranch, parseRepo } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { readHead } from "../shared/status.ts";
 import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
@@ -120,7 +120,7 @@ export const urlsOf = (plan: { domain: string; workspace: string }) => ({
   dev: `http://${devHostname(INSTANCE, plan.domain, plan.workspace)}`,
 });
 
-export const up = async (domain: string | undefined, options: { name?: string; checkouts: string[]; base?: string; fetch: boolean }, out: Out, json: boolean) => {
+export const up = async (domain: string | undefined, options: { name?: string; checkouts: string[]; branch?: string; base?: string; fetch: boolean }, out: Out, json: boolean) => {
   if (!domain) refuse("which domain?", "desolate up <domain> [--name <workspace>]", EXIT.usage);
   const phases: [string, number][] = [];
   let mark = Date.now();
@@ -135,6 +135,13 @@ export const up = async (domain: string | undefined, options: { name?: string; c
   let editorDown: string | null = null;
   let devcontainer = "";
   const view = await rootctl<DomainView>("domain.show", { slug: domain }, { quiet: true });
+  // --branch <b>: a worktree on <b> in every repository of the domain (a --checkout names one
+  // differently), so a task that spans repositories is one branch name in each.
+  if (options.branch !== undefined) {
+    if (!isBranch(options.branch)) refuse(`'${options.branch}' is not a branch desolate will carry`, "letters, digits, '.', '_', '-' and '/', not starting with a dash", EXIT.usage);
+    const named = new Set(options.checkouts.map((c) => c.split("=")[0]));
+    options = { ...options, checkouts: [...options.checkouts, ...view.repos.filter((repo) => !named.has(repo)).map((repo) => `${repo}=worktree:${options.branch}`)] };
+  }
   if (options.fetch) for (const repo of view.repos) await rootctl("repo.fetch", { repo }, { quiet: json });
   if (options.fetch) phase("mirrors refreshed");
   // The domain's template (section 4.7, C3), before this workspace takes its checkouts:
@@ -148,7 +155,9 @@ export const up = async (domain: string | undefined, options: { name?: string; c
     if (template) phase("template");
   }
   const plan = await rootctl<Workspace>("workspace.plan", { instance: INSTANCE, domain, name: options.name, checkouts: options.checkouts, base: options.base, fetch: options.fetch }, { quiet: true });
-  phase("planned");
+  // (Three asks of the root: the domain, whether it has a template to make, and the plan,
+  // which is two small files. No network: --fetch is its own phase, above.)
+  phase(template ? "planned" : "asked the root (domain, template check, plan)");
   try {
     if (template) await b.clone(template, specOf(plan, view.repos));
     else await b.create(specOf(plan, view.repos));

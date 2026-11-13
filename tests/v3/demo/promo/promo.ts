@@ -33,8 +33,14 @@ const sh = (command: string, args: string[], options: { input?: string; allowFai
   return masked(text);
 };
 const desolate = (...args: string[]) => sh(CLI, args);
-/** As the agent, in its workspace's checkout of the app. */
+/** As the agent, in its workspace's checkout of the app (in its devcontainer). */
 const agent = (script: string) => sh(CLI, ["exec", "acme/agent-1", "--checkout", APP, "--", "bash", "-lc", script]);
+const BRANCH = "feature/greet-by-name";
+/** Poll until a check passes (the camera may be rolling). */
+const waitFor = async (check: () => boolean, ms: number, what: string) => {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(1000)) if (check()) return;
+  throw new Error(`never: ${what}`);
+};
 
 // ---------------------------------------------------------------- Chrome, over CDP
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "promo-chrome-"));
@@ -115,13 +121,20 @@ const hold = async (ms: number) => {
   roll();
   await sleep(ms);
 };
+/** A caption across the bottom: for the video only. Never over the approval frame beside the
+ *  git terminal (Chrome counts a frame with anything over any part of it as covered, and
+ *  its Approve would not arm), and with no shadow (a shadow is drawn over its neighbours). */
 const caption = (t: Tab, text: string | null) =>
-  evaluate(t, text === null ? `document.getElementById("promo-caption")?.remove()` : `(() => { let c = document.getElementById("promo-caption"); if (!c) { c = document.createElement("div"); c.id = "promo-caption"; c.style.cssText = "position:fixed;left:0;right:0;bottom:0;padding:14px 22px;background:rgba(18,52,98,.95);color:#fff;font:600 19px -apple-system,system-ui,sans-serif;z-index:2147483647;box-shadow:0 -2px 14px rgba(0,0,0,.3)"; document.documentElement.appendChild(c); } c.textContent = ${JSON.stringify(text)}; })()`);
+  evaluate(t, text === null ? `document.getElementById("promo-caption")?.remove()` : `(() => { let c = document.getElementById("promo-caption"); if (!c) { c = document.createElement("div"); c.id = "promo-caption"; document.documentElement.appendChild(c); } const beside = document.getElementById("approvals"); c.style.cssText = "position:fixed;left:0;right:" + (beside && !beside.hidden ? "461px" : "0") + ";bottom:0;padding:12px 20px;background:rgba(18,52,98,.95);color:#fff;font:600 18px -apple-system,system-ui,sans-serif;z-index:2147483647"; c.textContent = ${JSON.stringify(text)}; })()`);
 const typeInto = async (t: Tab, text: string) => {
   for (const ch of text) {
     await send("Input.insertText", { text: ch }, t.sessionId);
     await sleep(30);
   }
+};
+const press = async (t: Tab, key: string, code: string, keyCode: number) => {
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode: keyCode }, t.sessionId);
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: keyCode }, t.sessionId);
 };
 const enter = (t: Tab) => send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" }, t.sessionId).then(() => send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }, t.sessionId));
 const mouseTo = async (t: Tab, from: [number, number], to: [number, number], steps = 30) => {
@@ -134,7 +147,7 @@ const mouseTo = async (t: Tab, from: [number, number], to: [number, number], ste
 // ---------------------------------------------------------------- the stage
 const stage = await tab(`file://${path.join(HERE, "stage.html")}`);
 await sleep(800);
-const card = async (title: string, lines: string[], small?: string, ms = 4500) => {
+const card = async (title: string, lines: string[], small?: string, ms = 2600) => {
   await show(stage);
   await evaluate(stage, `card(${JSON.stringify(title)}, ${JSON.stringify(lines)}, ${JSON.stringify(small ?? "")})`);
   await hold(ms);
@@ -146,169 +159,192 @@ const terminal = async (title: string, sub: string) => {
   await sleep(300);
 };
 /** A command, run for real (camera off), then shown typed and printed. */
-const replay = async (prompt: string, shown: string, output: string, after = 1600) => {
+const replay = async (prompt: string, shown: string, output: string, after = 900) => {
   roll();
-  await evaluate(stage, `run(${JSON.stringify(prompt)}, ${JSON.stringify(shown)}, ${JSON.stringify(output)})`);
+  await evaluate(stage, `run(${JSON.stringify(prompt)}, ${JSON.stringify(shown)}, ${JSON.stringify(output)}, 14)`);
   await sleep(after);
   cut();
 };
 const MAC = "you@mac ~ %";
+/** The address a desolate command prints, with its token (never shown on camera). */
+const address = (pattern: RegExp, ...args: string[]) => pattern.exec(spawnSync(CLI, args, { encoding: "utf8", env: process.env }).stdout)![1]!;
 
 let prOutput = "";
 let listenerPid = 0;
 try {
   // ------------------------------------------------------------ 0. what this is
-  await card("desolate", ["Coding agents, each in a VM of its own, on your Mac.", "They commit and offer. You review, approve with one click, and it is pushed."], "Everything here ran for real: Lima on an M1, a real GitHub repository. Waits are cut.", 5500);
+  await card("desolate", ["Coding agents, each in a VM of its own, on your Mac.", "They work in your project's devcontainer. You review, approve with one click, it is pushed."], "All of it ran for real: Lima on an M1, real GitHub repositories. Waits are cut.", 3500);
 
-  // ------------------------------------------------------------ 1. the stack
-  await terminal("Terminal on your Mac", "the stack is up: desolate bootstrap made it (once)");
-  await replay(MAC, "desolate doctor", desolate("doctor"), 3500);
-
-  // ------------------------------------------------------------ 2. repositories, a domain, a workspace
-  await card("1 · Repositories, a domain, a workspace", ["desolate holds each repository's deploy keys in its root VM, never in a workspace.", "A domain is a trust boundary: its repositories, its rules, its secrets."]);
-  await terminal("Terminal on your Mac", "");
+  // ------------------------------------------------------------ 1. repositories, a domain, a workspace
+  await terminal("Terminal on your Mac", "the stack is up (desolate bootstrap, once)");
+  await replay(MAC, "desolate doctor | tail -2", desolate("doctor").trim().split("\n").slice(-2).join("\n"));
   await replay(MAC, `desolate clone ${APP}`, desolate("clone", APP));
   await replay(MAC, `desolate clone ${LIB}`, desolate("clone", LIB));
-  await replay(MAC, `desolate domain create acme --title "Acme"`, desolate("domain", "create", "acme", "--title", "Acme"));
-  await replay(MAC, `desolate domain acme add --repo ${APP}`, desolate("domain", "acme", "add", "--repo", APP));
-  await replay(MAC, `desolate domain acme add --repo ${LIB}`, desolate("domain", "acme", "add", "--repo", LIB));
-  await replay(MAC, "desolate up acme --name agent-1", desolate("up", "acme", "--name", "agent-1"), 3000);
+  await replay(MAC, `desolate domain create acme --repo ${APP} --repo ${LIB}`, desolate("domain", "create", "acme", "--repo", APP, "--repo", LIB));
+  await replay(MAC, `desolate up acme --name agent-1 --branch ${BRANCH}`, desolate("up", "acme", "--name", "agent-1", "--branch", BRANCH), 2600);
 
-  // ------------------------------------------------------------ 3. the agent works
-  await card("2 · An agent works in its workspace", ["Its own VM: no keys, no route out but its own proxy.", "It commits freely. When the work is ready it offers it: offering is not pushing."]);
-  await terminal("agent-1's shell", "inside its VM, in /workspaces/" + APP);
-  const AGENT = "agent@agent-1 $";
-  await replay(AGENT, "git switch -c feature/greeting", agent("git switch -c feature/greeting 2>&1"));
-  const edit = `cat > src/greet.js <<'JS'
+  // ------------------------------------------------------------ 2. the agent, in VSCodium, in its devcontainer
+  // (Who the agent commits as: its checkout's own config, set before the camera rolls.)
+  agent("git config user.name agent-1 && git config user.email agent-1@acme.invalid");
+  const editor = await tab(address(/(http:\S+tkn=[0-9a-f]+\S*)/, "editor", "acme/agent-1"));
+  await until(editor, /EXPLORER|Explorer/, 180_000);
+  await sleep(6000);
+  await show(editor);
+  await caption(editor, "agent-1's editor: VSCodium, in its VM. Its terminal is inside the project's devcontainer.");
+  roll();
+  await press(editor, "F1", "F1", 112);
+  await sleep(700);
+  await typeInto(editor, "Terminal: Create New Terminal");
+  await sleep(500);
+  await enter(editor);
+  await sleep(5000);
+  const inTerminal = async (command: string, after: number) => {
+    await typeInto(editor, command);
+    await enter(editor);
+    await sleep(after);
+  };
+  await inTerminal("node --version && git status -sb | head -1", 2500);
+  // The agent's change (made off camera, as an agent would): greet by name, its test, and a
+  // banner image, which the repository keeps in LFS.
+  agent(`cat > src/greet.js <<'JS'
 export const greet = (name = "world") => \`Hello, \${name}. Good to see you.\`;
+JS
+cat > test/greet.test.js <<'JS'
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { greet } from "../src/greet.js";
+
+test("greets by name", () => {
+  assert.equal(greet("Ada"), "Hello, Ada. Good to see you.");
+});
+
+test("greets the world when no one is named", () => {
+  assert.equal(greet(), "Hello, world. Good to see you.");
+});
 JS
 python3 -c "import zlib,struct
 def p(w,h,c):
-  r=b''.join(b'\\\\x00'+bytes(c)*w for _ in range(h))
+  r=b''.join(b'\\x00'+bytes(c)*w for _ in range(h))
   k=lambda t,d: struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
-  return b'\\\\x89PNG\\\\r\\\\n\\\\x1a\\\\n'+k(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+k(b'IDAT',zlib.compress(r,9))+k(b'IEND',b'')
-open('assets/banner.png','wb').write(p(640,160,(230,120,40)))"`;
-  agent(edit);
-  await replay(AGENT, "cat src/greet.js; ls assets   # after its edit, and a new banner", agent("cat src/greet.js; ls assets"));
-  await replay(AGENT, `git add -A && git commit -m "Greet by name, and a banner"`, agent(`git add -A && git -c user.name="agent-1" -c user.email=agent-1@acme.invalid commit -m "Greet by name, and a banner" 2>&1`));
-  await replay(AGENT, "git lfs ls-files", agent("git lfs ls-files"));
-  await replay(AGENT, "desolate offer", agent("desolate offer 2>&1"));
-  await replay(AGENT, `/desolate/status set green "ready: offered feature/greeting"`, agent(`/desolate/status set green "ready: offered feature/greeting" 2>&1; echo "status: green"`), 2500);
-
-  // ------------------------------------------------------------ 4. the editor
-  const editorUrl = /(http:\S+)/.exec(sh(CLI, ["editor", "acme/agent-1"]).replace("tkn=…", ""))?.[1];
-  const realEditor = /(http:\S+tkn=[0-9a-f]+\S*)/.exec(spawnSync(CLI, ["editor", "acme/agent-1"], { encoding: "utf8", env: process.env }).stdout)?.[1];
-  if (realEditor) {
-    const editor = await tab(realEditor);
-    await sleep(15_000);
-    await show(editor);
-    await caption(editor, "You can watch it work in the workspace's own editor: VSCodium, running in its VM, in a tab");
-    await hold(5500);
-    cut();
-  } else say(`no editor address (${editorUrl ?? "none"}): scene skipped`);
-
-  // ------------------------------------------------------------ 5. the dashboard
-  const uiUrl = /dashboard\s+(http:\S+)/.exec(spawnSync(CLI, ["ui"], { encoding: "utf8", env: process.env }).stdout)![1]!;
-  const dashboard = await tab(uiUrl);
-  await until(dashboard, /Offered: .*feature\/greeting/);
-  await show(dashboard);
-  await caption(dashboard, "3 · The dashboard: every domain and workspace, and what needs you on top");
-  await hold(5000);
-  await evaluate(dashboard, `[...document.querySelectorAll("button")].find((b) => b.textContent === "Review")?.click()`);
-  await until(dashboard, /files? changed/);
-  await caption(dashboard, "Review: the commits, the files, the diff, made by git in the root VM; nothing in it runs");
-  await hold(6000);
-  await evaluate(dashboard, `window.scrollBy(0, 500)`);
+  return b'\\x89PNG\\r\\n\\x1a\\n'+k(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+k(b'IDAT',zlib.compress(r,9))+k(b'IEND',b'')
+open('assets/banner.png','wb').write(p(640,160,(230,120,40)))"`);
+  await caption(editor, "The agent edits, and runs the project's tests where the project says they run");
+  await inTerminal("git status -s && npm test 2>&1 | tail -8", 7000);
+  const before = agent("git rev-parse HEAD").trim();
+  await caption(editor, "It commits freely: the new banner goes to Git LFS, as the repository says");
+  await inTerminal(`git add -A && git commit -qm "Greet by name, and a banner" && git lfs ls-files`, 2500);
+  await waitFor(() => agent("git rev-parse HEAD").trim() !== before, 60_000, "the agent's commit");
+  await caption(editor, "When it is ready it offers the branch, and says so. Offering is not pushing.");
+  await inTerminal(`desolate offer && desolate status set green "ready: greet by name"`, 1500);
+  await waitFor(() => new RegExp(BRANCH).test(desolate("offers")), 120_000, "the offer");
   await hold(3500);
   cut();
 
-  // ------------------------------------------------------------ 6. your own script
-  await card("4 · Your own scripts hear what happens", ["desolate events: one JSON line per event, each saying who says so.", "This one opens a pull request whenever the pusher says a branch went out."]);
+  // ------------------------------------------------------------ 3. the dashboard
+  const dashboard = await tab(address(/dashboard\s+(http:\S+)/, "ui"));
+  await until(dashboard, new RegExp(`Offered: .*${BRANCH}`));
+  await show(dashboard);
+  await caption(dashboard, "The dashboard (desolate ui): each checkout's live branch, and what needs you on top");
+  await hold(4000);
+  await evaluate(dashboard, `document.querySelector("details.branches summary")?.click()`);
+  await sleep(400);
+  await evaluate(dashboard, `document.querySelector("details.branches")?.scrollIntoView({ block: "center" })`);
+  await caption(dashboard, "Every branch the domain has, offered or not, is the root's to review");
+  await hold(3500);
+  await evaluate(dashboard, `window.scrollTo(0, 0); [...document.querySelectorAll("button")].find((b) => b.textContent === "Review")?.click()`);
+  await until(dashboard, /files? changed/);
+  await caption(dashboard, "Review: commits, files and the diff, made by git in the root VM; nothing in it runs");
+  await hold(4500);
+  await evaluate(dashboard, `document.querySelector("[data-diff]")?.scrollIntoView({ block: "start" })`);
+  await hold(3000);
+  cut();
+
+  // ------------------------------------------------------------ 4. your own script
   const script = path.join(os.tmpdir(), "open-prs.sh");
   fs.writeFileSync(script, `#!/bin/bash
-# Open a pull request for every branch desolate's pusher reports pushed.
-${CLI.replace(os.homedir(), "~")} events | while read -r line; do
+# A pull request for every branch desolate's pusher pushes.
+desolate events | while read -r line; do
   [ "$(jq -r '.source + " " + .type' <<<"$line")" = "pusher pushed" ] || continue
-  repo=$(jq -r .repo <<<"$line"); branch=$(jq -r .branch <<<"$line")
-  commit=$(jq -r .commit <<<"$line")
+  repo=$(jq -r .repo <<<"$line"); branch=$(jq -r .branch <<<"$line"); commit=$(jq -r .commit <<<"$line")
   title=$(gh api "repos/$repo/commits/$commit" --jq '.commit.message' | head -1)
-  echo "pushed $branch to $repo: opening a pull request"
   gh pr create --repo "$repo" --head "$branch" --title "$title" --body "Pushed through desolate at $commit."
 done
-`.replace(`${CLI.replace(os.homedir(), "~")} events`, "desolate events"), { mode: 0o755 });
+`, { mode: 0o755 });
   const scriptReal = path.join(os.tmpdir(), "open-prs-real.sh");
   fs.writeFileSync(scriptReal, fs.readFileSync(script, "utf8").replace("desolate events", `"${CLI}" events`), { mode: 0o755 });
   const prLog = path.join(os.tmpdir(), "open-prs.log");
   fs.writeFileSync(prLog, "");
   const listener = spawn("bash", [scriptReal], { env: process.env, stdio: ["ignore", fs.openSync(prLog, "a"), fs.openSync(prLog, "a")], detached: true });
   listenerPid = listener.pid ?? 0;
-  await terminal("Terminal on your Mac", "");
-  await replay(MAC, "cat open-prs.sh", fs.readFileSync(script, "utf8"), 2500);
-  await replay(MAC, "./open-prs.sh &", "[1] " + String(listener.pid), 1500);
+  await terminal("Terminal on your Mac", "desolate events: what happens, one JSON line each, for your own scripts");
+  await replay(MAC, "cat open-prs.sh", fs.readFileSync(script, "utf8"), 2000);
+  await replay(MAC, "./open-prs.sh &", "[1] " + String(listener.pid), 600);
 
-  // ------------------------------------------------------------ 7. the git VM
-  await card("5 · Your git, in a browser tab", ["desolate git: bash and git in a VM of its own, in your clones.", "No network, no keys, nothing of the project's that runs. git push asks you."]);
-  const gitUrl = /git\s+(http:\S+)/.exec(spawnSync(CLI, ["git", APP], { encoding: "utf8", env: process.env }).stdout)![1]!;
-  const gitTab = await tab(gitUrl);
+  // ------------------------------------------------------------ 5. the git VM, and one click
+  const gitTab = await tab(address(/git\s+(http:\S+)/, "git", APP));
   await until(gitTab, /git VM/);
   await sleep(2500);
   await show(gitTab);
   await send("Runtime.evaluate", { expression: "document.querySelector('.xterm-helper-textarea')?.focus()" }, gitTab.sessionId);
-  await caption(gitTab, "git fetch root: what the domains offered, as root/<domain>/<branch>");
+  await caption(gitTab, "Your git (desolate git): no network, no keys. desolate fetch has the root refresh from GitHub.");
   roll();
-  const gitCommand = async (command: string, waitFor: RegExp, after = 2200) => {
+  const gitCommand = async (command: string, waitFor: RegExp, after = 1500) => {
     await typeInto(gitTab, command);
     await enter(gitTab);
-    await until(gitTab, waitFor, 120_000);
+    await until(gitTab, waitFor, 180_000);
     await sleep(after);
   };
-  await gitCommand("git fetch root", /\$ git fetch root/, 5000);
-  await gitCommand("git log --oneline -3 root/acme/feature/greeting", /Greet by name/);
-  await caption(gitTab, "Look at it as you would anywhere: log, diff, show");
-  await gitCommand("git diff --stat main root/acme/feature/greeting", /files? changed/, 3500);
-  await caption(gitTab, "git push origin <branch>: it waits for you on the approval page");
-  await gitCommand("git push origin root/acme/feature/greeting:refs/heads/feature/greeting", /handed to the root/, 2500);
-  cut();
-
-  // ------------------------------------------------------------ 8. one click
-  const approveUrl = /approvals {4}(http:\S+)/.exec(spawnSync(CLI, ["approve", "--web"], { encoding: "utf8", env: process.env }).stdout)![1]!;
-  const page = await tab(approveUrl);
-  await until(page, /feature\/greeting/);
-  await until(page, /1 commit\(s\) the remote does not have/);
-  await show(page);
-  await caption(page, "6 · The approval page, served by your Mac: what the push names, and what it would send");
-  await hold(6500);
-  const box = (await evaluate(page, "(() => { const r = document.querySelector('.arm').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")) as [number, number];
-  await caption(page, "Approve arms only when the pointer moves onto it, a moment after the page has your attention: one click");
-  await mouseTo(page, [W / 2, 140], box, 40);
-  await sleep(700);
-  await mouseTo(page, box, [box[0] + 6, box[1] + 2], 6);
-  await sleep(1200);
-  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: box[0] + 6, y: box[1] + 2, button: "left", clickCount: 1 }, page.sessionId);
-  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: box[0] + 6, y: box[1] + 2, button: "left", clickCount: 1 }, page.sessionId);
-  await until(page, /approved: the push continues/);
-  await hold(2500);
-  cut();
-
-  // ------------------------------------------------------------ 9. pushed
-  await show(gitTab);
-  await caption(gitTab, "7 · Pushed: the remote's branch is exactly the commit you approved");
-  await until(gitTab, /\[new branch\]/, 120_000);
+  await gitCommand("desolate fetch", /Fetching acme/, 2500);
+  await caption(gitTab, "Each domain is a remote: what its workspaces wrote, as acme/<branch>");
+  await gitCommand(`git log --oneline -2 acme/${BRANCH} && git diff --stat main acme/${BRANCH}`, /files? changed/, 2500);
+  await caption(gitTab, "git push origin: the approval opens beside the terminal");
+  await gitCommand(`git push origin acme/${BRANCH}:${BRANCH}`, /handed to the root/, 300);
+  // The approval page, framed beside the terminal: found as a target of its own.
+  let frame = "";
+  for (let i = 0; i < 120 && !frame; i++) {
+    const { targetInfos } = (await send("Target.getTargets")) as { targetInfos: { targetId: string; type: string; url: string }[] };
+    const found = targetInfos.find((t) => t.type === "iframe" && /desolate-approve\.localhost:\d+\/embed/.test(t.url));
+    if (found) frame = ((await send("Target.attachToTarget", { targetId: found.targetId, flatten: true })) as { sessionId: string }).sessionId;
+    else await sleep(250);
+  }
+  if (!frame) throw new Error("the approval frame never appeared");
+  const frameTab: Tab = { targetId: "", sessionId: frame };
+  await until(frameTab, new RegExp(BRANCH), 120_000);
+  await until(frameTab, /commit\(s\) the remote does not have/, 120_000);
+  await caption(gitTab, "What the push names, and what it would send, worked out in the root");
   await hold(4000);
+  const inFrame = (await evaluate(frameTab, "(() => { const r = document.querySelector('.arm').getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })()")) as [number, number];
+  const frameAt = (await evaluate(gitTab, "(() => { const r = document.getElementById('frame').getBoundingClientRect(); return [r.x, r.y]; })()")) as [number, number];
+  const box: [number, number] = [frameAt[0] + inFrame[0], frameAt[1] + inFrame[1]];
+  await caption(gitTab, "Approve arms only for a pointer that moves onto it. One click.");
+  await mouseTo(gitTab, [frameAt[0] - 200, 300], [frameAt[0] + 80, 200], 14);
+  await sleep(1200);
+  await mouseTo(gitTab, [frameAt[0] + 80, 200], box, 24);
+  await sleep(450);
+  await mouseTo(gitTab, box, [box[0] + 6, box[1] + 2], 5);
+  await sleep(500);
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: box[0] + 6, y: box[1] + 2, button: "left", clickCount: 1 }, gitTab.sessionId);
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: box[0] + 6, y: box[1] + 2, button: "left", clickCount: 1 }, gitTab.sessionId);
+  await until(frameTab, /approved: the push continues/);
+  await caption(gitTab, "Pushed: the remote's branch is exactly the commit you approved");
+  await until(gitTab, /\[new branch\]/, 180_000);
+  await hold(3000);
   cut();
+
+  // ------------------------------------------------------------ 6. the pull request
   for (let i = 0; i < 120 && !/github\.com\/.*\/pull\/\d+/.test(fs.readFileSync(prLog, "utf8")); i++) await sleep(1000);
   prOutput = masked(fs.readFileSync(prLog, "utf8"));
   const number = /\/pull\/(\d+)/.exec(prOutput)?.[1];
-  await terminal("Terminal on your Mac", "the script heard the pusher");
-  await replay("", "", prOutput || "(no pull request yet)", 2000);
-  if (number) await replay(MAC, `gh pr view ${number} --repo ${APP}`, sh("gh", ["pr", "view", number, "--repo", APP]), 4500);
+  await terminal("Terminal on your Mac", "the script heard the pusher, and opened a pull request");
+  await replay("", "", prOutput.trim() || "(no pull request yet)", 600);
+  if (number) await replay(MAC, `gh pr view ${number} --repo ${APP}`, sh("gh", ["pr", "view", number, "--repo", APP]), 3500);
 
-  // ------------------------------------------------------------ 10. what kept it safe
+  // ------------------------------------------------------------ 7. what kept it safe
   await card("What kept it safe", [
-    "The agent's VM held no key and reached nothing but its proxy.",
-    "The write key is in the root VM, and only the pusher can use it, for the one branch you approved.",
+    "The agent's VM held no key and reached nothing but its own proxy.",
+    "The write key lives in the root VM; only the pusher uses it, for the one push you approved.",
     "The approval is a click on a page your Mac serves; nothing in a VM can make it.",
-  ], "desolate · github.com/pmalacho-mit/isolated-devcontainers-suede (v3)", 8000);
+  ], "desolate · github.com/pmalacho-mit/isolated-devcontainers-suede (v3)", 5500);
 } finally {
   // The events listener, whatever happened: it is a process group of its own.
   if (listenerPid)

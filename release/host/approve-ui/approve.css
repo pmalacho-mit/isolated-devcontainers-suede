@@ -23,3 +23,9 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 button.approve:disabled { pointer-events: none; }
 .gone { opacity: 0.5; }
 .sensitive code { color: var(--danger); font-weight: 600; }
+/* Beside the git terminal (/embed): the same page, narrower. */
+html.embed body { padding: 10px 12px 24px; font-size: 14px; }
+html.embed .lede { display: none; }
+html.embed h1 { font-size: 16px; }
+html.embed .card { margin: 10px 0; padding: 12px; }
+html.embed .status { font-size: 13px; }

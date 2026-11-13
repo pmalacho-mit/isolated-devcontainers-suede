@@ -95,7 +95,7 @@ const pushOne = async (spec: string): Promise<string> => {
     fs.writeFileSync(`${request}.part`, JSON.stringify({ repo, branch, commit, forced, lfs, ...(domain === null ? {} : { domain }) }));
     fs.renameSync(`${request}.part`, request);
     process.stderr.write(domain === null
-      ? `desolate: handed to the root. Approve it on the approval page (on the Mac: desolate approve --web prints its address).\n  ${repo}  ${branch}  ${commit}\n`
+      ? `desolate: handed to the root. Approve it beside this terminal (in the browser tab), or on the approval page (desolate approve --web).\n  ${repo}  ${branch}  ${commit}\n`
       : `desolate: handed to the root, for ${domain}: its workspaces see it as root/${branch} within seconds.\n  ${repo}  ${branch}  ${commit}\n`);
     const result = path.join(ANSWERS, `${id}.json`);
     for (const until = Date.now() + WAIT_MS; Date.now() < until; ) {

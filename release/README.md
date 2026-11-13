@@ -73,12 +73,11 @@ Two domains share nothing but read-only mirrors.
 desolate bootstrap                                   # from nothing to a working stack; ends with doctor
 desolate clone acme/widgets                          # a read key, a write key, the mirror, your clone
 desolate clone acme/consumer --no-push               # a read key only: never written through desolate
-desolate domain create dev --title "widgets work"
-desolate domain dev add --repo acme/widgets
-desolate up dev --name issue-12 --fetch \
-    --checkout acme/widgets=worktree:issue/12 --base origin/main
-desolate ui                                          # the dashboard: in your browser
-desolate editor dev/issue-12                         # the address of its editor, for your browser
+desolate domain create dev --title "widgets work" --repo acme/widgets --repo acme/consumer
+desolate up dev --name issue-12 --branch issue/12 --fetch   # a worktree on issue/12 in each repository
+                                                     # (or per repository: --checkout acme/widgets=worktree:issue/12)
+desolate ui --open                                   # the dashboard, in Chrome or Firefox (not Safari)
+desolate editor dev/issue-12 --open                  # its editor (VSCodium, in its VM), in a tab
 desolate exec dev/issue-12 -- <an agent, or any command>     # in its devcontainer (--vm: the VM itself)
 desolate domain dev secret set MYAPP-OPENAI-KEY --hosts api.openai.com --headers authorization
                                                      # the value on stdin; workspaces send the name
@@ -90,7 +89,7 @@ desolate branches dev                                # every branch the domain h
 desolate review dev acme/widgets issue/12 --diff     # what a push would send, and its diff as text
 desolate review dev acme/widgets issue/12 --against domain   # ... or beside the domain's own main
 desolate push dev acme/widgets issue/12 --expect <commit>   # asks you, on your terminal
-desolate git acme/widgets                            # git in your browser: a shell in the git VM (below)
+desolate git acme/widgets --open                     # git in your browser: a shell in the git VM (below)
 desolate events                                      # what happens, as JSON lines, for your own scripts
 desolate root shell                                  # ordinary git on your clones: fetch --all, diff, push
 desolate approve                                     # ... and this approves a `git push origin` made there
@@ -136,7 +135,10 @@ signs only for a request from its own tab: a cookie only that address gives, its
 It cannot be framed, and its Approve button arms only after the tab has had your attention
 for a second and the pointer then moves onto it, so a click aimed at something else when a
 window opened under it lands on nothing. Treat the address like a password: anyone with it,
-on your Mac, can approve.
+on your Mac, can approve. In the git terminal (`desolate git`) the same page opens beside the
+shell when a push waits: `git push`, then Approve, in one tab. Only the git terminal's own
+origin may frame it; there the pointer over the frame counts as your attention, and in Chrome
+Approve arms only while the browser reports the button visible and uncovered.
 
 **Git in your browser.** `desolate git <owner/repo>` prints the address of a terminal the host
 serves in a browser tab: bash, in the git VM, in a clone of your own at `/git/<owner>/<repo>`.
@@ -146,7 +148,9 @@ domains', as `root/<domain>/<branch>`), diff, log, rebase, commit, and `git push
 <branch>`, which waits for you on the approval page and then goes out through the root.
 `git push <domain> <branch>` delivers a branch to a domain instead (its workspaces see
 `root/<branch>`; nothing leaves the machine, so nothing is asked), and `desolate fetch` has
-the root refresh the mirror from the remote first, then fetches every remote. The
+the root refresh the mirror from the remote first, then fetches every remote. Your commits
+there carry the Mac's own `git config --global user.name`/`user.email`, if it has
+them and the git VM has none yet. The
 git VM has no network, no key, and nothing of a project's that runs: no devcontainer, no
 direnv, no clone's hooks; `less` shows colour and nothing else raw, and vim reads no
 modelines. The root's clones and the mirrors are read-only to it. What it pushes, the root

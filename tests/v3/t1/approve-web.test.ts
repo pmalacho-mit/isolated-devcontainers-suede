@@ -13,7 +13,7 @@ import { after, before, describe, it } from "node:test";
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "desolate-approve-"));
 process.env.DESOLATE_HOME = home;
 process.env.DESOLATE_EDITOR_PORT = "31599";
-const { approveToken, handler, pushToken } = await import("../../../release/host/approve-web.ts");
+const { approveToken, embedAddress, handler, pushToken } = await import("../../../release/host/approve-web.ts");
 const { formatApproval } = await import("../../../release/shared/approval.ts");
 
 const NAME = "desolate-approve.localhost";
@@ -140,5 +140,32 @@ describe("T1 the approval page", () => {
     const no = await call("POST", "/refuse", { ...asPage(), origin: ORIGIN, "content-type": "application/json" }, JSON.stringify(good()));
     assert.equal(no.status, 200);
     assert.deepEqual(refused, [message]);
+  });
+
+  it("/embed: framed by the git terminal's origin alone, and its key opens only what the page's own requests open", async () => {
+    const framed = await call("GET", "/embed", { "sec-fetch-site": "same-site", "sec-fetch-dest": "iframe" });
+    assert.equal(framed.status, 200, "loaded as a frame, by the git terminal's page (another site)");
+    assert.equal((await call("GET", "/embed", { "sec-fetch-site": "cross-site", host: "evil.example:31599" })).status, 421, "still by this name only");
+    assert.equal((await call("GET", "/embed?tkn=x", { "sec-fetch-site": "cross-site" })).status, 403, "and only the bare page");
+    assert.match(String(framed.headers["content-security-policy"]), /frame-ancestors http:\/\/desolate-git\.localhost:31599(;|$)/, "that one origin, exactly");
+    assert.equal(framed.headers["x-frame-options"], undefined, "(X-Frame-Options cannot name an origin: frame-ancestors alone governs /embed)");
+    assert.match(String(framed.headers["content-security-policy"]), /script-src 'self'/);
+    assert.match(String((await call("GET", "/", {})).headers["content-security-policy"]), /frame-ancestors 'none'/, "the page at / still cannot be framed at all");
+    const address = embedAddress();
+    assert.match(address, /^http:\/\/desolate-approve\.localhost:31599\/embed#k=[0-9a-f]{64}$/, "the key is in the fragment, which no request carries");
+    const key = /#k=([0-9a-f]{64})$/.exec(address)![1]!;
+    assert.notEqual(key, approveToken(), "and it is not the address's token");
+    assert.equal((await call("GET", `/?tkn=${key}`, {})).status, 403, "the key is no token: it gives no cookie");
+    const embedded = { "x-desolate-embed": key, ...page };
+    assert.equal((await call("GET", "/pending", embedded)).status, 200, "the embedded page's own request");
+    assert.equal((await call("GET", "/pending", { ...embedded, "x-desolate-embed": "0".repeat(64) })).status, 401, "another key");
+    assert.equal((await call("GET", "/pending", { "x-desolate-embed": key, "sec-fetch-site": "same-site" })).status, 403, "from the git terminal's page itself, or any page but this one");
+    assert.equal((await call("GET", "/pending", { "x-desolate-embed": key, "sec-fetch-site": "cross-site" })).status, 403);
+    const before = approved.length;
+    const fromElsewhere = await call("POST", "/approve", { "x-desolate-embed": key, "sec-fetch-site": "same-site", origin: "http://desolate-git.localhost:31599", "content-type": "application/json" }, JSON.stringify(good()));
+    assert.equal(fromElsewhere.status, 403, "the git terminal's origin cannot approve with the key");
+    assert.equal(approved.length, before);
+    const fromFrame = await call("POST", "/approve", { ...embedded, origin: ORIGIN, "content-type": "application/json" }, JSON.stringify(good()));
+    assert.equal(fromFrame.status, 200, "control: the framed page's own click signs");
   });
 });

@@ -41,3 +41,31 @@ const start = async () => {
   stream.onerror = () => { stream.close(); status.textContent = "disconnected: reload for another shell"; };
 };
 start();
+
+// Pushes waiting for approval, beside the terminal: the approval page itself (its /embed),
+// in a frame of its own origin. This page gives it its address and learns from it how many
+// wait (a number, from that origin only); it opens when one does, and the button keeps it
+// open or closed after that.
+const aside = document.getElementById("approvals");
+const toggle = document.getElementById("toggle");
+const APPROVE_ORIGIN = location.origin.replace("//desolate-git.", "//desolate-approve.");
+let chosen = null; // the person's choice, once made: true open, false closed
+const show = (open) => {
+  if (aside.hidden === !open) return;
+  aside.hidden = !open;
+  window.dispatchEvent(new Event("resize"));
+};
+toggle.addEventListener("click", () => { chosen = aside.hidden; show(chosen); });
+window.addEventListener("message", (event) => {
+  if (event.origin !== APPROVE_ORIGIN || !event.data || typeof event.data.desolatePending !== "number") return;
+  const waiting = Math.max(0, Math.floor(event.data.desolatePending));
+  toggle.textContent = waiting ? `Approvals (${waiting})` : "Approvals";
+  toggle.classList.toggle("waiting", waiting > 0);
+  if (waiting > 0 && chosen !== false) show(true);
+  if (waiting === 0 && chosen === null) show(false);
+});
+fetch("/approvals-frame", { credentials: "same-origin" }).then((answer) => answer.ok ? answer.json() : null).then((body) => {
+  if (!body || typeof body.url !== "string" || !body.url.startsWith(`${APPROVE_ORIGIN}/embed#`)) return;
+  document.getElementById("frame").src = body.url;
+  toggle.hidden = false;
+}).catch(() => {});

@@ -17,7 +17,8 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import * as path from "node:path";
-import { editorHostPort, GIT_HOSTNAME, parseRepo } from "../shared/names.ts";
+import { APPROVE_HOSTNAME, editorHostPort, GIT_HOSTNAME, parseRepo } from "../shared/names.ts";
+import { embedAddress } from "./approve-web.ts";
 import { refusal } from "../workspace/editor-gate.ts";
 import { guest, paths, RELEASE_DIR } from "./paths.ts";
 
@@ -53,8 +54,10 @@ export const SECURITY: Record<string, string> = {
   "referrer-policy": "no-referrer",
   "cache-control": "no-store",
 };
+/** The one page this one frames: the approval page's /embed, beside the terminal. */
+const headers = () => ({ ...SECURITY, "content-security-policy": `${SECURITY["content-security-policy"]}; frame-src http://${APPROVE_HOSTNAME}:${editorHostPort()}` });
 const send = (res: ServerResponse, status: number, type: string, content: string | Buffer) => {
-  res.writeHead(status, { "content-type": type, "content-length": Buffer.byteLength(content), ...SECURITY });
+  res.writeHead(status, { "content-type": type, "content-length": Buffer.byteLength(content), ...headers() });
   res.end(content);
 };
 const json = (res: ServerResponse, status: number, value: unknown) => send(res, status, "application/json; charset=utf-8", JSON.stringify(value));
@@ -125,6 +128,9 @@ export const handler = (spawn: (argv: string[]) => ChildProcess, log: (line: str
     if (cookie === undefined || !same(cookie, token)) return json(res, 401, { error: "open the git terminal at the address `desolate git` prints, on this Mac's terminal: it carries this stack's token" });
     if (String(req.headers["sec-fetch-site"] ?? "") !== "same-origin") return json(res, 403, { error: "a request this page did not make" });
 
+    // The approval page's address for the frame beside the terminal (its key in the
+    // fragment): to this page's own script, which only the person's browser can load.
+    if (req.method === "GET" && url.pathname === "/approvals-frame") return json(res, 200, { url: embedAddress() });
     const match = /^\/session\/([0-9a-f]{16})\/(stream|input|resize)$/.exec(url.pathname);
     if (req.method === "GET" && match?.[2] === "stream") {
       const s = sessions.get(match[1]!);

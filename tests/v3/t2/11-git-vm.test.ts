@@ -112,7 +112,7 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
     await screen(/\/git\/acme\/widgets[\s\S]*## main\.\.\.origin\/main/);
     // A commit, and a push of it, typed as anyone would.
     await type("echo from-the-git-vm > note.txt && git add note.txt && git -c user.name=person -c user.email=p@example.invalid commit -qm 'from the git VM' && git push origin HEAD:refs/heads/from-git\n");
-    await screen(/handed to the root\. Approve it on the approval page/);
+    await screen(/handed to the root\. Approve it beside this terminal/);
     const commit = stack.inVm(gitVm(), ["git", "-C", "/git/acme/widgets", "rev-parse", "HEAD"]).stdout.trim();
     assert.equal(forgeRefs("acme/widgets")["from-git"], undefined, "nothing reached the remote before the approval");
 
@@ -194,10 +194,11 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
   });
 
   it("every branch a workspace makes reaches the git VM unoffered; a branch from there is delivered to a domain; desolate fetch refreshes", async () => {
-    assert.equal(stack.quiet("domain", "create", "dev").code, 0);
-    assert.equal(stack.quiet("domain", "dev", "add", "--repo", "acme/widgets").code, 0);
-    const up = stack.quiet("up", "dev", "--name", "w1");
+    // (A domain with its repository in one command, and a workspace on a branch of its own.)
+    assert.equal(stack.quiet("domain", "create", "dev", "--repo", "acme/widgets").code, 0);
+    const up = stack.quiet("up", "dev", "--name", "w1", "--branch", "task/one");
     assert.equal(up.code, 0, up.stderr);
+    assert.match(stack.desolate("list", "dev").stdout, /dev\/w1 {2}running.*acme\/widgets@task\/one/, "the checkout is on the branch --branch named");
     const ws = (script: string) => stack.desolate("exec", "dev/w1", "--checkout", "acme/widgets", "--", "bash", "-lc", script);
     // An agent's branch, never offered: the root imports it as the workspace writes it out.
     const made = ws("git switch -q -c wip/unoffered && git -c user.name=a -c user.email=a@a commit -q --allow-empty -m 'work in progress' && git rev-parse HEAD");
