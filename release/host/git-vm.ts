@@ -82,9 +82,12 @@ export const ensureGitClone = async (repo: Repo) => {
     `git config remote.root.pushurl /nonexistent/the-root-is-not-pushed-to`,
     // `origin` and `root` are the root's user's repositories (the mirror; its clone), and a
     // local fetch runs upload-pack under THEIR config. What of it could name a command is
-    // set here, on this side, where the root's user cannot write.
-    `git config remote.origin.uploadpack "git -c core.alternateRefsCommand= -c core.alternateRefsPrefixes= -c uploadpack.packObjectsHook= upload-pack"`,
-    `git config remote.root.uploadpack "git -c core.alternateRefsCommand= -c core.alternateRefsPrefixes= -c uploadpack.packObjectsHook= upload-pack"`,
+    // set here, on this side, where the root's user cannot write: the alternates' refs come
+    // from a command that prints nothing. (uploadpack.packObjectsHook needs no setting: git
+    // reads it from no repository's own config. Set empty, it was a command to run, and
+    // every fetch failed: "unable to fork git-pack-objects".)
+    `git config remote.origin.uploadpack "git -c core.alternateRefsCommand=true upload-pack"`,
+    `git config remote.root.uploadpack "git -c core.alternateRefsCommand=true upload-pack"`,
     "git lfs pull >/dev/null 2>&1 || true",
   ].join("\n");
   const made = await backend().exec(GIT_VM, ["bash", "-c", script, "_", mirror, dir, id, `${guest.rootClones}/${repo.owner}/${repo.name}`], { timeoutMs: 1_800_000 });
