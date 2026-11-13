@@ -112,7 +112,9 @@ export const launch = async (port: number, width: number, height: number) => {
 
 /** Two clips, one after the other, each under a banner that names it (BEFORE / AFTER). */
 export const beforeAfter = (before: string, after: string, out: string, labels = ["BEFORE", "AFTER"]) => {
-  const banner = (label: string, color: string) => `drawbox=x=0:y=0:w=iw:h=44:color=${color}@0.92:t=fill,drawtext=text='${label}':x=20:y=11:fontsize=24:fontcolor=white:font=Helvetica`;
+  // (drawtext's own syntax: a colon or a quote in the text ends it.)
+  const text = (label: string) => label.replace(/[\\:']/g, (c) => `\\${c}`);
+  const banner = (label: string, color: string) => `drawbox=x=0:y=0:w=iw:h=44:color=${color}@0.92:t=fill,drawtext=text='${text(label)}':x=20:y=11:fontsize=24:fontcolor=white:font=Helvetica`;
   execFileSync("ffmpeg", ["-y", "-loglevel", "error", "-i", before, "-i", after, "-filter_complex",
     `[0:v]${banner(labels[0]!, "0x7a2e2e")},setsar=1[a];[1:v]${banner(labels[1]!, "0x2e6b3a")},setsar=1[b];[a][b]concat=n=2:v=1:a=0[v]`,
     "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]);
