@@ -13,7 +13,7 @@
 //
 // desolate keeps its own Lima home under ~/.desolate, so it never touches a VM it did not
 // make, and refuses Lima's user-wide _config overrides, which could add a network.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
@@ -252,6 +252,17 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
         detail: version.code === 0 ? version.stdout.trim() : "limactl was not found",
         fix: process.platform === "darwin" ? `brew upgrade lima (${least.join(".")} or newer)` : `install Lima ${least.join(".")} or newer (https://lima-vm.io) and put limactl on PATH, or set DESOLATE_LIMACTL`,
       });
+      if (kind === "vz") {
+        // Virtualization.framework with virtiofs, as desolate uses it: macOS 13 or newer, on
+        // Apple silicon and on Intel alike.
+        const release = spawnSync("sw_vers", ["-productVersion"], { encoding: "utf8" }).stdout.trim();
+        const major = Number(release.split(".")[0]);
+        checks.push({ name: "macOS", ok: major >= 13, detail: release ? `macOS ${release}, ${os.arch() === "arm64" ? "Apple silicon" : "Intel"}` : "sw_vers did not answer", fix: "update macOS to 13 (Ventura) or newer" });
+        // On Intel the same code runs (an x86_64 Ubuntu image, x64 node and VSCodium, all
+        // pinned), but the boundaries were measured on Apple silicon: said, not failed.
+        if (os.arch() !== "arm64")
+          checks.push({ name: "Intel Mac", ok: true, detail: "supported by the code, not yet proven here: run the boundary tier once (TMPDIR=$HOME/t tests/v3/run.sh t4) before trusting a workspace with anything" });
+      }
       for (const override of ["default.yaml", "override.yaml"])
         if (fs.existsSync(path.join(LIMA_HOME, "_config", override)))
           checks.push({ name: "lima overrides", ok: false, detail: `${LIMA_HOME}/_config/${override} would change every VM (it could add a network)`, fix: `remove ${LIMA_HOME}/_config/${override}` });

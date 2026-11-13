@@ -9,7 +9,9 @@ first VM images to download.
 ## What you need
 
 - **A Mac with Apple silicon** (M1 or later). desolate runs its VMs with Apple's
-  Virtualization.framework, through Lima; an Intel Mac is not supported.
+  Virtualization.framework, through Lima, on macOS 13 or newer. An Intel Mac should work (the
+  code supports it) but has not been proven yet: run the boundary tests there first
+  ([intel.md](https://github.com/pmalacho-mit/isolated-devcontainers-suede/blob/main/docs/v3/intel.md)).
 - **Homebrew**, and from it: `brew install lima node gh`
   - Lima **2.3 or newer** (`limactl --version`): older versions let a confined VM's pings out.
   - node **22.18 or newer**: desolate is TypeScript that node runs directly.
