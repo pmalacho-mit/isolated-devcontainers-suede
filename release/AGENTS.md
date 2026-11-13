@@ -11,7 +11,7 @@ reach is unreachable on purpose, and is not a bug in the project.
   each in its own worktree. You share one `.git` with them: you can see their branches, and
   they can see yours. Workspaces of other domains see nothing of yours.
 - `/desolate/` is desolate's: `/desolate/mirrors/` (read-only: what each remote has
-  published), `/desolate/status` (say how your work is going), `/desolate/release/AGENTS.md`
+  published), `desolate status` (say how your work is going; also `/desolate/status`), `/desolate/release/AGENTS.md`
   (this file).
 
 ## Git: commit freely; you cannot push, and need not try
@@ -34,15 +34,15 @@ reach is unreachable on purpose, and is not a bug in the project.
 - Do not add or remove worktrees of your own in a loop: other workspaces share this `.git`.
 - LFS works: files check out from the mirror, and new large files travel with your offer.
 
-## Saying how it's going: `/desolate/status`
+## Saying how it's going: `desolate status`
 
 ```bash
-/desolate/status set blue   "working: issue #42"
-/desolate/status set orange "needs a human: which API version?"
-/desolate/status set red    "the tests cannot run: no database"
-/desolate/status set green  "ready: offered issue/42"
-/desolate/status note "what I changed, for the other agents here"
-/desolate/status board      # every checkout in this repository: its status and its note
+desolate status set blue   "working: issue #42"
+desolate status set orange "needs a human: which API version?"
+desolate status set red    "the tests cannot run: no database"
+desolate status set green  "ready: offered issue/42"
+desolate status note "what I changed, for the other agents here"
+desolate status board      # every checkout in this repository: its status and its note
 ```
 
 One line, at most 200 characters. Colours: `gray`, `blue`, `green`, `yellow`, `orange`,

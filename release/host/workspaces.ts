@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { EXIT, refuse } from "../shared/exit.ts";
 import { devHostname, editorHostname, editorHostPort, parseRepo } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
+import { readHead } from "../shared/status.ts";
 import { guest, INSTANCE, paths, RELEASE_DIR } from "./paths.ts";
 import { backend, ensureProxyUser, rootctl } from "./stack.ts";
 import type { VmSpec } from "./vm/types.ts";
@@ -184,7 +185,16 @@ export const list = async (out: Out, json: boolean, only?: string) => {
   const vms = new Map((await b.list()).map((vm) => [vm.name, vm.status]));
   const view = domains.map((d) => ({
     domain: d.slug, title: d.title, repos: d.repos,
-    workspaces: d.workspaces.map((w) => ({ workspace: w.workspace, vm: w.vm, status: vms.get(w.vm) ?? "missing", isolated: b.isolated, checkouts: w.checkouts, urls: urlsOf(w) })),
+    workspaces: d.workspaces.map((w) => ({
+      workspace: w.workspace, vm: w.vm, status: vms.get(w.vm) ?? "missing", isolated: b.isolated,
+      // What each checkout has checked out now (its HEAD, read here as data), beside what it
+      // started on.
+      checkouts: w.checkouts.map((c) => {
+        const head = readHead(paths.domainRepos(d.slug), c);
+        return { ...c, head, now: head ? (head.branch ?? (head.commit ? `(detached ${head.commit.slice(0, 12)})` : "(?)")) : c.branch };
+      }),
+      urls: urlsOf(w),
+    })),
   }));
   if (json) return out(JSON.stringify(view));
   if (view.length === 0) return out("no domains yet. Start with: desolate domain create <slug>");
@@ -192,7 +202,7 @@ export const list = async (out: Out, json: boolean, only?: string) => {
     out(`${d.domain}  "${d.title}"  ${d.repos.length ? d.repos.join(", ") : "(no repositories: desolate domain " + d.domain + " add --repo <owner>/<repo>)"}`);
     if (d.workspaces.length === 0) out(`  (no workspaces: desolate up ${d.domain})`);
     for (const w of d.workspaces)
-      out(`  ${d.domain}/${w.workspace}  ${w.status}${w.isolated ? "" : "  [not isolated]"}  ${w.checkouts.map((c) => `${c.repo}@${c.branch}`).join(", ")}`);
+      out(`  ${d.domain}/${w.workspace}  ${w.status}${w.isolated ? "" : "  [not isolated]"}  ${w.checkouts.map((c) => `${c.repo}@${c.now}`).join(", ")}`);
   }
 };
 

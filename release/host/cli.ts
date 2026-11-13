@@ -39,7 +39,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate rm <domain>                                           the domain and its clones; not the root's
 
   desolate offers [<domain>] [--json]                            what workspaces have offered: needs you
-  desolate review <domain> <owner/repo> <branch> [--diff] [--json]
+  desolate branches [<domain>] [--json]                           every branch each domain has (offered or not)
+  desolate review <domain> <owner/repo> <branch> [--diff] [--against origin|domain] [--json]
                                                                  what a push would send; --diff: the diff itself
   desolate push <domain> <owner/repo> <branch> --expect <commit> [--allow-default]
                                                                  to the remote; you approve it here, on the
@@ -160,10 +161,17 @@ const main = async (argv: string[]): Promise<number> => {
     await offers(positionals[0], out, values.json === true);
     return EXIT.ok;
   }
+  if (verb === "branches") {
+    const { values, positionals } = flags(rest, {});
+    const { branches } = await import("./push.ts");
+    await branches(positionals[0], out, values.json === true);
+    return EXIT.ok;
+  }
   if (verb === "review") {
-    const { values, positionals } = flags(rest, { diff: { type: "boolean" } });
+    const { values, positionals } = flags(rest, { diff: { type: "boolean" }, against: { type: "string" } });
+    if (values.against !== undefined && values.against !== "origin" && values.against !== "domain") refuse(`--against '${String(values.against)}' is not understood`, "--against origin (the remote's default branch, as the mirror has it) or --against domain (the domain's own copy of it)", EXIT.usage);
     const { review } = await import("./push.ts");
-    await review(values.diff === true ? [...positionals, "--diff"] : positionals, out, values.json === true);
+    await review(values.diff === true ? [...positionals, "--diff"] : positionals, out, values.json === true, values.against === "domain" ? "domain" : "origin");
     return EXIT.ok;
   }
   if (verb === "push") {

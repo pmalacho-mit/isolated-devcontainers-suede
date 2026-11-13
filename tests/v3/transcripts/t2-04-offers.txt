@@ -59,7 +59,7 @@ dev/w1  [green] ready: fix for issue 12
 ## review
 
 $ desolate review dev acme/widgets issue/12
-acme/widgets  issue/12  at <commit>
+acme/widgets  issue/12  at <commit>, against origin/main
 a push would send 1 commit(s): 2 files changed, 4 insertions(+), and 1 LFS object(s) first
   <id>  fix: issue 12
   README.md

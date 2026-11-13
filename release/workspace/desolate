@@ -1,6 +1,12 @@
 #!/bin/sh
 # `desolate` inside a workspace. In a devcontainer the project's own node (if any) may be
 # too old to run desolate's TypeScript, so the VM's node is mounted beside it.
+# `desolate status ...` is /desolate/status (a shell script: no node to start).
+if [ "${1:-}" = status ]; then
+  shift
+  [ $# -eq 0 ] && set -- show
+  exec /desolate/status "$@"
+fi
 NODE=node
 [ -x /desolate/bin/node ] && NODE=/desolate/bin/node
 exec "$NODE" --disable-warning=ExperimentalWarning /desolate/release/workspace/desolate.ts "$@"

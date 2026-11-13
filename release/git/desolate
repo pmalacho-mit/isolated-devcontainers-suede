@@ -1,0 +1,3 @@
+#!/bin/sh
+# `desolate` in the git VM: see desolate.ts.
+exec node --disable-warning=ExperimentalWarning /desolate/release/git/desolate.ts "$@"

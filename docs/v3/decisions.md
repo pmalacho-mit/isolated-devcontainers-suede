@@ -679,6 +679,66 @@ it can be believed:
   buffering, an offset that could drift and re-announce old pushes, and the unvalidated
   names; all fixed.)
 
+## What a checkout has checked out, live: the Mac's file events (decided on the Mac; tested on T1, measured on the M1)
+
+The dashboard and `desolate list` showed each checkout as it started (`@main` after the agent
+had switched to `feature/greeting`). They now show its HEAD, read as data like a status file
+(`shared/status.ts` `readHead`): a name desolate would carry or nothing, a link never followed,
+and a HEAD with no closing newline is one caught half written (seen on the M1: a read from the
+root VM returned `ref: refs/heads/live-`), so the last settled value stands.
+
+Listening, not polling. A VM gets no events for a share, but a share's files are the Mac's: a
+write from any VM is a file event on the Mac. The host daemon already watched each checkout's
+git directory for its status; it now also nudges for `HEAD`, and, on macOS only, holds one
+recursive FSEvents watch per repository on `refs/heads` and one on `packed-refs`. A directory
+there that is a link, or resolves outside the domain's tree, is not watched (a recursive watch
+would follow it). Measured on the M1: a `git switch` or a commit in a workspace is on the
+dashboard, and a `head` event in `desolate events`, about 200 ms later. The state service's
+look every second stays, for a missed event. The git VM's outbox is taken the same way (a
+watch, with a look every 5 s behind it). The workspace's own refs watch (`wsd`, every 3 s)
+and the root's outbox look (`rootd`) still poll: those run inside VMs.
+
+## Every branch is the root's to read, and reviewable; an offer is "ready" (decided on the Mac; tested on T1)
+
+A workspace writes every branch out as it changes (`wsd`: a bundle and its list of refs,
+every few seconds), but the root brought a domain's branches into its clones only when one
+was offered or reviewed, so `git fetch root` in the git VM showed only those. `rootd` now
+imports a repository's branches when the domain's list of them changes (by the file's time
+only), at most one import every 3 s per repository, by the same path a review takes
+(`fetchDomain`: git-remote-desolate, every object checked). Two imports at once in a clone
+can meet on a ref's lock; the later one tries again. This is not a new way in: a domain
+could already make the root import as often as it offers (30 requests a minute).
+
+The dashboard lists every branch per domain (the domain's own list, read as data: names
+desolate would carry, at most 200 a repository), shows which workspace has it checked out,
+and reviews any of them; each checkout has a Diff button for the branch it is on. A review is
+against `origin/<default>` (what a push would send) or the domain's own `<default>`
+(`--against domain`: what the agents built beyond their own main). `desolate branches` is the
+same list on the host. Pushing from the dashboard stays with offered branches, at the commit
+reviewed: an offer is how a branch's new LFS objects reach the root. Anything else is pushed
+from the git terminal, where it is one `git push`.
+
+## In a workspace, `desolate status`; in the git VM, `desolate fetch` and a remote per domain (decided on the Mac; tested on T2)
+
+`desolate status ...` inside a workspace is `/desolate/status ...` (the wrapper runs the
+shell script itself: no node starts), which stays for whatever already calls it.
+
+The git VM's clone of a repository has a remote for each domain that has it: `git fetch
+<domain>` reads that domain's branches from the root clone (as `git fetch root` does, with
+upload-pack's command fixed on this side), and its push address, `desolate-out::<repo>@<domain>`,
+makes `git push <domain> <branch>` a delivery: the bundle goes the way a push does (host,
+`bundleRefusal`, every object checked), and the root then runs its own `git push <domain>`
+(git-remote-desolate), so the domain's workspaces see `root/<branch>`. A domain without the
+repository is refused by the root. New LFS objects stay in the root (a delivery carries
+commits). `desolate fetch` in the git VM asks the host, through the same out-box, to have the
+root refresh the mirror (at most once in 5 s per repository), then runs `git fetch --all`.
+
+What this opens: the git VM writes into domains without the person approving each delivery.
+The git VM is the person's, but it is also where they read what agents wrote, so if git
+itself fell to a domain's content, the git VM could plant a branch (never checked out:
+`root/<branch>`) in another domain. It could already read every domain's work. Deliveries are
+events (`git-delivery-handed`). Recorded in mac-audit-notes as accepted, with the reason.
+
 ## ssh-agent needs a relay in front of it (measured)
 
 ssh-agent refuses any peer whose uid is not its own. The keyring runs as its own user so the

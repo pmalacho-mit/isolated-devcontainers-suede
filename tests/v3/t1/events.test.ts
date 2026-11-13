@@ -70,4 +70,14 @@ describe("T1 desolate events", () => {
     const [status] = stateEvents({ domains: [] }, { domains: [{ slug: "dev", workspaces: [{ workspace: "w1", says: { status: { color: "blink", message: "hi", updated: "1" } } }] }] });
     assert.equal(status!.color, null);
   });
+
+  it("a checkout's HEAD moving is an event, its names checked", () => {
+    const at = (branch: unknown, commit: unknown) => ({ domains: [{ slug: "dev", workspaces: [{ workspace: "w1", checkouts: [{ repo: "acme/widgets", head: { branch, commit } }] }] }] });
+    assert.deepEqual(stateEvents(at("main", A), at("main", A)), []);
+    const [moved] = stateEvents(at("main", A), at("issue/12", B));
+    assert.deepEqual({ ...moved, at: "" }, { at: "", v: 1, type: "head", source: "root", domain: "dev", workspace: "w1", repo: "acme/widgets", branch: "issue/12", commit: B, was: { branch: "main", commit: A } });
+    const [odd] = stateEvents(at("main", A), at("--upload-pack=x", "nope"));
+    assert.equal(odd!.branch, null);
+    assert.equal(odd!.commit, null);
+  });
 });

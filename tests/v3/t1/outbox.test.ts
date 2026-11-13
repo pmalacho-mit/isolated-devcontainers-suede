@@ -158,3 +158,20 @@ describe("T1 outbox", { skip: ON_LINUX ? false : NEEDS_LINUX }, () => {
     assert.deepEqual([last.copies.length, last.more, fs.readdirSync(many)], [1, false, []]);
   });
 });
+
+describe("T1 a domain's list of its branches: its word, read as data", () => {
+  it("names desolate would carry, commits that are commits, bounded; a link is not followed", async () => {
+    const { branchesOf } = await import("../../../release/root/outbox.ts");
+    const dir = `${domains}/t1-branches/outbox/sync/acme/widgets`;
+    fs.mkdirSync(dir, { recursive: true });
+    const A = "a".repeat(40);
+    fs.writeFileSync(`${dir}/refs.json`, JSON.stringify({ refs: { main: A, "feature/x": A, "--upload-pack=x": A, "../../etc": A, bad: "nope" } }));
+    assert.deepEqual(branchesOf("t1-branches", ["acme/widgets", "acme/absent"]), [{ repo: "acme/widgets", branch: "main", commit: A }, { repo: "acme/widgets", branch: "feature/x", commit: A }]);
+    fs.writeFileSync(`${dir}/refs.json`, JSON.stringify({ refs: Object.fromEntries(Array.from({ length: 500 }, (_, i) => [`b${i}`, A])) }));
+    assert.equal(branchesOf("t1-branches", ["acme/widgets"]).length, 200, "at most 200 a repository");
+    fs.rmSync(`${dir}/refs.json`);
+    fs.writeFileSync(path.join(work, "elsewhere.json"), JSON.stringify({ refs: { main: A } }));
+    fs.symlinkSync(path.join(work, "elsewhere.json"), `${dir}/refs.json`);
+    assert.deepEqual(branchesOf("t1-branches", ["acme/widgets"]), [], "a list that is a link is not read");
+  });
+});

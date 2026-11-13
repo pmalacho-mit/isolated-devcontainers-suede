@@ -4,6 +4,7 @@
 //   desolate fetch [<owner/repo>]          ask the root to refresh the mirror, then git fetch
 //   desolate offer [<owner/repo>] [<branch>]  bundle a branch for the root; a person pushes it
 //   desolate sync                          write this domain's branches out for the root now
+//   desolate status ...                    /desolate/status (the wrapper, workspace/desolate, runs it)
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -69,6 +70,6 @@ if (verb === "fetch") {
     process.stdout.write(`${repo}: ${result.branches} branch(es) written for the root${result.bundled ? "" : " (nothing new to bundle)"}.\n`);
   }
 } else {
-  process.stdout.write("desolate, inside a workspace:\n  desolate fetch [<owner/repo>]             ask the root to refresh the mirror, then git fetch\n  desolate offer [<owner/repo>] [<branch>]  offer a branch to the root; a person reviews and pushes it\n  desolate sync                             write this domain's branches out for the root now\n  /desolate/status set <colour> \"<message>\"  say how the work is going\n");
+  process.stdout.write("desolate, inside a workspace:\n  desolate fetch [<owner/repo>]             ask the root to refresh the mirror, then git fetch\n  desolate offer [<owner/repo>] [<branch>]  offer a branch to the root; a person reviews and pushes it\n  desolate sync                             write this domain's branches out for the root now\n  desolate status set <colour> \"<message>\"  say how the work is going (also: note, board, show, clear)\n");
   process.exit(verb && verb !== "help" ? 64 : 0);
 }

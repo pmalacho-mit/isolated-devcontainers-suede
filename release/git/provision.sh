@@ -62,10 +62,11 @@ git() {
 }
 export PS1='\[\e[1m\]git VM\[\e[0m\] \w\$ '
 cd_repo() { cd "/git/$1" 2>/dev/null || echo "no clone of $1 here: on the Mac, desolate git $1"; }
-case $- in *i*) echo "desolate's git VM: your clones are under /git. No network, no keys: \`git push origin <branch>\` asks you on the approval page." ;; esac
+case $- in *i*) echo "desolate's git VM: your clones are under /git. No network, no keys: \`git push origin <branch>\` asks you on the approval page; \`desolate\` says what else." ;; esac
 P
 chmod 0644 /etc/profile.d/desolate-git.sh
 mkdir -p /etc/vim
 printf 'set nomodeline\nset modelines=0\n' >/etc/vim/vimrc.local
 ln -sf /desolate/release/git/git-remote-desolate-out /usr/local/bin/git-remote-desolate-out
+ln -sf /desolate/release/git/desolate /usr/local/bin/desolate
 echo "git VM: ready"

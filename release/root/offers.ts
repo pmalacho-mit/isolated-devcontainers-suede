@@ -23,7 +23,13 @@ const lfsStore = (dir: string, oid: string) => path.join(dir, oid.slice(0, 2), o
 
 /** Bring a domain's branches into the root clone: `git fetch <domain>`, by the helper. */
 export const fetchDomain = async (domain: string, repo: Repo) => {
-  const result = await git(clonePath(repo), ["fetch", "--quiet", "--prune", domain], { timeoutMs: 600_000 });
+  // rootd imports as a domain writes, and a review imports too: two at once in one clone
+  // can meet on a ref's lock, and the later one tries again.
+  let result = await git(clonePath(repo), ["fetch", "--quiet", "--prune", domain], { timeoutMs: 600_000 });
+  for (let tries = 0; result.code !== 0 && /\.lock\b|cannot lock/i.test(result.stderr) && tries < 5; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 300 + 300 * tries));
+    result = await git(clonePath(repo), ["fetch", "--quiet", "--prune", domain], { timeoutMs: 600_000 });
+  }
   if (result.code !== 0) throw new Error(`could not bring ${domain}'s branches of ${repo.owner}/${repo.name} into the root clone: ${result.stderr.trim().slice(-400)}`);
 };
 
@@ -99,13 +105,19 @@ const missingLfs = async (repo: Repo, commit: string) =>
   (await lfsOf(repo, commit)).filter((oid) => !fs.existsSync(lfsStore(path.join(clonePath(repo), ".git", "lfs", "objects"), oid)) && !fs.existsSync(lfsStore(path.join(mirrorPath(repo), "lfs", "objects"), oid)));
 
 export type Review = {
-  domain: string; repo: string; branch: string; commit: string; base: string; defaultBranch: string | null;
+  domain: string; repo: string; branch: string; commit: string; base: string; against: Against; againstLabel: string; defaultBranch: string | null;
   pushable: boolean; isDefault: boolean; commits: { commit: string; subject: string }[]; files: string[];
   stat: string; lfsObjects: number; warnings: string[];
 };
 
 /** What a push would send (section 8: `desolate review`). Read from the root clone only. */
-export const review = async (domain: string, repoArg: unknown, branch: unknown): Promise<Review> => {
+/** What a branch is compared with: the remote's default branch as the mirror has it
+ *  ("origin"), or the domain's own copy of it ("domain": what this domain's agents built on,
+ *  which may be ahead of the remote with their merged work). */
+export type Against = "origin" | "domain";
+export const againstOf = (value: unknown): Against => (value === "domain" ? "domain" : "origin");
+export const review = async (domain: string, repoArg: unknown, branch: unknown, againstArg: unknown = "origin"): Promise<Review> => {
+  const against = againstOf(againstArg);
   const d = domainOf(domain);
   const repo = parseRepo(repoArg) ?? refuse(`'${String(repoArg)}' is not a repository`, "name it as <owner>/<repo>");
   const id = `${repo.owner}/${repo.name}`;
@@ -116,7 +128,9 @@ export const review = async (domain: string, repoArg: unknown, branch: unknown):
   const clone = clonePath(repo);
   const commit = (await git(clone, ["rev-parse", "--verify", "--quiet", `refs/remotes/${domain}/${branch}`])).stdout.trim();
   if (!commit) refuse(`the domain '${domain}' has no branch '${branch}' of ${id}`, `desolate offers ${domain}`);
-  const upstream = record.defaultBranch ? `refs/remotes/origin/${record.defaultBranch}` : "";
+  const upstream = !record.defaultBranch ? "" : against === "domain" ? `refs/remotes/${domain}/${record.defaultBranch}` : `refs/remotes/origin/${record.defaultBranch}`;
+  if (upstream && against === "domain" && !(await git(clone, ["rev-parse", "--verify", "--quiet", upstream])).stdout.trim())
+    refuse(`the domain '${domain}' has no ${record.defaultBranch} of ${id} to compare with`, "compare with origin instead");
   const base = upstream ? (await git(clone, ["merge-base", commit, upstream])).stdout.trim() : "";
   const range = base ? `${base}..${commit}` : commit;
   const log = await gitOk(clone, ["log", "--format=%H%x09%s", "--max-count=200", range]);
@@ -127,7 +141,8 @@ export const review = async (domain: string, repoArg: unknown, branch: unknown):
   if (files.some((f) => /(^|\/)\.suede\/core\//.test(f))) warnings.push("changes a vendored .suede/core/: a proposal that rewrites suede's own machinery is worth a second look");
   if (files.some((f) => f === ".lfsconfig" || f === ".gitattributes" || f === ".gitmodules")) warnings.push("changes .lfsconfig, .gitattributes or .gitmodules: these steer what git does with this repository elsewhere");
   return {
-    domain, repo: id, branch, commit, base, defaultBranch: record.defaultBranch, pushable: record.pushable,
+    domain, repo: id, branch, commit, base, against, againstLabel: record.defaultBranch ? (against === "domain" ? `${domain}'s ${record.defaultBranch}` : `origin/${record.defaultBranch}`) : "nothing (no default branch)",
+    defaultBranch: record.defaultBranch, pushable: record.pushable,
     isDefault: branch === record.defaultBranch,
     commits: log.split("\n").filter(Boolean).map((line) => ({ commit: line.slice(0, line.indexOf("\t")), subject: line.slice(line.indexOf("\t") + 1) })),
     files, stat, lfsObjects: (await lfsOf(repo, commit)).length, warnings,
@@ -141,8 +156,8 @@ export const review = async (domain: string, repoArg: unknown, branch: unknown):
  *  is the content's, so whoever shows it shows it as text. Capped: a diff too long to read
  *  is cut, and says so. */
 export const DIFF_LIMIT = 1024 * 1024;
-export const diff = async (domain: string, repoArg: unknown, branch: unknown): Promise<{ repo: string; branch: string; commit: string; base: string; text: string; truncated: boolean }> => {
-  const r = await review(domain, repoArg, branch);
+export const diff = async (domain: string, repoArg: unknown, branch: unknown, against: unknown = "origin"): Promise<{ repo: string; branch: string; commit: string; base: string; against: Against; text: string; truncated: boolean }> => {
+  const r = await review(domain, repoArg, branch, against);
   const clone = clonePath(parseRepo(r.repo)!);
   if (!ownedByRoot(clone)) throw new Error("not a root clone");
   const child = spawn("git", [...safeIn(clone), "-C", clone, "--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--unified=3", r.base || "4b825dc642cb6eb9a060e54bf8d69288fbee4904", r.commit, "--"],
@@ -167,5 +182,5 @@ export const diff = async (domain: string, repoArg: unknown, branch: unknown): P
   });
   await new Promise<void>((resolve) => child.on("close", () => resolve()));
   clearTimeout(timer);
-  return { repo: r.repo, branch: r.branch, commit: r.commit, base: r.base, text: Buffer.concat(chunks).toString("utf8"), truncated };
+  return { repo: r.repo, branch: r.branch, commit: r.commit, base: r.base, against: r.against, text: Buffer.concat(chunks).toString("utf8"), truncated };
 };

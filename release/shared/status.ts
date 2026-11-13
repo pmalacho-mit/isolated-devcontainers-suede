@@ -4,6 +4,7 @@
 // shown, never acted on.
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isBranch, isCommit } from "./names.ts";
 import type { WorkspacePlan } from "./plan.ts";
 
 export type Status = { color: string; message: string; updated: string };
@@ -64,9 +65,38 @@ export const readNote = (base: string, file: string): string =>
 export const statusDir = (reposDir: string, c: { repo: string; kind: string; name: string }) =>
   c.kind === "main" ? path.join(reposDir, c.repo, ".git") : path.join(reposDir, c.repo, ".git", "worktrees", c.name);
 
-export type StatusView = { workspace: string; checkouts: { repo: string; branch: string; status: Status | null; note: string }[]; status: Status | null };
+/** What a checkout has checked out NOW (the plan says only what it started on): read from
+ *  its HEAD as data, like its status. `branch` is a name desolate would carry, or null (a
+ *  detached HEAD, a rebase under way, or a name it would not carry); `commit` is what that
+ *  branch names when its ref is a loose file or in packed-refs, or the detached commit. */
+export type Head = { branch: string | null; commit: string | null };
+const COMMIT_LINE = /^([0-9a-f]{40})\n$/;
+const refCommit = (reposDir: string, common: string, branch: string): string | null => {
+  const loose = readPlain(reposDir, path.join(common, "refs", "heads", branch), 128, true);
+  if (loose !== null) return COMMIT_LINE.exec(loose)?.[1] ?? null;
+  const packed = readPlain(reposDir, path.join(common, "packed-refs"), 4 << 20, true) ?? "";
+  for (const line of packed.split("\n")) {
+    const [commit, ref] = line.split(" ");
+    if (ref === `refs/heads/${branch}` && isCommit(commit)) return commit;
+  }
+  return null;
+};
+export const readHead = (reposDir: string, c: { repo: string; kind: string; name: string }): Head | null => {
+  const text = readPlain(reposDir, path.join(statusDir(reposDir, c), "HEAD"), 512, true);
+  // Git ends what it writes there with a newline. Without one, this read caught it half
+  // written (a share's file, read from another VM while it is written): unsettled, so
+  // null, and the reader keeps what it saw before.
+  if (text === null || !text.endsWith("\n")) return null;
+  const detached = COMMIT_LINE.exec(text);
+  if (detached) return { branch: null, commit: detached[1]! };
+  const named = /^ref: refs\/heads\/(\S+)\n$/.exec(text)?.[1];
+  if (!isBranch(named)) return { branch: null, commit: null };
+  return { branch: named, commit: refCommit(reposDir, path.join(reposDir, c.repo, ".git"), named) };
+};
+
+export type StatusView = { workspace: string; checkouts: { repo: string; branch: string; head: Head | null; status: Status | null; note: string }[]; status: Status | null };
 export const statusView = (reposDir: string, w: WorkspacePlan): StatusView => {
-  const checkouts = w.checkouts.map((c) => ({ repo: c.repo, branch: c.branch, status: readStatus(reposDir, path.join(statusDir(reposDir, c), "desolate-status.json")), note: readNote(reposDir, path.join(statusDir(reposDir, c), "desolate-note.md")) }));
+  const checkouts = w.checkouts.map((c) => ({ repo: c.repo, branch: c.branch, head: readHead(reposDir, c), status: readStatus(reposDir, path.join(statusDir(reposDir, c), "desolate-status.json")), note: readNote(reposDir, path.join(statusDir(reposDir, c), "desolate-note.md")) }));
   // A workspace's status is its most recently set one.
   const latest = checkouts.map((c) => c.status).filter((s): s is Status => s !== null).sort((a, b) => b.updated.localeCompare(a.updated))[0] ?? null;
   return { workspace: `${w.domain}/${w.workspace}`, checkouts, status: latest };

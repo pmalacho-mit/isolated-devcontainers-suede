@@ -192,4 +192,44 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
     assert.deepEqual(push!.summary.commits, [], "no commit the remote does not have");
     assert.equal((await approvals.post("/refuse", { nonce: push!.nonce, token: push!.token, commit: push!.commit })).status, 200);
   });
+
+  it("every branch a workspace makes reaches the git VM unoffered; a branch from there is delivered to a domain; desolate fetch refreshes", async () => {
+    assert.equal(stack.quiet("domain", "create", "dev").code, 0);
+    assert.equal(stack.quiet("domain", "dev", "add", "--repo", "acme/widgets").code, 0);
+    const up = stack.quiet("up", "dev", "--name", "w1");
+    assert.equal(up.code, 0, up.stderr);
+    const ws = (script: string) => stack.desolate("exec", "dev/w1", "--checkout", "acme/widgets", "--", "bash", "-lc", script);
+    // An agent's branch, never offered: the root imports it as the workspace writes it out.
+    const made = ws("git switch -q -c wip/unoffered && git -c user.name=a -c user.email=a@a commit -q --allow-empty -m 'work in progress' && git rev-parse HEAD");
+    assert.equal(made.code, 0, made.stderr);
+    const wip = made.stdout.trim();
+    // (A new remote for the new domain: desolate git sets the clone up again.)
+    assert.equal(stack.desolate("git", "acme/widgets").code, 0);
+    let seen = "";
+    for (let i = 0; i < 60 && !seen.includes(wip); i++) {
+      seen = stack.inVm(gitVm(), ["bash", "-lc", "cd /git/acme/widgets && git fetch -q dev 2>&1; git rev-parse dev/wip/unoffered 2>/dev/null; true"]).stdout;
+      if (!seen.includes(wip)) await sleep(500);
+    }
+    assert.match(seen, new RegExp(wip), "the unoffered branch is the git VM's to read, as dev/wip/unoffered");
+    const branches = stack.desolate("branches", "dev");
+    assert.match(branches.stdout, /dev {2}acme\/widgets {2}wip\/unoffered {2}[0-9a-f]{12} {2}checked out in w1/);
+    // A branch from the git VM, delivered: no approval, and the workspace has it as root/<branch>.
+    const sent = stack.inVm(gitVm(), ["bash", "-lc", "cd /git/acme/widgets && git switch -q -c review/notes origin/main && echo notes > NOTES.md && git add NOTES.md && git -c user.name=r -c user.email=r@r commit -qm 'Review notes' && git push dev review/notes 2>&1 && git rev-parse HEAD; git switch -q main"]);
+    assert.match(sent.stdout, /delivered to dev/, sent.stdout + sent.stderr);
+    const notes = sent.stdout.trim().split("\n").pop()!;
+    let there = "";
+    for (let i = 0; i < 40 && !there.includes(notes); i++) {
+      there = ws("git rev-parse root/review/notes 2>/dev/null; true").stdout;
+      if (!there.includes(notes)) await sleep(500);
+    }
+    assert.match(there, new RegExp(notes), "the workspace sees the delivery as root/review/notes");
+    assert.equal(forgeRefs("acme/widgets")["refs/heads/review/notes"], undefined, "a delivery goes nowhere near the remote");
+    // A delivery to a domain without the repository is refused by the root.
+    assert.equal(stack.quiet("domain", "create", "empty").code, 0);
+    const refused = stack.inVm(gitVm(), ["bash", "-lc", "cd /git/acme/widgets && git push desolate-out::acme/widgets@empty review/notes 2>&1; true"]);
+    assert.match(refused.stdout, /not in the domain 'empty'/);
+    // desolate fetch: the root refreshes the mirror, and every remote is fetched.
+    const fetched = stack.inVm(gitVm(), ["bash", "-lc", "cd /git/acme/widgets && desolate fetch 2>&1; echo EXIT=$?"]);
+    assert.match(fetched.stdout, /asking the root to refresh acme\/widgets[\s\S]*Fetching origin[\s\S]*Fetching dev[\s\S]*EXIT=0/, fetched.stdout);
+  });
 });

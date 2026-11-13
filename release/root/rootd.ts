@@ -8,6 +8,8 @@
 //   fetch <repo>            refresh the mirror
 //   offer <repo> <branch>   a bundle is waiting in the outbox
 //
+// And it imports each domain's branches into the root clones as the domain writes them out.
+//
 // virtiofs delivers no file events across VMs, so outboxes are polled.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -15,7 +17,7 @@ import { writeJson } from "../shared/json.ts";
 import { parseRepo } from "../shared/names.ts";
 import { sleep } from "../shared/run.ts";
 import { domains } from "./domains.ts";
-import { take } from "./offers.ts";
+import { fetchDomain, take } from "./offers.ts";
 import { drain, inbox, outbox } from "./outbox.ts";
 import * as repos from "./repos.ts";
 
@@ -43,9 +45,37 @@ const handle = async (domain: string, repoList: string[], request: Record<string
 };
 
 const log = (line: string) => process.stderr.write(`${new Date().toISOString()} rootd: ${line}\n`);
+
+/** A domain's branches, brought into the root clone as the domain writes them out (its list
+ *  beside each bundle changes), not only when one is reviewed or offered: so `git fetch
+ *  root` in the git VM, and the dashboard's review, have every branch. The import is the
+ *  one a review does (offers.ts fetchDomain: git-remote-desolate, every object checked). At
+ *  most one every few seconds per repository, whatever the domain writes. */
+const IMPORT_GAP_MS = 3000;
+const imported = new Map<string, { mtime: number; at: number }>();
+const importChanged = async (slug: string, repoList: string[]) => {
+  for (const id of repoList) {
+    const repo = parseRepo(id);
+    if (!repo) continue;
+    let mtime = 0;
+    try {
+      // (A stat of the domain's file, read for its time only: what it says is not used.)
+      mtime = fs.lstatSync(path.join(outbox(slug), "sync", id, "refs.json")).mtimeMs;
+    } catch {
+      continue;
+    }
+    const key = `${slug}\0${id}`;
+    const last = imported.get(key);
+    if (last && (last.mtime === mtime || Date.now() - last.at < IMPORT_GAP_MS)) continue;
+    imported.set(key, { mtime, at: Date.now() });
+    await fetchDomain(slug, repo).catch((error: Error) => log(`${slug} ${id}: not imported: ${error.message.slice(0, 300)}`));
+  }
+};
+
 log("up");
 for (;;) {
   for (const d of domains()) {
+    await importChanged(d.slug, d.repos);
     // Each request is read once and removed, by name, in a directory that was checked to be
     // the outbox's own (outbox.ts): never through a path a workspace could have redirected.
     for (const { name, data: request } of drain<Record<string, unknown>>(path.join(outbox(d.slug), "requests"), /^[0-9a-z-]{1,60}\.json$/, 50)) {

@@ -86,3 +86,12 @@ in `decisions.md` and `release/docs/incidents.md`; this page is the index.
   runs no untrusted code (the rule).
 - **The base image is `FROM ubuntu:24.04` by tag, not digest** (the fake backend's image
   and the stand-in forge only; the vz base VM is Lima's digest-pinned Ubuntu image).
+- **The git VM delivers a branch to a domain (`git push <domain> <branch>`) without an
+  approval.** Nothing leaves the machine, the root checks the bundle as it checks a domain's,
+  and a domain must have the repository. The cost: if git in the git VM fell to an agent's
+  content, it could plant a branch in another domain (seen there as `root/<branch>`, never
+  checked out). It could already read every domain's work. Each delivery is an event
+  (`git-delivery-handed`).
+- **The root imports every branch a domain writes out, as it writes it** (at most every 3 s a
+  repository), not only on an offer or a review. The import is the one a review does (every
+  object checked); a domain could already make the root import as often as it offers.

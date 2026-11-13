@@ -31,13 +31,23 @@ export const offers = async (domain: string | undefined, out: Out, json: boolean
   for (const o of list) out(`  ${o.domain}  ${o.repo}  ${plain(o.branch)}  ${o.commit.slice(0, 12)}  from ${o.workspace}${o.lfs ? `  ${o.lfs} LFS object(s)` : ""}\n    review: desolate review ${o.domain} ${o.repo} ${o.branch}`);
 };
 
-export const review = async (args: string[], out: Out, json: boolean) => {
+/** `desolate branches [<domain>]`: every branch each domain has, not only what was offered.
+ *  The list is each domain's own word; `desolate review` reads the branch in the root. */
+export const branches = async (domain: string | undefined, out: Out, json: boolean) => {
+  const list = await rootctl<{ domain: string; repo: string; branch: string; commit: string; offered: boolean; checkedOutIn: string[] }[]>("branches.list", domain ? { domain } : {}, { quiet: true });
+  if (json) return out(JSON.stringify(list));
+  if (list.length === 0) return out(domain ? `${domain} has no branches the root has heard of yet` : "no domain has any branch the root has heard of yet");
+  for (const b of list)
+    out(`  ${b.domain}  ${b.repo}  ${plain(b.branch)}  ${b.commit.slice(0, 12)}${b.offered ? "  offered" : ""}${b.checkedOutIn.length ? `  checked out in ${b.checkedOutIn.join(", ")}` : ""}\n    review: desolate review ${b.domain} ${b.repo} ${plain(b.branch)}`);
+};
+
+export const review = async (args: string[], out: Out, json: boolean, against: "origin" | "domain" = "origin") => {
   const diff = args.includes("--diff");
   const [domain, repo, branch] = args.filter((arg) => arg !== "--diff");
-  if (!domain || !repo || !branch) refuse("review what?", "desolate review <domain> <owner/repo> <branch>   (see `desolate offers`)", EXIT.usage);
-  const r = await rootctl<Review>("review", { domain, repo, branch }, { quiet: true });
+  if (!domain || !repo || !branch) refuse("review what?", "desolate review <domain> <owner/repo> <branch> [--against origin|domain]   (see `desolate branches` and `desolate offers`)", EXIT.usage);
+  const r = await rootctl<Review & { againstLabel?: string }>("review", { domain, repo, branch, against }, { quiet: true });
   if (json) return out(JSON.stringify(r));
-  out(`${r.repo}  ${plain(r.branch)}  at ${r.commit}`);
+  out(`${r.repo}  ${plain(r.branch)}  at ${r.commit}, against ${r.againstLabel ?? "origin"}`);
   out(`a push would send ${r.commits.length} commit(s): ${r.stat || "no file changes"}${r.lfsObjects ? `, and ${r.lfsObjects} LFS object(s) first` : ""}`);
   for (const c of r.commits.slice(0, 30)) out(`  ${c.commit.slice(0, 12)}  ${plain(c.subject).slice(0, 100)}`);
   if (r.commits.length > 30) out(`  ... and ${r.commits.length - 30} more`);
@@ -47,12 +57,12 @@ export const review = async (args: string[], out: Out, json: boolean) => {
   if (diff) {
     // The diff is the content's own text, made in the root by git alone. Shown as text:
     // anything that could repaint a terminal is replaced.
-    const d = await rootctl<{ text: string; truncated: boolean }>("review.diff", { domain, repo, branch }, { quiet: true });
+    const d = await rootctl<{ text: string; truncated: boolean }>("review.diff", { domain, repo, branch, against }, { quiet: true });
     out("");
     out(d.text.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "?").trimEnd());
     if (d.truncated) out("... the diff is longer than is shown here. The whole of it: desolate root shell, then git diff.");
   } else {
-    out(`read the diff: desolate review ${domain} ${r.repo} ${plain(r.branch)} --diff`);
+    out(`read the diff: desolate review ${domain} ${r.repo} ${plain(r.branch)} --diff${against === "domain" ? " --against domain" : ""}`);
     out(`  or in the dashboard: http://${ROOT_HOSTNAME}:${editorHostPort()}/?review&domain=${encodeURIComponent(domain)}&repo=${encodeURIComponent(r.repo)}&branch=${encodeURIComponent(r.branch)}`);
     out("  or with git, in `desolate root shell`");
   }
