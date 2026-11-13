@@ -1,0 +1,178 @@
+# Getting started with desolate
+
+From nothing to a coding agent working on one of your repositories in a VM of its own, its
+work reviewed by you and pushed with one click. About 20 minutes, most of it waiting for the
+first VM images to download.
+
+![The dashboard: what needs you on top, then each domain's workspaces and their live branches](assets/dashboard.png)
+
+## What you need
+
+- **A Mac with Apple silicon** (M1 or later). desolate runs its VMs with Apple's
+  Virtualization.framework, through Lima.
+- **Homebrew**, and from it: `brew install lima node gh`
+  - Lima **2.3 or newer** (`limactl --version`): older versions let a confined VM's pings out.
+  - node **22.18 or newer**: desolate is TypeScript that node runs directly.
+  - GitHub's CLI, signed in (`gh auth login`) as someone who can add deploy keys to the
+    repositories you want agents to work on. Without that, see `--no-push` below.
+- **Chrome or Firefox.** desolate's pages live at names under `localhost`
+  (`desolate.localhost`, `desolate-git.localhost`, ...). Those browsers resolve them; Safari
+  does not.
+- About 15 GB of disk for the VM images and your repositories' mirrors.
+
+You do **not** need Docker on your Mac: the projects' devcontainers run inside the VMs.
+
+## 1. Install
+
+```bash
+git clone --branch release https://github.com/pmalacho-mit/isolated-devcontainers-suede ~/desolate
+mkdir -p ~/.local/bin && ln -sf ~/desolate/cli.sh ~/.local/bin/desolate   # ~/.local/bin on your PATH
+source <(desolate completion)                                             # tab completion (add to ~/.zshrc)
+```
+
+## 2. Bootstrap the stack
+
+```bash
+desolate bootstrap
+```
+
+This makes the **root VM**, which holds every deploy key and your repositories' mirrors and
+never runs an agent's code, then starts the host daemon, then runs `desolate doctor`. The
+first time it downloads a base image and takes 5 to 10 minutes; after that, seconds. It ends
+with every check passed:
+
+```
+  ok   root: the Mac's loopback is walled off: the root's own user cannot reach a port that answers on the Mac's 127.0.0.1, ...
+doctor: all checks passed.
+```
+
+If macOS asks whether `limactl` may accept incoming network connections, **click Deny**:
+desolate listens only on your Mac's loopback ([why](../README.md#on-a-mac-if-macos-asks-about-limactl-and-incoming-connections)).
+
+## 3. Clone a repository, and make a domain
+
+```bash
+desolate clone you/app                        # makes a read and a write deploy key, registers them with gh
+desolate clone you/lib
+desolate domain create acme --repo you/app --repo you/lib
+```
+
+- `clone` keeps the keys in the root VM, where nothing an agent runs can reach them, and
+  mirrors the repository (with its LFS files). Use `--no-push` for a repository you only
+  read (one key, read-only), or `--anonymous` for a public one you cannot add keys to.
+- A **domain** is a trust boundary: its repositories, its network rules, its secrets.
+  Workspaces in one domain can see each other's branches; workspaces in different domains
+  share nothing.
+
+## 4. Start a workspace
+
+```bash
+desolate up acme --name agent-1 --branch feature/greet-by-name
+```
+
+```
+workspace acme/agent-1 is up
+  you/app  worktree feature/greet-by-name from main  /workspaces/you/app/.worktrees/feature-greet-by-name
+  you/lib  worktree feature/greet-by-name from main  /workspaces/you/lib/.worktrees/feature-greet-by-name
+  devcontainer up (mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm, user node)
+  ...
+the start took 81.9 s: template 63.7 s, asked the root 0.2 s, VM booted 9.6 s, services, checkouts, devcontainer and editor 8.2 s
+next: desolate editor acme/agent-1 --open      its editor, in your browser
+      desolate exec acme/agent-1 -- <agent>       an agent (or any command), in its devcontainer
+```
+
+A workspace is a VM with a worktree of each repository, on the branch you named. If the
+first repository has a `devcontainer.json`, it runs inside the VM, as written. The first
+workspace of a domain builds the domain's environment once (the "template" above); the
+next ones start from it in about 20 seconds.
+
+The workspace has **no credentials and no network** but its own proxy (HTTP and HTTPS to
+named hosts; `desolate domain acme net enforce` limits even that to a list).
+
+## 5. Put an agent to work
+
+```bash
+desolate editor acme/agent-1 --open          # VSCodium, running in the VM, in a browser tab
+desolate exec acme/agent-1 -- claude         # or any agent CLI: it runs in the devcontainer
+```
+
+![The workspace's editor: both repositories in one window, and a terminal inside the devcontainer](assets/editor.png)
+
+The agent reads [`AGENTS.md`](../AGENTS.md) (it is in every workspace at
+`/desolate/release/AGENTS.md`): it commits freely, says how it is going with
+`desolate status set <colour> "<message>"`, and when the work is ready, runs
+`desolate offer`. It cannot push, and does not need to try.
+
+## 6. Review
+
+```bash
+desolate ui --open                           # the dashboard
+```
+
+Everything an agent commits reaches the root within seconds. The dashboard shows each
+checkout's branch as it changes, what needs you (offers, agents asking for help), and every
+branch of every domain under **Branches**:
+
+![Every branch a domain has, offered or not, with Review and Open in git](assets/dashboard-branches.png)
+
+**Review** shows what a push would send: the commits, the files and the diff, made by git in
+the root VM, from the objects alone (nothing in the branch runs):
+
+![Reviewing an offer: commits, files, and the diff as text](assets/review.png)
+
+## 7. Push it
+
+Two ways, and both end with you approving the exact commit:
+
+- From the dashboard: **Push exactly <commit>**.
+- From the **git terminal**, which is git as you use it anywhere, in a VM of its own with no
+  network and no keys:
+
+```bash
+desolate git you/app --open
+```
+
+```bash
+desolate fetch                                  # in the git terminal: refresh from GitHub, fetch every remote
+git log --oneline acme/feature/greet-by-name    # each domain is a remote
+git push origin acme/feature/greet-by-name:refs/heads/feature/greet-by-name
+```
+
+The push waits for you, and the approval opens beside the terminal: what the push names, and
+what it would send, worked out in the root. **Approve** arms only when the pointer moves onto
+it; one click, and the root pushes exactly that commit.
+
+![A push from the git terminal, waiting for approval beside it](assets/git-approve.png)
+
+## 8. Hear about it
+
+```bash
+desolate notify            # macOS notifications: a push waiting, an offer, an agent asking for you
+desolate events            # the same, as JSON lines, for your own scripts
+```
+
+The [README](../README.md) ("Your own scripts") has a script that opens a pull request for
+every branch desolate pushes.
+
+## Day to day
+
+| | |
+|---|---|
+| `desolate list` | every domain and workspace, with the branch each checkout is on now |
+| `desolate branches [<domain>]` | every branch the domains have, offered or not |
+| `desolate review <domain> <repo> <branch> [--diff]` | what a push would send |
+| `desolate stop / start / rm <domain>/<workspace>` | a workspace's VM; `rm` removes it and its worktrees |
+| `desolate fetch <repo>` | refresh a mirror from its remote |
+| `desolate doctor` | every check, with what to do about each that fails |
+| `desolate down` / `desolate bootstrap` | stop everything / bring it back |
+| `desolate destroy --all` | remove the whole stack and its keys (on GitHub, remove the deploy keys named `desolate ...` yourself) |
+
+## When something is wrong
+
+- **`desolate doctor`** says what is wrong and what to run. Every refusal desolate prints
+  ends with a `fix:` line.
+- **A page "cannot be found"**: open it in Chrome or Firefox, not Safari.
+- **An agent says it cannot reach something**: that is usually the point. Its requests, and
+  why each was refused, are in `desolate net log acme`.
+- **A push was refused at approval**, or timed out: it waits two minutes; run it again.
+- What desolate has got wrong before, and how it was found: [`incidents.md`](incidents.md).
