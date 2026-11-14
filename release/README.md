@@ -109,6 +109,8 @@ cannot take is approving a push, so a script's work ends at an offer.
   and the factories: GitHub issues to agents in parallel, and suede upstreaming.
 - [docs/suede.md](docs/suede.md): a vendored suede dependency changed in a consumer, proposed
   back to the dependency: `desolate upstream`, and the suede factory.
+- [docs/developing-desolate.md](docs/developing-desolate.md): desolate developed from a desolate
+  workspace: its tests there, an inner stack, and pushing, pulling and restarting on the change.
 - [AGENTS.md](AGENTS.md): what an agent in a workspace reads.
 - [docs/incidents.md](docs/incidents.md): ways desolate has been wrong, and what each taught.
 

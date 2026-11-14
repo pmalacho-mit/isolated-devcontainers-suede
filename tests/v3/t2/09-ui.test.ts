@@ -108,7 +108,7 @@ describe("T2 section 4.8: the root UI", () => {
     const empty = await state();
     assert.deepEqual([empty.repos, empty.domains, empty.offers], [[], [], []]);
     assert.ok(await until(async () => (await state()).hostConnected), "the host's daemon has told the state service about the host");
-    assert.deepEqual((await state()).stack, { instance: stack.instance, backend: "fake", isolated: false, editorPort: port, approver: "terminal" });
+    assert.deepEqual((await state()).stack, { instance: stack.instance, backend: "fake", isolated: false, editorPort: port, approver: "terminal", rootHostname: "desolate.localhost", gitHostname: "desolate-git.localhost" });
     // The first-run steps, done from the dashboard; each records the command it ran.
     assert.equal(stack.quiet("clone", "acme/app", "--no-domain").code, 0);
     assert.equal((await action("domain.create", { domain: "web", title: "the web app" })).status, 202);

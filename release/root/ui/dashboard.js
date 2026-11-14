@@ -391,12 +391,8 @@ const firstRun = () => {
   const firstDomain = state.domains[0];
   return el("div", { class: "card" }, el("h3", {}, "Getting started"), el("p", { class: "sub" }, "Each step shows the command it runs, so you can do the same from a terminal."),
     el("ol", { class: "steps" },
-      el("li", { class: hasRepo ? "done" : "" }, "Clone a repository. Its deploy keys are made in the root VM; adding them at GitHub is yours to do, so this one starts on the host: ", el("code", {}, "desolate clone <owner>/<repo>"), hasRepo ? `  (have: ${state.repos.map((r) => r.repo).join(", ")})` : ""),
-      el("li", { class: hasDomain ? "done" : "" }, "Create a domain: the trust boundary your workspaces share. ", el("code", {}, "desolate domain create <slug>"),
-        !hasDomain && hasRepo ? el("form", { class: "inline", onsubmit: (event) => { event.preventDefault(); act("create", "domain.create", { domain: event.target.elements.slug.value.trim(), title: event.target.elements.title.value.trim() }); } },
-          el("input", { name: "slug", placeholder: "slug, e.g. dev", required: true, pattern: "[a-z0-9][a-z0-9-]{0,39}" }), el("input", { name: "title", placeholder: "title (optional)" }), el("button", {}, "Create domain")) : null),
-      el("li", { class: hasBoth ? "done" : "" }, "Give it a repository. ", el("code", {}, `desolate domain ${firstDomain ? firstDomain.slug : "<slug>"} add --repo <owner>/<repo>`), hasDomain && !hasBoth ? " (use Add repository on its card below)" : ""),
-      el("li", {}, "Start a workspace: a VM with the project's devcontainer and an editor in it. ", el("code", {}, `desolate up ${firstDomain ? firstDomain.slug : "<slug>"}`), hasBoth ? " (use New workspace on its card below)" : "")));
+      el("li", { class: hasRepo ? "done" : "" }, "Clone a repository. Its deploy keys are made in the root VM; adding them at GitHub is yours to do, so this one starts on the host. It also makes the repository a domain, the trust boundary its workspaces share, named owner--repo: ", el("code", {}, "desolate clone <owner>/<repo>"), hasRepo ? `  (have: ${state.repos.map((r) => r.repo).join(", ")})` : ""),
+      el("li", {}, "Start a workspace: a VM with the project's devcontainer and an editor in it, ", el("code", {}, `desolate up ${firstDomain ? firstDomain.slug : "<owner>--<repo>"}`), "; or one with Claude at work in it, ", el("code", {}, `desolate task ${firstDomain ? firstDomain.slug : "<owner>--<repo>"} "<what to do>"`), hasBoth ? " (or New workspace on its card below)" : "")));
 };
 
 const render = () => {
