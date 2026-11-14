@@ -114,6 +114,8 @@ export const overrideOf = (spec: Record<string, unknown>, checkout: string, home
     bind("/desolate/release/workspace/desolate", "/usr/local/bin/desolate", true),
     bind("/desolate/release/workspace/status", "/desolate/status", true),
     bind("/desolate/cache", "/desolate/cache"),
+    // The VM's own disk, at the same path (start.sh): binds for docker-outside-of-docker.
+    bind("/desolate/scratch", "/desolate/scratch"),
   ];
   const containerEnv = {
     // git in the container: the mirror and the checkouts are owned by the VM's user, which

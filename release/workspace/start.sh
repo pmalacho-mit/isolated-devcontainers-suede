@@ -11,6 +11,11 @@ LINK=${2:?usage: start.sh <uid> <link>}
 HERE=$(cd "$(dirname "$0")" && pwd)
 USER_NAME=$(getent passwd "$USER_UID" | cut -d: -f1)
 install -d -m 0755 /run/desolate /var/lib/desolate
+# A scratch directory on the VM's own disk, at the same path in the devcontainer: what a
+# docker-outside-of-docker container is given with -v must be a path the VM's docker has, and
+# /workspaces is a share (virtiofs refuses chmod on a socket; /run is noexec). Like /tmp:
+# anyone's, sticky; everything in this VM is the domain's (P5). Kept across restarts.
+install -d -m 1777 /desolate/scratch
 # Lima runs every command from the host over one ssh connection per VM, and sshd allows ten
 # sessions on a connection by default: a workspace's link, the dashboard and desolate's own
 # commands are each one, and the eleventh was refused (an audit on the M1). Raised; a
