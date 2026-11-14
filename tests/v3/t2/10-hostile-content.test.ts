@@ -42,7 +42,7 @@ describe("T2: what a hostile domain sends, the root takes as data", () => {
       git(dir, "commit", "--quiet", "-m", "seed");
     });
     assert.equal(bootstrap(stack).code, 0);
-    assert.equal(stack.quiet("clone", "acme/widgets").code, 0);
+    assert.equal(stack.quiet("clone", "acme/widgets", "--no-domain").code, 0);
     assert.equal(stack.quiet("domain", "create", "dev").code, 0);
     assert.equal(stack.quiet("domain", "dev", "add", "--repo", "acme/widgets").code, 0);
     assert.equal(stack.quiet("up", "dev").code, 0);

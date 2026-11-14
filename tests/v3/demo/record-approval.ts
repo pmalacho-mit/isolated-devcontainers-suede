@@ -29,7 +29,7 @@ stack.seed("acme/widgets", (dir) => {
   git(dir, "commit", "--quiet", "-m", "seed");
 });
 if (bootstrap(stack).code !== 0) throw new Error("bootstrap failed");
-if (stack.quiet("clone", "acme/widgets").code !== 0) throw new Error("clone failed");
+if (stack.quiet("clone", "acme/widgets", "--no-domain").code !== 0) throw new Error("clone failed");
 const gitUrl = /(http:\S+)/.exec(stack.desolate("git", "acme/widgets").stdout)![1]!;
 say("stack up");
 

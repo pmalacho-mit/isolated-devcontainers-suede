@@ -47,7 +47,7 @@ describe("T2 phase 4: a domain's secrets", () => {
     });
     forge = stack.env.DESOLATE_FORGE_SPEC!.replace(/^.*@/, "").replace(/:\d+$/, "");
     assert.equal(bootstrap(stack).code, 0);
-    assert.equal(stack.quiet("clone", "acme/app").code, 0);
+    assert.equal(stack.quiet("clone", "acme/app", "--no-domain").code, 0);
     const crt = fs.readFileSync(path.join(stack.work, "forge-state", "upstream.crt"), "utf8");
     for (const domain of ["dev", "two"]) {
       assert.equal(stack.quiet("domain", "create", domain).code, 0);

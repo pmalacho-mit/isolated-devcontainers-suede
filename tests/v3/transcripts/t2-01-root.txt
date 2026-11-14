@@ -120,7 +120,8 @@ $ desolate clone acme/widgets
   read key: registered
   write key: registered (it asks you before every push)
 cloned acme/widgets: 1 branch(es), default main, 1 LFS object(s); pushable.
-next: desolate domain create <slug> --repo acme/widgets   (or, to a domain you have: desolate domain <slug> add --repo acme/widgets)
+domain widgets: made for acme/widgets.
+next: desolate up widgets   (or: desolate task widgets "<what to do>")
 fetching acme/widgets with the read key
 [exit 0]
 
@@ -193,7 +194,8 @@ doctor: all checks passed.
 $ desolate clone acme/consumer --no-push
   read key: registered
 cloned acme/consumer: 1 branch(es), default main, 0 LFS object(s); read-only (no write key).
-next: desolate domain create <slug> --repo acme/consumer   (or, to a domain you have: desolate domain <slug> add --repo acme/consumer)
+domain consumer: made for acme/consumer.
+next: desolate up consumer   (or: desolate task consumer "<what to do>")
 fetching acme/consumer with the read key
 [exit 0]
 
@@ -201,12 +203,66 @@ $ desolate repos --json
 [{"repo":"acme/consumer","pushable":false,"anonymous":false,"defaultBranch":"main","fetchedAt":"<time>"},{"repo":"acme/widgets","pushable":true,"anonymous":false,"defaultBranch":"main","fetchedAt":"<time>"}]
 [exit 0]
 
+## clone: the domain it makes
+
+$ desolate list --json
+[{"domain":"consumer","title":"acme/consumer","repos":["acme/consumer"],"workspaces":[]},{"domain":"widgets","title":"acme/widgets","repos":["acme/widgets"],"workspaces":[]}]
+[exit 0]
+
+$ desolate clone acme/widgets
+  read key: registered
+  write key: registered (it asks you before every push)
+cloned acme/widgets: 1 branch(es), default main, 1 LFS object(s); pushable.
+domain widgets: already holds acme/widgets.
+next: desolate up widgets   (or: desolate task widgets "<what to do>")
+fetching acme/widgets with the read key
+[exit 0]
+
+$ desolate clone other/widgets --no-push
+  read key: registered
+cloned other/widgets: 1 branch(es), default main, 0 LFS object(s); read-only (no write key).
+domain other-widgets: made for other/widgets.
+next: desolate up other-widgets   (or: desolate task other-widgets "<what to do>")
+fetching other/widgets with the read key
+[exit 0]
+
+$ desolate clone acme/lib --no-push --domain widgets
+  read key: registered
+cloned acme/lib: 1 branch(es), default main, 0 LFS object(s); read-only (no write key).
+domain widgets: acme/lib added.
+next: desolate up widgets   (or: desolate task widgets "<what to do>")
+fetching acme/lib with the read key
+[exit 0]
+
+$ desolate clone acme/loose --no-push --no-domain
+  read key: registered
+cloned acme/loose: 1 branch(es), default main, 0 LFS object(s); read-only (no write key).
+next: desolate domain create <slug> --repo acme/loose   (or, to a domain you have: desolate domain <slug> add --repo acme/loose; or clone again with --domain <slug>)
+fetching acme/loose with the read key
+[exit 0]
+
+$ desolate list --json
+[{"domain":"consumer","title":"acme/consumer","repos":["acme/consumer"],"workspaces":[]},{"domain":"other-widgets","title":"other/widgets","repos":["other/widgets"],"workspaces":[]},{"domain":"widgets","title":"acme/widgets","repos":["acme/lib","acme/widgets"],"workspaces":[]}]
+[exit 0]
+
+$ desolate clone acme/loose --domain x --no-domain
+desolate: --domain and --no-domain say opposite things
+  fix: give one of them
+[exit 64]
+
+$ desolate rm other-widgets
+removed the domain other-widgets; the root clones keep this domain's branches for as long as they are wanted.
+[exit 0]
+
 ## keys
 
 $ desolate keys
 acme/consumer  read
+acme/lib  read
+acme/loose  read
 acme/widgets  read
 acme/widgets  write  (asks you before every push)
+other/widgets  read
 a key's public half: desolate keys <owner>/<repo>
 [exit 0]
 

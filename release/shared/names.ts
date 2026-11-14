@@ -54,6 +54,32 @@ declare namespace parseRepo {
 
 export const repoId = (repo: Repo) => `${repo.owner}/${repo.name}`;
 
+/** Text as a slug: lower case, every run of anything else one dash, at most 40. */
+const slugFrom = (text: string) =>
+  text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, 40).replace(/-+$/, "");
+
+/** The names `clone` tries, in order, for the domain it makes a repository: the
+ *  repository's own name, then owner and name together. A slug, never `owner/repo` itself
+ *  (it is a VM label, a hostname and a path; see the top of this file). */
+export const domainNamesFor = (repo: Repo): string[] =>
+  [...new Set([slugFrom(repo.name), slugFrom(`${repo.owner}-${repo.name}`)])]
+    .filter((name) => isSlug(name) && name !== "origin" && name !== "root");
+
+declare namespace domainNamesFor {
+  /** the repository's name first, lower-cased; then owner-name for when that is taken */
+  export type Names = Table<typeof domainNamesFor, [
+    [args: [repo: { owner: "acme"; name: "widgets" }], expected: ["widgets", "acme-widgets"]],
+    [args: [repo: { owner: "pmalacho-mit"; name: "suede.nests" }], expected: ["suede-nests", "pmalacho-mit-suede-nests"]],
+    [args: [repo: { owner: "Acme"; name: "My_App" }], expected: ["my-app", "acme-my-app"]],
+    [args: [repo: { owner: "acme"; name: "a--b" }], expected: ["a-b", "acme-a-b"]],
+  ]>;
+  /** names a domain may not have are skipped: `origin` and `root` are remotes in every clone */
+  export type Skips = Table<typeof domainNamesFor, [
+    [args: [repo: { owner: "acme"; name: "origin" }], expected: ["acme-origin"]],
+    [args: [repo: { owner: "acme"; name: "_" }], expected: ["acme"]],
+  ]>;
+}
+
 /** A branch name desolate will carry across an owner boundary. Stricter than git's
  *  check-ref-format (which the importing side also runs): no leading dash, no shell or
  *  refspec metacharacters, so it is safe as an argv word and inside a refspec. */

@@ -40,7 +40,7 @@ describe("T2 phases 2-3: domains, workspaces and their checkouts", () => {
       git(dir, "commit", "--quiet", "-m", "seed");
     });
     assert.equal(bootstrap(stack).code, 0);
-    for (const repo of ["acme/widgets", "acme/consumer", "acme/private"]) assert.equal(stack.quiet("clone", repo).code, 0);
+    for (const repo of ["acme/widgets", "acme/consumer", "acme/private"]) assert.equal(stack.quiet("clone", repo, "--no-domain").code, 0);
   });
   after(() => stack.destroy());
 

@@ -46,7 +46,7 @@ doctor: all checks passed.
 
 ## clone, domain, workspace
 
-$ desolate clone acme/widgets
+$ desolate clone acme/widgets --no-domain
   read key: registered
   write key: registered (it asks you before every push)
 cloned acme/widgets: 1 branch(es), default main, 1 LFS object(s); pushable.
