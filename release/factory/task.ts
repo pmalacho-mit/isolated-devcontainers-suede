@@ -51,6 +51,35 @@ for (let n = 2; !values.name && taken.has(name); n++) name = `${nameFor(sentence
 const branch = values.branch ?? `task/${name}`;
 const where = `${domain}/${name}`;
 
+// Claude's credential, before a workspace is made for nothing: the domain holds it, or it is
+// copied (inside the root: the value goes nowhere) from a domain that does. One token for
+// every domain is the usual case; `secret rm` in a domain undoes the copy.
+if (custom.length === 0) {
+  const secret = String(values.secret);
+  const holds = (d: string) => {
+    try {
+      return (JSON.parse(desolate(["domain", d, "secret", "list", "--json"]).out) as { name: string }[]).some((s) => s.name === secret);
+    } catch {
+      return false;
+    }
+  };
+  if (!holds(domain!)) {
+    let all: { domain: string }[] = [];
+    try {
+      all = JSON.parse(desolate(["list", "--json"]).out);
+    } catch {
+      all = [];
+    }
+    const source = all.map((d) => d.domain).find((d) => d !== domain && holds(d));
+    if (!source)
+      fail(`no domain holds ${secret}, Claude's token`,
+        `once, on this Mac: claude setup-token, then: desolate domain ${domain} secret set ${secret} --hosts api.anthropic.com --headers authorization   (paste the token)`);
+    const copied = desolate(["domain", domain!, "secret", "copy", secret, "--from", source!]);
+    if (copied.code !== 0) fail(`${secret} could not be copied from ${source}: ${printable(copied.err.trim(), 300)}`, `desolate domain ${domain} secret copy ${secret} --from ${source}`);
+    say(`${domain}: ${secret} copied from the domain ${source}, inside the root (to undo: desolate domain ${domain} secret rm ${secret})`);
+  }
+}
+
 say(`${where}: starting, every repository on ${branch}`);
 const up = await new Promise<number>((resolve) => spawn(CLI, ["up", domain!, "--name", name, "--branch", branch], { stdio: ["ignore", "ignore", "inherit"] }).on("close", (code) => resolve(code ?? 1)));
 if (up !== 0) fail(`the workspace did not start (desolate up said ${up})`, `desolate up ${domain} --name ${name} --branch ${branch}`);

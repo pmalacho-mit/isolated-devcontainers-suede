@@ -22,15 +22,40 @@ export const desolate = (args: string[], input?: string) => {
 export const agentCommand = (custom: string[], secret: string, task: string): string[] =>
   custom.length > 0
     ? [...custom, task]
-    : ["env", "-u", "ANTHROPIC_API_KEY", "-u", "ANTHROPIC_AUTH_TOKEN", `CLAUDE_CODE_OAUTH_TOKEN=${secret}`, "claude", "--permission-mode", "auto", task];
+    : ["env", "-u", "ANTHROPIC_API_KEY", "-u", "ANTHROPIC_AUTH_TOKEN", `CLAUDE_CODE_OAUTH_TOKEN=${secret}`, ...CLAUDE, "--permission-mode", "auto", task];
+
+/** Where desolate installs Claude Code when the project's environment has none: the domain's
+ *  cache, which every workspace of the domain mounts and a rebuild of a container keeps. */
+export const CACHED = "/desolate/cache/claude-code/bin/claude";
+/** Claude: the environment's own if it has one, else the domain's copy. */
+const CLAUDE = ["sh", "-c", `exec "$(command -v claude || echo ${CACHED})" "$@"`, "claude"];
 
 /** Claude Code in the workspace's environment, installed if it is not there (the project's
  *  devcontainer should carry it: ghcr.io/anthropics/devcontainer-features/claude-code:1). */
 export const ensureClaude = (where: string, checkout: string | undefined, say: (line: string) => void): boolean => {
   const at = checkout ? ["--checkout", checkout] : [];
-  if (desolate(["exec", where, ...at, "--", "sh", "-c", "command -v claude"]).code === 0) return true;
-  say(`${where}: installing Claude Code (the devcontainer feature ghcr.io/anthropics/devcontainer-features/claude-code:1 would carry it)`);
-  return desolate(["exec", where, ...at, "--", "sh", "-c", "npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash"]).code === 0;
+  if (desolate(["exec", where, ...at, "--", "sh", "-c", `command -v claude || test -x ${CACHED}`]).code !== 0 && !installClaude(where, at, say)) return false;
+  return desolate(["exec", where, ...at, "--", "/desolate/bin/node", "-e", FIRST_RUN]).code === 0;
+};
+
+/** What Claude Code asks a person on its first run, answered: its onboarding (a theme
+ *  picker) and whether to trust the folder. Left unanswered, an agent started with no one
+ *  attached waits at the first question, never reaching its task. Merged into the
+ *  container's ~/.claude.json; the theme is only the default (/theme changes it). */
+export const FIRST_RUN = `const fs = require("fs"), path = require("path"), file = path.join(require("os").homedir(), ".claude.json");
+let c = {}; try { c = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+c.hasCompletedOnboarding = true; c.theme = c.theme || "dark";
+c.projects = c.projects || {}; const p = c.projects[process.cwd()] = c.projects[process.cwd()] || {};
+p.hasTrustDialogAccepted = true; p.hasCompletedProjectOnboarding = true;
+fs.writeFileSync(file, JSON.stringify(c, null, 2));`;
+
+const installClaude = (where: string, at: string[], say: (line: string) => void): boolean => {
+  say(`${where}: installing Claude Code into the domain's cache, once for all its workspaces (or the project's devcontainer can carry it: the feature ghcr.io/anthropics/devcontainer-features/claude-code:1)`);
+  // With npm: into the cache by prefix. Without (a Python or Rust image): Anthropic's own
+  // installer, whose binary is then copied into the cache.
+  const prefix = CACHED.replace(/\/bin\/claude$/, "");
+  const install = `if command -v npm >/dev/null; then npm install -g --prefix ${prefix} @anthropic-ai/claude-code >/dev/null 2>&1; else curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 && mkdir -p ${prefix}/bin && cp "$(readlink -f "$HOME/.local/bin/claude")" ${CACHED}; fi; test -x ${CACHED}`;
+  return desolate(["exec", where, ...at, "--", "sh", "-c", install]).code === 0;
 };
 
 /** How every agent desolate starts is told where it is and how to finish. */
@@ -64,6 +89,6 @@ declare namespace nameFor {
 
 declare namespace agentCommand {
   /** Claude, with the secret's name only; or the person's own command, the task last */
-  export type Claude = Expect<Invoke<typeof agentCommand, [custom: [], secret: "CLAUDE-OAUTH", task: "do it"]>, "=", ["env", "-u", "ANTHROPIC_API_KEY", "-u", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN=CLAUDE-OAUTH", "claude", "--permission-mode", "auto", "do it"]>;
+  export type Claude = Expect<Invoke<typeof agentCommand, [custom: [], secret: "CLAUDE-OAUTH", task: "do it"]>, "=", ["env", "-u", "ANTHROPIC_API_KEY", "-u", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN=CLAUDE-OAUTH", "sh", "-c", "exec \"$(command -v claude || echo /desolate/cache/claude-code/bin/claude)\" \"$@\"", "claude", "--permission-mode", "auto", "do it"]>;
   export type Own = Expect<Invoke<typeof agentCommand, [custom: ["aider", "--yes"], secret: "CLAUDE-OAUTH", task: "do it"]>, "=", ["aider", "--yes", "do it"]>;
 }

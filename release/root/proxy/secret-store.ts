@@ -1,6 +1,6 @@
 // A domain's secret values, kept by root and read only by that domain's proxies.
 //
-//   node secret-store.ts <domain> set|switch|remove|import      (as root; the request on stdin)
+//   node secret-store.ts <domain> set|switch|remove|import|copy (as root; the request on stdin)
 //
 // The host runs this as root in the root VM, through its own way in (never the root's
 // ordinary user), with a secret's value on stdin. It writes two files, both root's:
@@ -111,6 +111,25 @@ const main = async () => {
     current = JSON.parse(fs.readFileSync(storeFile(domain!), "utf8")) as Store;
   } catch {
     /* none yet */
+  }
+  // `copy`: another domain's secret, value and all, without the value leaving root (one
+  // subscription token for every domain, set once). Then checked like any set.
+  if (op === "copy") {
+    const from = String(input.from ?? "");
+    if (!SLUG.test(from) || from === domain) refuse(`'${from}' is not another domain`, `desolate domain ${domain} secret copy <NAME> --from <domain>`);
+    let source: Store | null = null;
+    try {
+      source = JSON.parse(fs.readFileSync(storeFile(from), "utf8")) as Store;
+    } catch {
+      source = null;
+    }
+    const secret = source?.secrets[String(input.name ?? "")];
+    if (!secret) refuse(`the domain ${from} has no secret named ${String(input.name ?? "")}`, `desolate domain ${from} secret list`);
+    const copied = change(current, domain!, "set", { name: input.name, value: secret!.value, hosts: secret!.hosts, headers: secret!.headers });
+    writeRoot(storeFile(domain!), JSON.stringify(copied, null, 2) + "\n", gid, 0o640);
+    writeRoot(indexFile(domain!), JSON.stringify(indexOf(copied), null, 2) + "\n", 0, 0o644);
+    process.stdout.write(JSON.stringify({ ok: true, result: indexOf(copied) }) + "\n");
+    return;
   }
   // `import`: a store kept by an older desolate, as the data it is (root/start.sh hands it
   // over, read by the user who could read it), checked like any set.

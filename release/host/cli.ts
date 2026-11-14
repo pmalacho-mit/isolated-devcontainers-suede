@@ -31,7 +31,7 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
                                                                  the domain's network rules, at its proxies
   desolate net log [<domain>] [--json]                           what each workspace asked to reach, and the verdict
   desolate domain <domain> net recommend                         what it reached that is not on its list
-  desolate domain <domain> secret set <NAME> --hosts <h>[,...] [--headers <h>[,...]] | list | off | on [--ttl 30m] | rm
+  desolate domain <domain> secret set <NAME> --hosts <h>[,...] [--headers <h>[,...]] | copy <NAME> --from <d> | list | off | on [--ttl 30m] | rm
                                                                  a secret: the value on stdin, the name in workspaces
   desolate up <domain> [--name <workspace>] [--branch <branch>] [--fetch] [--base <ref>]
               [--cpus <n>] [--memory <8g>] [--disk <60g>]   (defaults: from this Mac; per domain: domain <d> size)
