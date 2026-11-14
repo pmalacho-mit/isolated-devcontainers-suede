@@ -128,7 +128,9 @@ export const newStack = (label: string): Stack => {
       .replace(new RegExp(`(\\.localhost|127\\.0\\.0\\.1):${editorPort}\\b`, "g"), "$1:31591")
       // A workspace's default size comes from the machine running the tests.
       .replace(/\(this Mac: \d+ cores, \d+ GB\)/g, "(this Mac: <cores> cores, <memory> GB)")
-      .replace(/\d+ CPUs?, \d+ (GiB|MiB) memory, \d+ GiB disk/g, "<size>");
+      .replace(/\d+ CPUs?, \d+ (GiB|MiB) memory, \d+ GiB disk/g, "<size>")
+      // The same, as `desolate list` says it.
+      .replace(/\(\d+ CPUs?, \d+ (GiB|MiB)\)/g, "(<size>)");
   // Root in the root VM is reached as the host reaches it (host/vm/lima.ts): ssh as root
   // with Lima's key. Its login user has no sudo there.
   const quote = (arg: string) => `'${arg.replace(/'/g, "'\\''")}'`;
