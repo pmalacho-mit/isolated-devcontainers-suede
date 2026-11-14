@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { parseApproval } from "../shared/approval.ts";
 import { EXIT, Refusal, refuse } from "../shared/exit.ts";
 import { isCommit, parseRepo } from "../shared/names.ts";
+import { isDownstream } from "../shared/suede.ts";
 import { ask } from "./keyring-client.ts";
 import { KEYRING, ROOT } from "./layout.ts";
 import { review, withdraw } from "./offers.ts";
@@ -40,6 +41,11 @@ const main = async () => {
   if (expect !== r.commit) refuse(`${branch} is at ${r.commit.slice(0, 12)}, not the ${expect!.slice(0, 12)} that was reviewed: it moved since`, `review it again (${again}), then push with --expect ${r.commit}`, EXIT.expectMismatch);
   if (r.isDefault && !allowDefault) refuse(`${branch} is ${r.repo}'s default branch`, "push a branch and open a pull request; or, to push the default branch itself, add --allow-default", EXIT.defaultBranch);
   if (r.commits.length === 0) refuse(`${branch} has nothing the remote lacks`, again);
+  // A suede proposal: its own workflows run on the remote when it lands (shared/suede.ts).
+  if (isDownstream(branch!)) {
+    const why = await repos.downstreamCheck(repo, r.commit);
+    if (why) refuse(`${branch} is a suede proposal, and ${why}`, "change it in the workspace and offer it again");
+  }
 
   if (mode === "prepare") {
     // What the remote's branch is now, as the mirror last saw it: the push moves it from

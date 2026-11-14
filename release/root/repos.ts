@@ -6,6 +6,7 @@ import { readJson, writeJson } from "../shared/json.ts";
 import { repoId } from "../shared/names.ts";
 import type { Repo } from "../shared/names.ts";
 import { refuse } from "../shared/exit.ts";
+import { downstreamRefusal } from "../shared/suede.ts";
 import { forge, git, gitBare, gitOk, remoteUrl, safeIn, sshCommand } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { clonePath, HOOKS, KEYRING, MIRROR_HOOKS, mirrorPath, REGISTRY, ROOT } from "./layout.ts";
@@ -73,6 +74,13 @@ export const remoteTip = async (repo: Repo, branch: string): Promise<string | nu
   const found = await git(mirrorPath(repo), ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`]);
   const id = found.stdout.trim();
   return found.code === 0 && /^[0-9a-f]{40}$/.test(id) ? id : null;
+};
+
+/** suede's rule for a `downstream/...` branch (shared/suede.ts): asked of the root clone,
+ *  against every branch the remote has, as the mirror last saw them. Why not, or null. */
+export const downstreamCheck = async (repo: Repo, commit: string): Promise<string | null> => {
+  const tips = (await git(mirrorPath(repo), ["for-each-ref", "--format=%(objectname)", "refs/heads"])).stdout.split("\n").filter((id) => /^[0-9a-f]{40}$/.test(id));
+  return downstreamRefusal((args) => git(clonePath(repo), args), commit, tips);
 };
 
 const fetchNow = async (repo: Repo, log: (line: string) => void) => {

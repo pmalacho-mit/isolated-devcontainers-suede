@@ -44,7 +44,7 @@ _desolate() {
     local i
     for ((i = 1; i < COMP_CWORD; i++)); do [ "${COMP_WORDS[i]}" = "--" ] && return 0; done
     if [ "$COMP_CWORD" -eq 1 ]; then
-        words="bootstrap doctor destroy down clone fetch repos keys domain up list status board start stop rm exec editor ui ports offers branches review push approve root net git events notify agent factory suede completion help"
+        words="bootstrap doctor destroy down clone fetch repos keys domain up list status board start stop rm exec editor ui ports offers branches review push approve root net git events notify agent factory suede upstream completion help"
     else
         case "$verb" in
             domain)
@@ -61,6 +61,7 @@ _desolate() {
             exec) if [ "$COMP_CWORD" -eq 2 ]; then words="$(_desolate_workspaces)"; else words="--checkout --vm --"; fi ;;
             clone) if [ "$COMP_CWORD" -gt 2 ]; then words="--no-push --anonymous"; fi ;;
             fetch) words="$(_desolate_repos)" ;;
+            upstream) if [ "$COMP_CWORD" -eq 2 ] || [ "$COMP_CWORD" -eq 4 ]; then words="$(_desolate_repos)"; else words="--from --no-wait --remote"; fi ;;
             review|push)
                 if [ "$COMP_CWORD" -eq 2 ]; then words="$(_desolate_domains)"
                 elif [ "$COMP_CWORD" -eq 3 ]; then words="$(_desolate_repos)"

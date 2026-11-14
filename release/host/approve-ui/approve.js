@@ -169,7 +169,7 @@ const summaryOf = (summary, card) => {
     const sensitive = files.filter((f) => f.sensitive);
     const rest = files.filter((f) => !f.sensitive);
     if (sensitive.length) {
-      box.append(el("p", `${sensitive.length} of them run on the forge, or change how git treats the repository:`, "error"));
+      box.append(el("p", `${sensitive.length} of them run on the forge, change how git treats the repository, or are suede's own machinery:`, "error"));
       const sl = el("ul");
       for (const f of sensitive) sl.append(line(f));
       box.append(sl);

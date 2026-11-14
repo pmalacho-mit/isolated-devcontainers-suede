@@ -32,6 +32,7 @@ import * as path from "node:path";
 import { isBranch, isCommit, parseRepo, repoId } from "../shared/names.ts";
 import type { Repo } from "../shared/names.ts";
 import { run } from "../shared/run.ts";
+import { SUEDE_CORE } from "../shared/suede.ts";
 import { ask } from "./keyring-client.ts";
 import { GITCONFIG, KEYRING, PINNED_FORGE, REVIEWER } from "./layout.ts";
 
@@ -44,9 +45,10 @@ const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 export const shown = (text: string, max: number) =>
   [...text.normalize("NFC").replace(/[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\u{fe00}-\u{fe0f}\u{e0100}-\u{e01ef}\u{180e}]/gu, "?")].slice(0, max).join("");
 
-/** Files that run on the forge, or change how git treats the repository: always listed
+/** Files that run on the forge, or change how git treats the repository, or are suede's own
+ *  machinery (`.suede/core/`, which every consumer of a dependency runs): always listed
  *  (first), however many files a push changes. */
-export const SENSITIVE = /(^|\/)(\.github\/|\.gitlab-ci\.yml$|\.gitmodules$|\.gitattributes$|\.lfsconfig$|\.gitignore$|\.circleci\/|Jenkinsfile$|\.devcontainer\/|devcontainer\.json$|\.husky\/|\.pre-commit-config\.yaml$|CODEOWNERS$)/;
+export const SENSITIVE = /(^|\/)(\.github\/|\.gitlab-ci\.yml$|\.gitmodules$|\.gitattributes$|\.lfsconfig$|\.gitignore$|\.circleci\/|Jenkinsfile$|\.devcontainer\/|devcontainer\.json$|\.husky\/|\.pre-commit-config\.yaml$|CODEOWNERS$|\.suede\/core\/)/;
 const POINTER = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize (\d+)\n$/;
 
 const repoDir = (repo: Repo) => path.join(REVIEWER.home, "repos", repo.owner, `${repo.name}.git`);
@@ -204,22 +206,41 @@ const summary = async (repo: Repo, branch: string, commit: string, onto: string 
   if (now !== onto) warnings.push(now ? `the remote's ${branch} is now ${now.slice(0, 12)}, not the ${onto ? onto.slice(0, 12) : "absence"} this push names: the push will be refused` : `the remote has no ${branch} any more: the push will be refused`);
   // What the commit is compared with: the branch it moves from, or (for a new branch) the
   // remote's default branch.
-  const base = onto ?? (remote.defaultBranch ? remote.heads.get(remote.defaultBranch) ?? null : null);
+  let base = onto ?? (remote.defaultBranch ? remote.heads.get(remote.defaultBranch) ?? null : null);
   if (base && !(await has(dir, base))) return { ok: false, error: `the root has not sent the reviewer ${base.slice(0, 12)}, which this push is compared with` };
   const known = [];
   for (const id of new Set(remote.heads.values())) if (await has(dir, id)) known.push(id);
   if (known.length < new Set(remote.heads.values()).size) warnings.push("some of the remote's branches were not sent to the reviewer: commits on them may be listed as new");
+  // A new branch that is not built on the default branch (a suede proposal is built on the
+  // dependency's release, which shares nothing with main): compared with where it does leave
+  // the remote's history, not with the default branch's whole tree.
+  if (!onto && base && (await gitIn(dir, ["merge-base", "--is-ancestor", base, commit])).code !== 0) {
+    const newSince = async (from: string) => Number((await gitIn(dir, ["rev-list", "--count", commit, `^${from}`])).stdout.trim());
+    const fork = async (tip: string) => (await gitIn(dir, ["merge-base", commit, tip])).stdout.trim();
+    const fromDefault = await fork(base);
+    let best = isCommit(fromDefault) ? { at: base, count: await newSince(fromDefault) } : null;
+    for (const tip of known.slice(0, 200)) {
+      const at = await fork(tip);
+      if (!isCommit(at)) continue;
+      const count = await newSince(at);
+      if (!best || count < best.count) best = { at, count };
+    }
+    if (best && best.at !== base) base = best.at;
+  }
   const listed = await gitOk(dir, ["log", "--no-decorate", "--no-show-signature", `--max-count=${LIMIT.commits + 1}`, "--format=%H%x00%an%x00%s%x00", commit, ...known.map((id) => `^${id}`)]);
   const fields = listed.split("\x00\n").filter(Boolean).map((entry) => entry.replace(/^\n/, "").split("\x00"));
   const commits = fields.slice(0, LIMIT.commits).map(([id, author, subject]) => ({ commit: id!, author: shown(author ?? "", 80), subject: shown(subject ?? "", 200) }));
   const counted = Number((await gitOk(dir, ["rev-list", "--count", commit, ...known.map((id) => `^${id}`)])).trim()) || 0;
   const numstat = await gitOk(dir, ["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base ?? EMPTY_TREE, commit], { timeoutMs: 600_000 });
   const files: { path: string; added: number; removed: number; binary?: boolean; sensitive?: boolean }[] = [];
+  let core = 0;
   for (const part of numstat.split("\x00").filter(Boolean)) {
     const [added, removed, ...name] = part.split("\t");
     const raw = name.join("\t");
     files.push({ path: shown(raw, 300), added: Number(added) || 0, removed: Number(removed) || 0, ...(added === "-" ? { binary: true } : {}), ...(SENSITIVE.test(raw) ? { sensitive: true } : {}) });
+    if (SUEDE_CORE.test(raw)) core += 1;
   }
+  if (core) warnings.push(`it changes suede's own machinery (${core} file(s) under .suede/core/), which every consumer of this code runs: worth a second look`);
   // What runs on the forge first: never past the cut.
   files.sort((a, b) => Number(Boolean(b.sensitive)) - Number(Boolean(a.sensitive)));
   // LFS objects: the new blobs that are pointers.
