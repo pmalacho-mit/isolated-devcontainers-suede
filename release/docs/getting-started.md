@@ -215,13 +215,42 @@ every branch desolate pushes.
 | `desolate doctor` | every check, with what to do about each that fails |
 | `desolate down` | stop every VM and the daemon; remove nothing |
 | `desolate bootstrap`, then `desolate start <domain>/<workspace>` | bring it back after `down` or a restart of the Mac |
+| `git pull`, then `desolate bootstrap` | upgrade desolate (see [Upgrading desolate](#upgrading-desolate)) |
+
+## Upgrading desolate
+
+```bash
+git -C <your desolate checkout> pull
+desolate bootstrap
+```
+
+That is the whole of it; nothing of yours is touched. `bootstrap` restarts the host daemon
+and the root's services on the new code. When the new desolate changes the VMs' image
+(`pins.env`, a lock, `image/provision.sh`), it also provisions the base and the root VM
+again, in place: a few minutes, once, and the root's keys and secrets stay where they are.
+The git VM is made again (your clones in it are on your Mac), and a domain's template on its
+next `up`.
+
+- **Running workspaces keep going** on the code and tools they started with. `desolate stop`
+  then `desolate start` gives one the new code. One made before an image change keeps its
+  older tools until it is made again: `desolate rm <d>/<w>`, then `desolate up <d> --name <w>
+  --branch <its branch>` (its checkouts, committed or not, are on your Mac and are kept).
+- **One checkout per stack.** The VMs run desolate from the folder they were made from. Run
+  desolate from that folder; `desolate doctor` fails if the stack's VMs run another
+  checkout's code. To move a stack to another checkout: `desolate destroy`, then
+  `desolate bootstrap` from the new one.
+- **`desolate destroy` keeps everything but the VMs**, keys included: the root's keys,
+  repository list, secrets and network rules are taken out of the root VM first
+  (`~/.desolate/root-kept`), and the next `bootstrap` puts them into the new root and
+  deletes that copy. `desolate start <d>/<w>` then makes a workspace's VM again, on its
+  checkouts.
 
 ## Removing it
 
 ```bash
 desolate rm app/agent-1          # a workspace's VM (its branches stay)
 desolate rm app                   # a domain and its clones
-desolate destroy                  # every VM; your clones and keys stay in ~/.desolate
+desolate destroy                  # every VM; your clones, keys and secrets stay (the next bootstrap puts them back)
 desolate destroy --all            # and ~/.desolate: mirrors, clones, the root's keys
 ```
 
