@@ -67,8 +67,9 @@ desolate task desolate "Make the dashboard's Push button say which commit it pus
 ```
 
 The agent works on `task/<name>`, runs `make test` and `tests/v3/run.sh t2` inside, commits,
-and offers. Name the branch `mac/<topic>` if you want your usual convention:
-`desolate task desolate --branch mac/push-label "..."`. Then, on the Mac:
+and offers it for v3 (`desolate offer --base v3`: the repository's [`AGENTS.md`](../../AGENTS.md),
+which agents working on desolate read, says so). Name the branch `mac/<topic>` if you want
+your usual convention: `desolate task desolate --branch mac/push-label "..."`. Then, on the Mac:
 
 ```bash
 desolate ui --open      # Review the offer, then Push, and approve the exact commit
@@ -77,11 +78,19 @@ desolate ui --open      # Review the offer, then Push, and approve the exact com
 or `desolate push desolate pmalacho-mit/isolated-devcontainers-suede mac/push-label --expect <commit>`
 in a terminal. desolate refuses a push to the default branch (`main` here). It does not know
 your rule about `release`, so the approval, which names the branch, is where that is kept.
-Then the pull request, with your own `gh`:
+Then the pull request. Once the push lands, desolate gives GitHub's page for opening it, filled
+in with the branch and its base: "Open pull request" on the dashboard, or the line `open a pull
+request into v3, in your browser, as yourself: https://github.com/...` after `desolate push`.
+You create it there, signed in as yourself: desolate holds no token that could. Or with your
+own `gh`:
 
 ```bash
 gh pr create --repo pmalacho-mit/isolated-devcontainers-suede --base v3 --head mac/push-label
 ```
+
+Once the pull request is merged (by a merge, a squash or a rebase), the root notices within 15
+minutes, or at the next `desolate fetch`: the dashboard marks the workspace's checkout "merged
+into v3", and the workspace "Its work is merged", with how to stop or remove it.
 
 **2. Pull it on the Mac,** into the checkout desolate runs from (the one `which desolate` leads to):
 

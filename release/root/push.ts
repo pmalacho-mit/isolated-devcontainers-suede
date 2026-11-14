@@ -19,9 +19,11 @@ import { isCommit, parseRepo } from "../shared/names.ts";
 import { isDownstream } from "../shared/suede.ts";
 import { ask } from "./keyring-client.ts";
 import { KEYRING, ROOT } from "./layout.ts";
-import { review, withdraw } from "./offers.ts";
+import { offersOf, review, withdraw } from "./offers.ts";
+import { afterPush } from "./pushed.ts";
 import * as repos from "./repos.ts";
 import { remoteTip } from "./repos.ts";
+import { submitForReview } from "./review-client.ts";
 import { send } from "./send.ts";
 
 const main = async () => {
@@ -48,6 +50,11 @@ const main = async () => {
   }
 
   if (mode === "prepare") {
+    // What the person is shown at the prompt is the reviewer's account (host/push.ts): it is
+    // sent the commit first, as a raw push sends it (raw-push.ts). Until this, a branch never
+    // pushed raw was described as "the reviewer could not say" (found by T2 04).
+    const unreviewed = await submitForReview(repo, r.commit);
+    if (unreviewed) process.stderr.write(`desolate: the reviewer was not sent this push (${unreviewed}); the prompt will say it cannot describe it\n`);
     // What the remote's branch is now, as the mirror last saw it: the push moves it from
     // exactly this (pusher.ts). If the remote moved since, the push is refused, not forced.
     const reply = await ask(KEYRING.control, { op: "challenge", repo: r.repo, ref: branch, commit: r.commit, onto: await remoteTip(repo, branch!) });
@@ -83,10 +90,13 @@ const main = async () => {
     if (approval) await ask(KEYRING.control, { op: "revoke", id: approval }).catch(() => {});
     fs.rmSync(lock, { recursive: true, force: true });
   }
+  const base = offersOf(domain!).find((o) => o.repo === r.repo && o.branch === branch)?.base ?? r.defaultBranch;
+  const link = afterPush({ repo: r.repo, branch: branch!, commit: r.commit, base }, (line) => process.stderr.write(`${line}\n`));
   withdraw(domain!, r.repo, branch!);
   // What the remote now has, the mirror has: origin/* in every clone follows.
   await repos.fetch(repo).catch(() => {});
   process.stdout.write(`pushed ${r.repo} ${branch} at ${r.commit} (${r.commits.length} commit(s)${r.lfsObjects ? `, ${r.lfsObjects} LFS object(s) first` : ""}).\n`);
+  if (link) process.stdout.write(`open a pull request into ${base}, in your browser, as yourself: ${link}\n`);
 };
 
 try {

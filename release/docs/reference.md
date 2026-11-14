@@ -35,6 +35,21 @@ shell when a push waits: `git push`, then Approve, in one tab. Only the git term
 origin may frame it; there the pointer over the frame counts as your attention, and in Chrome
 Approve arms only while the browser reports the button visible and uncovered.
 
+**After a push: its pull request, and noticing the merge.** A branch offered with
+`desolate offer --base <branch>` is for that branch; otherwise for the repository's default.
+When its push lands, desolate gives GitHub's page for opening the pull request, filled in:
+"Open pull request" in the dashboard's activity, a line after `desolate push`, and one in a
+raw `git push origin`'s output. It opens in your browser, where you are signed in as
+yourself, and you create the pull request there: desolate holds no forge token, and this
+needs none. The root keeps a record of what it pushed (`/var/lib/desolate/pushed.json`, kept
+across `destroy`). When the mirror shows a pushed commit's changes in the branch it was for,
+`desolate branches` and the dashboard say "merged into <base>" for as long as the domain's
+branch is still at that commit. The root fetches a repository with a push waiting to land
+every 15 minutes, for 30 days. The test is conservative: every file the branch changed is, in
+the base, exactly as the branch left it (so a merge commit, a squash and a rebase all count).
+A base that has since changed one of those files again is not recognised, and the branch is
+then just not marked.
+
 **Git in your browser.** `desolate git <owner/repo>` prints the address of a terminal the host
 serves in a browser tab: bash, in the git VM, in a clone of your own at `/git/<owner>/<repo>`.
 It is git as you use it anywhere: `git fetch` (from the mirror), `git fetch <domain>` (every
@@ -198,6 +213,7 @@ everything but the hypervisor boundary. "T3" is real VMs on Linux (QEMU through 
 | One-click approval in the browser, beside the git terminal | yes | T1, T2, and in Chrome | Firefox and Safari cannot say whether Approve is covered (Chrome can) |
 | The git VM: your git in a browser tab, no network or keys; a remote per domain; LFS | yes | T2 | |
 | `desolate events` and `desolate notify` | yes | T1, T2 | |
+| After a push: the pull request's page on GitHub; "merged into <base>" once the mirror shows it | yes | T1 (the link; a merge, a squash, a rebase), T2 (a squash on the stand-in forge) | the link has not been opened on github.com; the 15-minute fetch not watched in real use |
 
 ## Layout
 

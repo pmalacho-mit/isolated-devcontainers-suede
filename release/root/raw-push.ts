@@ -14,6 +14,8 @@ import type { Repo } from "../shared/names.ts";
 import { git } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { APPROVALS, clonePath, KEYRING } from "./layout.ts";
+import { allOffers } from "./offers.ts";
+import { afterPush } from "./pushed.ts";
 import * as repos from "./repos.ts";
 import { submitForReview } from "./review-client.ts";
 import { send } from "./send.ts";
@@ -80,6 +82,10 @@ export const pushCommit = async (repo: Repo, commit: string, branch: string, for
   } finally {
     await ask(KEYRING.control, { op: "revoke", id: approval }).catch(() => {});
   }
+  // The base a pull request goes into: what an offer of this commit named, else the default.
+  const base = allOffers().find((o) => o.repo === name && o.branch === branch && o.commit === commit)?.base ?? repos.registry().repos[name]?.defaultBranch ?? null;
+  const link = afterPush({ repo: name, branch, commit, base }, say);
   await repos.fetch(repo).catch(() => {});
+  if (link) say(`desolate: open a pull request into ${base}, in your browser, as yourself: ${link}`);
   return null;
 };

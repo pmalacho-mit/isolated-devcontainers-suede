@@ -72,7 +72,8 @@ desolate ports                                       # each dev server's URL, at
 desolate status dev/issue-12 --json                  # what the agent says of its work
 desolate list                                        # each workspace, and the branch each checkout is on now
 desolate offers                                      # what workspaces have offered: needs you
-desolate branches dev                                # every branch the domain has, offered or not
+desolate branches dev                                # every branch the domain has, offered or not;
+                                                     # "merged into main" once its pull request is
 desolate review dev acme/widgets issue/12 --diff     # what a push would send, and its diff as text
 desolate review dev acme/widgets issue/12 --against domain   # ... or beside the domain's own main
 desolate push dev acme/widgets issue/12 --expect <commit>   # asks you, on your terminal
@@ -87,7 +88,9 @@ desolate approve --web                               # or: the approval page's a
 ```
 
 Inside a workspace: `git fetch` (from the mirror: no key, no network), `desolate fetch`
-(ask the root to refresh the mirror first), `desolate offer` (mark a branch ready for you).
+(ask the root to refresh the mirror first), `desolate offer` (mark a branch ready for you;
+`--base <branch>` names the branch its pull request goes into). After the push, desolate
+gives GitHub's page for opening that pull request, filled in, for you to create as yourself.
 Offering is not how work reaches the root: every commit on every branch is written out as
 the agent makes it, and the root imports it within seconds (`desolate branches`, the
 dashboard's Branches, `git fetch <domain>` in the git VM). An offer says "this is ready", and
@@ -111,6 +114,7 @@ cannot take is approving a push, so a script's work ends at an offer.
   back to the dependency: `desolate upstream`, and the suede factory.
 - [docs/developing-desolate.md](docs/developing-desolate.md): desolate developed from a desolate
   workspace: its tests there, an inner stack, and pushing, pulling and restarting on the change.
+  An agent doing that reads the repository's own [`AGENTS.md`](../AGENTS.md).
 - [AGENTS.md](AGENTS.md): what an agent in a workspace reads.
 - [docs/incidents.md](docs/incidents.md): ways desolate has been wrong, and what each taught.
 

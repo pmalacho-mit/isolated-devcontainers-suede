@@ -240,6 +240,21 @@ page is about, and because three of them were mistakes in the *tests*.
 - **A deploy key named its owner.** A key's title carried the Mac's hostname, which on a
   Mac is usually its owner's name, and a deploy key's title is shown to everyone who
   administers the repository. It is a hash of the hostname now.
+- **A review that compared with a default branch the remote had left behind.** A mirror
+  fetch brought in what the remote published, but nothing updated the root clone's
+  `origin/*`: `desolate review` measured a branch against `main` as the clone last fetched
+  it, and the reviewer, sent only what the clone held, answered every raw push after the
+  remote moved with "has not sent the reviewer ..., which this push is compared with".
+  Nothing had shown it, because no test moved the remote's default branch and then pushed.
+  Found when T2 04 squash-merged a pushed branch on the forge, for the "merged into" mark.
+  Each mirror fetch now ends with the root clone fetching from the mirror.
+  (`tests/v3/t2/04-offers.test.ts`)
+- **`desolate push` asked the person with nothing to show.** Only a raw `git push` sent its
+  commit to the reviewer; `desolate push` did not, so the prompt for an offered branch said
+  "desolate's reviewer could not say what this push would send". Every push in T2 04 had
+  been raw-pushed (and refused) first, so the reviewer already held its commit and the
+  transcript read well. Found by the first test to push a commit nothing had raw-pushed.
+  `desolate push` now sends the commit first, as a raw push does.
 
 ## Found by the 2026 security audits
 

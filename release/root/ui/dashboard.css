@@ -17,6 +17,7 @@ main { max-width: 1080px; margin: 0 auto; padding: 22px 24px 60px; display: grid
 .chip { font-size: 12px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--soft); white-space: nowrap; }
 .chip.bad { color: #fff; background: var(--red); border-color: var(--red); }
 .chip.off { text-decoration: line-through; opacity: 0.6; }
+.chip.merged { color: var(--green); border-color: currentColor; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
 .card > .top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
 .sub { color: var(--soft); font-size: 13px; }

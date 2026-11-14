@@ -19,6 +19,7 @@ import { sleep } from "../shared/run.ts";
 import { domains } from "./domains.ts";
 import { fetchDomain, take } from "./offers.ts";
 import { drain, inbox, outbox } from "./outbox.ts";
+import { waiting } from "./pushed.ts";
 import * as repos from "./repos.ts";
 
 const RATE = { perMinute: 30 } as const;
@@ -72,8 +73,30 @@ const importChanged = async (slug: string, repoList: string[]) => {
   }
 };
 
+/** A pushed branch's pull request is merged on the forge, not here: so a repository with a
+ *  push still waiting to land is fetched now and then (pushed.ts), and its mirror shows the
+ *  merge without anyone asking. The same fetch as `desolate fetch`, with the read key. */
+const LANDED_EVERY_MS = Number(process.env.DESOLATE_LANDED_CHECK_MS) || 15 * 60_000;
+let landedAt = Date.now();
+let checking = false;
+// Beside the loop, not in it: a fetch can take minutes, and requests keep being answered.
+const checkLanded = () => {
+  if (checking || Date.now() - landedAt < LANDED_EVERY_MS) return;
+  checking = true;
+  landedAt = Date.now();
+  void (async () => {
+    for (const id of waiting()) {
+      const repo = parseRepo(id);
+      if (repo) await repos.fetch(repo).catch((error: Error) => log(`${id}: not fetched to look for merges: ${error.message.slice(0, 300)}`));
+    }
+  })().finally(() => {
+    checking = false;
+  });
+};
+
 log("up");
 for (;;) {
+  checkLanded();
   for (const d of domains()) {
     await importChanged(d.slug, d.repos);
     // Each request is read once and removed, by name, in a directory that was checked to be

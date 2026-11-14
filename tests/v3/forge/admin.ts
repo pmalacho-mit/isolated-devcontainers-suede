@@ -96,6 +96,23 @@ done
   process.stdout.write(git("rev-parse", "HEAD"));
   fs.rmSync(work, { recursive: true, force: true });
   execFileSync("chown", ["-R", "git:git", repoDir(repo)], { stdio: "ignore" });
+} else if (verb === "squash-merge") {
+  // A pull request merged on the forge by squashing, its branch then deleted (GitHub's
+  // "delete head branch"): the base gets one new commit, and the branch's commits never
+  // become part of it.
+  const repo = need(args[0]);
+  const [, branch, into] = args;
+  const work = fs.mkdtempSync("/tmp/forge-merge-");
+  const env = { ...process.env, GIT_LFS_SKIP_SMUDGE: "1" };
+  const git = (...argv: string[]) => execFileSync("git", ["-C", work, "-c", "user.name=someone", "-c", "user.email=someone@example.invalid", ...argv], { encoding: "utf8", env });
+  execFileSync("git", ["clone", "--quiet", repoDir(repo), work], { env });
+  git("checkout", "--quiet", into!);
+  git("merge", "--quiet", "--squash", `origin/${branch}`);
+  git("commit", "--quiet", "-m", `${branch} (squashed)`);
+  git("push", "--quiet", "--no-verify", "origin", into!, `:${branch}`);
+  process.stdout.write(git("rev-parse", "HEAD"));
+  fs.rmSync(work, { recursive: true, force: true });
+  execFileSync("chown", ["-R", "git:git", repoDir(repo)], { stdio: "ignore" });
 } else if (verb === "pulls") {
   console.log(JSON.stringify(lines("pulls.log").filter((pull) => !args[0] || pull.repo === args[0])));
 } else if (verb === "pushes") {

@@ -127,6 +127,29 @@ declare namespace isCommit {
   ]>;
 }
 
+/** GitHub's page for opening a pull request of `branch` into `base`, filled in: the person
+ *  opens it in their own browser, signed in as themselves, and creates the pull request
+ *  there. desolate holds no token that could. Null for anything that is not a repository and
+ *  two branches. */
+export const pullRequestUrl = (repo: string, branch: string, base: string | null): string | null => {
+  const r = parseRepo(repo);
+  if (!r || !isBranch(branch) || !base || !isBranch(base) || base === branch) return null;
+  const part = (b: string) => b.split("/").map(encodeURIComponent).join("/");
+  return `https://github.com/${encodeURIComponent(r.owner)}/${encodeURIComponent(r.name)}/compare/${part(base)}...${part(branch)}?expand=1`;
+};
+
+declare namespace pullRequestUrl {
+  /** a branch into its base, on GitHub; nothing for a branch into itself or a bad name */
+  export type Links = Table<typeof pullRequestUrl, [
+    [args: [repo: "acme/widgets", branch: "mac/push-label", base: "v3"], expected: "https://github.com/acme/widgets/compare/v3...mac/push-label?expand=1"],
+    [args: [repo: "acme/widgets", branch: "issue/12", base: "main"], expected: "https://github.com/acme/widgets/compare/main...issue/12?expand=1"],
+    [args: [repo: "acme/widgets", branch: "main", base: "main"], expected: null],
+    [args: [repo: "acme/widgets", branch: "a..b", base: "main"], expected: null],
+    [args: [repo: "acme/widgets", branch: "x", base: null], expected: null],
+    [args: [repo: "not a repo", branch: "x", base: "main"], expected: null],
+  ]>;
+}
+
 export const isLfsOid = (value: unknown): value is string =>
   typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 

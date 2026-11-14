@@ -328,6 +328,20 @@ const checkoutLine = (c) => {
   return [el("span", { class: "mono" }, c.repo), ` @ ${head.branch}`, el("span", { class: "sub mono" }, at)];
 };
 
+/** The base a checkout's branch is merged into, when the root saw its pushed commit land
+ *  there (pushed.ts) and the checkout is still at that commit; else null. */
+const landedOf = (d, c) => {
+  if (!c.head || !c.head.branch || !c.head.commit) return null;
+  const b = (d.branches || []).find((b) => b.repo === c.repo && b.branch === c.head.branch && b.commit === c.head.commit);
+  return b && b.landed ? b.landed : null;
+};
+/** A workspace whose work is all in: some checkout's branch is merged, and every other is
+ *  merged too or on its repository's default branch. */
+const allLanded = (d, w) => {
+  const defaultOf = (repo) => (state.repos.find((r) => r.repo === repo) || {}).defaultBranch;
+  return w.checkouts.some((c) => landedOf(d, c)) && w.checkouts.every((c) => landedOf(d, c) || (c.head && c.head.branch && c.head.branch === defaultOf(c.repo)));
+};
+
 const workspaceRow = (d, w) => {
   const host = w.host || {};
   const running = host.status === "running";
@@ -339,9 +353,11 @@ const workspaceRow = (d, w) => {
     el("div", { class: "what" },
       el("div", { class: "name" }, w.workspace, " ", el("span", { class: "sub" }, state.hostConnected ? (host.status || w.state) : `${w.state} (as last known)`)),
       w.checkouts.map((c) => el("div", { class: "line", "data-checkout": c.repo }, checkoutLine(c),
+        landedOf(d, c) ? [" ", el("span", { class: "chip merged", "data-merged": landedOf(d, c) }, `merged into ${landedOf(d, c)}`)] : null,
         c.head && c.head.branch && (d.branches || []).some((b) => b.repo === c.repo && b.branch === c.head.branch)
           ? [" ", el("button", { class: "quiet small", "data-diff-checkout": c.repo, onclick: () => openReview({ domain: d.slug, repo: c.repo, branch: c.head.branch }) }, "Diff")] : null)),
       says ? el("div", { class: "line", "data-says": "" }, says.message) : null,
+      allLanded(d, w) ? el("div", { class: "line sub", "data-done": "" }, "Its work is merged. ", running ? "Stop frees its memory; " : "", el("code", {}, `desolate rm ${d.slug}/${w.workspace}`), " removes it, with anything uncommitted in it.") : null,
       host.devcontainer ? el("div", { class: "line" }, `devcontainer: ${host.devcontainer}`) : null,
       w.size ? el("div", { class: "line" }, `${w.size.cpus} CPUs, ${Math.round(w.size.memoryMiB / 1024)} GiB memory, ${w.size.diskGiB} GiB disk`) : null,
       (host.ports || []).length ? el("div", { class: "line" }, "dev servers: ", host.ports.map((p, i) => [i ? ", " : "", el("a", { href: p.url, target: "_blank", rel: "noopener" }, `:${p.port}`)])) : null),
@@ -363,7 +379,7 @@ const branchList = (d) => {
       el("span", { class: `dot ${offered(b) ? "blue" : "hollow"}`, title: offered(b) ? "offered" : "not offered" }),
       el("div", { class: "what" },
         el("div", { class: "name" }, el("span", { class: "mono" }, b.branch), " ", el("span", { class: "sub" }, b.repo)),
-        el("div", { class: "line" }, el("span", { class: "mono" }, short(b.commit)), offered(b) ? " · offered" : "", where(b).length ? ` · checked out in ${where(b).join(", ")}` : "")),
+        el("div", { class: "line" }, el("span", { class: "mono" }, short(b.commit)), offered(b) ? " · offered" : "", b.landed ? ` · merged into ${b.landed}` : "", where(b).length ? ` · checked out in ${where(b).join(", ")}` : "")),
       el("div", { class: "buttons" }, el("button", { class: "quiet", onclick: () => openReview({ domain: d.slug, repo: b.repo, branch: b.branch }) }, "Review"), gitLink(b.repo))))));
 };
 const branchesOpen = new Set();
@@ -429,7 +445,9 @@ const render = () => {
   document.getElementById("activity-list").replaceChildren(...recent.map((a) => el("li", { "data-action-state": a.state },
     el("span", { class: `dot ${a.state === "done" ? "green" : a.state === "failed" ? "red" : "blue"}` }),
     el("div", { class: "what" }, el("div", { class: "name mono" }, redact(a.command)), el("div", { class: "line" }, a.state === "queued" ? "queued for the host..." : a.state === "running" ? "running..." : a.state === "done" ? "done" : `failed${a.code !== undefined ? ` (exit ${a.code})` : ""}`),
-      a.lines.length ? el("pre", { class: "mono" }, a.lines.map(redact).join("\n")) : null), el("div", {}))));
+      a.lines.length ? el("pre", { class: "mono" }, a.lines.map(redact).join("\n")) : null),
+    el("div", { class: "buttons" }, typeof a.link === "string" && a.link.startsWith("https://github.com/")
+      ? el("a", { class: "button", href: a.link, target: "_blank", rel: "noopener noreferrer", "data-pull-request": "" }, "Open pull request") : null))));
   document.title = needs.length ? `(${needs.length}) desolate` : "desolate";
 };
 

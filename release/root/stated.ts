@@ -41,16 +41,17 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import * as path from "node:path";
 import { hostArgv } from "../shared/actions.ts";
 import { parseApproval } from "../shared/approval.ts";
-import { isBranch, isCommit, isLocalhostSuffix, isSlug, parseRepo, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
+import { isBranch, isCommit, isLocalhostSuffix, isSlug, parseRepo, pullRequestUrl, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
 import { statusView } from "../shared/status.ts";
 import type { Head } from "../shared/status.ts";
 import { refusal, sameSecret } from "../shared/gate.ts";
 import * as domains from "./domains.ts";
 import { branchesOf, refusalsOf } from "./outbox.ts";
-import { safeIn } from "./git.ts";
+import { forge, safeIn } from "./git.ts";
 import { APPROVALS, clonePath, domainPath, GITCONFIG, ROOT } from "./layout.ts";
 import * as offers from "./offers.ts";
 import * as proxy from "./proxy/manage.ts";
+import { landedFor, pushedList } from "./pushed.ts";
 import * as secrets from "./proxy/secrets.ts";
 import * as repos from "./repos.ts";
 
@@ -83,7 +84,8 @@ type HostFacts = {
   workspaces?: Record<string, { status: string; devcontainer?: string; editor?: string; ports?: { port: number; url: string }[]; reserved?: number[] }>;
   at?: string;
 };
-type Action = { id: string; kind: string; args: Record<string, string>; command: string; state: "queued" | "running" | "done" | "failed"; lines: string[]; at: string; code?: number };
+/** `link`: after a push, GitHub's page for opening its pull request (shared/names.ts). */
+type Action = { id: string; kind: string; args: Record<string, string>; command: string; state: "queued" | "running" | "done" | "failed"; lines: string[]; at: string; code?: number; link?: string };
 let facts: HostFacts = {};
 let hostSeen = 0;
 const actions: Action[] = [];
@@ -105,9 +107,12 @@ const settled = (key: string, head: Head | null): Head | null => {
 };
 
 const snapshot = () => {
+  // What was pushed and has since landed in the branch it was for (pushed.ts): a branch
+  // still at that commit is marked "merged into <base>".
+  const pushed = pushedList();
   const list = domains.domains().map((d) => ({
     slug: d.slug, title: d.title, repos: d.repos,
-    branches: branchesOf(d.slug, d.repos),
+    branches: branchesOf(d.slug, d.repos).map((b) => ({ ...b, landed: landedFor(pushed, b.repo, b.branch, b.commit) })),
     net: proxy.policy(d.slug).mode,
     secrets: secrets.list(d.slug).map((s) => ({ name: s.name, on: s.on })),
     workspaces: domains.workspaces(d.slug).map((w) => {
@@ -210,6 +215,13 @@ const push = (args: Record<string, string>, record: (command: string) => Action)
     if (code === 0) {
       offers.withdraw(args.domain!, args.repo!, args.branch!);
       action.lines.push(`pushed ${args.repo} ${args.branch} at ${args.commit}`);
+      // (Recorded by the push itself, in raw-push.ts; this is only the page's link.)
+      try {
+        const base = offer.base ?? repos.list().find((r) => r.repo === args.repo)?.defaultBranch ?? null;
+        action.link = (forge().kind === "github" ? pullRequestUrl(args.repo!, args.branch!, base) : null) ?? undefined;
+      } catch {
+        /* no forge on record: no link */
+      }
     }
     changed();
   });
