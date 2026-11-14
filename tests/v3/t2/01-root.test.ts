@@ -217,6 +217,33 @@ describe("T2 phase 1: the root VM", () => {
     assert.doesNotMatch(keys.stdout, /write/, "no write key exists for it anywhere");
   });
 
+  it("clone makes each repository a domain of its name, once, and --domain or --no-domain choose", () => {
+    stack.step("clone: the domain it makes");
+    const domains = () => (JSON.parse(stack.desolate("list", "--json").stdout) as { domain: string; repos: string[] }[])
+      .map((d) => [d.domain, d.repos.join(",")]);
+    assert.deepEqual(domains(), [["consumer", "acme/consumer"], ["widgets", "acme/widgets"]], "each clone above made a domain named after its repository");
+    const again = stack.desolate("clone", REPO);
+    assert.equal(again.code, 0, again.stderr);
+    assert.match(again.stdout, /domain widgets: already holds acme\/widgets/);
+    // Taken by another repository of that name: owner and name together.
+    for (const repo of ["other/widgets", "acme/lib", "acme/loose"])
+      stack.seed(repo, (dir) => {
+        fs.writeFileSync(path.join(dir, "README.md"), `# ${repo}\n`);
+        git(dir, "add", "-A");
+        git(dir, "commit", "--quiet", "-m", "seed");
+      });
+    assert.match(stack.desolate("clone", "other/widgets", "--no-push").stdout, /domain other-widgets: made for other\/widgets/);
+    assert.match(stack.desolate("clone", "acme/lib", "--no-push", "--domain", "widgets").stdout, /domain widgets: acme\/lib added/);
+    const loose = stack.desolate("clone", "acme/loose", "--no-push", "--no-domain");
+    assert.equal(loose.code, 0, loose.stderr);
+    assert.match(loose.stdout, /next: desolate domain create <slug> --repo acme\/loose/);
+    assert.deepEqual(domains(), [["consumer", "acme/consumer"], ["other-widgets", "other/widgets"], ["widgets", "acme/lib,acme/widgets"]]);
+    const both = stack.desolate("clone", "acme/loose", "--domain", "x", "--no-domain");
+    assert.notEqual(both.code, 0, "--domain and --no-domain together are refused");
+    // Put back as the later tests expect: only the two domains of the first clones.
+    for (const slug of ["other-widgets"]) assert.equal(stack.desolate("rm", slug).code, 0);
+  });
+
   it("keys: which the root holds, and public halves only", () => {
     stack.step("keys");
     const held = stack.desolate("keys");

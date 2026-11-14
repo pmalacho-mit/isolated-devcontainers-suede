@@ -92,7 +92,7 @@ describe("T3: boundaries that need a real VM", { skip: REAL ? false : "set DESOL
 
   it("T3 a repository, a domain, and a workspace in its own VM", () => {
     stack.step("clone, domain, workspace");
-    const cloned = stack.desolate("clone", "acme/widgets");
+    const cloned = stack.desolate("clone", "acme/widgets", "--no-domain");
     assert.equal(cloned.code, 0, cloned.stderr);
     assert.equal(stack.desolate("domain", "create", "a").code, 0);
     assert.equal(stack.desolate("domain", "a", "add", "--repo", "acme/widgets").code, 0);

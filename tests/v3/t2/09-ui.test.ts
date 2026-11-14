@@ -110,7 +110,7 @@ describe("T2 section 4.8: the root UI", () => {
     assert.ok(await until(async () => (await state()).hostConnected), "the host's daemon has told the state service about the host");
     assert.deepEqual((await state()).stack, { instance: stack.instance, backend: "fake", isolated: false, editorPort: port, approver: "terminal" });
     // The first-run steps, done from the dashboard; each records the command it ran.
-    assert.equal(stack.quiet("clone", "acme/app").code, 0);
+    assert.equal(stack.quiet("clone", "acme/app", "--no-domain").code, 0);
     assert.equal((await action("domain.create", { domain: "web", title: "the web app" })).status, 202);
     assert.ok(await until(async () => (await state()).domains.some((d) => d.slug === "web")));
     assert.equal((await action("domain.add", { domain: "web", repo: "acme/app" })).status, 202);
