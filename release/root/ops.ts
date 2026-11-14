@@ -23,6 +23,7 @@ import { SECRETS_DIR } from "./proxy/secret-store.ts";
 import * as domains from "./domains.ts";
 import { branchesOf, refusalsOf } from "./outbox.ts";
 import * as offers from "./offers.ts";
+import { landedFor, pushedList } from "./pushed.ts";
 import * as proxy from "./proxy/manage.ts";
 import * as secrets from "./proxy/secrets.ts";
 import * as repos from "./repos.ts";
@@ -141,8 +142,10 @@ export const ops: Record<string, Op> = {
       const offered = offers.offersOf(d.slug);
       const reposDir = path.join(domainPath(d.slug), "repos");
       const heads = domains.workspaces(d.slug).flatMap((w) => w.checkouts.map((c) => ({ workspace: w.workspace, repo: c.repo, head: readHead(reposDir, c) })));
+      const pushed = pushedList();
       return branchesOf(d.slug, d.repos).map((b) => ({
         domain: d.slug, ...b,
+        landed: landedFor(pushed, b.repo, b.branch, b.commit),
         offered: offered.some((o) => o.repo === b.repo && o.branch === b.branch && o.commit === b.commit),
         checkedOutIn: heads.filter((h) => h.repo === b.repo && h.head?.branch === b.branch).map((h) => h.workspace),
       }));

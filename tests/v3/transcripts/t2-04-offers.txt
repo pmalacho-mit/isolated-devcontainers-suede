@@ -171,3 +171,30 @@ desolate: acme/consumer is not pushable: the root holds no write key for it
 ## a hostile domain repository
 
 ## a delivery to another domain
+
+## a pushed branch, squash-merged on the forge
+
+$ desolate push dev acme/widgets issue/12 --expect <commit>    # at a terminal; the person types: issue/12
+desolate: this push needs your confirmation.
+  repository  acme/widgets
+  branch      issue/12
+  commit      <commit>
+  onto        <commit>  (the remote's issue/12 now: it moves from this to the commit, or not at all)
+  sends       1 commit(s) the remote does not have, 1 file(s)
+              (desolate's reviewer, in the root)
+Type the branch name (issue/12) to push, or anything else to refuse: issue/12
+pushed acme/widgets issue/12 at <commit> (2 commit(s)).
+[exit 0]
+
+$ desolate branches dev
+  dev  acme/consumer  main  <id>
+    review: desolate review dev acme/consumer main
+  dev  acme/consumer  tweak  <id>  offered  checked out in w1
+    review: desolate review dev acme/consumer tweak
+  dev  acme/widgets  experiment  <id>
+    review: desolate review dev acme/widgets experiment
+  dev  acme/widgets  issue/12  <id>  merged into main  checked out in w1
+    review: desolate review dev acme/widgets issue/12
+  dev  acme/widgets  main  <id>
+    review: desolate review dev acme/widgets main
+[exit 0]

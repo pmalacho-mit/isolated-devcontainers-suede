@@ -10,6 +10,7 @@ import { downstreamRefusal } from "../shared/suede.ts";
 import { forge, git, gitBare, gitOk, remoteUrl, safeIn, sshCommand } from "./git.ts";
 import { ask } from "./keyring-client.ts";
 import { clonePath, HOOKS, KEYRING, MIRROR_HOOKS, mirrorPath, REGISTRY, ROOT } from "./layout.ts";
+import { settle } from "./pushed.ts";
 
 export type RepoRecord = {
   /** The root holds a write key for it. A domain has no access level: every domain reads,
@@ -144,6 +145,15 @@ const fetchNow = async (repo: Repo, log: (line: string) => void) => {
   all.repos[repoId(repo)] = { ...record, defaultBranch, fetchedAt: new Date().toISOString() };
   save(all);
   const created = await ensureClone(repo, defaultBranch);
+  // The root clone's origin/* follows the mirror (a local fetch, from what the remote
+  // published). Without it, a review compared a branch with the default branch as it was
+  // when the clone last fetched, and the reviewer was sent none of the remote's newer
+  // commits, so it could not describe a push after the remote moved (found by T2 04, once a
+  // pull request was merged on the forge).
+  const followed = await git(clonePath(repo), ["fetch", "--quiet", "--prune", "--no-auto-gc", "origin"], { timeoutMs: 600_000 });
+  if (followed.code !== 0) log(`the root clone of ${repoId(repo)} did not follow the mirror: ${followed.stderr.trim().split("\n").pop() ?? ""}`);
+  // A pull request merged since a push: the mirror now shows it (pushed.ts).
+  await settle(repoId(repo), (args) => git(mirror, args)).catch((error: Error) => log(`could not check what landed in ${repoId(repo)}: ${error.message.slice(0, 200)}`));
   return { repo: repoId(repo), branches: heads.length, defaultBranch, lfsObjects, rootClone: created ? "created" : "present" };
 };
 

@@ -25,7 +25,8 @@ reach is unreachable on purpose, and is not a bug in the project.
 - **When your work is ready:** commit it, then `desolate offer` (in the checkout, on the
   branch). That hands the branch to the person, who reviews it and pushes it. **Offering is
   not pushing, and nothing you do here pushes.** Do not look for a token, install `gh`, or
-  add a remote: there is nothing to find.
+  add a remote: there is nothing to find. If the pull request should go into a branch other
+  than the default one, say which: `desolate offer --base <branch>`.
 - **If an offer is refused** with "the root refused this domain's bundle", some branch in
   this clone (not necessarily yours) holds an object git considers dangerous: a `.git`
   directory inside a tree, a `.gitmodules` that is a link or names a command, a malformed

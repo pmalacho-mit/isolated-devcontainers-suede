@@ -16,7 +16,7 @@ import { guest } from "./paths.ts";
 import { backend, ROOT_VM, rootctl } from "./stack.ts";
 
 type Out = (line: string) => void;
-type Offer = { domain: string; repo: string; branch: string; commit: string; workspace: string; lfs: number; at: string };
+type Offer = { domain: string; repo: string; branch: string; commit: string; workspace: string; lfs: number; at: string; base?: string };
 type Review = { repo: string; branch: string; commit: string; pushable: boolean; isDefault: boolean; commits: { commit: string; subject: string }[]; files: string[]; stat: string; lfsObjects: number; warnings: string[] };
 
 /** Text from a repository (a branch name, a commit subject) is shown as text: control
@@ -30,17 +30,17 @@ export const offers = async (domain: string | undefined, out: Out, json: boolean
   for (const r of refused) out(`Refused from ${r.domain} (${r.repo}, ${r.at}): ${plain(r.why)}\n  Nothing new from ${r.domain} is taken while one of its branches holds what git refused. Delete that branch in the workspace, then \`desolate sync\` there.`);
   if (list.length === 0) return out("no offers. In a workspace, `desolate offer` marks a branch ready for you.");
   out("Needs you:");
-  for (const o of list) out(`  ${o.domain}  ${o.repo}  ${plain(o.branch)}  ${o.commit.slice(0, 12)}  from ${o.workspace}${o.lfs ? `  ${o.lfs} LFS object(s)` : ""}\n    review: desolate review ${o.domain} ${o.repo} ${o.branch}`);
+  for (const o of list) out(`  ${o.domain}  ${o.repo}  ${plain(o.branch)}  ${o.commit.slice(0, 12)}  from ${o.workspace}${o.base ? `  for ${plain(o.base)}` : ""}${o.lfs ? `  ${o.lfs} LFS object(s)` : ""}\n    review: desolate review ${o.domain} ${o.repo} ${o.branch}`);
 };
 
 /** `desolate branches [<domain>]`: every branch each domain has, not only what was offered.
  *  The list is each domain's own word; `desolate review` reads the branch in the root. */
 export const branches = async (domain: string | undefined, out: Out, json: boolean) => {
-  const list = await rootctl<{ domain: string; repo: string; branch: string; commit: string; offered: boolean; checkedOutIn: string[] }[]>("branches.list", domain ? { domain } : {}, { quiet: true });
+  const list = await rootctl<{ domain: string; repo: string; branch: string; commit: string; offered: boolean; checkedOutIn: string[]; landed?: string | null }[]>("branches.list", domain ? { domain } : {}, { quiet: true });
   if (json) return out(JSON.stringify(list));
   if (list.length === 0) return out(domain ? `${domain} has no branches the root has heard of yet` : "no domain has any branch the root has heard of yet");
   for (const b of list)
-    out(`  ${b.domain}  ${b.repo}  ${plain(b.branch)}  ${b.commit.slice(0, 12)}${b.offered ? "  offered" : ""}${b.checkedOutIn.length ? `  checked out in ${b.checkedOutIn.join(", ")}` : ""}\n    review: desolate review ${b.domain} ${b.repo} ${plain(b.branch)}`);
+    out(`  ${b.domain}  ${b.repo}  ${plain(b.branch)}  ${b.commit.slice(0, 12)}${b.offered ? "  offered" : ""}${b.landed ? `  merged into ${plain(b.landed)}` : ""}${b.checkedOutIn.length ? `  checked out in ${b.checkedOutIn.join(", ")}` : ""}\n    review: desolate review ${b.domain} ${b.repo} ${plain(b.branch)}`);
 };
 
 export const review = async (args: string[], out: Out, json: boolean, against: "origin" | "domain" = "origin") => {

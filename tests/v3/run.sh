@@ -8,7 +8,7 @@
 #   tests/v3/run.sh t3      end to end on real VMs (the qemu backend: KVM if /dev/kvm exists,
 #                           software emulation if not). Tens of minutes under emulation.
 #   tests/v3/run.sh t4      the same end-to-end boundary tests on a Mac (the vz backend).
-#                           NEVER RUN YET: see docs/v3/HANDOFF.md.
+#                           About 3 minutes on an M1.
 #   tests/v3/run.sh all     t1, t2, t3
 #
 # A tier whose needs are not met FAILS and says what to install: it does not skip, because a

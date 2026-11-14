@@ -417,6 +417,35 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
     assert.equal(forgeRefs("acme/widgets")["fix-from-dev"], undefined, "a delivery is a local transfer: the remote was not written");
   });
 
+  it("a pushed branch whose pull request was merged is marked merged, once the mirror shows it", () => {
+    stack.step("a pushed branch, squash-merged on the forge");
+    const branchesOf = () => JSON.parse(stack.quiet("branches", "dev", "--json").stdout) as { repo: string; branch: string; commit: string; landed: string | null }[];
+    const issue = () => branchesOf().find((b) => b.repo === "acme/widgets" && b.branch === "issue/12");
+    // The branch as it is now (the tests above added to it, and one wrote over the domain's
+    // list of its branches: written again here), pushed by a person.
+    inWs("dev/w1", `cd ${WT} && desolate sync >/dev/null`);
+    const tip = (JSON.parse(stack.quiet("review", "dev", "acme/widgets", "issue/12", "--json").stdout) as { commit: string }).commit;
+    const pushed = stack.person("Type the branch name", "issue/12", "push", "dev", "acme/widgets", "issue/12", "--expect", tip);
+    assert.equal(pushed.code, 0, pushed.stdout);
+    assert.equal(issue()?.commit, tip);
+    assert.equal(issue()?.landed, null, "CONTROL: pushed, but not merged: not marked");
+    stack.forge("squash-merge", "acme/widgets", "issue/12", "main");
+    assert.equal(forgeRefs("acme/widgets")["issue/12"], undefined, "the forge deleted the branch, as GitHub does after a merge");
+    assert.equal(issue()?.landed, null, "the root has not looked yet");
+    assert.equal(stack.quiet("fetch", "acme/widgets").code, 0);
+    assert.equal(issue()?.landed, "main", "a squash merge counts: every file the branch changed is in main as it left it");
+    assert.match(stack.desolate("branches", "dev").stdout, /issue\/12 {2}[0-9a-f]{12}.* {2}merged into main/);
+    // A new commit on the branch is new work: not marked.
+    inWs("dev/w1", `cd ${WT} && echo after >> README.md && git commit -qam 'after the merge' && desolate sync >/dev/null`);
+    let now = issue();
+    for (let waited = 0; now?.commit === tip && waited < 10_000; waited += 250) {
+      spawnSync("sleep", ["0.25"]);
+      now = issue();
+    }
+    assert.notEqual(now?.commit, tip, "the root sees the branch's new commit");
+    assert.equal(now?.landed, null, "the branch moved on: no longer marked");
+  });
+
   it("the transcript reads as reviewed", () => {
     stack.checkTranscript("t2-04-offers");
   });

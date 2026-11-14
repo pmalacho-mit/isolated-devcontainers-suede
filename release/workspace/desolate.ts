@@ -54,6 +54,11 @@ if (verb === "fetch") {
     process.stdout.write(`${repo}: the mirror is refreshed and origin/* is up to date${delivered.length ? `; delivered from the root: ${delivered.map((b) => `root/${b}`).join(", ")}` : ""}.\n`);
   }
 } else if (verb === "offer") {
+  // --base <branch>: the branch a pull request of this one would go into (else the default).
+  const at = args.indexOf("--base");
+  const base = at >= 0 ? args[at + 1] : undefined;
+  if (at >= 0 && !isBranch(base)) fail("--base names the branch a pull request would go into", "desolate offer --base main");
+  if (at >= 0) args.splice(at, 2);
   const repo = await repoOf(args[0] && args[0].includes("/") && parseRepo(args[0]) ? args[0] : undefined);
   const named = args[0] && !(args[0].includes("/") && parseRepo(args[0])) ? args[0] : args[1];
   const current = (await run("git", ["rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
@@ -63,9 +68,9 @@ if (verb === "fetch") {
   const dirty = await run("git", ["-C", `/workspaces/${repo}`, "status", "--porcelain", "--untracked-files=no"]);
   const lfs = await stageLfs(repo, branch).catch((error: Error) => fail(error.message, "git lfs fsck"));
   await syncRepo(repo);
-  const reply = await request({ op: "offer", repo, branch, commit, workspace: workspace.workspace, lfs });
+  const reply = await request({ op: "offer", repo, branch, commit, workspace: workspace.workspace, lfs, ...(base ? { base } : {}) });
   if (reply.ok !== true) fail(`the root did not take the offer: ${String(reply.error)}`, String(reply.fix ?? "on the host: desolate doctor"));
-  process.stdout.write(`offered ${repo} ${branch} at ${commit.slice(0, 12)}${lfs.length ? `, with ${lfs.length} LFS object(s)` : ""}.\n`);
+  process.stdout.write(`offered ${repo} ${branch} at ${commit.slice(0, 12)}${base ? `, for ${base}` : ""}${lfs.length ? `, with ${lfs.length} LFS object(s)` : ""}.\n`);
   process.stdout.write("It is now under \"Needs you\" in the root. Offering is not pushing: a person reviews it there and pushes.\n");
   if (dirty.stdout.trim()) process.stdout.write("note: the main checkout has uncommitted changes; only commits are offered.\n");
 } else if (verb === "sync") {
@@ -75,6 +80,6 @@ if (verb === "fetch") {
     process.stdout.write(`${repo}: ${result.branches} branch(es) written for the root${result.bundled ? "" : " (nothing new to bundle)"}.\n`);
   }
 } else {
-  process.stdout.write("desolate, inside a workspace:\n  desolate fetch [<owner/repo>]             ask the root to refresh the mirror, then git fetch\n  desolate offer [<owner/repo>] [<branch>]  offer a branch to the root; a person reviews and pushes it\n  desolate sync                             write this domain's branches out for the root now\n  desolate status set <colour> \"<message>\"  say how the work is going (also: note, board, show, clear)\n");
+  process.stdout.write("desolate, inside a workspace:\n  desolate fetch [<owner/repo>]             ask the root to refresh the mirror, then git fetch\n  desolate offer [<owner/repo>] [<branch>]  offer a branch to the root; a person reviews and pushes it\n                    [--base <branch>]       (the branch a pull request of it would go into)\n  desolate sync                             write this domain's branches out for the root now\n  desolate status set <colour> \"<message>\"  say how the work is going (also: note, board, show, clear)\n");
   process.exit(verb && verb !== "help" ? 64 : 0);
 }

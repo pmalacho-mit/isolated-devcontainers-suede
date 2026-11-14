@@ -14,7 +14,9 @@ import { clonePath, domainPath, GITCONFIG, mirrorPath, ROOT } from "./layout.ts"
 import { dropLfs, refusalsOf, takeLfs } from "./outbox.ts";
 import { recordOf } from "./repos.ts";
 
-export type Offer = { domain: string; repo: string; branch: string; commit: string; workspace: string; lfs: number; at: string };
+/** `base`: the branch a pull request of this one would go into, as the workspace said
+ *  (`desolate offer --base`); without it, the repository's default branch. */
+export type Offer = { domain: string; repo: string; branch: string; commit: string; workspace: string; lfs: number; at: string; base?: string };
 const file = (domain: string) => path.join(domainPath(domain), "offers.json");
 export const offersOf = (domain: string): Offer[] => readJson<Offer[]>(file(domain), []);
 export const allOffers = (only?: string): Offer[] => domains().filter((d) => !only || d.slug === only).flatMap((d) => offersOf(d.slug));
@@ -38,6 +40,7 @@ export const take = async (domain: string, request: Record<string, unknown>): Pr
   const repo = parseRepo(request.repo);
   if (!repo || !d.repos.includes(String(request.repo))) return { ok: false, error: "that repository is not in this domain" };
   if (!isBranch(request.branch) || !isCommit(request.commit)) return { ok: false, error: "an offer names a branch and a commit" };
+  if (request.base !== undefined && (!isBranch(request.base) || request.base === request.branch)) return { ok: false, error: "--base names another branch, the one a pull request would go into" };
   const id = String(request.repo);
   const clone = clonePath(repo);
   // Two VMs see a share each through its own cache, and nothing makes them agree at once:
@@ -73,7 +76,7 @@ export const take = async (domain: string, request: Record<string, unknown>): Pr
   if (missing.length > 0) return { ok: false, error: `the offered commits reference ${missing.length} LFS object(s) the root does not have (${missing[0]!.slice(0, 12)}...)`, fix: "offer again from the workspace that made them" };
 
   const offers = offersOf(domain).filter((o) => !(o.repo === id && o.branch === request.branch));
-  offers.push({ domain, repo: id, branch: request.branch, commit: request.commit, workspace: String(request.workspace ?? "").slice(0, 40), lfs: staged.length, at: new Date().toISOString() });
+  offers.push({ domain, repo: id, branch: request.branch, commit: request.commit, workspace: String(request.workspace ?? "").slice(0, 40), lfs: staged.length, at: new Date().toISOString(), ...(isBranch(request.base) ? { base: request.base } : {}) });
   writeJson(file(domain), offers);
   return { ok: true };
 };
