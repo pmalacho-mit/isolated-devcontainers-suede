@@ -34,7 +34,7 @@ describe("T2 section 4.3: egress through the workspace's own proxy", () => {
     });
     forge = stack.env.DESOLATE_FORGE_SPEC!.replace(/^.*@/, "").replace(/:\d+$/, "");
     assert.equal(bootstrap(stack).code, 0);
-    assert.equal(stack.quiet("clone", "acme/app").code, 0);
+    assert.equal(stack.quiet("clone", "acme/app", "--no-domain").code, 0);
     for (const domain of ["dev", "two"]) {
       assert.equal(stack.quiet("domain", "create", domain).code, 0);
       assert.equal(stack.quiet("domain", domain, "add", "--repo", "acme/app").code, 0);

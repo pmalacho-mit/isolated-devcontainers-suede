@@ -44,14 +44,14 @@ _desolate() {
     local i
     for ((i = 1; i < COMP_CWORD; i++)); do [ "${COMP_WORDS[i]}" = "--" ] && return 0; done
     if [ "$COMP_CWORD" -eq 1 ]; then
-        words="bootstrap doctor destroy down clone fetch repos keys domain up list status board start stop rm exec editor ui ports offers branches review push approve root net git events notify agent factory suede completion help"
+        words="bootstrap doctor destroy down clone fetch repos keys domain up list status board start stop rm exec editor ui ports offers branches review push approve root net git events notify agent task factory suede completion help"
     else
         case "$verb" in
             domain)
                 if [ "$COMP_CWORD" -eq 2 ]; then words="create $(_desolate_domains)"
                 elif [ "$COMP_CWORD" -eq 3 ] && [ "${COMP_WORDS[2]}" != create ]; then words="add show net secret"
                 elif [ "${COMP_WORDS[3]:-}" = net ] && [ "$COMP_CWORD" -eq 4 ]; then words="show open enforce allow deny allow-internal recommend"
-                elif [ "${COMP_WORDS[3]:-}" = secret ] && [ "$COMP_CWORD" -eq 4 ]; then words="list set on off rm"
+                elif [ "${COMP_WORDS[3]:-}" = secret ] && [ "$COMP_CWORD" -eq 4 ]; then words="list set copy on off rm"
                 elif [ "${COMP_WORDS[3]:-}" = add ]; then words="--repo $(_desolate_repos)"
                 fi ;;
             up) if [ "$COMP_CWORD" -eq 2 ]; then words="$(_desolate_domains)"; else words="--name --checkout --base --fetch"; fi ;;

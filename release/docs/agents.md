@@ -31,28 +31,84 @@ last printed anything; the dashboard shows each workspace's status as the agent 
 (`desolate status set ...` inside), and `desolate notify` turns orange and red into
 notifications.
 
-## Claude Code in a workspace
+## Claude agents, start to finish
 
-Its credential stays out of the workspace. Once per domain, on your Mac:
+What you run, once and then per task. Everything below runs on your Mac.
+
+**Once, for the stack** (a Pro, Max, Team or Enterprise subscription):
 
 ```bash
-claude setup-token                       # prints a subscription token (Pro, Max, Team or Enterprise)
-desolate domain acme secret set CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization
-                                         # paste the token on stdin
+claude setup-token        # Claude Code on your Mac prints a long-lived token
+desolate clone you/app    # the repository, and a domain named after it: app
+desolate domain app secret set CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization
+                          # paste the token; it is held in the root VM, never in a workspace
 ```
 
-The workspace holds the name `CLAUDE-OAUTH`; its proxy puts the token in the
-`Authorization` header of requests to api.anthropic.com, and nowhere else. Then:
+**Each task:**
 
 ```bash
-desolate agent start acme/agent-1 --name claude -- \
+desolate task app "Fix the login redirect loop, with a test"      # --attach to watch at once
+```
+
+That makes a workspace named for the task (`fix-the-login-redirect-loop`), with every
+repository of the domain on `task/<that name>`, starts Claude Code in it on your sentence plus
+desolate's standing orders, and keeps it running whether or not you watch:
+
+- **Watch or talk to it:** `desolate agent attach app/fix-the-login-redirect-loop` (Ctrl-]
+  lets go; it keeps working). Your terminal's own scrollback and copy work.
+- **Hear from it:** `desolate notify` turns its statuses into notifications: orange when it
+  asks you something, green when it has offered its branch.
+- **Review and push:** `desolate ui --open`. Its branch is under Branches as it commits, and
+  under Needs you once it is offered; Review shows the commits and the diff, and Push asks you
+  to approve the exact commit. Nothing it does reaches GitHub without that.
+- **Several at once:** each `desolate task` is its own VM; run as many as your Mac holds
+  (`desolate bootstrap` says what one costs).
+- **Done with it:** `desolate rm app/fix-the-login-redirect-loop` (its branch stays).
+
+**Another repository:** `desolate clone you/other`, then `desolate task other "..."`. The
+first task in a domain without the token copies it from a domain that has it, inside the root
+(the value goes nowhere else), and says so; `desolate domain other secret rm CLAUDE-OAUTH`
+undoes that. Two repositories one task should see together go in one domain:
+`desolate clone you/lib --domain app`.
+
+**What desolate does for Claude, and why:**
+
+- **The token stays out of the workspace.** The agent's environment holds
+  `CLAUDE_CODE_OAUTH_TOKEN=CLAUDE-OAUTH`, a name; the workspace's proxy writes the token into
+  the `Authorization` header of requests to api.anthropic.com, and nowhere else. A workspace
+  that leaks its environment leaks a name.
+- **Installed once per domain.** When the project's devcontainer has no Claude Code, desolate
+  installs it into the domain's cache (`/desolate/cache/claude-code`), which every workspace of
+  the domain mounts and a container rebuild keeps. To carry it in the image instead, add the
+  devcontainer feature `ghcr.io/anthropics/devcontainer-features/claude-code:1`.
+- **Its first-run questions are answered** (the theme picker, trusting the folder), so an
+  agent started with nobody attached gets to its task instead of waiting at the first prompt.
+- **Auto mode** (`--permission-mode auto`): Claude handles its own permission prompts, checking
+  each action first. The workspace VM is the boundary either way: no keys, a proxied network,
+  and pushes only through you.
+- **The standing orders** tell it where it is (`/desolate/release/AGENTS.md`), to commit as
+  it goes, to `desolate offer` and go green when done, and to go orange and wait when it
+  needs you.
+
+**Without `desolate task`**, the same by hand (a workspace you already have, a name of your
+choosing):
+
+```bash
+desolate agent start app/w1 --name claude -- \
   env CLAUDE_CODE_OAUTH_TOKEN=CLAUDE-OAUTH claude --permission-mode auto "Fix issue #12: ..."
 ```
 
-Claude Code must be installed in the project's environment: the devcontainer feature
-`ghcr.io/anthropics/devcontainer-features/claude-code:1` does it (the factory installs it
-with npm when it is missing, which a rebuild of the container loses). With an API key instead:
-a secret on the header `x-api-key`, and `ANTHROPIC_API_KEY=<its name>`.
+Here Claude must already be in the environment, and its first run asks its questions:
+`desolate agent attach` and answer them. Your own agent instead of Claude: `desolate task app
+"..." -- <command...>`, which gets the task as its last argument. With an API key instead of a
+subscription: a secret on the header `x-api-key`, and `ANTHROPIC_API_KEY=<its name>`.
+
+**What has not been tried:** a real subscription token. The path has been run end to end on
+the M1 with a stand-in token: the secret copied between domains, Claude installed and started
+on its task, the token substituted on the way to api.anthropic.com, and Anthropic answering
+that the token is invalid, as it should for a stand-in. Your first `desolate task` is the
+first with a real one; if it says `Please run /login`, the token is wrong or expired: run
+`claude setup-token` again and `secret set` it again.
 
 ## The issue factory: `desolate factory issues`
 

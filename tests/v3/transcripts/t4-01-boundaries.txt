@@ -39,13 +39,15 @@ bootstrap: 8 step(s) done.
   ok   root: only the pusher reaches the write agent: /run/desolate/keyring-write is closed to the root's own user
   ok   root: the reviewer answers: /run/desolate/reviewer/control.sock; it is not this user, and its read relay is closed to it
   ok   root: the pusher answers: /run/desolate/pusher/control.sock; the forge it pushes to is root's copy
+  ok   root: runs this desolate's code: its share of the release is <repo>/release
+  ok   host daemon holds its port: 127.0.0.1:31591: the dashboard, the editors and the approval page
   ok   root: the Mac's loopback is walled off: the root's own user cannot reach a port that answers on the Mac's 127.0.0.1, at <forge> or .3
 doctor: all checks passed.
 [exit 0]
 
 ## clone, domain, workspace
 
-$ desolate clone acme/widgets
+$ desolate clone acme/widgets --no-domain
   read key: registered
   write key: registered (it asks you before every push)
 cloned acme/widgets: 1 branch(es), default main, 1 LFS object(s); pushable.

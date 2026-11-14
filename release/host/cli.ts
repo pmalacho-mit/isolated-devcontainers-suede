@@ -15,7 +15,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate destroy [--all]                                       remove the VMs (--all: and ~/.desolate)
   desolate completion                                            tab completion: source <(desolate completion)
 
-  desolate clone <owner/repo> [--no-push] [--anonymous]          keys, mirror (with LFS), root clone
+  desolate clone <owner/repo> [--no-push] [--anonymous]          keys, mirror (with LFS), root clone, and a domain
+                [--domain <d> | --no-domain]                    named after the repository (or <d>; or none)
   desolate fetch <owner/repo>                                    remote -> mirror
   desolate repos [--json]
   desolate keys [<owner/repo>] [--json]                          which keys the root holds; a key's public half
@@ -30,7 +31,7 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
                                                                  the domain's network rules, at its proxies
   desolate net log [<domain>] [--json]                           what each workspace asked to reach, and the verdict
   desolate domain <domain> net recommend                         what it reached that is not on its list
-  desolate domain <domain> secret set <NAME> --hosts <h>[,...] [--headers <h>[,...]] | list | off | on [--ttl 30m] | rm
+  desolate domain <domain> secret set <NAME> --hosts <h>[,...] [--headers <h>[,...]] | copy <NAME> --from <d> | list | off | on [--ttl 30m] | rm
                                                                  a secret: the value on stdin, the name in workspaces
   desolate up <domain> [--name <workspace>] [--branch <branch>] [--fetch] [--base <ref>]
               [--cpus <n>] [--memory <8g>] [--disk <60g>]   (defaults: from this Mac; per domain: domain <d> size)
@@ -54,6 +55,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
                                                                  host, on your terminal
   desolate events [--replay <n>]                                 what happens, as JSON lines, until stopped: pushed,
                                                                  offered, status, approval-waiting, workspace-up, ...
+  desolate task <domain> "<what to do>" [--name <w>] [--branch <b>] [--attach] [-- <agent...>]
+                                                                 a workspace, its branch and an agent on it, at once
   desolate agent start <domain>/<workspace> [--name <n>] [--checkout <repo>] -- <command...>
                                                                  an agent kept running in a workspace (no tmux)
   desolate agent attach|log|stop <domain>/<workspace> [--name <n>]   your terminal on it; Ctrl-] detaches
@@ -122,9 +125,10 @@ const main = async (argv: string[]): Promise<number> => {
     return (await destroy({ all: values.all === true }, out)).length === 0 ? EXIT.ok : EXIT.failed;
   }
   if (verb === "clone") {
-    const { values, positionals } = flags(rest, { "no-push": { type: "boolean" }, anonymous: { type: "boolean" } });
+    const { values, positionals } = flags(rest, { "no-push": { type: "boolean" }, anonymous: { type: "boolean" }, domain: { type: "string" }, "no-domain": { type: "boolean" } });
     const { clone } = await import("./repos.ts");
-    await clone(positionals[0], { push: values["no-push"] !== true && values.anonymous !== true, anonymous: values.anonymous === true }, out, values.json === true);
+    if (values.domain !== undefined && values["no-domain"] === true) refuse("--domain and --no-domain say opposite things", "give one of them", EXIT.usage);
+    await clone(positionals[0], { push: values["no-push"] !== true && values.anonymous !== true, anonymous: values.anonymous === true, domain: values["no-domain"] === true ? false : values.domain as string | undefined }, out, values.json === true);
     return EXIT.ok;
   }
   if (verb === "fetch") {
@@ -282,6 +286,12 @@ const main = async (argv: string[]): Promise<number> => {
     else if (sub === "log") await agents.log(where, { name: values.name as string | undefined });
     else refuse("desolate agent what?", "desolate agent start|attach|list|log|stop <domain>/<workspace> [--name <n>]", EXIT.usage);
     return EXIT.ok;
+  }
+  if (verb === "task") {
+    // From a sentence to an agent at work on it (release/factory/task.ts).
+    const { RELEASE_DIR } = await import("./paths.ts");
+    const child = (await import("node:child_process")).spawn(process.execPath, ["--disable-warning=ExperimentalWarning", `${RELEASE_DIR}/factory/task.ts`, ...rest], { stdio: "inherit" });
+    return new Promise<number>((resolve) => child.on("close", (code) => resolve(code ?? 1)));
   }
   if (verb === "factory") {
     // Harnesses on top of desolate (release/factory/): they drive this CLI and your gh.

@@ -71,7 +71,7 @@ describe("T2 section 4.4: ports, forwarded by name", () => {
       git(dir, "commit", "--quiet", "-m", "seed");
     });
     assert.equal(bootstrap(stack).code, 0);
-    assert.equal(stack.quiet("clone", "acme/app").code, 0);
+    assert.equal(stack.quiet("clone", "acme/app", "--no-domain").code, 0);
     assert.equal(stack.quiet("domain", "create", "web").code, 0);
     assert.equal(stack.quiet("domain", "web", "add", "--repo", "acme/app").code, 0);
     assert.equal(stack.quiet("up", "web", "--name", "one").code, 0);

@@ -832,6 +832,15 @@ export const disconnectWorkspace = async (vm: string) => {
   if (await alive()) await ask({ op: "unregister", vm });
 };
 
+/** Why the daemon could not take the editors' port ("" when it holds it), or null when the
+ *  daemon does not answer. Asked without starting a daemon: doctor reports, it does not fix. */
+export const editorPortError = async (): Promise<string | null> => {
+  if (!(await alive())) return null;
+  const reply = await ask({ op: "ports" }).catch(() => null);
+  const editor = reply?.editor as { error?: unknown } | undefined;
+  return reply?.ok === true ? String(editor?.error ?? "") : null;
+};
+
 export const ports = async (): Promise<PortView[]> => {
   await ensureDaemon();
   const reply = await ask({ op: "ports" });

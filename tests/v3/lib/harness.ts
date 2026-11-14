@@ -87,14 +87,17 @@ export const newStack = (label: string): Stack => {
   const admin = path.join(work, "forge-admin");
   fs.writeFileSync(admin, `#!/bin/sh\nexec docker exec -e FORGE_STATE=/forge-state ${forgeName} node --disable-warning=ExperimentalWarning /forge/admin.ts "$@"\n`, { mode: 0o755 });
 
+  // A free port, asked of the system (it hands out one nobody holds), unless one is given.
+  const editorPort = process.env.DESOLATE_EDITOR_PORT ?? execFileSync(process.execPath, ["-e", "const s = require('net').createServer().listen(0, '127.0.0.1', () => { process.stdout.write(String(s.address().port)); s.close(); })"], { encoding: "utf8" }).trim();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     DESOLATE_HOME: home,
     DESOLATE_INSTANCE: instance,
     DESOLATE_BACKEND: backend,
     DESOLATE_TEST_RUN: "1",
-    // Beside a real stack on the same machine: the tests' editors are on a port of their own.
-    DESOLATE_EDITOR_PORT: process.env.DESOLATE_EDITOR_PORT ?? "31591",
+    // Beside a real stack, and beside other test stacks: the editors on a port of this
+    // stack's own (doctor fails a daemon that could not take its port).
+    DESOLATE_EDITOR_PORT: editorPort,
     DESOLATE_FORGE_ADMIN: admin,
     DESOLATE_FORGE_SPEC: `stand-in:ssh://git@${ip}:${sshPort}`,
     // On vz the forge, and the upstream the egress tests use, are on the Mac's loopback,
@@ -121,6 +124,8 @@ export const newStack = (label: string): Stack => {
       .replace(/\b\d+(\.\d+)? ?(ms|s)\b/g, "<duration>")
       .replace(/dsl-<instance>-[0-9a-f]{10}/g, "dsl-<instance>-<vm>")
       .replace(/-[0-9a-f]{6}\.localhost/g, "-<hex>.localhost")
+      // Each stack's port is its own; the transcripts say the one they were reviewed with.
+      .replace(new RegExp(`(\\.localhost|127\\.0\\.0\\.1):${editorPort}\\b`, "g"), "$1:31591")
       // A workspace's default size comes from the machine running the tests.
       .replace(/\(this Mac: \d+ cores, \d+ GB\)/g, "(this Mac: <cores> cores, <memory> GB)")
       .replace(/\d+ CPUs?, \d+ (GiB|MiB) memory, \d+ GiB disk/g, "<size>");
