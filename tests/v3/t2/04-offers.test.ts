@@ -57,8 +57,8 @@ describe("T2 phase 5: offers, the root's view, and pushes", () => {
       git(dir, "commit", "--quiet", "-m", "seed");
     });
     assert.equal(bootstrap(stack).code, 0);
-    assert.equal(stack.quiet("clone", "acme/widgets").code, 0);
-    assert.equal(stack.quiet("clone", "acme/consumer", "--no-push").code, 0);
+    assert.equal(stack.quiet("clone", "acme/widgets", "--no-domain").code, 0);
+    assert.equal(stack.quiet("clone", "acme/consumer", "--no-push", "--no-domain").code, 0);
     assert.equal(stack.quiet("domain", "create", "dev").code, 0);
     assert.equal(stack.quiet("domain", "dev", "add", "--repo", "acme/widgets").code, 0);
     assert.equal(stack.quiet("domain", "dev", "add", "--repo", "acme/consumer").code, 0);

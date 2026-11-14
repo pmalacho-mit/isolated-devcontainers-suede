@@ -4,11 +4,11 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { refuse } from "../shared/exit.ts";
-import { parseRepo, repoId } from "../shared/names.ts";
+import { EXIT, refuse } from "../shared/exit.ts";
+import { domainNamesFor, isSlug, parseRepo, repoId } from "../shared/names.ts";
 import { run } from "../shared/run.ts";
 import { INSTANCE } from "./paths.ts";
-import { config, rootctl } from "./stack.ts";
+import { config, ensureProxyUser, rootctl } from "./stack.ts";
 
 type Out = (line: string) => void;
 type Key = { role: "read" | "write"; pubkey: string };
@@ -48,17 +48,50 @@ const register = async (repo: string, key: Key) => {
   return "registered";
 };
 
-export const clone = async (name: string | undefined, options: { push: boolean; anonymous: boolean }, out: Out, json: boolean) => {
+/** The domain a clone lands in: the one named (made if it is new), or one named after the
+ *  repository, made for it. A domain that already holds the repository is reused, so a
+ *  second clone changes nothing. */
+const domainFor = async (repo: string, named: string | undefined): Promise<{ slug: string; made: boolean; added: boolean } | { taken: string[] }> => {
+  const existing = await rootctl<{ slug: string; repos: string[] }[]>("domain.list", {}, { quiet: true });
+  const holding = (slug: string) => existing.find((d) => d.slug === slug);
+  const join = async (slug: string) => {
+    const there = holding(slug);
+    if (there?.repos.includes(repo)) return { slug, made: false, added: false };
+    if (!there) {
+      await rootctl("domain.create", { slug, title: repo }, { quiet: true });
+      await ensureProxyUser(slug);
+    }
+    await rootctl("domain.add-repo", { slug, repo }, { quiet: true });
+    return { slug, made: !there, added: true };
+  };
+  if (named !== undefined) return join(named);
+  // Already in a domain of its own name (a second clone): nothing to do.
+  const candidates = domainNamesFor(repoArg(repo));
+  for (const slug of candidates) if (holding(slug)?.repos.includes(repo)) return { slug, made: false, added: false };
+  for (const slug of candidates) if (!holding(slug)) return join(slug);
+  return { taken: candidates };
+};
+
+export const clone = async (name: string | undefined, options: { push: boolean; anonymous: boolean; domain?: string | false }, out: Out, json: boolean) => {
   const repo = repoId(repoArg(name));
+  if (typeof options.domain === "string" && !isSlug(options.domain))
+    refuse(`'${options.domain}' is not a domain name`, "a domain name is a slug: lowercase letters, digits and single dashes, at most 40", EXIT.usage);
   const prepared = await rootctl<{ pushable: boolean; anonymous: boolean; keys: Key[] }>("repo.prepare", { repo, push: options.push, anonymous: options.anonymous });
   for (const key of prepared.keys) {
     const how = await register(repo, key);
     if (!json) out(`  ${key.role} key: ${how}${key.role === "write" ? " (it asks you before every push)" : ""}`);
   }
   const fetched = await rootctl<Record<string, unknown>>("repo.fetch", { repo });
-  if (json) return out(JSON.stringify({ ...prepared, keys: prepared.keys.map((k) => k.role), ...fetched }));
+  const placed = options.domain === false ? null : await domainFor(repo, options.domain);
+  const domain = placed && "slug" in placed ? placed : null;
+  if (json) return out(JSON.stringify({ ...prepared, keys: prepared.keys.map((k) => k.role), ...fetched, domain: domain?.slug ?? null }));
   out(`cloned ${repo}: ${fetched.branches} branch(es), default ${fetched.defaultBranch ?? "none"}, ${fetched.lfsObjects} LFS object(s); ${prepared.pushable ? "pushable" : prepared.anonymous ? "read-only, fetched anonymously" : "read-only (no write key)"}.`);
-  out(`next: desolate domain create <slug> --repo ${repo}   (or, to a domain you have: desolate domain <slug> add --repo ${repo})`);
+  if (domain) {
+    out(domain.made ? `domain ${domain.slug}: made for ${repo}.` : domain.added ? `domain ${domain.slug}: ${repo} added.` : `domain ${domain.slug}: already holds ${repo}.`);
+    return out(`next: desolate up ${domain.slug}   (or: desolate task ${domain.slug} "<what to do>")`);
+  }
+  if (placed && "taken" in placed) out(`no domain was made: ${placed.taken.join(" and ")} are domains already, holding other repositories.`);
+  out(`next: desolate domain create <slug> --repo ${repo}   (or, to a domain you have: desolate domain <slug> add --repo ${repo}; or clone again with --domain <slug>)`);
 };
 
 export const fetch = async (name: string | undefined, out: Out, json: boolean) => {

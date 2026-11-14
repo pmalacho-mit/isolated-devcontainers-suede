@@ -73,7 +73,7 @@ describe("T2 P1: a workspace's editor, inside its VM, by its own hostname", () =
       git(dir, "commit", "--quiet", "-m", "seed");
     });
     assert.equal(bootstrap(stack).code, 0);
-    assert.equal(stack.quiet("clone", "acme/app").code, 0);
+    assert.equal(stack.quiet("clone", "acme/app", "--no-domain").code, 0);
     assert.equal(stack.quiet("domain", "create", "web").code, 0);
     assert.equal(stack.quiet("domain", "web", "add", "--repo", "acme/app").code, 0);
   });

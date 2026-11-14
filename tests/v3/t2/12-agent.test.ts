@@ -19,7 +19,7 @@ describe("T2 desolate agent: kept running, attached to, stopped", () => {
       git(dir, "commit", "--quiet", "-m", "seed");
     });
     assert.equal(bootstrap(stack).code, 0);
-    assert.equal(stack.quiet("clone", "acme/widgets").code, 0);
+    assert.equal(stack.quiet("clone", "acme/widgets", "--no-domain").code, 0);
     assert.equal(stack.quiet("domain", "create", "dev", "--repo", "acme/widgets").code, 0);
     const up = stack.quiet("up", "dev", "--name", "w1", "--branch", "task/one");
     assert.equal(up.code, 0, up.stderr);
