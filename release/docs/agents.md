@@ -155,3 +155,8 @@ runs the dependency's tests, offers it and goes green; if not, it goes gray and 
 
 The push upstream is yours, never the agent's: review the branch in the dashboard and push
 it. When the branch is pushed, the factory opens a pull request to the dependency.
+
+When you already know a consumer branch's change to a dependency should go upstream, no agent
+is needed: `desolate upstream` splits it out with suede's own upstream and proposes it as
+suede's `downstream/...` branch, which the dependency's own Action turns into a pull request.
+[suede.md](suede.md) has both, side by side.

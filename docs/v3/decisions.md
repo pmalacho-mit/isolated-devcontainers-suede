@@ -743,6 +743,134 @@ itself fell to a domain's content, the git VM could plant a branch (never checke
 `root/<branch>`) in another domain. It could already read every domain's work. Deliveries are
 events (`git-delivery-handed`). Recorded in mac-audit-notes as accepted, with the reason.
 
+## `desolate upstream`: suede's own script, pinned, run in the git VM; the push is an ordinary one (decided on the Mac; tested on T1 and T2; run against github.com)
+
+move-to-vms.md 5.5 put suede's `upstream` in the root, because that was where a person
+pushed. It is not any more: the root has no terminal a person types in, and the person's git
+is the git VM. What `upstream` does is in two parts, and they go to different places:
+
+1. **The split**: suede's hosted `scripts/upstream.sh`, which runs `git subrepo push`, which
+   walks the consumer's history and rebuilds the dependency's commits from it (`commit-tree`,
+   `filter-branch --tree-filter`, a worktree), then restores the clone. That is a large shell
+   program reading what an agent wrote: the consumer's history, every `.gitrepo` in it, the
+   trees it checks out.
+2. **The push** of the result to the dependency's remote, as `downstream/<owner>/<repo>-<commit>`.
+
+**Where the split runs: the git VM.** It has no network, no key, nothing of the root's, and it
+is already where the person reads agents' work with git. A bug in git-subrepo, or in git, that
+an agent's history could reach there gets what the git VM has: the person's clones and
+read-only mirrors, and the ability to ask for a push that the person then approves on the
+approval page. In the root it would get the root's user: every domain's share, the network,
+the proxies, and the keyring's door. On the host it would break the host's rule (no git on
+desolate's repositories). A pure-git reimplementation of the split was the fallback if
+git-subrepo could not be pinned or run safely; it can be (next paragraph), and suede's own code
+is what suede's own Action expects, so it is not reimplemented. What desolate does write is
+the checking around it, in TypeScript, by argv.
+
+**What runs, and from where.** suede's `scripts/upstream.sh` at `SUEDE_COMMIT` (pins.env),
+vendored byte for byte at `release/git/suede-upstream.sh` and refused at run time unless its
+sha256 is `SUEDE_UPSTREAM_SHA256`; T1 checks the same. git-subrepo is the image's
+(`/opt/git-subrepo`, by commit, from v2). Never the copy an agent's branch vendors at
+`<dependency>/.suede/core/upstream`: that is repository content, and it would also fetch the
+real script from suede.sh, which the git VM cannot reach and should not run if it could.
+`tools/pin-suede.sh <commit>` moves the pin. git-subrepo at that commit quotes what it reads
+(`.gitrepo` values go to `commit-tree` as array elements, authors through `mapfile`), and the
+values that become arguments are checked first anyway (below).
+
+**How it runs.** `desolate upstream [<consumer>] <dependency-dir> <owner/repo> [--from <ref>]`
+in the git VM (or on the Mac, which runs the same in the git VM and then waits for the pull
+request). Never in the person's clone: in a scratch clone of it (`--shared`) that also
+borrows the dependency's mirror's objects, checked out on a branch at the commit, with:
+`origin` set to the consumer's GitHub-shaped address (suede names the branch from it); a
+remote `dependency` that fetches from the mirror (so suede's "already proposed?" check and
+git-subrepo's fetch read what the remote published) and pushes into a bare repository in the
+scratch directory, so suede's push is captured, not sent. Only then does desolate look at what
+it made, and refuse if:
+
+- **the dependency named is not the one `.gitrepo` names** (owner/repo, case aside), or is not
+  a repository desolate holds a mirror of; on the Mac, or not pushable. v2's H1 fix: the person
+  names where it goes, and a `.gitrepo` that names another repository stops it. `--remote` is
+  taken only if it names the same repository too (it is suede's flag; the push still goes to
+  the one named);
+- **any `.gitrepo` in the history git-subrepo walks has a `commit`/`parent` that is not a full
+  id, or a `method` but merge or rebase** (before the split runs);
+- **the split is not exactly the dependency's files at that commit** (its tree is the
+  directory's, less `.gitrepo`), or the branch is not the one suede names, or it does not build
+  on the release commit `.gitrepo` names, or the mirror has no such commit;
+- **it changes the dependency's `.github/`** against that release commit. v2's rule: a pushed
+  branch's own workflows run on the remote, with its secrets, on the push itself (suede's
+  `suede-downstream-to-main` is exactly such a workflow, with `contents: write`).
+
+It prints what the push would send, and in red when the branch changed the vendored
+`.suede/core/` (suede's own machinery, which every consumer of the dependency would then run).
+Then it pushes the split with `git push desolate-out::<owner/repo>` like any push from the git
+VM: bundle, host, the root's object checks, the reviewer, **the approval page, which names the
+dependency, the `downstream/...` branch and the commit**, then the pusher. No new path to a
+write key: the dependency's key is used as for any push, only after that approval, and a
+`--no-push` dependency is refused by the root as any push to it is.
+
+**The root checks the `.github/` rule too**, for every push of a `downstream/...` branch
+however it was made (a raw `git push`, or `desolate push` of a domain's branch): the commit's
+`.github/` must be that of a commit the remote already has and that it builds on. The git VM's
+check is for the person; the root's is for everything else that can ask for such a push.
+The reviewer marks `.suede/core/` like the files that run on the forge (listed first, with a
+warning), and compares a new branch that does not build on the default branch with the
+remote branch it does build on (a proposal builds on `release`, not `main`), not with the
+default branch's whole tree.
+
+**Waiting for the pull request** needs GitHub's API, which the git VM cannot reach: `desolate
+upstream` on the Mac waits for it (as suede does: the PR's link, a draft for conflicts,
+"nothing new" when the Action removed the branch, the run's link when it failed), unless
+`--no-wait`; in the git VM it says where the PR will be.
+
+**Beside the suede factory** (`desolate factory suede`, release/factory/suede.ts). The two
+start from different places and so make different branches, and both are kept:
+
+- the factory starts from a push to a project's default branch, and has an **agent** port the
+  change into the dependency's own checkout (main-shaped: the change goes under `release/`),
+  in a domain that holds both, on `upstream/<project>-<commit>`; the person pushes that branch
+  like any offer, and the factory opens the pull request with `gh`. It is for "should any of
+  this go upstream?", and the agent's judgement and the dependency's own tests are the point;
+- `desolate upstream` starts from a branch the person has already read and decided on, and
+  needs **no agent and no domain holding the dependency**: the split is mechanical, it is
+  release-shaped, and it goes to suede's own `downstream/<owner>/<repo>-<commit>`, so the
+  dependency's `suede-downstream-to-main` Action rebuilds it onto main and opens the PR,
+  exactly as for a consumer anywhere that runs suede's `upstream`.
+
+One convention for both was considered and refused: a release-shaped split pushed as
+`upstream/...` would get no PR from suede's Action (it fires on `downstream/**`) and a PR
+from the factory against main that cannot be merged (the trees have different shapes); a
+main-shaped branch pushed as `downstream/...` would be "rebuilt" by the Action as if it were
+release-shaped. The branch name says which shape it is, and suede already decided that name.
+What they share is in one place: `shared/suede.ts` (suede's branch spelling, reading a
+`.gitrepo`'s remote, the `.github/` rule the root applies to every `downstream/...` push) and
+the root's `suede.changed` (which directories are vendored dependencies), which `desolate
+upstream` does not need, since the person names the directory. `release/docs/suede.md` tells
+the whole workflow.
+
+**Tested.** T1 `upstream` (14: every refusal above beside its control, on repositories made
+with git; the root's rule; the pin). T2 `13-upstream` (5: a workspace's branch proposed through
+the approval page and the pusher, with the stand-in Action's pull request; `.github/`, the
+wrong dependency, a read-only one and a foreign `--remote` refused; `.suede/core/` in red and
+on the page; the root refusing a hand-made `downstream/...` push that changes `.github/`, and
+taking one that does not). **On GitHub** (2026-11-13, the M1, vz): a suede dependency made
+from suede's template (`mitdesolate/desolate-upstream-lib`), a consumer vendoring it with
+git-subrepo (`mitdesolate/desolate-upstream-app`), an agent's commit in a workspace, `desolate
+upstream` on the Mac, approved on the page: the pusher pushed
+`downstream/mitdesolate/desolate-upstream-app-e3006d6...`, suede's Action rebuilt it, and
+`desolate upstream` printed its pull request
+(https://github.com/mitdesolate/desolate-upstream-lib/pull/1, changing `release/greet.txt`).
+
+**What is left.** The split still runs git-subrepo and git on an agent's history, in the git
+VM: a bug there could make a different commit than the one the branch describes. What it makes
+is then checked (its tree is the directory's), shown, and approved by the person on a page
+whose account of it is the reviewer's, so the worst it can do is ask for a push the person
+reads. Commit messages and authors of the split are the consumer's commits' (git-subrepo keeps
+them); they reach the dependency's remote, as they would with suede anywhere. Not done: a
+dependency with files in LFS (the push helper looks for new LFS objects in the scratch
+clone's store, which has none; what the root then does with the push has not been tried);
+and a button on the dashboard.
+
 ## Push and approve in one tab: the approval page, framed by the git terminal alone (decided on the Mac; tested on T1, in Chrome)
 
 The approval page cannot be framed, so a push from the git terminal meant a second tab. Now

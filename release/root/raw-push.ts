@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseApproval } from "../shared/approval.ts";
 import { isBranch, repoId } from "../shared/names.ts";
+import { isDownstream } from "../shared/suede.ts";
 import type { Repo } from "../shared/names.ts";
 import { git } from "./git.ts";
 import { ask } from "./keyring-client.ts";
@@ -31,6 +32,11 @@ export const pushCommit = async (repo: Repo, commit: string, branch: string, for
   if (!isBranch(branch)) return "desolate pushes branches";
   if (repos.registry().repos[name]?.defaultBranch === branch) return `${branch} is the default branch: push a branch; or, on the host: desolate push <domain> ${name} ${branch} --expect ${commit} --allow-default`;
   if (!repos.recordOf(repo).pushable) return `${name} is not pushable: the root holds no write key for it`;
+  // A suede proposal: its own workflows run on the remote when it lands (shared/suede.ts).
+  if (isDownstream(branch)) {
+    const why = await repos.downstreamCheck(repo, commit);
+    if (why) return `${branch} is a suede proposal, and ${why}`;
+  }
   // The approval names what the remote's branch is now, as the mirror last saw it: the push
   // moves it from exactly that, or not at all (pusher.ts). Like git, an update that does
   // not build on it needs a `+`; the person approving sees which it is.

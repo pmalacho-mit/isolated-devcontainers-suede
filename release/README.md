@@ -77,6 +77,8 @@ desolate review dev acme/widgets issue/12 --diff     # what a push would send, a
 desolate review dev acme/widgets issue/12 --against domain   # ... or beside the domain's own main
 desolate push dev acme/widgets issue/12 --expect <commit>   # asks you, on your terminal
 desolate git acme/widgets --open                     # git in your browser: a shell in the git VM (below)
+desolate upstream acme/consumer lib acme/lib --from dev/fix   # a vendored suede dependency's change, proposed to it
+                                                     # (suede's own upstream, pinned; you approve the push)
 desolate events                                      # what happens, as JSON lines, for your own scripts
 desolate notify                                      # ... or as notifications: a push waiting, an agent asking
 desolate root shell                                  # ordinary git on your clones: fetch --all, diff, push
@@ -105,6 +107,8 @@ cannot take is approving a push, so a script's work ends at an offer.
   is and is not done, and where the code is.
 - [docs/agents.md](docs/agents.md): agents kept running and attached to (no tmux), Claude Code,
   and the factories: GitHub issues to agents in parallel, and suede upstreaming.
+- [docs/suede.md](docs/suede.md): a vendored suede dependency changed in a consumer, proposed
+  back to the dependency: `desolate upstream`, and the suede factory.
 - [AGENTS.md](AGENTS.md): what an agent in a workspace reads.
 - [docs/incidents.md](docs/incidents.md): ways desolate has been wrong, and what each taught.
 

@@ -4,6 +4,10 @@
 //   desolate fetch [<owner/repo>]   the root refreshes the mirror from the remote (with its
 //                                   read key; this VM has none), then this fetches every
 //                                   remote here: origin, root, and each domain's
+//   desolate upstream [<consumer>] <dependency-dir> <owner/repo> [--from <ref>]
+//                                   suede's upstream, desolate's pinned copy: a consumer's
+//                                   change to a vendored dependency, proposed to the
+//                                   dependency as a push you approve (upstream.ts)
 //
 // The request goes the way a push does: a file in /desolate/out, the host's answer in
 // /desolate/answers. It names a repository and nothing else.
@@ -50,6 +54,14 @@ if (verb === "fetch") {
   if (reply.fetched !== true) fail(`the root could not refresh ${repo}: ${String(reply.error ?? "no reason given")}`, `on the Mac: desolate fetch ${repo}`);
   const fetched = spawnSync("git", ["-C", dir, "fetch", "--all", "--prune"], { stdio: "inherit" });
   process.exit(fetched.status ?? 1);
+} else if (verb === "upstream") {
+  const { upstream, Stop } = await import("./upstream.ts");
+  try {
+    process.exit(await upstream(args, () => repoOf(undefined)));
+  } catch (error) {
+    if (error instanceof Stop) fail(error.message, error.fix);
+    throw error;
+  }
 } else {
   process.stdout.write([
     "desolate, in the git VM:",
@@ -57,6 +69,9 @@ if (verb === "fetch") {
     "  git push origin <branch>        push it: you approve it on the approval page",
     "  git push <domain> <branch>      deliver it to a domain: its workspaces see root/<branch>",
     "  git fetch <domain>              what a domain's workspaces wrote: <domain>/<branch>",
+    "  desolate upstream <dependency-dir> <owner/repo> [--from <domain>/<branch>]",
+    "                                  propose a vendored suede dependency's change to it",
+    "                                  (suede's upstream, pinned; you approve the push)",
     "",
   ].join("\n"));
   process.exit(verb && verb !== "help" ? 64 : 0);

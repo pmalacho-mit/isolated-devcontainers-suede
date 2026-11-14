@@ -61,7 +61,7 @@ T2 `03-ports`, `06-editor`, `09-ui`).
 | 4.8 One click: open an editor, start, stop | **Done** | T2 `09-ui`. Resume: no. |
 | 4.8 One click: review an offer in the native diff editor | **Done differently** | One click on an offer shows what a push would send (commits, files, warnings) and its diff, as text made by git in the root with external diff and textconv off, capped at 1 MiB, shown only if it is of the commit the Push button names. Unified, not side by side; no syntax colouring. T2 `09-ui` (a branch whose content is markup and escape sequences arrives as text). |
 | 4.8 One click: push, raising the confirmation | **Done, with a difference** | Push starts in the dashboard and then waits for `desolate approve` on the host. No prompt is raised by the dashboard itself: nothing in a VM may make an approval dialog appear (`decisions.md`). |
-| 4.8 One click: `upstream` | **Not done** | There is no `desolate upstream`. |
+| 4.8 One click: `upstream` | **Done, as a command** | `desolate upstream` on the Mac or in the git terminal (5.5); its push is approved with the approval page's one click. No dashboard button: the split runs in the git VM, which the dashboard does not drive. |
 | 4.8 A first-run path that shows the commands | **Done** | Create a domain, add a repository, start a workspace run from the dashboard and show their commands. Cloning is shown as a command: adding deploy keys at GitHub is the person's. Choosing the environment is not in the path. |
 | 4.8 Safety: own code, strict CSP, content as text, no tokens in labels | **Done** | T2 `09-ui`, in a real browser. |
 
@@ -86,7 +86,7 @@ does its work (what needs you, what a push would send) in the root.
 | 5.3 A read key for every repository; a write key for pushable ones; `--no-push` | **Done** | T2 `01-root`, `04-offers`. Against GitHub itself: unrun (the tests use a stand-in forge). |
 | 5.3 P2 enforced by the keyring | **Done** | As P2. |
 | 5.4 Several repositories in a domain | **Done** | T2 `02-domains`. |
-| 5.5 `desolate upstream`, suede's own script pinned | **Not done** | `SUEDE_COMMIT` in `pins.env` is empty. `carryover/transfer/` holds v2's rules (the dependency named by the person, `.github/` refused). The stand-in forge already opens a pull request for a `downstream/...` branch. |
+| 5.5 `desolate upstream`, suede's own script pinned | **Done, in the git VM, not the root** (`decisions.md`, "`desolate upstream`") | suede's `scripts/upstream.sh` pinned by commit and hash (`SUEDE_COMMIT`, `SUEDE_UPSTREAM_SHA256`; vendored at `release/git/suede-upstream.sh`, `tools/pin-suede.sh` moves it), the image's git-subrepo, run in a scratch clone in the git VM with its push caught; the vendored `.suede/core/upstream` is never run. Refused: a dependency other than the one `.gitrepo` names, one desolate does not hold or cannot push, a `.gitrepo` in the history whose commit is not an id, a release commit the remote lacks, a change to the dependency's `.github/` (in the git VM, and by the root for every `downstream/...` push), a snapshot already proposed, a split that is not the dependency's files. `.suede/core/` changes are shown in red and warned of on the approval page. The push is an ordinary git VM push: approval page, then pusher. `--remote` (checked), `--no-wait`; the Mac waits for the PR through GitHub's API. T1 `upstream` (14), T2 `13-upstream` (5); run against github.com. Not done: LFS files inside a dependency. |
 
 ## 6. Git
 
@@ -108,7 +108,7 @@ argv: **done**. Both spellings work: `domain <d> add --secret NAME ...` and
 
 ## 8. CLI
 
-Every verb in the spec's list exists except: `desolate upstream`; `domain <d> env compose`;
+Every verb in the spec's list exists except: `domain <d> env compose`;
 `watch` (the dashboard is the live view); `secret`/`proxy` as top-level verbs (they are
 under `domain <d>`). Added beyond the list: `approve`, `editor`, `ui`, `down`, `completion`,
 `keys`, `doctor`, `net log`, `domain <d> net recommend`. `--json` on what a harness reads,
@@ -127,7 +127,7 @@ therefore has no runnable form yet.
 |---|---|
 | the proxy (`addon.py`) | ported, cut down (`secrets_addon.py`) |
 | the keyring | ported, and changed (two agents, signed approvals) |
-| transfer, review, `--expect`, exit codes | reimplemented; `upstream` missing |
+| transfer, review, `--expect`, exit codes | reimplemented; `upstream` too (in the git VM, with v2's two rules) |
 | status and board | ported (shared reader: `shared/status.ts`) |
 | hostnames, the gate, the ingress host check | ported |
 | editor settings held | ported, twice (workspace and root) |
@@ -158,7 +158,7 @@ budgets as tests: the dashboard's three budgets only.
 | 2 One workspace | Done but for caches C2 to C4 and the workspace-side extension. |
 | 3 Domains | Mostly: the environment is way 1 only; no templates, no package caches, no gc. |
 | 4 Secrets and policy | Done but for the self-test fixture and timed learn. |
-| 5 Offers and pushes | Done except `upstream`. |
+| 5 Offers and pushes | Done, `upstream` included. |
 | 6 Root UI and agents | The dashboard (with the diff) and the state service: done. No root editor, by decision. The dispatchers: not. |
 | 7 Hardening | Ongoing. |
 
@@ -177,7 +177,7 @@ provisionally. Each has its evidence in `decisions.md`.
    of unrun code. (The Touch ID approver is opt-in now and not on the path.)
 2. **Templates and caches (C2 to C4)**: without them a workspace with a real toolchain
    rebuilds it every time.
-3. **`desolate upstream`** (5.5).
+3. ~~**`desolate upstream`** (5.5).~~ Done (2026-11-13): in the git VM.
 4. **The workspace-side extension** (URL mapping).
 5. **A quota on a domain's outbox**, and keeping the image's git current: the two things
    left open by the audit of what the root takes from a domain.

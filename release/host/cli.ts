@@ -67,7 +67,11 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
                                                                  vendored suede dependency they changed
   desolate suede changed <owner/repo> <commit> [--from <commit>] [--json]
                                                                  which vendored suede dependencies a commit changed
-  desolate notify                                                notifications on this Mac: a push waiting, an offer,
+  desolate upstream <consumer> <dependency-dir> <owner/repo> [--from <domain>/<branch>] [--no-wait] [--remote <url>]
+                                                                 a consumer's change to a vendored suede dependency,
+                                                                 proposed to it (suede's upstream, pinned, in the git
+                                                                 VM); you approve the push; waits for the pull request
+  desolate notify                                               notifications on this Mac: a push waiting, an offer,
                                                                  an agent asking for you, a push done; until stopped
   desolate git [<owner/repo>] [--open]                           a shell in the git VM, in your browser: your own
                                                                  clones, git and nothing else; pushes wait for approval
@@ -308,6 +312,12 @@ const main = async (argv: string[]): Promise<number> => {
     if (values.json === true) out(JSON.stringify(changed));
     else for (const c of changed) out(`  ${c.dir}  ${c.remote ?? "(no remote)"} ${c.branch}  ${c.files.length ? `${c.files.length} file(s) changed` : "unchanged"}`);
     return EXIT.ok;
+  }
+  if (verb === "upstream") {
+    // suede's upstream, desolate's pinned copy, in the git VM; the push waits for approval.
+    const { values, positionals } = flags(rest, { from: { type: "string" }, remote: { type: "string" },"no-wait": { type: "boolean" } });
+    const { upstreamCommand } = await import("./upstream.ts");
+    return upstreamCommand(positionals, values, out);
   }
   if (verb === "notify") {
     flags(rest, {});
