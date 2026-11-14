@@ -22,7 +22,7 @@ const el = (tag, attrs = {}, ...children) => {
  *  person's clone of the repository. It carries no token: the tab is signed in only if the
  *  person opened `desolate git`'s address in this browser once. */
 const gitLink = (repo) => state && state.stack && state.stack.editorPort
-  ? el("a", { class: "button quiet", href: `http://desolate-git.localhost:${state.stack.editorPort}/?repo=${encodeURIComponent(repo)}`, target: "_blank", rel: "noopener noreferrer" }, "Open in git")
+  ? el("a", { class: "button quiet", href: `http://${state.stack.gitHostname || "desolate-git.localhost"}:${state.stack.editorPort}/?repo=${encodeURIComponent(repo)}`, target: "_blank", rel: "noopener noreferrer" }, "Open in git")
   : null;
 // A token in an address is for the link, never for the label.
 const redact = (text) => String(text).replace(/tkn=[0-9a-f]+/g, "tkn=...");

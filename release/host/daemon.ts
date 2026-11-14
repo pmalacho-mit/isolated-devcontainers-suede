@@ -131,7 +131,10 @@ const serve = async () => {
 
   const byName = (name: string): { entry: Entry; surface: "dev" | "editor" } | null => {
     for (const entry of entries.values()) {
-      if (name === devHostname(INSTANCE, entry.domain, entry.workspace)) return { entry, surface: "dev" };
+      const dev = devHostname(INSTANCE, entry.domain, entry.workspace);
+      // A name under a workspace's dev name is that workspace's too: a desolate stack run in
+      // it, developing desolate, names its pages so (shared/names.ts, HOSTNAME_SUFFIX).
+      if (name === dev || name.endsWith(`.${dev}`)) return { entry, surface: "dev" };
       if (name === editorHostname(INSTANCE, entry.domain, entry.workspace)) return { entry, surface: "editor" };
     }
     return null;
@@ -553,7 +556,7 @@ const serve = async () => {
       };
     }
     const { kind } = await import("./approver.ts");
-    const facts = { stack: { instance: INSTANCE, backend: b.kind, isolated: b.isolated, editorPort: port, approver: kind() }, workspaces };
+    const facts = { stack: { instance: INSTANCE, backend: b.kind, isolated: b.isolated, editorPort: port, approver: kind(), rootHostname: ROOT_HOSTNAME, gitHostname: GIT_HOSTNAME }, workspaces };
     const text = JSON.stringify(facts);
     // Said when it changes, and now and then regardless, so the service knows the host is there.
     if (text === sentFacts && Date.now() - sentAt < 45_000) return;
