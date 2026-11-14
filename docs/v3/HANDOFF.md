@@ -168,6 +168,19 @@ the ergonomics that the video showed were missing (#92, #93, and `mac/ergonomics
 - `domain create --repo`, `up --branch`, `--open`, the Mac's git identity in the git VM;
 - no devcontainer lockfile written into an agent's checkout.
 
+Then **`desolate upstream`** (`mac/upstream`): a consumer's change to a vendored suede
+dependency, proposed to the dependency. The spec put it in the root; the root no longer has a
+terminal, so it runs in the git VM (decisions.md, "`desolate upstream`", says why, and how it
+sits beside the suede factory): suede's own `upstream.sh`, pinned by commit and hash, and the
+image's git-subrepo, in a scratch clone whose push is caught, checked (the named dependency is
+`.gitrepo`'s, `.github/` untouched, the split is the dependency's files), shown (red for
+`.suede/core/`), then pushed as any git VM push is (approval page, pusher). The root refuses a
+`downstream/...` push that changes `.github/` whichever way it comes. On the Mac it waits for
+the PR. `release/docs/suede.md` is the workflow end to end. Run on GitHub once, end to end:
+https://github.com/mitdesolate/desolate-upstream-lib/pull/1. Dummy repositories:
+`mitdesolate/desolate-upstream-lib` (a suede dependency made from suede's template, with its
+downstream Action) and `mitdesolate/desolate-upstream-app` (vendors it at `lib/`).
+
 Dummy repositories for demos: `mitdesolate/desolate-promo-app` (LFS, a devcontainer with the
 git-lfs feature, a test) and `mitdesolate/desolate-promo-lib`. The recording script is
 `tests/v3/demo/promo/promo.ts`; the approval-only one is `tests/v3/demo/record-approval.ts`.
@@ -287,9 +300,11 @@ Each item names where to start. The order is by what unblocks use.
    for secrets.
 3. **A quota for a domain's outbox and share; a side-by-side diff in the dashboard** if
    the unified one proves too little for review.
-4. **`desolate upstream` (section 5.5).** `SUEDE_COMMIT` in `release/pins.env` is empty on
-   purpose: pin it. `carryover/transfer/` has v2's rules. The forge's push hook already opens
-   a stand-in pull request for a `downstream/...` branch, for the tests.
+4. **[x] `desolate upstream` (section 5.5).** Done (`mac/upstream`, section 2e): in the git
+   VM, not the root, with suede's `scripts/upstream.sh` pinned at `SUEDE_COMMIT` (9db3faf,
+   chosen by the agent: suede's main on 2026-11-13; move it with `tools/pin-suede.sh`).
+   Left: LFS files inside a dependency (the split's LFS objects are not looked for); a
+   dashboard button (the split is the git VM's, which the dashboard does not drive).
 5. **The environment (4.5) and the caches (4.7: C2, C4).**
 6. **Hardening**, the list in section 6.
 7. **Ergonomics (13.3):** the fresh-eyes run, screenshots, budgets as tests. The transcripts
@@ -376,6 +391,9 @@ release/host/approve-web.ts    the approval page: one click, served by the host 
 release/host/git-vm.ts         the git VM: the person's clones, no network; hands its pushes to the root
 release/host/git-web.ts        the git terminal in a browser tab (git-ui/, with xterm.js vendored by hash)
 release/git/                   inside the git VM: provision.sh, terminal.py, the push helper
+release/git/upstream.ts        `desolate upstream`: suede's pinned upstream (suede-upstream.sh), checked, then a push
+release/host/upstream.ts       ... on the Mac: runs it in the git VM, then waits for the PR
+release/shared/suede.ts        suede's names, and the .github/ rule for every downstream/... push
 release/root/raw-push.ts       a push asked for with git (root terminal or git VM): review, approval, pusher
 release/root/intake.ts         every object of a bundle checked before a root clone takes it
 release/root/wall.sh           the root VM does not reach the Mac's loopback (nftables)

@@ -743,7 +743,7 @@ itself fell to a domain's content, the git VM could plant a branch (never checke
 `root/<branch>`) in another domain. It could already read every domain's work. Deliveries are
 events (`git-delivery-handed`). Recorded in mac-audit-notes as accepted, with the reason.
 
-## `desolate upstream`: suede's own script, pinned, run in the git VM; the push is an ordinary one (decided on the Mac)
+## `desolate upstream`: suede's own script, pinned, run in the git VM; the push is an ordinary one (decided on the Mac; tested on T1 and T2; run against github.com)
 
 move-to-vms.md 5.5 put suede's `upstream` in the root, because that was where a person
 pushed. It is not any more: the root has no terminal a person types in, and the person's git
@@ -848,12 +848,28 @@ the root's `suede.changed` (which directories are vendored dependencies), which 
 upstream` does not need, since the person names the directory. `release/docs/suede.md` tells
 the whole workflow.
 
+**Tested.** T1 `upstream` (14: every refusal above beside its control, on repositories made
+with git; the root's rule; the pin). T2 `13-upstream` (5: a workspace's branch proposed through
+the approval page and the pusher, with the stand-in Action's pull request; `.github/`, the
+wrong dependency, a read-only one and a foreign `--remote` refused; `.suede/core/` in red and
+on the page; the root refusing a hand-made `downstream/...` push that changes `.github/`, and
+taking one that does not). **On GitHub** (2026-11-13, the M1, vz): a suede dependency made
+from suede's template (`mitdesolate/desolate-upstream-lib`), a consumer vendoring it with
+git-subrepo (`mitdesolate/desolate-upstream-app`), an agent's commit in a workspace, `desolate
+upstream` on the Mac, approved on the page: the pusher pushed
+`downstream/mitdesolate/desolate-upstream-app-e3006d6...`, suede's Action rebuilt it, and
+`desolate upstream` printed its pull request
+(https://github.com/mitdesolate/desolate-upstream-lib/pull/1, changing `release/greet.txt`).
+
 **What is left.** The split still runs git-subrepo and git on an agent's history, in the git
 VM: a bug there could make a different commit than the one the branch describes. What it makes
 is then checked (its tree is the directory's), shown, and approved by the person on a page
 whose account of it is the reviewer's, so the worst it can do is ask for a push the person
 reads. Commit messages and authors of the split are the consumer's commits' (git-subrepo keeps
-them); they reach the dependency's remote, as they would with suede anywhere.
+them); they reach the dependency's remote, as they would with suede anywhere. Not done: a
+dependency with files in LFS (the push helper looks for new LFS objects in the scratch
+clone's store, which has none; what the root then does with the push has not been tried);
+and a button on the dashboard.
 
 ## Push and approve in one tab: the approval page, framed by the git terminal alone (decided on the Mac; tested on T1, in Chrome)
 
