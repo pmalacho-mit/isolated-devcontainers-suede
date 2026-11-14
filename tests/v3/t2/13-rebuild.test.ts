@@ -24,7 +24,7 @@ describe("T2 destroy and bootstrap again: nothing of yours is lost", () => {
       git(dir, "commit", "--quiet", "-m", "seed");
     });
     assert.equal(bootstrap(stack).code, 0);
-    assert.equal(stack.quiet("clone", "acme/widgets").code, 0);
+    assert.equal(stack.quiet("clone", "acme/widgets", "--no-domain").code, 0);
     assert.equal(stack.quiet("domain", "create", "dev", "--repo", "acme/widgets").code, 0);
     const secret = spawnSync(CLI, ["domain", "dev", "secret", "set", "REBUILD-TOKEN", "--hosts", "example.com"], { env: stack.env, input: "rebuild-secret-value\n", encoding: "utf8" });
     assert.equal(secret.status, 0, secret.stderr);
