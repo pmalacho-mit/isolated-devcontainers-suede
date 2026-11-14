@@ -39,22 +39,22 @@ What you run, once and then per task. Everything below runs on your Mac.
 
 ```bash
 claude setup-token        # Claude Code on your Mac prints a long-lived token
-desolate clone you/app    # the repository, and a domain named after it: app
-desolate domain app secret set CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization
+desolate clone you/app    # the repository, and a domain named owner--repo: you--app
+desolate domain you--app secret set CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization
                           # paste the token; it is held in the root VM, never in a workspace
 ```
 
 **Each task:**
 
 ```bash
-desolate task app "Fix the login redirect loop, with a test"      # --attach to watch at once
+desolate task you--app "Fix the login redirect loop, with a test"      # --attach to watch at once
 ```
 
 That makes a workspace named for the task (`fix-the-login-redirect-loop`), with every
 repository of the domain on `task/<that name>`, starts Claude Code in it on your sentence plus
 desolate's standing orders, and keeps it running whether or not you watch:
 
-- **Watch or talk to it:** `desolate agent attach app/fix-the-login-redirect-loop` (Ctrl-]
+- **Watch or talk to it:** `desolate agent attach you--app/fix-the-login-redirect-loop` (Ctrl-]
   lets go; it keeps working). Your terminal's own scrollback and copy work.
 - **Hear from it:** `desolate notify` turns its statuses into notifications: orange when it
   asks you something, green when it has offered its branch.
@@ -63,13 +63,13 @@ desolate's standing orders, and keeps it running whether or not you watch:
   to approve the exact commit. Nothing it does reaches GitHub without that.
 - **Several at once:** each `desolate task` is its own VM; run as many as your Mac holds
   (`desolate bootstrap` says what one costs).
-- **Done with it:** `desolate rm app/fix-the-login-redirect-loop` (its branch stays).
+- **Done with it:** `desolate rm you--app/fix-the-login-redirect-loop` (its branch stays).
 
 **Another repository:** `desolate clone you/other`, then `desolate task other "..."`. The
 first task in a domain without the token copies it from a domain that has it, inside the root
 (the value goes nowhere else), and says so; `desolate domain other secret rm CLAUDE-OAUTH`
 undoes that. Two repositories one task should see together go in one domain:
-`desolate clone you/lib --domain app`.
+`desolate clone you/lib --domain you--app`.
 
 **What desolate does for Claude, and why:**
 
@@ -94,12 +94,12 @@ undoes that. Two repositories one task should see together go in one domain:
 choosing):
 
 ```bash
-desolate agent start app/w1 --name claude -- \
+desolate agent start you--app/w1 --name claude -- \
   env CLAUDE_CODE_OAUTH_TOKEN=CLAUDE-OAUTH claude --permission-mode auto "Fix issue #12: ..."
 ```
 
 Here Claude must already be in the environment, and its first run asks its questions:
-`desolate agent attach` and answer them. Your own agent instead of Claude: `desolate task app
+`desolate agent attach` and answer them. Your own agent instead of Claude: `desolate task you--app
 "..." -- <command...>`, which gets the task as its last argument. With an API key instead of a
 subscription: a secret on the header `x-api-key`, and `ANTHROPIC_API_KEY=<its name>`.
 

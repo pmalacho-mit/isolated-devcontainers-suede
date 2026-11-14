@@ -24,7 +24,7 @@ commit, and only then does the pusher send it.
 ```bash
 desolate clone you/some-dependency                 # pushable: proposals go to it
 desolate clone you/app --no-push                   # the consumer: never written through desolate
-desolate domain create app --repo you/app          # where agents work on the consumer
+desolate domain create you--app --repo you/app          # where agents work on the consumer
 ```
 
 The dependency must have suede's downstream Action on its `release` branch (every dependency
@@ -34,16 +34,16 @@ made from suede's template has it), so that a `downstream/...` branch becomes a 
 
 An agent changed `some-dependency/` in a workspace and committed it on `fix/thing` (offered or
 not: every branch reaches the root as it is written). Read it (the dashboard's Branches, or
-`desolate review app you/app fix/thing --diff`), then, on the Mac:
+`desolate review you--app you/app fix/thing --diff`), then, on the Mac:
 
 ```bash
-desolate upstream you/app some-dependency you/some-dependency --from app/fix/thing
+desolate upstream you/app some-dependency you/some-dependency --from you--app/fix/thing
 ```
 
 or in the git terminal (`desolate git you/app --open`), where it is the same command:
 
 ```bash
-git fetch app && git checkout app/fix/thing
+git fetch you--app && git checkout you--app/fix/thing
 desolate upstream some-dependency you/some-dependency
 ```
 

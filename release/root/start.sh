@@ -75,7 +75,7 @@ id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx desolate-reviewer && gpasswd -d "$U
 id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx desolate-proxy && gpasswd -d "$USER_NAME" desolate-proxy >/dev/null
 for domain_dir in /desolate/domains/*/; do
   domain=$(basename "$domain_dir")
-  [[ $domain =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] && [[ $domain != *--* ]] || continue
+  [[ $domain =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]] && [[ $domain != *--*--* && $domain != xn--* && $domain != *---* ]] || continue
   bash "$HERE/proxy-user.sh" "$USER_UID" "$domain" >/dev/null
 done
 # THE SHARES ARE CLOSED TO EVERY OTHER USER HERE. On vz, a file in a share reports as owned

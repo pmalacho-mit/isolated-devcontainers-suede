@@ -65,8 +65,8 @@ desolate clone you/app                        # makes a read and a write deploy 
   read key: registered
   write key: registered (it asks you before every push)
 cloned you/app: 2 branch(es), default main, 2 LFS object(s); pushable.
-domain app: made for you/app.
-next: desolate up app   (or: desolate task app "<what to do>")
+domain you--app: made for you/app.
+next: desolate up you--app   (or: desolate task you--app "<what to do>")
 ```
 
 - `clone` keeps the keys in the root VM, where nothing an agent runs can reach them, and
@@ -77,24 +77,24 @@ next: desolate up app   (or: desolate task app "<what to do>")
   key at all, for a public repository.
 - A **domain** is a trust boundary: its repositories, its network rules, its secrets.
   Workspaces in one domain can see each other's branches; workspaces in different domains
-  share nothing. `clone` makes one per repository, named after it (`app`; `you-app` if
-  `app` is taken by another repository's). Repositories that work together go in one:
-  `desolate clone you/lib --domain app`. `--no-domain` makes none.
+  share nothing. `clone` makes one per repository, named `owner--repo` (`you--app`).
+  Repositories that work together go in one: `desolate clone you/lib --domain you--app`.
+  `--no-domain` makes none.
 
 ## 4. Start a workspace
 
 ```bash
-desolate up app --name agent-1 --branch feature/greet-by-name
+desolate up you--app --name agent-1 --branch feature/greet-by-name
 ```
 
 ```
-workspace app/agent-1 is up
+workspace you--app/agent-1 is up
   you/app  worktree feature/greet-by-name from main  /workspaces/you/app/.worktrees/feature-greet-by-name
   devcontainer up (mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm, user node)
   ...
 the start took 81.9 s: template 63.7 s, asked the root 0.2 s, VM booted 9.6 s, services, checkouts, devcontainer and editor 8.2 s
-next: desolate editor app/agent-1 --open      its editor, in your browser
-      desolate exec app/agent-1 -- <agent>       an agent (or any command), in its devcontainer
+next: desolate editor you--app/agent-1 --open      its editor, in your browser
+      desolate exec you--app/agent-1 -- <agent>       an agent (or any command), in its devcontainer
 ```
 
 A workspace is a VM with a worktree of each repository, on the branch you named. Each
@@ -107,8 +107,8 @@ memory (3 to 8 GiB) and 30 GiB of disk; `desolate bootstrap` says what that come
 Mac. Change it for a domain, or for one workspace:
 
 ```bash
-desolate domain app size --cpus 4 --memory 12g --disk 60g    # its new workspaces
-desolate up app --name big --memory 16g                       # this one
+desolate domain you--app size --cpus 4 --memory 12g --disk 60g    # its new workspaces
+desolate up you--app --name big --memory 16g                       # this one
 ```
 
 What it costs: CPUs are shares of your Mac's time (an idle VM uses almost none); memory is a
@@ -120,7 +120,7 @@ workspace of a domain builds the domain's environment once (the "template" above
 next ones start from it in about 20 seconds.
 
 The workspace has **no credentials and no network** but its own proxy (HTTP and HTTPS to
-named hosts; `desolate domain app net enforce` limits even that to a list).
+named hosts; `desolate domain you--app net enforce` limits even that to a list).
 
 ## 5. Put an agent to work
 
@@ -128,21 +128,21 @@ named hosts; `desolate domain app net enforce` limits even that to a list).
 
 ```bash
 claude setup-token        # on your Mac
-desolate domain app secret set CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization   # paste it
+desolate domain you--app secret set CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization   # paste it
 ```
 
 then, for each task:
 
 ```bash
-desolate task app "Greet the user by name, with a test"     # a workspace, a branch, Claude on it
-desolate agent attach app/greet-the-user-by-name-with-a      # watch it; Ctrl-] lets go, it keeps working
+desolate task you--app "Greet the user by name, with a test"     # a workspace, a branch, Claude on it
+desolate agent attach you--app/greet-the-user-by-name-with-a      # watch it; Ctrl-] lets go, it keeps working
 ```
 
 The workspace holds the name `CLAUDE-OAUTH`, which its proxy replaces on the way to
 api.anthropic.com. desolate installs Claude Code in the domain if the project's devcontainer
 has none. All of it, including several agents at once and agents for labelled GitHub issues:
-[agents.md](agents.md). Any other agent or command: `desolate exec app/agent-1 -- <command>`,
-or the workspace's editor, `desolate editor app/agent-1 --open`.
+[agents.md](agents.md). Any other agent or command: `desolate exec you--app/agent-1 -- <command>`,
+or the workspace's editor, `desolate editor you--app/agent-1 --open`.
 
 ![The workspace's editor: both repositories in one window, and a terminal inside the devcontainer](assets/editor.png)
 
@@ -183,8 +183,8 @@ desolate git you/app --open
 
 ```bash
 desolate fetch                                  # in the git terminal: refresh from GitHub, fetch every remote
-git log --oneline app/feature/greet-by-name    # each domain is a remote
-git push origin app/feature/greet-by-name:refs/heads/feature/greet-by-name
+git log --oneline you--app/feature/greet-by-name    # each domain is a remote
+git push origin you--app/feature/greet-by-name:refs/heads/feature/greet-by-name
 ```
 
 The push waits for you, and the approval opens beside the terminal: what the push names, and
@@ -248,8 +248,8 @@ next `up`.
 ## Removing it
 
 ```bash
-desolate rm app/agent-1          # a workspace's VM (its branches stay)
-desolate rm app                   # a domain and its clones
+desolate rm you--app/agent-1          # a workspace's VM (its branches stay)
+desolate rm you--app                   # a domain and its clones
 desolate destroy                  # every VM; your clones, keys and secrets stay (the next bootstrap puts them back)
 desolate destroy --all            # and ~/.desolate: mirrors, clones, the root's keys
 ```
@@ -263,6 +263,6 @@ Then, on GitHub, delete the deploy keys titled `desolate read (host ...)` and
   ends with a `fix:` line.
 - **A page "cannot be found"**: open it in Chrome or Firefox, not Safari.
 - **An agent says it cannot reach something**: that is usually the point. Its requests, and
-  why each was refused, are in `desolate net log app`.
+  why each was refused, are in `desolate net log you--app`.
 - **A push was refused at approval**, or timed out: it waits two minutes; run it again.
 - What desolate has got wrong before, and how it was found: [`incidents.md`](incidents.md).

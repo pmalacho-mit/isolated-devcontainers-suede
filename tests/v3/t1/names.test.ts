@@ -6,8 +6,8 @@ import { devHostname, editorHostname, isBranch, isCommit, isSlug, parseRepo, roo
 
 describe("T1 names", () => {
   it("a slug has one spelling", () => {
-    for (const good of ["a", "nests-dev", "issue-12", "w1", "0day", "a".repeat(40)]) assert.equal(isSlug(good), true, good);
-    for (const bad of ["", "-a", "a-", "a--b", "A", "a_b", "a.b", "a/b", "a b", "a".repeat(41), "../x", "a\n", 12, null, undefined]) assert.equal(isSlug(bad), false, String(bad));
+    for (const good of ["a", "nests-dev", "issue-12", "w1", "0day", "acme--widgets", "a".repeat(40)]) assert.equal(isSlug(good), true, good);
+    for (const bad of ["", "-a", "a-", "a--b--c", "a---b", "xn--a", "a--", "A", "a_b", "a.b", "a/b", "a b", "a".repeat(41), "../x", "a\n", 12, null, undefined]) assert.equal(isSlug(bad), false, String(bad));
   });
 
   it("a repository is owner/name, and nothing that could leave its directory", () => {
