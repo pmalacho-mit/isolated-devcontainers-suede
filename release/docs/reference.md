@@ -112,7 +112,15 @@ nature.
 **Devcontainers.** A workspace runs its project's own `devcontainer.json`, unchanged, with
 the devcontainer CLI and a docker daemon inside the workspace's VM. Nothing in a spec is
 refused: the VM is the boundary. A spec that does not come up leaves the workspace as the
-VM itself, and `up` says why.
+VM itself, and `up` says why. A compose spec runs as written; its primary service (`service`)
+is where `desolate exec`, the editor and desolate's mounts are, on the VM's paths, and what
+listens in it, and each `forwardPorts` entry written `service:port`, is forwarded at the
+workspace's hostname like a single container's. For Docker inside the devcontainer, prefer
+the `docker-outside-of-docker` feature: the VM is the boundary, so sharing its daemon costs
+nothing, and it shares the VM's images. `docker-in-docker` works in a compose service
+(privileged, with a store of its own); avoid it in a single-container spec, where it shares
+the VM's network and its `docker0` with the VM's own daemon, and both hand out the same
+addresses.
 
 **Secrets.** A workspace never holds a secret's value. It holds the name
 (`export OPENAI_API_KEY=MYAPP-OPENAI-KEY`), and the root puts the value in its place on the
@@ -183,7 +191,7 @@ everything but the hypervisor boundary. "T3" is real VMs on Linux (QEMU through 
 | Egress through each workspace's own proxy, per-domain rules, audit by link | yes | T2, T3 | |
 | Secrets: per domain, substituted for the hosts and headers they name, proven by the upstream's certificate, scrubbed from responses, switched off and on (`--ttl`) | yes | T2, T3 | v2's self-test fixture; "learn" as a timed mode |
 | **P1: the editor**: VSCodium's server in every workspace VM (in the project's devcontainer when it can), its own hostname, v2's gate | yes | T2 (HTTP, WebSocket, a real browser), T3 | desolate's workspace extension ([`carryover/editor/extension`](https://github.com/pmalacho-mit/isolated-devcontainers-suede/blob/main/carryover/editor/extension): mapping `localhost` URLs) is not ported |
-| The project's devcontainer, from its own `devcontainer.json` (features included), inside the workspace VM; `exec` and the editor enter it | yes | T2 (an image, a Dockerfile, a failing spec, no spec, a changed spec); on the M1, a public image with a feature | compose specs start but their ports are not forwarded |
+| The project's devcontainer, from its own `devcontainer.json` (features included), inside the workspace VM; `exec` and the editor enter it | yes | T2 (an image, a Dockerfile, a failing spec, no spec, a changed spec, a compose spec and its ports); on the M1, a public image with a feature, compose with Docker outside and inside | a compose service that is not glibc gets no port relay and no editor |
 | The root UI: a state service in the root that pushes changes, a dashboard at `desolate.localhost` with the diff of an offer as text; no editor in the root | yes | T2 (the spec's three budgets, a real browser), T3 (the state reaches the dashboard) | a side-by-side diff |
 | The Mac backend (`vz`) | yes | **T4 on an M1**: read-only shares and forced egress against root in the VM (TCP, UDP, DNS, ICMP), no path between domains, an offer over a real share, the editor, a secret | |
 | Pushes by the pusher alone (it speaks receive-pack; compare-and-swap from the commit you saw) | yes | T1, T2; against github.com | |

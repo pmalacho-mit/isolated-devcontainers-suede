@@ -82,7 +82,7 @@ describe("T2 section 4.2: the project's devcontainer, inside the workspace's VM"
     forge = stack.env.DESOLATE_FORGE_SPEC!.replace(/^.*@/, "").replace(/:\d+$/, "");
     assert.equal(bootstrap(stack).code, 0);
     for (const [domain, repo] of [["app", "acme/app"], ["built", "acme/built"], ["plain", "acme/plain"]] as const) {
-      assert.equal(stack.quiet("clone", repo).code, 0);
+      assert.equal(stack.quiet("clone", repo, "--no-domain").code, 0);
       assert.equal(stack.quiet("domain", "create", domain).code, 0);
       assert.equal(stack.quiet("domain", domain, "add", "--repo", repo).code, 0);
     }

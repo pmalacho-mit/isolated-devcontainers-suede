@@ -118,13 +118,40 @@ export const bootstrap = async (options: { forge?: string; forgeKnownHosts?: str
     const walled = await backend().exec(ROOT_VM, ["bash", `${guest.release}/root/wall.sh`, "set", ...(backend().isolated ? ["--required"] : []), ...hosts, ...ports], { root: true, timeoutMs: 60_000 });
     if (walled.code !== 0 && backend().isolated) refuse(`the root VM could not be walled off from the Mac's loopback: ${(walled.stderr || walled.stdout).trim().slice(-300)}`, "desolate doctor");
   }
-  // Always: start.sh leaves alone what is running, and starts what a newer desolate added.
-  {
-    await startRootServices();
+  // A root provisioned from an older image than this desolate's (pins.env, a lock or
+  // provision.sh changed since): provisioned again, in place, so what is on its disk (keys,
+  // secrets) stays. Its services then start again on what it now has.
+  if (b.kind !== "fake") {
+    const { imageFingerprint, stampOf } = await import("./image.ts");
+    const info = await b.exec(ROOT_VM, ["cat", "/opt/desolate/image-info"], { timeoutMs: 30_000 });
+    const stamp = stampOf(info.stdout);
+    const fingerprint = imageFingerprint();
+    if (stamp !== fingerprint) {
+      out(`    the root VM was provisioned from ${stamp ? `image ${stamp}` : "an unstamped image"}; this desolate's is ${fingerprint}: provisioning it again, in place (minutes)`);
+      const again = await b.exec(ROOT_VM, ["env", "DESOLATE_IMAGE_KIND=vm", `DESOLATE_IMAGE_FINGERPRINT=${fingerprint}`, "bash", `${guest.release}/image/provision.sh`], { root: true, timeoutMs: 3_600_000 });
+      if (again.code !== 0) refuse(`provisioning the root VM again failed: ${(again.stderr || again.stdout).trim().split("\n").slice(-5).join(" | ")}`, "desolate bootstrap again (provision.sh is idempotent); desolate doctor");
+      await b.exec(ROOT_VM, ["rm", "-f", "/var/lib/desolate-root/code"], { root: true, timeoutMs: 30_000 });
+      step(true, `root VM provisioned again: image ${fingerprint}`);
+    }
+  }
+  const waitKeyring = async () => {
     const up = await waitFor(() => rootctl<{ keyring: boolean }>("ping", {}, { quiet: true, timeoutMs: 30_000 }).then((r) => r.keyring), 30_000, 500);
     if (!up) refuse("the root's keyring did not come up", "desolate doctor");
-  }
+  };
+  // Always: start.sh leaves alone what is running, and starts what a newer desolate added.
+  await startRootServices();
+  await waitKeyring();
   step(!wasUp, "root services: keyring");
+  // What a `destroy` kept of the root before (carry.ts): into this root, if it is new.
+  {
+    const { restoreRootState } = await import("./carry.ts");
+    const held = await rootctl<unknown[]>("keys.list", {}, { quiet: true });
+    if (await restoreRootState(out, held.length > 0)) {
+      await startRootServices();
+      await waitKeyring();
+      changed.push("root state put back");
+    }
+  }
   if (configChanged || !wasUp) await rootctl("forge.set", { forge }, { quiet: true });
   // Every time: the pusher's copy is root's, and the host's word (stack.ts, pinForge).
   await pinForge(forge);
@@ -196,6 +223,32 @@ export const doctor = async (out: Out, json = false): Promise<number> => {
   }
   if (asked) checks.push(...asked);
   else for (const name of rootChecks) checks.push({ name, ok: false, detail: "could not be asked: the root does not answer", fix: "desolate bootstrap" });
+  // The code the root runs is this desolate's: its share of the release is this folder. A
+  // VM keeps the folder it was made with, so a stack made from another checkout (moved, or
+  // a second clone) runs that one's code whatever this one says.
+  if (rootUp) {
+    const { codeFiles, differing } = await import("./image.ts");
+    const sums = await b.exec(ROOT_VM, ["bash", "-c", 'cd "$1" && shift && sha256sum -- "$@" 2>/dev/null; true', "_", guest.release, ...codeFiles()], { timeoutMs: 60_000 }).catch(() => null);
+    const off = sums ? differing(sums.stdout) : null;
+    checks.push({
+      name: "root: runs this desolate's code", ok: off !== null && off.length === 0,
+      detail: off === null ? "could not be asked" : off.length === 0 ? `its share of the release is ${RELEASE_DIR}` : `${off.length} file(s) differ from ${RELEASE_DIR} (${off.slice(0, 3).join(", ")}${off.length > 3 ? ", ..." : ""}): its VMs were made from another checkout of desolate`,
+      fix: "run desolate from the checkout the stack was made from; or, to move it to this one: desolate destroy (it keeps keys, secrets and clones), then desolate bootstrap from here",
+    });
+  }
+  // The editors' and dashboard's port is the daemon's, not another program's (another stack's
+  // daemon, say): if it is not, every address printed opens someone else's server.
+  {
+    const { editorPortError } = await import("./daemon.ts");
+    const { editorHostPort } = await import("../shared/names.ts");
+    const port = editorHostPort();
+    const error = await editorPortError().catch(() => null);
+    checks.push({
+      name: "host daemon holds its port", ok: error === "",
+      detail: error === null ? "the host daemon does not answer" : error === "" ? `127.0.0.1:${port}: the dashboard, the editors and the approval page` : `${error}: every address this stack prints would open that program, not this stack's daemon`,
+      fix: error === null ? "desolate bootstrap" : `stop what holds port ${port}, or give this stack another: DESOLATE_EDITOR_PORT=<port> desolate bootstrap`,
+    });
+  }
   // The Mac's loopback, from the root's own user, asked by trying: a listener of doctor's own
   // on the Mac's 127.0.0.1 (so the port certainly answers there), tried at both addresses
   // Lima's network maps to the Mac; and the wall itself, as root.
@@ -246,6 +299,16 @@ export const down = async (out: Out) => {
  *  should not be (an empty list is the passing answer; the test asserts it). */
 export const destroy = async (options: { all: boolean }, out: Out): Promise<string[]> => {
   const b = backend();
+  // Without --all the home stays, and so must what the root holds that is not in it
+  // (carry.ts). A root whose state could not be kept is not removed.
+  if (!options.all) {
+    const { keepRootState } = await import("./carry.ts");
+    try {
+      await keepRootState(out);
+    } catch (error) {
+      refuse(`nothing was removed: ${(error as Error).message}`, "desolate doctor; to remove everything anyway, home and keys included: desolate destroy --all");
+    }
+  }
   const { stopForwarder } = await import("./daemon.ts");
   await stopForwarder();
   for (const vm of await b.list()) {

@@ -185,30 +185,94 @@ Dummy repositories for demos: `mitdesolate/desolate-promo-app` (LFS, a devcontai
 git-lfs feature, a test) and `mitdesolate/desolate-promo-lib`. The recording script is
 `tests/v3/demo/promo/promo.ts`; the approval-only one is `tests/v3/demo/record-approval.ts`.
 
+### 2f. Compose, and Docker inside the devcontainer (2026-11-13, an agent on the M1)
+
+`mac/compose-docker`. A real repository, `mitdesolate/desolate-compose-demo` (private): a
+compose devcontainer (an app service on `javascript-node:22`, and Postgres), the
+`docker-outside-of-docker` feature on `main`, `docker-in-docker` on `dind`, a single container
+with `docker-in-docker` on `dind-single`; a web app on 8000 and a test that talks to the db.
+
+What was broken, on `v3` as it was (the spec came up; nothing in it worked as a workspace):
+- **git in the service**: "unable to normalize alternate object path": the domain clone
+  borrows the mirror by its absolute path, and a compose service got none of desolate's
+  mounts. Nor `desolate`, `/desolate/status`, the outbox, the caches;
+- **the folder** was the project's (`/workspaces/<repo>`), not the VM's path, so a worktree's
+  `.git` (an absolute VM path) and the multi-checkout `.code-workspace` did not resolve;
+- **Docker outside of Docker bind mounts**: `docker run -v "$PWD:/src"` from the service
+  named a path the VM does not have, and docker made it, empty, in the domain's share on
+  the Mac (`domains/<d>/repos/<repo>`);
+- **ports**: a server in the app service, and `forwardPorts` (`db:5432`), were not
+  forwarded; only what a service published (docker's proxy in the VM) was;
+- **the editor** stayed in the VM.
+
+What changed (`workspace/devcontainer.ts`, `svcnet.ts`, `bridge.ts`, `wsd.ts`, `editor.sh`,
+`enter.sh`):
+- the primary service gets desolate's mounts, as a single container does, and the VM's
+  `/workspaces` at `/workspaces`, over the project's own mount there (compose merges a
+  service's volumes by target); the folder is the checkout's own path. The CLI drops
+  `readonly` from a compose mount (it writes `source:target`), so the mode rides in the
+  target (`:ro`); T2 checks the mirrors refuse root's write beside the cache taking it;
+- `svcnet.ts` runs in the primary service (the editor's node, as the VM's user) on a unix
+  socket in `/run/desolate`; `bridge.ts` in wsd mirrors each of the service's listeners,
+  and each `forwardPorts` `service:port`, onto the VM's 127.0.0.1, where the forwarder
+  finds them like any listener (so raw-port and reservation rules are unchanged). A
+  `service:port` is connected from inside the app's network, by name. Docker's embedded
+  resolver (127.0.0.11) is not a listener;
+- the editor runs in the primary service when it is glibc and the relay is up; the gate
+  stays in the VM and reaches the server through the same mirror.
+
+Measured on the M1 (vz, 4 CPUs and 8 GiB per workspace):
+- first `up` of the demo (template built): **114.5 s** (template 88.3 s: pulls of the app
+  image, Postgres and the feature, through the workspace's proxy); the same on `v3` before
+  the change, 122.4 s;
+- second `up`, from the template: **27.8 s** (VM boot 10.8 s; services, checkouts,
+  devcontainer and editor 16.5 s); `stop` then `start`: 24 s;
+- from the Mac: `:8000` served "visit number 3, counted in postgres"; `:5432` answered a
+  Postgres SSLRequest; a sibling container started from the service (`./sibling.sh 8081`)
+  served the checkout, through a bind mount of `$PWD`; `npm test` 2 of 2;
+- service to service on port 80 is not caught by the VM's redirect (measured: 200 by name
+  and by address).
+
+**Docker outside of Docker or Docker in Docker: outside.** Both work, ports included. The
+workspace VM is the boundary, so a devcontainer that drives the VM's daemon gives up
+nothing; inside costs, measured on the same VM:
+- a privileged service, and a second dockerd and containerd in it (131 MB resident);
+- a second image store, in a volume, that shares nothing with the VM's: what the template
+  pulled (3.1 GB of images there) is not in it, and every image the work uses is pulled
+  again (93 MB, of the two the test used);
+- first `up` on the DooD template: 61.2 s for the devcontainer (the feature built in the
+  clone), against 16.5 s;
+- the same per operation, once running: pull 2.1 s against 3.3 s, `docker run` 0.50 s
+  against 0.52 s, a one-step build 0.67 s against 0.84 s, `stop`/`start` 22 s against 24 s;
+- a nested container's published port is in the service's network, so it reaches the Mac
+  only through the relay (it does); a sibling's is docker's own listener in the VM.
+- **docker-in-docker in a single-container spec is worse than that**: desolate runs a
+  single container on the VM's network, so the nested daemon shares the VM's network
+  namespace and its `docker0`, and both daemons hand out the same addresses: measured,
+  `172.17.0.2` and `172.17.0.3` each given twice, once by each daemon, on one bridge (the
+  nested one also writes iptables-legacy rules beside the VM's nftables). It ran, and its
+  published port was forwarded, but two containers with one address is a fault waiting.
+  Docker-outside-of-docker has none of this.
+
+Not done: a compose service that is not glibc (alpine) gets no relay, so neither its own
+ports nor `service:port` forwards nor the editor; `up` says so (the VM's docker-proxy
+still publishes `ports:`). The other services get no desolate mounts (by design). The
+template keeps docker volumes (Postgres' data directory as the builder left it, a DinD
+store), as it keeps images.
+
 ### What has never been run
 
-- **The `vz` backend.** `release/host/vm/lima.ts` was written from the M1's Phase 0 results
-  and from the `qemu` backend that does run. Expect to fix things on first contact
-  (section 4).
-- **Anything on arm64.**
-- **The devcontainer with a real project.** The tests use a small image made in the VM.
-  Features, compose, and anything that pulls from a registry have not run. On the Mac the
-  first `up` of a real project will pull through the workspace's proxy: watch
-  `desolate net log <domain>`.
-- **The dashboard on the Mac.** Its budgets are met on the fake backend, where reaching
-  into a VM is a `docker exec`. On the Mac it is an ssh session through Lima; measure.
-- **The Touch ID approver** (opt-in: `DESOLATE_APPROVER=touchid`).
-  `release/host/approver/touchid.swift` was written on Linux and has never been compiled.
-  The default `terminal` approver makes the same kind of signature and is what every test
-  uses.
-- **The checks that need Linux's `/proc`, on the Mac.** They run in the root VM, which is
-  Linux everywhere, so this is one function: `readPlain` in `release/shared/status.ts`
-  takes its other branch when the *host* reads a status file. T1 `status` covers that
-  branch only when it is run on a Mac: run T1 there first.
-- **The editor on arm64**, and in a browser other than headless Chrome.
-- **GitHub.** Every test uses the stand-in forge. `desolate clone` against GitHub (registering
-  deploy keys with `gh`) is written and untested.
-- **`release/image/Dockerfile`.** The sandbox cannot pull `ubuntu:24.04`.
+(Revised 2026-11-13. The vz backend, arm64, a real devcontainer with a feature, the dashboard
+on the Mac, the image's Dockerfile, and `clone` and pushes against GitHub have all run on the
+M1 since this list was first written: sections 2d and 2e.)
+
+- **The Touch ID approver** (opt-in: `DESOLATE_APPROVER=touchid`). It compiles on the M1;
+  running it makes a Secure Enclave key and asks for a fingerprint, which is a person's to do.
+  The default `terminal` approver and the approval page are what every test uses.
+- **The editor in a browser other than Chrome** (Safari cannot open `*.localhost` names).
+- **Claude Code with a real token.** The way it is wired (a domain secret, substituted by
+  the workspace's proxy on the way to api.anthropic.com) is exercised with a stand-in token
+  that Anthropic refuses; a real subscription's first run is the owner's.
 
 ## 3. What is missing that matters most
 
@@ -293,8 +357,8 @@ Each item names where to start. The order is by what unblocks use.
    root's), and clone workspaces from its disk (C3). Then the pull-through registry (C2)
    and the domain's package caches (C4). Freeze the environment when the domain is made
    and pin its features then (`carryover/devcontainer/feature-pins.ts`).
-   Also here: compose specs (forward their services' ports; test them), and the domain's
-   CA for tools that ignore the environment (`carryover/proxy/install-ca.sh`).
+   Also here: the domain's CA for tools that ignore the environment
+   (`carryover/proxy/install-ca.sh`). (Compose specs: done, section 2f.)
 2. **The workspace-side extension** (`carryover/editor/extension`), which is what maps
    `localhost` URLs to the workspace's hostname (section 4.4). And v2's self-test fixture
    for secrets.

@@ -1216,6 +1216,24 @@ caches (C2, C4), so each workspace builds its own environment; compose specs' po
 forwarded. Features and compose are untested: the sandbox has no registry. The tests build
 their image inside the VM from the VM's own files (`tests/v3/lib/devimage.sh`).
 
+Since (2026-11-13, on the M1; `HANDOFF.md` 2f): templates and caches exist, and a compose
+spec's primary service is given what a single container is given, but for the network. Its
+network stays its own, because its services find each other by name; the VM reaches into it
+through a relay in that service (`svcnet.ts`, on a unix socket in `/run/desolate`), and wsd
+mirrors its listeners and its `service:port` forwards onto the VM's loopback (`bridge.ts`).
+That changes no boundary: the service, the relay and wsd are all the domain's, the relay
+answers only the VM's user, and the forwarder still decides on the host what reaches the
+Mac, by the same rules. Considered and not taken: putting the primary service on the VM's
+network (it loses its neighbours' names), and connecting to service addresses from the VM
+(a server on the service's loopback, Vite's default, is unreachable that way, and addresses
+change when a service is made again). Docker inside the devcontainer: docker-outside-of-docker
+is the one to recommend; the VM is the boundary, so the devcontainer driving the VM's daemon
+gives up nothing that docker-in-docker would keep, and docker-in-docker costs a privileged
+service, a second daemon and a second image store (measured in `HANDOFF.md` 2f). In a
+single-container spec it is worse: on the VM's network the nested daemon shares the VM's
+`docker0` and hands out the addresses the VM's daemon does (measured: the same two
+addresses given twice).
+
 ## The root UI: a state service that is told, and a dashboard that asks for nothing
 
 Section 4.8's requirements, and how each came out:

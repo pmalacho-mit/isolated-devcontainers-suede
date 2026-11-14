@@ -55,18 +55,18 @@ doctor: all checks passed.
 If macOS asks whether `limactl` may accept incoming network connections, **click Deny**:
 desolate listens only on your Mac's loopback ([why](../README.md#on-a-mac-if-macos-asks-about-limactl-and-incoming-connections)).
 
-## 3. Clone a repository, and make a domain
+## 3. Clone a repository: it is a domain
 
 ```bash
 desolate clone you/app                        # makes a read and a write deploy key, registers them with gh
-desolate clone you/lib
-desolate domain create acme --repo you/app --repo you/lib
 ```
 
 ```
   read key: registered
   write key: registered (it asks you before every push)
 cloned you/app: 2 branch(es), default main, 2 LFS object(s); pushable.
+domain app: made for you/app.
+next: desolate up app   (or: desolate task app "<what to do>")
 ```
 
 - `clone` keeps the keys in the root VM, where nothing an agent runs can reach them, and
@@ -77,23 +77,24 @@ cloned you/app: 2 branch(es), default main, 2 LFS object(s); pushable.
   key at all, for a public repository.
 - A **domain** is a trust boundary: its repositories, its network rules, its secrets.
   Workspaces in one domain can see each other's branches; workspaces in different domains
-  share nothing.
+  share nothing. `clone` makes one per repository, named after it (`app`; `you-app` if
+  `app` is taken by another repository's). Repositories that work together go in one:
+  `desolate clone you/lib --domain app`. `--no-domain` makes none.
 
 ## 4. Start a workspace
 
 ```bash
-desolate up acme --name agent-1 --branch feature/greet-by-name
+desolate up app --name agent-1 --branch feature/greet-by-name
 ```
 
 ```
-workspace acme/agent-1 is up
+workspace app/agent-1 is up
   you/app  worktree feature/greet-by-name from main  /workspaces/you/app/.worktrees/feature-greet-by-name
-  you/lib  worktree feature/greet-by-name from main  /workspaces/you/lib/.worktrees/feature-greet-by-name
   devcontainer up (mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm, user node)
   ...
 the start took 81.9 s: template 63.7 s, asked the root 0.2 s, VM booted 9.6 s, services, checkouts, devcontainer and editor 8.2 s
-next: desolate editor acme/agent-1 --open      its editor, in your browser
-      desolate exec acme/agent-1 -- <agent>       an agent (or any command), in its devcontainer
+next: desolate editor app/agent-1 --open      its editor, in your browser
+      desolate exec app/agent-1 -- <agent>       an agent (or any command), in its devcontainer
 ```
 
 A workspace is a VM with a worktree of each repository, on the branch you named. Each
@@ -106,8 +107,8 @@ memory (3 to 8 GiB) and 30 GiB of disk; `desolate bootstrap` says what that come
 Mac. Change it for a domain, or for one workspace:
 
 ```bash
-desolate domain acme size --cpus 4 --memory 12g --disk 60g    # its new workspaces
-desolate up acme --name big --memory 16g                       # this one
+desolate domain app size --cpus 4 --memory 12g --disk 60g    # its new workspaces
+desolate up app --name big --memory 16g                       # this one
 ```
 
 What it costs: CPUs are shares of your Mac's time (an idle VM uses almost none); memory is a
@@ -119,30 +120,29 @@ workspace of a domain builds the domain's environment once (the "template" above
 next ones start from it in about 20 seconds.
 
 The workspace has **no credentials and no network** but its own proxy (HTTP and HTTPS to
-named hosts; `desolate domain acme net enforce` limits even that to a list).
+named hosts; `desolate domain app net enforce` limits even that to a list).
 
 ## 5. Put an agent to work
 
-```bash
-desolate editor acme/agent-1 --open          # VSCodium, running in the VM, in a browser tab
-desolate exec acme/agent-1 -- <an agent CLI> # it runs in the devcontainer, in the first checkout
-```
-
-**Claude Code, for example**, kept running so you can attach to it from your own terminal
-(no tmux: your terminal's scrollback and copy work):
+**Claude Code**, once (a subscription token, held in the root VM and never in a workspace):
 
 ```bash
-claude setup-token        # on your Mac, once: a subscription token
-desolate domain acme secret set CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization   # paste it
-desolate agent start acme/agent-1 --name claude -- \
-  env CLAUDE_CODE_OAUTH_TOKEN=CLAUDE-OAUTH claude --permission-mode auto "Greet by name"
-desolate agent attach acme/agent-1 --name claude      # Ctrl-] detaches; it keeps running
+claude setup-token        # on your Mac
+desolate domain app secret set CLAUDE-OAUTH --hosts api.anthropic.com --headers authorization   # paste it
 ```
 
-The token never enters the workspace: it holds the name `CLAUDE-OAUTH`, which its proxy
-replaces on the way to api.anthropic.com. Claude Code must be in the project's environment
-(the devcontainer feature `ghcr.io/anthropics/devcontainer-features/claude-code:1`). More,
-including agents for labelled GitHub issues, in parallel: [agents.md](agents.md).
+then, for each task:
+
+```bash
+desolate task app "Greet the user by name, with a test"     # a workspace, a branch, Claude on it
+desolate agent attach app/greet-the-user-by-name-with-a      # watch it; Ctrl-] lets go, it keeps working
+```
+
+The workspace holds the name `CLAUDE-OAUTH`, which its proxy replaces on the way to
+api.anthropic.com. desolate installs Claude Code in the domain if the project's devcontainer
+has none. All of it, including several agents at once and agents for labelled GitHub issues:
+[agents.md](agents.md). Any other agent or command: `desolate exec app/agent-1 -- <command>`,
+or the workspace's editor, `desolate editor app/agent-1 --open`.
 
 ![The workspace's editor: both repositories in one window, and a terminal inside the devcontainer](assets/editor.png)
 
@@ -183,8 +183,8 @@ desolate git you/app --open
 
 ```bash
 desolate fetch                                  # in the git terminal: refresh from GitHub, fetch every remote
-git log --oneline acme/feature/greet-by-name    # each domain is a remote
-git push origin acme/feature/greet-by-name:refs/heads/feature/greet-by-name
+git log --oneline app/feature/greet-by-name    # each domain is a remote
+git push origin app/feature/greet-by-name:refs/heads/feature/greet-by-name
 ```
 
 The push waits for you, and the approval opens beside the terminal: what the push names, and
@@ -215,13 +215,42 @@ every branch desolate pushes.
 | `desolate doctor` | every check, with what to do about each that fails |
 | `desolate down` | stop every VM and the daemon; remove nothing |
 | `desolate bootstrap`, then `desolate start <domain>/<workspace>` | bring it back after `down` or a restart of the Mac |
+| `git pull`, then `desolate bootstrap` | upgrade desolate (see [Upgrading desolate](#upgrading-desolate)) |
+
+## Upgrading desolate
+
+```bash
+git -C <your desolate checkout> pull
+desolate bootstrap
+```
+
+That is the whole of it; nothing of yours is touched. `bootstrap` restarts the host daemon
+and the root's services on the new code. When the new desolate changes the VMs' image
+(`pins.env`, a lock, `image/provision.sh`), it also provisions the base and the root VM
+again, in place: a few minutes, once, and the root's keys and secrets stay where they are.
+The git VM is made again (your clones in it are on your Mac), and a domain's template on its
+next `up`.
+
+- **Running workspaces keep going** on the code and tools they started with. `desolate stop`
+  then `desolate start` gives one the new code. One made before an image change keeps its
+  older tools until it is made again: `desolate rm <d>/<w>`, then `desolate up <d> --name <w>
+  --branch <its branch>` (its checkouts, committed or not, are on your Mac and are kept).
+- **One checkout per stack.** The VMs run desolate from the folder they were made from. Run
+  desolate from that folder; `desolate doctor` fails if the stack's VMs run another
+  checkout's code. To move a stack to another checkout: `desolate destroy`, then
+  `desolate bootstrap` from the new one.
+- **`desolate destroy` keeps everything but the VMs**, keys included: the root's keys,
+  repository list, secrets and network rules are taken out of the root VM first
+  (`~/.desolate/root-kept`), and the next `bootstrap` puts them into the new root and
+  deletes that copy. `desolate start <d>/<w>` then makes a workspace's VM again, on its
+  checkouts.
 
 ## Removing it
 
 ```bash
-desolate rm acme/agent-1          # a workspace's VM (its branches stay)
-desolate rm acme                  # a domain and its clones
-desolate destroy                  # every VM; your clones and keys stay in ~/.desolate
+desolate rm app/agent-1          # a workspace's VM (its branches stay)
+desolate rm app                   # a domain and its clones
+desolate destroy                  # every VM; your clones, keys and secrets stay (the next bootstrap puts them back)
 desolate destroy --all            # and ~/.desolate: mirrors, clones, the root's keys
 ```
 
@@ -234,6 +263,6 @@ Then, on GitHub, delete the deploy keys titled `desolate read (host ...)` and
   ends with a `fix:` line.
 - **A page "cannot be found"**: open it in Chrome or Firefox, not Safari.
 - **An agent says it cannot reach something**: that is usually the point. Its requests, and
-  why each was refused, are in `desolate net log acme`.
+  why each was refused, are in `desolate net log app`.
 - **A push was refused at approval**, or timed out: it waits two minutes; run it again.
 - What desolate has got wrong before, and how it was found: [`incidents.md`](incidents.md).

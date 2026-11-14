@@ -162,7 +162,7 @@ export const pinForge = async (forge: unknown) => {
  *  the request (a value among it) on stdin (root/proxy/secret-store.ts). Then the root's
  *  user, which never sees a value, starts or stops the domain's secrets proxy and tells its
  *  workspaces the names. Returns the names, hosts and switches. */
-export const changeSecrets = async <T>(domain: string, op: "set" | "switch" | "remove", input: Record<string, unknown>): Promise<T> => {
+export const changeSecrets = async <T>(domain: string, op: "set" | "switch" | "remove" | "copy", input: Record<string, unknown>): Promise<T> => {
   await ensureProxyUser(domain);
   const result = await backend().exec(ROOT_VM, [...NODE, `${guest.release}/root/proxy/secret-store.ts`, domain, op], { root: true, input: JSON.stringify(input), timeoutMs: 60_000 });
   let reply: { ok: boolean; error?: string; fix?: string };

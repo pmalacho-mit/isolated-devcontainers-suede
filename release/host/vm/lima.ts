@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { run } from "../../shared/run.ts";
 import type { RunResult } from "../../shared/run.ts";
 import { readJson, writeJson } from "../../shared/json.ts";
+import { imageFingerprint } from "../image.ts";
 import { INSTANCE, paths, RELEASE_DIR } from "../paths.ts";
 import { duplexOf, parseSs } from "./fake.ts";
 import { socatAddress } from "./types.ts";
@@ -35,6 +36,16 @@ export const BASE_DISK_GIB = 30;
 const LIMACTL = process.env.DESOLATE_LIMACTL ?? "limactl";
 const PREFIX = `dsl-${INSTANCE}-`;
 const BASE = `${PREFIX}base`;
+/** The image the base was provisioned from (host/image.ts), beside Lima's files for it:
+ *  read without booting it. */
+const STAMP = "desolate-image";
+const baseStamp = () => {
+  try {
+    return /^[0-9a-f]{16}$/.exec(fs.readFileSync(path.join(LIMA_HOME, BASE, STAMP), "utf8").trim())?.[0] ?? null;
+  } catch {
+    return null;
+  }
+};
 /** What the guest connects to for its link, per backend. */
 const QEMU_LINK = "tcp:192.168.5.100:15000";
 
@@ -279,13 +290,44 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       for (const vm of await backend.list()) if (vm.status === "running" && !forwardsClosed(vm.name)) open.push(vm.labels.title ?? vm.name);
       checks.push({ name: "VMs forward nothing by themselves", ok: open.length === 0, detail: open.length === 0 ? "every running VM refuses Lima's own forwarding" : `${open.join(", ")} still forward their loopback listeners onto this Mac`, fix: "restart each: desolate stop <domain>/<workspace> && desolate start <domain>/<workspace> (the root VM: desolate down, then desolate bootstrap)" });
       const haveBase = fs.existsSync(path.join(LIMA_HOME, BASE, "lima.yaml"));
-      checks.push({ name: "base image", ok: haveBase, detail: haveBase ? `the base VM ${BASE}` : "no base VM yet", fix: `desolate bootstrap --backend ${kind}` });
+      const stamp = baseStamp();
+      const current = haveBase && stamp === imageFingerprint();
+      checks.push({
+        name: "base image", ok: current,
+        detail: !haveBase ? "no base VM yet" : current ? `the base VM ${BASE}, provisioned from this desolate's image (${stamp})` : `the base VM ${BASE} was provisioned from ${stamp ? `another image (${stamp})` : "an image older than image stamps"}; this desolate's is ${imageFingerprint()}`,
+        fix: `desolate bootstrap${haveBase ? " (it provisions the base again, in place: minutes, once)" : ` --backend ${kind}`}`,
+      });
       return checks;
+    },
+
+    baseStale() {
+      if (!fs.existsSync(path.join(LIMA_HOME, BASE, "lima.yaml"))) return null;
+      const stamp = baseStamp();
+      return stamp === imageFingerprint() ? null : `the base VM was provisioned from ${stamp ? `image ${stamp}` : "an unstamped image"}, and this desolate's is ${imageFingerprint()}`;
     },
 
     async ensureImage(log) {
       fs.mkdirSync(LIMA_HOME, { recursive: true });
-      if (fs.existsSync(path.join(LIMA_HOME, BASE, "lima.yaml"))) return log(`base VM ${BASE} present`);
+      const fingerprint = imageFingerprint();
+      const provision = async (what: string) => {
+        log(`provisioning it${what} (packages, node, docker, the editor server): several minutes`);
+        const provisioned = await lima(["shell", "--workdir", "/", BASE, "sudo", "env", "DESOLATE_IMAGE_KIND=vm", `DESOLATE_IMAGE_FINGERPRINT=${fingerprint}`, "bash", "/desolate/release/image/provision.sh"], { timeoutMs: 3_600_000, inheritStderr: true });
+        return provisioned;
+      };
+      if (fs.existsSync(path.join(LIMA_HOME, BASE, "lima.yaml"))) {
+        const stamp = baseStamp();
+        if (stamp === fingerprint) return log(`base VM ${BASE} present, image ${fingerprint}`);
+        // Older than this desolate (pins.env, a lock or provision.sh changed since it was
+        // made): provisioned again in place. provision.sh is idempotent; what it installs
+        // changes, nothing of the stack's lives in the base.
+        log(`base VM ${BASE} was provisioned from ${stamp ? `image ${stamp}` : "an unstamped image"}; this desolate's is ${fingerprint}`);
+        await limaOk(["start", BASE, "--timeout", "10m"], { timeoutMs: 900_000 });
+        const again = await provision(" again");
+        await limaOk(["stop", BASE], { timeoutMs: 300_000 });
+        if (again.code !== 0) throw new Error(`provisioning the base VM again failed (it is left as it was, still older): ${again.stdout.trim().split("\n").slice(-5).join(" | ")}`);
+        fs.writeFileSync(path.join(LIMA_HOME, BASE, STAMP), `${fingerprint}\n`);
+        return;
+      }
       const file = path.join(LIMA_HOME, "base.yaml");
       if (kind === "qemu") {
         for (const need of ["disk.raw", "vmlinuz", "initrd"])
@@ -301,13 +343,13 @@ export const limaBackend = (kind: "qemu" | "vz"): Backend => {
       fs.writeFileSync(file, baseYaml());
       log("creating the base VM from Lima's pinned Ubuntu image (downloads it the first time)");
       await limaOk(["start", `--name=${BASE}`, "--timeout", "20m", file], { timeoutMs: 1_500_000 });
-      log("provisioning it (packages, node, docker, the editor server): several minutes, once");
-      const provisioned = await lima(["shell", "--workdir", "/", BASE, "sudo", "env", "DESOLATE_IMAGE_KIND=vm", "bash", "/desolate/release/image/provision.sh"], { timeoutMs: 3_600_000, inheritStderr: true });
+      const provisioned = await provision("");
       if (provisioned.code !== 0) {
         await lima(["delete", "-f", BASE]);
         throw new Error(`provisioning the base VM failed: ${provisioned.stdout.trim().split("\n").slice(-5).join(" | ")}`);
       }
       await limaOk(["stop", BASE], { timeoutMs: 300_000 });
+      fs.writeFileSync(path.join(LIMA_HOME, BASE, STAMP), `${fingerprint}\n`);
     },
 
     async create(spec) {

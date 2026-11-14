@@ -173,6 +173,10 @@ export const up = async (domain: string | undefined, options: { name?: string; c
   };
   const started = Date.now();
   const b = backend();
+  // A workspace is a clone of the base (or of a template made from it): one older than this
+  // desolate's image would give it other tools than this desolate expects.
+  const stale = b.baseStale?.() ?? null;
+  if (stale) refuse(`${stale}: a workspace made now would run the older tools`, "desolate bootstrap (it provisions the base again: minutes, once)");
   let editorDown: string | null = null;
   let devcontainer = "";
   const view = await rootctl<DomainView>("domain.show", { slug: domain }, { quiet: true });
@@ -307,7 +311,14 @@ export const start = async (target: string | undefined, out: Out) => {
   const b = backend();
   const started = Date.now();
   const info = await b.info(w.vm);
-  if (info.status === "missing") refuse(`the VM of ${w.domain}/${w.workspace} is gone`, `desolate rm ${w.domain}/${w.workspace} && desolate up ${w.domain} --name ${w.workspace}`);
+  if (info.status === "missing") {
+    // Its VM is gone (a destroy, or a VM removed by hand), its record and checkouts are not:
+    // the checkouts are in the domain's clones on the host. Made again, on the same ones.
+    out(`the VM of ${w.domain}/${w.workspace} is gone; making it again, on the same checkouts (they are on this Mac, and kept)`);
+    const checkouts = w.checkouts.map((c) => (c.kind === "main" ? `${c.repo}=main` : `${c.repo}=worktree:${c.branch}`));
+    await remove(`${w.domain}/${w.workspace}`, () => {});
+    return up(w.domain, { name: w.workspace, checkouts, fetch: false, size: w.size ?? undefined }, out, false);
+  }
   if (info.status === "suspended") await b.resume(w.vm);
   else if (info.status !== "running") await b.start(w.vm);
   const { devcontainer, editorDown } = await startServices(w);

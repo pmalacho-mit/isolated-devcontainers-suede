@@ -14,8 +14,8 @@ STATE=/run/desolate/devcontainer.json
 if [ "$VM" = 0 ] && [ -s "$STATE" ] && [ "$(jq -r .state "$STATE" 2>/dev/null)" = up ]; then
   ID=$(jq -r .containerId "$STATE")
   if [ "$(docker inspect -f '{{.State.Running}}' "$ID" 2>/dev/null)" = true ]; then
-    # A compose service sees the project where its own spec mounted it, not at the VM's path.
-    [ "$(jq -r .compose "$STATE")" = true ] && DIR=$(jq -r .folder "$STATE")
+    # (A compose service has the VM's /workspaces at the same path, as a single container
+    # does: devcontainer.ts.)
     # The environment the spec describes (remoteEnv, the user's own shell environment), as
     # `devcontainer exec` gives it: worked out once, when the container came up
     # (devcontainer.ts), and given here to `docker exec`, which takes 20 ms where the CLI

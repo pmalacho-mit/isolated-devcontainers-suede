@@ -28,7 +28,7 @@ const browser = await launch(9367, 1280, 800);
 const clips: string[] = [];
 try {
   if (bootstrap(stack).code !== 0) throw new Error("bootstrap failed");
-  for (const step of [["clone", "acme/app"], ["domain", "create", "web", "--repo", "acme/app"], ["up", "web", "--name", "one", "--branch", "typed-and-tested"]]) {
+  for (const step of [["clone", "acme/app", "--no-domain"], ["domain", "create", "web", "--repo", "acme/app"], ["up", "web", "--name", "one", "--branch", "typed-and-tested"]]) {
     const done = stack.quiet(...step);
     if (done.code !== 0) throw new Error(`${step.join(" ")}: ${done.stderr}`);
   }

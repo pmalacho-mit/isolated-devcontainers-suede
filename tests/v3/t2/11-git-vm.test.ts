@@ -51,7 +51,7 @@ describe("T2 the git VM: git in a browser tab, pushes through the approval page"
       git(dir, "commit", "--quiet", "-m", "seed");
     });
     assert.equal(bootstrap(stack).code, 0);
-    assert.equal(stack.quiet("clone", "acme/widgets").code, 0);
+    assert.equal(stack.quiet("clone", "acme/widgets", "--no-domain").code, 0);
   });
   after(() => stack.destroy());
 

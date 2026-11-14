@@ -130,7 +130,7 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
     // desolate domain <d> secret [list] | set <NAME> --hosts a,b [--headers h,...] | rm <NAME>
     const [, , action, name] = args;
     type Listed = { name: string; hosts: string[]; headers: string[] | null; on: boolean; secondsLeft?: number };
-    const usage = `desolate domain ${first} secret list | set <NAME> --hosts <host>[,...] [--headers <header>[,...]] | off <NAME> | on <NAME> [--ttl 30m] | rm <NAME>`;
+    const usage = `desolate domain ${first} secret list | set <NAME> --hosts <host>[,...] [--headers <header>[,...]] | copy <NAME> --from <domain> | off <NAME> | on <NAME> [--ttl 30m] | rm <NAME>`;
     const left = (seconds: number) => (seconds >= 7200 ? `${Math.round(seconds / 3600)} h` : seconds >= 120 ? `${Math.round(seconds / 60)} min` : `${seconds} s`);
     const stateOf = (s: Listed) => (!s.on ? "OFF" : s.secondsLeft !== undefined ? `on for ${left(s.secondsLeft)} more` : "on");
     const csv = (value: unknown) => (typeof value === "string" ? value.split(",").map((part) => part.trim()).filter(Boolean) : []);
@@ -145,6 +145,14 @@ export const domainCommand = async (args: string[], values: Record<string, unkno
       const switched = (await changeSecrets<Listed[]>(first, "switch", { name, on: action === "on", ttlSeconds })).find((s) => s.name === name)!;
       if (json) return out(JSON.stringify(switched));
       return out(switched.on ? `${name} is ${stateOf(switched)}${switched.secondsLeft !== undefined ? ", then off" : ""}.` : `${name} is OFF: its value goes nowhere, and a request that carries its name toward ${switched.hosts.join(", ")} is refused. To switch it on: desolate domain ${first} secret on ${name} [--ttl 30m]`);
+    }
+    if (action === "copy") {
+      // desolate domain <d> secret copy <NAME> --from <other>: the value stays in the root.
+      if (!name || typeof values.from !== "string") refuse("copy which secret, from which domain?", `desolate domain ${first} secret copy <NAME> --from <domain>`, EXIT.usage);
+      const copied = (await changeSecrets<Listed[]>(first, "copy", { name, from: values.from })).find((s) => s.name === name)!;
+      await trustCa(first);
+      if (json) return out(JSON.stringify(copied));
+      return out(`${copied.name} is held for the domain ${first} too, copied from ${values.from} inside the root (its value went nowhere else). It is put in place on the way to: ${copied.hosts.join(", ")}${copied.headers ? ` (in the header${copied.headers.length > 1 ? "s" : ""} ${copied.headers.join(", ")} only)` : ""}.`);
     }
     if (action === "set" || action === "rm") {
       if (!name) refuse("which secret?", usage, EXIT.usage);
