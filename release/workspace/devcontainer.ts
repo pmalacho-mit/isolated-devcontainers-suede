@@ -20,8 +20,17 @@
 //   - the mirrors (read-only), the inbox (read-only), the outbox, desolate's own CLI and
 //     status script, the editor's server (read-only), and the trust store that holds the
 //     domain's CA.
-// A compose spec is started as written: its services keep their own networks, reach out
-// through the same redirect, and its ports are not forwarded (not done yet).
+// A compose spec gets the same, in its primary service (`service`), with two differences:
+//   - its network stays its own: the services find each other by name. Instead svcnet.ts
+//     runs in the primary service, and the VM's wsd mirrors each of its listeners, and each
+//     `forwardPorts` entry written `service:port`, onto the VM's loopback (bridge.ts). The
+//     host then forwards them like a single container's; what a service publishes
+//     (`ports:`) is docker's own listener in the VM and needs nothing;
+//   - the VM's /workspaces is mounted over whatever the project's compose file mounts at
+//     /workspaces (compose merges a service's volumes by target), and the folder is the
+//     checkout's own path: the domain's worktrees name their .git by the VM's absolute
+//     path, so git works in the service only on the VM's paths. A project mount elsewhere
+//     (`..:/src`) is kept beside it. The other services get nothing of desolate's.
 //
 // The environment is the first checkout that has a spec (section 4.5, way 1). It is not
 // frozen and its features are not pinned to digests yet.
@@ -30,6 +39,7 @@
 // workspace is the VM itself, and /run/desolate/devcontainer.json says which and why.
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readJson, writeJson } from "../shared/json.ts";
@@ -41,7 +51,14 @@ export const STATE = "/run/desolate/devcontainer.json";
 export type State =
   | { state: "none"; why: string }
   | { state: "failed"; why: string; config: string }
-  | { state: "up"; containerId: string; remoteUser: string; folder: string; config: string; override: string; checkout: string; hostNetwork: boolean; glibc: boolean; compose: boolean; extensions: string[]; image: string; note?: string };
+  | { state: "up"; containerId: string; remoteUser: string; folder: string; config: string; override: string; checkout: string; hostNetwork: boolean; glibc: boolean; compose: boolean; extensions: string[]; image: string; note?: string;
+      /** compose: svcnet.ts's socket in the primary service, when it answers (bridge.ts) */
+      bridge?: string;
+      /** compose: `forwardPorts` entries naming another service, for bridge.ts */
+      forwards?: { port: number; host: string }[] };
+
+/** svcnet.ts's socket: in /run/desolate, which the primary service shares with the VM. */
+export const SVCNET = "/run/desolate/svcnet.sock";
 
 export const locate = (dir: string): string | undefined => {
   const nested = path.join(dir, ".devcontainer", "devcontainer.json");
@@ -79,7 +96,11 @@ export const overrideOf = (spec: Record<string, unknown>, checkout: string, home
   const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
   const env = (value: unknown): Record<string, unknown> => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
   const compose = spec.dockerComposeFile !== undefined;
-  const bind = (source: string, target: string, readonly = false) => `source=${source},target=${target},type=bind${readonly ? ",readonly" : ""}`;
+  // For compose, the CLI writes each mount into its override file as `source:target` and
+  // drops every other option, `readonly` among them (read in CLI 0.88.0), so the mode rides
+  // in the target, which it copies as it is: `source:target:ro` is compose's own syntax.
+  const bind = (source: string, target: string, readonly = false) =>
+    compose ? `source=${source},target=${target}${readonly ? ":ro" : ""},type=bind` : `source=${source},target=${target},type=bind${readonly ? ",readonly" : ""}`;
   const ours = [
     bind("/desolate/mirrors", "/desolate/mirrors", true),
     bind("/desolate/inbox", "/desolate/inbox", true),
@@ -106,12 +127,11 @@ export const overrideOf = (spec: Record<string, unknown>, checkout: string, home
     // VM's ~/.desolate/workspace.json is not in the container's home).
     DESOLATE_DOMAIN: who.domain,
     DESOLATE_WORKSPACE_NAME: who.workspace,
-    // The domain's package caches (C4), where the container can see them: not for a compose
-    // spec, whose services are not given the mount.
-    ...(compose ? {} : CACHE_ENV),
+    // The domain's package caches (C4), where the container can see them.
+    ...CACHE_ENV,
     ...env(spec.containerEnv),
   };
-  if (compose) return { ...spec, containerEnv };
+  if (compose) return { ...spec, workspaceFolder: checkout, mounts: [...list(spec.mounts), ...ours, bind("/workspaces", "/workspaces")], containerEnv };
   return {
     ...spec,
     workspaceMount: bind("/workspaces", "/workspaces"),
@@ -120,6 +140,43 @@ export const overrideOf = (spec: Record<string, unknown>, checkout: string, home
     runArgs: [...list(spec.runArgs).filter((arg) => typeof arg !== "string" || !/^--net(work)?(=|$)/.test(arg)), "--network=host"],
     containerEnv,
   };
+};
+
+/** `forwardPorts` entries that name another compose service (`db:5432`): what bridge.ts
+ *  carries there. A bare number, or the primary service's own name, needs nothing: every
+ *  listener of the primary service is mirrored already. */
+export const forwardsOf = (spec: Record<string, unknown>): { port: number; host: string }[] => {
+  const out = new Map<number, string>();
+  for (const entry of Array.isArray(spec.forwardPorts) ? spec.forwardPorts : []) {
+    const match = typeof entry === "string" ? /^([A-Za-z0-9][A-Za-z0-9._-]{0,62}):(\d{1,5})$/.exec(entry) : null;
+    if (!match) continue;
+    const [host, port] = [match[1]!, Number(match[2])];
+    if (port < 1024 || port > 65535 || host === spec.service || host === "localhost" || host === "127.0.0.1" || out.has(port)) continue;
+    out.set(port, host);
+  }
+  return [...out].map(([port, host]) => ({ port, host }));
+};
+
+/** svcnet.ts in the primary service, as the VM's user, with the editor's node (a glibc
+ *  program, as the editor's server is). Kept if one already answers. */
+const startSvcnet = async (id: string): Promise<boolean> => {
+  const answers = () =>
+    new Promise<boolean>((resolve) => {
+      const conn = net.connect(SVCNET);
+      conn.setTimeout(1000, () => conn.destroy());
+      conn.on("connect", () => conn.write("L\n"));
+      conn.on("data", () => resolve(true));
+      conn.on("error", () => resolve(false));
+      conn.on("close", () => resolve(false));
+    });
+  if (await answers()) return true;
+  const started = await run("docker", ["exec", "-d", "-u", `${process.getuid!()}:${process.getgid!()}`, id, "/opt/desolate/editor/node", "--disable-warning=ExperimentalWarning", "/desolate/release/workspace/svcnet.ts", SVCNET]);
+  if (started.code !== 0) return false;
+  for (let i = 0; i < 50; i++) {
+    if (await answers()) return true;
+    await sleep(100);
+  }
+  return false;
 };
 
 const main = async () => {
@@ -193,6 +250,10 @@ const main = async () => {
     /* no .gitattributes */
   }
   const lfsMissing = usesLfs && (await run("docker", ["exec", id, "sh", "-c", "git lfs version"])).code !== 0;
+  // A compose service's own network, reached from the VM (bridge.ts): its listeners, its
+  // `service:port` forwards, and the editor's server when it runs there.
+  const compose = spec.dockerComposeFile !== undefined;
+  const bridged = compose && network !== "host" && glibc && (await startSvcnet(id));
   // The environment `devcontainer exec` gives a command (remoteEnv, and what its probe of the
   // user's login shell finds), worked out once, here: enter.sh then enters with `docker
   // exec` and this, in 20 ms rather than the CLI's 300 to 400 (measured on the M1), every
@@ -205,8 +266,14 @@ const main = async () => {
       .filter((entry) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(entry) && !/^(PWD|OLDPWD|SHLVL|_|TERM|HOSTNAME)=/.test(entry));
     fs.writeFileSync(execEnv, JSON.stringify({ containerId: id, user: result.remoteUser ?? "root", env: entries }), { mode: 0o600 });
   }
-  done({ state: "up", containerId: id, remoteUser: result.remoteUser ?? "root", folder: result.remoteWorkspaceFolder ?? checkout.path, config, override, checkout: checkout.path, hostNetwork: network === "host", glibc, compose: spec.dockerComposeFile !== undefined, extensions: extensionsOf(spec), image: String(spec.image ?? (spec.dockerComposeFile !== undefined ? "compose" : image ?? "built")).slice(0, 120),
-    ...(lfsMissing ? { note: "this repository keeps files in Git LFS and the container has no git-lfs, so committing them fails there; add the feature ghcr.io/devcontainers/features/git-lfs:1 to its devcontainer.json" } : {}) });
+  const notes = [
+    ...(lfsMissing ? ["this repository keeps files in Git LFS and the container has no git-lfs, so committing them fails there; add the feature ghcr.io/devcontainers/features/git-lfs:1 to its devcontainer.json"] : []),
+    ...(compose && network !== "host" && !bridged ? [`its service's ports are not forwarded and the editor runs in the VM: ${glibc ? "desolate's port relay did not start in it" : "it is not a glibc container, which desolate's port relay and the editor need"}`] : []),
+  ];
+  done({ state: "up", containerId: id, remoteUser: result.remoteUser ?? "root", folder: result.remoteWorkspaceFolder ?? checkout.path, config, override, checkout: checkout.path, hostNetwork: network === "host", glibc, compose, extensions: extensionsOf(spec),
+    image: (compose ? `service ${String(spec.service)}` : String(spec.image ?? image ?? "built")).slice(0, 120),
+    ...(bridged ? { bridge: SVCNET, forwards: forwardsOf(spec) } : {}),
+    ...(notes.length ? { note: notes.join("; ") } : {}) });
 };
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) await main();

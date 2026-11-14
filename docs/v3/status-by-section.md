@@ -31,7 +31,7 @@ T2 `03-ports`, `06-editor`, `09-ui`).
 | Section | State | Evidence, or what is missing |
 |---|---|---|
 | 4.1 Storage on the host, shared; the host never runs git there | **Done** | `~/.desolate/`; the CLI reads status files and plans as data. The root VM can be destroyed and rebuilt without losing mirrors, clones or domain work: not tested as such (`destroy` without `--all` keeps the home; a test that rebuilds the root over an existing home is missing). |
-| 4.2 Shape A: the devcontainer CLI runs in the VM, on the project's own spec | **Done for single-container specs; partly for compose** | T2 `08-devcontainer`: an image spec, a Dockerfile spec built from the project's context, a failing spec, no spec, a changed spec. `privileged` and anything else in a spec is allowed: there is no spec policy. **Compose specs** are started as written, but their services' ports are not forwarded and the editor stays in the VM; untested. **Features** need a registry, which the sandbox does not have: untested. |
+| 4.2 Shape A: the devcontainer CLI runs in the VM, on the project's own spec | **Done** | T2 `08-devcontainer`: an image spec, a Dockerfile spec built from the project's context, a failing spec, no spec, a changed spec. T2 `08-devcontainer-compose`: a compose spec of three services; `exec`, git, `desolate offer` and the editor in its primary service, on the VM's paths, with desolate's mounts (read-only where they should be); a server on the service's own loopback, a `forwardPorts` entry written `service:port` (beside it, the same service's undeclared port, not forwarded) and a published port, each at the workspace's hostname. On the M1 (`HANDOFF.md`, 2f): `mitdesolate/desolate-compose-demo`, an app service and Postgres with the docker-outside-of-docker feature, and with docker-in-docker. **Features** come from their registry through the workspace's proxy (ghcr.io, measured on the M1); T2 has no registry. `privileged` and anything else in a spec is allowed: there is no spec policy. A compose service that is not a glibc container gets neither the port relay nor the editor, and `up` says so. |
 | 4.2 The base image carries git's `safe.directory` and git-lfs | **Done** | `image/provision.sh`. |
 | 4.3 One link per workspace, reaching only its proxy; enforced outside | **Done** | T3 (`restrict=on`, `guestfwd`); T4 (`sandbox-exec`, a loopback port opened by token). The request channel is a file spool in the shares, not a socket (`decisions.md`). |
 | 4.3 The proxy: domain's rules, audit by link | **Done** | T2 `05-egress`, T3. |
@@ -181,5 +181,5 @@ provisionally. Each has its evidence in `decisions.md`.
 4. **The workspace-side extension** (URL mapping).
 5. **A quota on a domain's outbox**, and keeping the image's git current: the two things
    left open by the audit of what the root takes from a domain.
-6. **Compose specs**: forward their services' ports; test them.
+6. ~~**Compose specs**~~: done (`HANDOFF.md`, 2f).
 7. **The dispatchers**, on v3's contract.

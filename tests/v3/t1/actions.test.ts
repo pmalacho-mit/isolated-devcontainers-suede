@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { hostArgv } from "../../../release/shared/actions.ts";
 import { parse as parseJsonc } from "../../../release/shared/jsonc.ts";
-import { extensionsOf, overrideOf } from "../../../release/workspace/devcontainer.ts";
+import { extensionsOf, forwardsOf, overrideOf } from "../../../release/workspace/devcontainer.ts";
 
 describe("T1 the dashboard's requests to the host", () => {
   it("each kind becomes one fixed command", () => {
@@ -54,16 +54,30 @@ describe("T1 the spec desolate hands the devcontainer CLI", () => {
     assert.ok(merged.mounts.includes("source=/desolate/outbox,target=/desolate/outbox,type=bind"));
     assert.deepEqual([merged.containerEnv.MINE, merged.containerEnv.SSL_CERT_FILE, merged.containerEnv.GIT_CONFIG_KEY_0], ["1", "/my/own/bundle", "safe.directory"], "the spec's own environment wins over desolate's");
   });
-  it("a compose spec is left as written, but for the environment", () => {
-    const compose = overrideOf({ dockerComposeFile: "compose.yml", service: "app", workspaceFolder: "/src" }, "/workspaces/acme/app", "/home/dev") as Record<string, unknown>;
-    assert.deepEqual([compose.dockerComposeFile, compose.service, compose.workspaceFolder, compose.runArgs, compose.mounts], ["compose.yml", "app", "/src", undefined, undefined]);
+  it("a compose spec: its own services and network, and the VM's paths and mounts in its primary service", () => {
+    const compose = overrideOf({ dockerComposeFile: "compose.yml", service: "app", workspaceFolder: "/src", mounts: ["source=v,target=/v,type=volume"], runArgs: ["--x"] }, "/workspaces/acme/app", "/home/dev") as { [k: string]: unknown; mounts: string[] };
+    assert.deepEqual([compose.dockerComposeFile, compose.service, compose.runArgs, compose.workspaceMount], ["compose.yml", "app", ["--x"], undefined], "no network is chosen for it: compose ignores runArgs, and its services find each other by name");
+    assert.equal(compose.workspaceFolder, "/workspaces/acme/app", "the checkout's own path, where the domain's .git is named");
+    assert.equal(compose.mounts[0], "source=v,target=/v,type=volume");
+    assert.equal(compose.mounts.at(-1), "source=/workspaces,target=/workspaces,type=bind", "the VM's /workspaces at /workspaces (over the project's own mount there, which compose merges by target)");
+    // The CLI writes a compose mount as `source:target` and drops its options: the mode rides in the target.
+    assert.ok(compose.mounts.includes("source=/desolate/mirrors,target=/desolate/mirrors:ro,type=bind"), "the mirrors, read-only, at their own path");
+    assert.ok(compose.mounts.includes("source=/desolate/outbox,target=/desolate/outbox,type=bind"));
+    assert.ok(compose.mounts.includes("source=/run/desolate,target=/run/desolate,type=bind"), "where svcnet.ts's socket is, for the VM");
+    // CONTROL: a single container's read-only mounts say so in the CLI's own way.
+    assert.ok(!merged.mounts.some((m) => m.includes(":ro")));
   });
-  it("the domain's package caches (C4): mounted and named for a container, not for compose, and the spec's own setting wins", () => {
+  it("forwardPorts that name another compose service are carried there; the rest need nothing", () => {
+    assert.deepEqual(forwardsOf({ service: "app", forwardPorts: [8000, "db:5432", "app:3000", "localhost:4000", "cache:6379", "db:80", "x:y", "a b:1", "db:99999", "redis:5432"] }), [{ port: 5432, host: "db" }, { port: 6379, host: "cache" }]);
+    assert.deepEqual(forwardsOf({ forwardPorts: "db:5432" }), []);
+  });
+  it("the domain's package caches (C4): mounted and named for a container and for compose, and the spec's own setting wins", () => {
     assert.ok(merged.mounts.includes("source=/desolate/cache,target=/desolate/cache,type=bind"), "the domain's cache, writable, at its own path");
     assert.deepEqual([merged.containerEnv.npm_config_cache, merged.containerEnv.PIP_CACHE_DIR, merged.containerEnv.GOMODCACHE], ["/desolate/cache/npm", "/desolate/cache/pip", "/desolate/cache/go-mod"]);
     assert.equal(merged.containerEnv.CARGO_HOME, undefined, "never where a tool installs itself");
-    const compose = overrideOf({ dockerComposeFile: "compose.yml", service: "app" }, "/workspaces/acme/app", "/home/dev") as { containerEnv: Record<string, string> };
-    assert.equal(compose.containerEnv.npm_config_cache, undefined, "compose services are not given the mount, so they are not pointed at it");
+    const compose = overrideOf({ dockerComposeFile: "compose.yml", service: "app" }, "/workspaces/acme/app", "/home/dev") as { containerEnv: Record<string, string>; mounts: string[] };
+    assert.equal(compose.containerEnv.npm_config_cache, "/desolate/cache/npm", "the primary compose service is given the mount, so it is pointed at it");
+    assert.ok(compose.mounts.includes("source=/desolate/cache,target=/desolate/cache,type=bind"));
     const own = overrideOf({ image: "x", containerEnv: { npm_config_cache: "/home/node/.npm" } }, "/workspaces/acme/app", "/home/dev") as { containerEnv: Record<string, string> };
     assert.equal(own.containerEnv.npm_config_cache, "/home/node/.npm");
   });
