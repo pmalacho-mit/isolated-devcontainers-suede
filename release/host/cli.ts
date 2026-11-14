@@ -16,7 +16,8 @@ const HELP = `desolate: a VM per workspace, an editor inside it, and every push 
   desolate completion                                            tab completion: source <(desolate completion)
 
   desolate clone <owner/repo> [--no-push] [--anonymous]          keys, mirror (with LFS), root clone, and a domain
-                [--domain <d> | --no-domain]                    named after the repository (or <d>; or none)
+                [--domain <d> | --no-domain]                    named owner--repo (or <d>; or none)
+                [--keys-by-hand]                                 print the deploy keys for the repository's admin to add
   desolate fetch <owner/repo>                                    remote -> mirror
   desolate repos [--json]
   desolate keys [<owner/repo>] [--json]                          which keys the root holds; a key's public half
@@ -129,10 +130,10 @@ const main = async (argv: string[]): Promise<number> => {
     return (await destroy({ all: values.all === true }, out)).length === 0 ? EXIT.ok : EXIT.failed;
   }
   if (verb === "clone") {
-    const { values, positionals } = flags(rest, { "no-push": { type: "boolean" }, anonymous: { type: "boolean" }, domain: { type: "string" }, "no-domain": { type: "boolean" } });
+    const { values, positionals } = flags(rest, { "no-push": { type: "boolean" }, anonymous: { type: "boolean" }, domain: { type: "string" }, "no-domain": { type: "boolean" }, "keys-by-hand": { type: "boolean" } });
     const { clone } = await import("./repos.ts");
     if (values.domain !== undefined && values["no-domain"] === true) refuse("--domain and --no-domain say opposite things", "give one of them", EXIT.usage);
-    await clone(positionals[0], { push: values["no-push"] !== true && values.anonymous !== true, anonymous: values.anonymous === true, domain: values["no-domain"] === true ? false : values.domain as string | undefined }, out, values.json === true);
+    await clone(positionals[0], { push: values["no-push"] !== true && values.anonymous !== true, anonymous: values.anonymous === true, domain: values["no-domain"] === true ? false : values.domain as string | undefined, byHand: values["keys-by-hand"] === true }, out, values.json === true);
     return EXIT.ok;
   }
   if (verb === "fetch") {

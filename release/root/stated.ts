@@ -41,7 +41,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import * as path from "node:path";
 import { hostArgv } from "../shared/actions.ts";
 import { parseApproval } from "../shared/approval.ts";
-import { isBranch, isCommit, isSlug, parseRepo, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
+import { isBranch, isCommit, isLocalhostSuffix, isSlug, parseRepo, ROOT_HOSTNAME, ROOT_UI } from "../shared/names.ts";
 import { statusView } from "../shared/status.ts";
 import type { Head } from "../shared/status.ts";
 import { refusal, sameSecret } from "../shared/gate.ts";
@@ -79,7 +79,7 @@ const cookieName = (token: string) => `desolate_ui_${createHash("sha256").update
 
 // ------------------------------------------------------------------ state
 type HostFacts = {
-  stack?: { instance: string; backend: string; isolated: boolean; editorPort: number; approver: string | null };
+  stack?: { instance: string; backend: string; isolated: boolean; editorPort: number; approver: string | null; rootHostname?: string; gitHostname?: string };
   workspaces?: Record<string, { status: string; devcontainer?: string; editor?: string; ports?: { port: number; url: string }[]; reserved?: number[] }>;
   at?: string;
 };
@@ -323,7 +323,10 @@ const handle = async (req: IncomingMessage, res: ServerResponse) => {
   }
 
   // A browser. The gate's rules: this name only, this origin only.
-  const refused = refusal(ROOT_HOSTNAME, req.headers);
+  // The dashboard's name, as the host says it is (a stack inside a workspace has its own:
+  // shared/names.ts, HOSTNAME_SUFFIX); checked, and desolate.localhost until it says.
+  const named = facts.stack?.rootHostname;
+  const refused = refusal(typeof named === "string" && named.startsWith("desolate.") && isLocalhostSuffix(named.slice(9)) ? named : ROOT_HOSTNAME, req.headers);
   if (refused) return send(res, refused.status, "text/plain; charset=utf-8", `desolate: refused ${refused.why.replace("this is the editor of", "this is the dashboard at")}\n`);
   const ui = uiToken();
   if (!ui) return send(res, 503, "text/plain; charset=utf-8", "desolate: the dashboard has no credential installed yet; run `desolate bootstrap` on the host\n");

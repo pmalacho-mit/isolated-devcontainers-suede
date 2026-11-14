@@ -41,7 +41,7 @@ const register = async (repo: string, key: Key) => {
     if (/already in use|already exists/i.test(result.stderr)) return "already registered";
     if (result.code === 127) refuse("registering a deploy key needs GitHub's CLI", "install gh and run `gh auth login`, or add this key to the repository's deploy keys by hand:\n" + key.pubkey);
     refuse(`GitHub refused the ${key.role} deploy key for ${repo}: ${result.stderr.trim().split("\n").pop()}`,
-      key.role === "write" ? `if you cannot administer ${repo}, clone it with --no-push; if you cannot add any key, with --anonymous` : `if you cannot add a key to ${repo} and it is public, clone it with --anonymous`);
+      `if someone else administers ${repo}, they can add the keys: desolate clone ${repo} --keys-by-hand prints them. Otherwise: ${key.role === "write" ? "--no-push (no write key), or " : ""}--anonymous (no key, a public repository)`);
   } finally {
     fs.rmSync(file, { force: true });
   }
@@ -70,15 +70,27 @@ const domainFor = async (repo: string, named: string | undefined): Promise<{ slu
   return { taken: [slug] };
 };
 
-export const clone = async (name: string | undefined, options: { push: boolean; anonymous: boolean; domain?: string | false }, out: Out, json: boolean) => {
+export const clone = async (name: string | undefined, options: { push: boolean; anonymous: boolean; domain?: string | false; byHand?: boolean }, out: Out, json: boolean) => {
   const repo = repoId(repoArg(name));
   if (typeof options.domain === "string" && !isSlug(options.domain))
     refuse(`'${options.domain}' is not a domain name`, "a domain name is a slug: lowercase letters, digits and single dashes, at most 40", EXIT.usage);
   const prepared = await rootctl<{ pushable: boolean; anonymous: boolean; keys: Key[] }>("repo.prepare", { repo, push: options.push, anonymous: options.anonymous });
-  for (const key of prepared.keys) {
-    const how = await register(repo, key);
-    if (!json) out(`  ${key.role} key: ${how}${key.role === "write" ? " (it asks you before every push)" : ""}`);
-  }
+  if (options.byHand) {
+    // Keys added by whoever administers the repository (GitHub: Settings, Deploy keys). The
+    // root made them and keeps them; only their public halves are shown. The fetch says
+    // whether the read key is in place yet; the write key is first used by a push you approve.
+    const tried = await rootctl<Record<string, unknown>>("repo.fetch", { repo }, { quiet: true }).catch(() => null);
+    if (!tried) {
+      out(`Add ${prepared.keys.length === 1 ? "this deploy key" : "these deploy keys"} to ${repo}${config()?.forge.kind === "github" ? ` (https://github.com/${repo}/settings/keys/new)` : ""}, then run this command again:`);
+      for (const key of prepared.keys) out(`\n  ${key.role === "write" ? "desolate write: tick \"Allow write access\"" : "desolate read: read-only"}\n  ${key.pubkey}`);
+      return out("\nOnly public halves are shown: the private ones never leave the root's keyring.");
+    }
+    if (!json) out(`  keys: added by hand; the read key works${prepared.pushable ? " (the write key is first used by a push you approve)" : ""}`);
+  } else
+    for (const key of prepared.keys) {
+      const how = await register(repo, key);
+      if (!json) out(`  ${key.role} key: ${how}${key.role === "write" ? " (it asks you before every push)" : ""}`);
+    }
   const fetched = await rootctl<Record<string, unknown>>("repo.fetch", { repo });
   const placed = options.domain === false ? null : await domainFor(repo, options.domain);
   const domain = placed && "slug" in placed ? placed : null;

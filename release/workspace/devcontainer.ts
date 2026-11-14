@@ -44,6 +44,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { readJson, writeJson } from "../shared/json.ts";
 import { parse as parseJsonc } from "../shared/jsonc.ts";
+import { devHostname } from "../shared/names.ts";
 import type { WorkspacePlan } from "../shared/plan.ts";
 import { run, sleep } from "../shared/run.ts";
 
@@ -92,7 +93,7 @@ export const CACHE_ENV: Record<string, string> = {
   GOMODCACHE: "/desolate/cache/go-mod",
 };
 /** The spec desolate hands the CLI: the project's, plus what the header lists. */
-export const overrideOf = (spec: Record<string, unknown>, checkout: string, home: string, who: { domain: string; workspace: string } = { domain: "", workspace: "" }): Record<string, unknown> => {
+export const overrideOf = (spec: Record<string, unknown>, checkout: string, home: string, who: { domain: string; workspace: string; devHostname?: string } = { domain: "", workspace: "" }): Record<string, unknown> => {
   const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
   const env = (value: unknown): Record<string, unknown> => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
   const compose = spec.dockerComposeFile !== undefined;
@@ -114,6 +115,8 @@ export const overrideOf = (spec: Record<string, unknown>, checkout: string, home
     bind("/desolate/release/workspace/desolate", "/usr/local/bin/desolate", true),
     bind("/desolate/release/workspace/status", "/desolate/status", true),
     bind("/desolate/cache", "/desolate/cache"),
+    // The VM's own disk, at the same path (start.sh): binds for docker-outside-of-docker.
+    bind("/desolate/scratch", "/desolate/scratch"),
   ];
   const containerEnv = {
     // git in the container: the mirror and the checkouts are owned by the VM's user, which
@@ -127,6 +130,9 @@ export const overrideOf = (spec: Record<string, unknown>, checkout: string, home
     // VM's ~/.desolate/workspace.json is not in the container's home).
     DESOLATE_DOMAIN: who.domain,
     DESOLATE_WORKSPACE_NAME: who.workspace,
+    // Its dev name, which the host routes here with every name under it: what a desolate
+    // stack run in this workspace takes as its DESOLATE_HOSTNAME_SUFFIX (shared/names.ts).
+    ...(who.devHostname ? { DESOLATE_DEV_HOSTNAME: who.devHostname } : {}),
     // The domain's package caches (C4), where the container can see them.
     ...CACHE_ENV,
     ...env(spec.containerEnv),
@@ -205,7 +211,8 @@ const main = async () => {
   }
   const home = os.homedir();
   fs.mkdirSync(`${home}/.desolate-editor`, { recursive: true, mode: 0o700 });
-  const merged = overrideOf(spec, checkout.path, home, { domain: plan.domain, workspace: plan.workspace });
+  const instance = /^dsl-([a-z0-9]{1,12})-/.exec(plan.vm)?.[1];
+  const merged = overrideOf(spec, checkout.path, home, { domain: plan.domain, workspace: plan.workspace, ...(instance ? { devHostname: devHostname(instance, plan.domain, plan.workspace) } : {}) });
   const text = JSON.stringify(merged, null, 2);
   const dir = `${home}/.desolate-devcontainer`;
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

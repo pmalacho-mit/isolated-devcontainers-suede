@@ -146,17 +146,31 @@ export const workspaceVmName = (instance: string, domain: string, workspace: str
  *  a recreated workspace, from sharing a cookie jar by name. */
 export const surfaceHex = (instance: string, domain: string, workspace: string) =>
   hex(`${instance}\0${domain}\0${workspace}`, 6);
+/** What this stack's names end in: `localhost`, or, for a stack run inside a desolate
+ *  workspace (developing desolate there), that workspace's own dev name: the outer stack
+ *  routes it and every name under it to that workspace (host/daemon.ts), and a browser on the
+ *  Mac resolves every `*.localhost` name to loopback. Inside the workspace, the outer stack
+ *  gives it as DESOLATE_DEV_HOSTNAME:
+ *    DESOLATE_HOSTNAME_SUFFIX=$DESOLATE_DEV_HOSTNAME desolate bootstrap
+ *  Everything under it is that workspace's (its domain's), the inner stack's pages included. */
+export const isLocalhostSuffix = (value: unknown): value is string =>
+  typeof value === "string" && value.length <= 120 && /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*localhost$/.test(value);
+export const HOSTNAME_SUFFIX = (() => {
+  const value = process.env.DESOLATE_HOSTNAME_SUFFIX || "localhost";
+  if (!isLocalhostSuffix(value)) throw new Error(`DESOLATE_HOSTNAME_SUFFIX must be localhost or a name under it, not '${value}'`);
+  return value;
+})();
 export const devHostname = (instance: string, domain: string, workspace: string) =>
-  `${domain}-${workspace}-${surfaceHex(instance, domain, workspace)}.localhost`;
+  `${domain}-${workspace}-${surfaceHex(instance, domain, workspace)}.${HOSTNAME_SUFFIX}`;
 export const editorHostname = (instance: string, domain: string, workspace: string) =>
-  `${domain}-${workspace}-editor-${surfaceHex(instance, domain, workspace)}.localhost`;
-export const ROOT_HOSTNAME = "desolate.localhost";
+  `${domain}-${workspace}-editor-${surfaceHex(instance, domain, workspace)}.${HOSTNAME_SUFFIX}`;
+export const ROOT_HOSTNAME = `desolate.${HOSTNAME_SUFFIX}`;
 /** The approval page (host/approve-web.ts), served by the host daemon itself on the editors'
  *  port. A name of its own, not under ROOT_HOSTNAME: the dashboard's content comes from the
  *  root, and a cookie it set for its own domain would be sent to names under it. */
-export const APPROVE_HOSTNAME = "desolate-approve.localhost";
+export const APPROVE_HOSTNAME = `desolate-approve.${HOSTNAME_SUFFIX}`;
 /** The git terminal (host/git-web.ts): a bash in the git VM, in a browser tab. */
-export const GIT_HOSTNAME = "desolate-git.localhost";
+export const GIT_HOSTNAME = `desolate-git.${HOSTNAME_SUFFIX}`;
 
 /** A workspace's editor (P1: it runs in the workspace VM). In the VM, the editor's server
  *  listens on loopback at `server`, and editor-gate.ts in front of it at `gate`; the host's
@@ -174,3 +188,16 @@ export const editorHostPort = () => {
  *  ROOT_HOSTNAME. (The root has no editor: nothing in the root opens what an agent wrote
  *  with anything but git and desolate's own code.) */
 export const ROOT_UI = { port: 31590 } as const;
+
+declare namespace isLocalhostSuffix {
+  /** localhost, or names under it: never another domain, a port or anything a URL could escape by */
+  export type Names = Table<typeof isLocalhostSuffix, [
+    [args: [value: "localhost"], expected: true],
+    [args: [value: "acme--app-w1-0a1b2c.localhost"], expected: true],
+    [args: [value: "example.com"], expected: false],
+    [args: [value: "localhost.example.com"], expected: false],
+    [args: [value: "a.localhost:80"], expected: false],
+    [args: [value: "A.localhost"], expected: false],
+    [args: [value: ".localhost"], expected: false],
+  ]>;
+}
