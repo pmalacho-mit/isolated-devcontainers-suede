@@ -51,7 +51,7 @@ _desolate() {
                 if [ "$COMP_CWORD" -eq 2 ]; then words="create $(_desolate_domains)"
                 elif [ "$COMP_CWORD" -eq 3 ] && [ "${COMP_WORDS[2]}" != create ]; then words="add show net secret"
                 elif [ "${COMP_WORDS[3]:-}" = net ] && [ "$COMP_CWORD" -eq 4 ]; then words="show open enforce allow deny allow-internal recommend"
-                elif [ "${COMP_WORDS[3]:-}" = secret ] && [ "$COMP_CWORD" -eq 4 ]; then words="list set on off rm"
+                elif [ "${COMP_WORDS[3]:-}" = secret ] && [ "$COMP_CWORD" -eq 4 ]; then words="list set copy on off rm"
                 elif [ "${COMP_WORDS[3]:-}" = add ]; then words="--repo $(_desolate_repos)"
                 fi ;;
             up) if [ "$COMP_CWORD" -eq 2 ]; then words="$(_desolate_domains)"; else words="--name --checkout --base --fetch"; fi ;;

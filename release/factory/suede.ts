@@ -114,6 +114,10 @@ const handle = async (project: string, commit: string, onto: string | null) => {
       say(`${domain}/${name}: did not start (desolate up said ${up})`);
       continue;
     }
+    if (positionals.length === 0 && !ensureClaudeIn(`${domain}/${name}`, dep.remote, say)) {
+      say(`${domain}/${name}: Claude Code could not be installed in it`);
+      continue;
+    }
     const started = desolate(["agent", "start", `${domain}/${name}`, "--name", "claude", "--checkout", dep.remote, "--", ...agentCommand(task(project, commit, onto, dep, branch))]);
     say(started.code === 0 ? `${domain}/${name}: working. Watch: desolate agent attach ${domain}/${name} --name claude` : `${domain}/${name}: the agent did not start: ${started.err.trim()}`);
   }
