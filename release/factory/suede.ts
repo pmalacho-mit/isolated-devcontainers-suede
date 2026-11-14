@@ -23,7 +23,6 @@ import { spawn, spawnSync } from "node:child_process";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { printable } from "../shared/text.ts";
-import { agentCommand as claudeCommand, ensureClaude as ensureClaudeIn } from "./claude.ts";
 
 const CLI = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "cli.sh");
 // Everything said here is made printable: a .gitrepo's text, gh's and the VM's errors.
@@ -76,7 +75,10 @@ const task = (project: string, commit: string, onto: string | null, dep: Changed
   "If you cannot tell: `desolate status set orange \"<the question>\"`.",
 ].join("\n");
 
-const agentCommand = (text: string) => claudeCommand(positionals, String(values.secret), text);
+const agentCommand = (text: string) =>
+  positionals.length > 0
+    ? [...positionals, text]
+    : ["env", "-u", "ANTHROPIC_API_KEY", "-u", "ANTHROPIC_AUTH_TOKEN", `CLAUDE_CODE_OAUTH_TOKEN=${values.secret}`, "claude", "--permission-mode", "auto", text];
 
 const handle = async (project: string, commit: string, onto: string | null) => {
   const asked = desolate(["suede", "changed", project, commit, ...(onto ? ["--from", onto] : []), "--json"]);

@@ -32,6 +32,8 @@ bootstrap: 7 step(s) done.
   ok   root: only the pusher reaches the write agent: /run/desolate/keyring-write is closed to the root's own user
   ok   root: the reviewer answers: /run/desolate/reviewer/control.sock; it is not this user, and its read relay is closed to it
   ok   root: the pusher answers: /run/desolate/pusher/control.sock; the forge it pushes to is root's copy
+  ok   root: runs this desolate's code: its share of the release is <repo>/release
+  ok   host daemon holds its port: 127.0.0.1:31591: the dashboard, the editors and the approval page
 doctor: all checks passed.
 [exit 0]
 

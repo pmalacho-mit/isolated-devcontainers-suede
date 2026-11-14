@@ -138,7 +138,11 @@ git config --system protocol.file.allow always
 
 say "desolate's directories and identity"
 mkdir -p /desolate /workspaces /run/desolate /var/lib/desolate
+# image=: what this was provisioned from (host/image.ts), given by the host that ran this;
+# a VM whose image= differs from the host's desolate is older than it, and is provisioned
+# again (bootstrap).
 printf 'kind=%s\nnode=%s\nbuilt=%s\n' "$KIND" "$(node --version)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/opt/desolate/image-info
+if [[ ${DESOLATE_IMAGE_FINGERPRINT:-} =~ ^[0-9a-f]{16}$ ]]; then echo "image=$DESOLATE_IMAGE_FINGERPRINT" >>/opt/desolate/image-info; fi
 # dockerd is started by the workspace role, not at boot: the root VM runs no containers.
 systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true
 rm -rf "$STAGE"

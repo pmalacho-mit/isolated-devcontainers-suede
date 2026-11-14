@@ -31,19 +31,6 @@ last printed anything; the dashboard shows each workspace's status as the agent 
 (`desolate status set ...` inside), and `desolate notify` turns orange and red into
 notifications.
 
-## From a sentence to an agent: `desolate task`
-
-```bash
-desolate task acme "Add a shout() greeting, with a test"
-```
-
-One command for the common case: a workspace named for the task (`add-a-shout-greeting-with-a`,
-or `--name`), every repository of the domain on one branch (`task/<name>`, or `--branch`),
-Claude Code started in it with your sentence and how to finish (offer the branch, go green),
-and how to watch it. `--attach` attaches your terminal at once. Your own agent instead:
-`-- <command...>`, which gets the task as its last argument. Claude needs the domain's
-`CLAUDE-OAUTH` secret, below.
-
 ## Claude Code in a workspace
 
 Its credential stays out of the workspace. Once per domain, on your Mac:

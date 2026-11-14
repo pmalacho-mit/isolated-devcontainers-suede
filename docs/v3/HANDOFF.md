@@ -174,28 +174,17 @@ git-lfs feature, a test) and `mitdesolate/desolate-promo-lib`. The recording scr
 
 ### What has never been run
 
-- **The `vz` backend.** `release/host/vm/lima.ts` was written from the M1's Phase 0 results
-  and from the `qemu` backend that does run. Expect to fix things on first contact
-  (section 4).
-- **Anything on arm64.**
-- **The devcontainer with a real project.** The tests use a small image made in the VM.
-  Features, compose, and anything that pulls from a registry have not run. On the Mac the
-  first `up` of a real project will pull through the workspace's proxy: watch
-  `desolate net log <domain>`.
-- **The dashboard on the Mac.** Its budgets are met on the fake backend, where reaching
-  into a VM is a `docker exec`. On the Mac it is an ssh session through Lima; measure.
-- **The Touch ID approver** (opt-in: `DESOLATE_APPROVER=touchid`).
-  `release/host/approver/touchid.swift` was written on Linux and has never been compiled.
-  The default `terminal` approver makes the same kind of signature and is what every test
-  uses.
-- **The checks that need Linux's `/proc`, on the Mac.** They run in the root VM, which is
-  Linux everywhere, so this is one function: `readPlain` in `release/shared/status.ts`
-  takes its other branch when the *host* reads a status file. T1 `status` covers that
-  branch only when it is run on a Mac: run T1 there first.
-- **The editor on arm64**, and in a browser other than headless Chrome.
-- **GitHub.** Every test uses the stand-in forge. `desolate clone` against GitHub (registering
-  deploy keys with `gh`) is written and untested.
-- **`release/image/Dockerfile`.** The sandbox cannot pull `ubuntu:24.04`.
+(Revised 2026-11-13. The vz backend, arm64, a real devcontainer with a feature, the dashboard
+on the Mac, the image's Dockerfile, and `clone` and pushes against GitHub have all run on the
+M1 since this list was first written: sections 2d and 2e.)
+
+- **The Touch ID approver** (opt-in: `DESOLATE_APPROVER=touchid`). It compiles on the M1;
+  running it makes a Secure Enclave key and asks for a fingerprint, which is a person's to do.
+  The default `terminal` approver and the approval page are what every test uses.
+- **The editor in a browser other than Chrome** (Safari cannot open `*.localhost` names).
+- **Claude Code with a real token.** The way it is wired (a domain secret, substituted by
+  the workspace's proxy on the way to api.anthropic.com) is exercised with a stand-in token
+  that Anthropic refuses; a real subscription's first run is the owner's.
 
 ## 3. What is missing that matters most
 

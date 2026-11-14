@@ -55,31 +55,4 @@ describe("T2 desolate agent: kept running, attached to, stopped", () => {
     assert.match(listed, /echo {2}exited/, "stopped as a person would: interrupted, through its own terminal");
     assert.equal(stack.desolate("agent", "start", "dev/w1", "--name", "../x", "--", "true").code, 64, "a name is a name");
   });
-
-  it("desolate task: a sentence becomes a workspace on its own branch, an agent at work in it, and an offer", async () => {
-    const agent = ["--", "bash", "/desolate/release/factory/echo-agent.sh"];
-    const started = stack.desolate("task", "dev", "Add a shout() greeting", ...agent);
-    assert.equal(started.code, 0, started.stderr);
-    assert.match(started.stdout, /dev\/add-a-shout-greeting: starting, every repository on task\/add-a-shout-greeting/);
-    assert.match(started.stdout, /the agent is working on it\.\n {2}watch it: {3}desolate agent attach dev\/add-a-shout-greeting/);
-    // The stand-in agent writes its task down, commits, offers the branch and goes green.
-    let offers: { branch: string; workspace: string }[] = [];
-    for (let i = 0; i < 120 && !offers.some((o) => o.branch === "task/add-a-shout-greeting"); i++) {
-      offers = JSON.parse(stack.desolate("offers", "dev", "--json").stdout || "[]");
-      if (!offers.some((o) => o.branch === "task/add-a-shout-greeting")) await sleep(500);
-    }
-    assert.ok(offers.some((o) => o.branch === "task/add-a-shout-greeting" && o.workspace === "add-a-shout-greeting"), JSON.stringify(offers));
-    const log = stack.desolate("agent", "log", "dev/add-a-shout-greeting").stdout;
-    assert.match(log, /task: Add a shout\(\) greeting/, "the sentence is the agent's task");
-    // The same sentence again: a workspace of its own, never the first one's.
-    const again = stack.desolate("task", "dev", "Add a shout() greeting", ...agent);
-    assert.equal(again.code, 0, again.stderr);
-    assert.match(again.stdout, /dev\/add-a-shout-greeting-2: starting, every repository on task\/add-a-shout-greeting-2/);
-    // Refused before anything is made.
-    assert.equal(stack.desolate("task", "dev").code, 64, "a task is a domain and a sentence");
-    const nowhere = stack.desolate("task", "nowhere", "Do it", ...agent);
-    assert.equal(nowhere.code, 64);
-    assert.match(nowhere.stderr, /there is no domain 'nowhere'/);
-    for (const name of ["add-a-shout-greeting", "add-a-shout-greeting-2"]) stack.desolate("agent", "stop", `dev/${name}`);
-  });
 });

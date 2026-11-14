@@ -29,6 +29,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { WorkspacePlan } from "../shared/plan.ts";
+import { imageFingerprint } from "./image.ts";
 import { INSTANCE, RELEASE_DIR } from "./paths.ts";
 import { backend, rootctl } from "./stack.ts";
 import type { VmSpec } from "./vm/types.ts";
@@ -49,7 +50,7 @@ const released = (file: string) => {
 };
 /** The template's key: the spec, and what the VM it is built in is made of. */
 export const keyOf = (env: EnvKey) =>
-  hashOf(env.repo, env.spec, env.id, released("image/provision.sh"), released("pins.env"), released("workspace/devcontainer.ts"), released("workspace/editor.sh")).slice(0, 16);
+  hashOf(env.repo, env.spec, env.id, imageFingerprint(), released("workspace/devcontainer.ts"), released("workspace/editor.sh")).slice(0, 16);
 /** `dsl-<instance>-t<9 hex>`: as long as a workspace's VM name (the socket-path check counts
  *  on it), and never one ("t" is not hex). */
 export const templateVm = (domain: string, key: string) => `dsl-${INSTANCE}-t${hashOf(domain, key).slice(0, 9)}`;

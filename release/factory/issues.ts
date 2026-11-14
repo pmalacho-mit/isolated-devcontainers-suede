@@ -24,7 +24,6 @@ import { spawn, spawnSync } from "node:child_process";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { printable } from "../shared/text.ts";
-import { agentCommand as claudeCommand, ensureClaude as ensureClaudeIn } from "./claude.ts";
 
 const CLI = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "cli.sh");
 // Everything said here is made printable: issue text, gh's and the VM's errors, an agent's words.
@@ -80,9 +79,21 @@ const task = (issue: Issue) => [
   "If you need a person (a decision, access, a secret): `desolate status set orange \"<the question>\"`, and wait.",
 ].join("\n");
 
-/** The agent's command: Claude Code by default (factory/claude.ts), or yours after `--`. */
-const agentCommand = (issue: Issue) => claudeCommand(custom, String(values.secret), task(issue));
-const ensureClaude = (where: string) => custom.length > 0 || ensureClaudeIn(where, repo, say);
+/** The agent's command: Claude Code by default, on the domain's secret, in auto mode. */
+const agentCommand = (issue: Issue) =>
+  custom.length > 0
+    ? [...custom, task(issue)]
+    : ["env", "-u", "ANTHROPIC_API_KEY", "-u", "ANTHROPIC_AUTH_TOKEN", `CLAUDE_CODE_OAUTH_TOKEN=${values.secret}`, "claude", "--permission-mode", "auto", task(issue)];
+
+/** Claude Code in the workspace's environment, if it is not there yet (the project's
+ *  devcontainer should carry it: ghcr.io/anthropics/devcontainer-features/claude-code). */
+const ensureClaude = (where: string) => {
+  if (custom.length > 0) return true;
+  const has = desolate(["exec", where, "--checkout", repo, "--", "sh", "-c", "command -v claude"]);
+  if (has.code === 0) return true;
+  say(`${where}: installing Claude Code (add the claude-code devcontainer feature to skip this)`);
+  return desolate(["exec", where, "--checkout", repo, "--", "sh", "-c", "npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash"]).code === 0;
+};
 
 const workspaces = (): Row[] => {
   const listed = desolate(["list", domain, "--json"]);
