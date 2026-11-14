@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { EXIT, refuse } from "../shared/exit.ts";
-import { domainNamesFor, isSlug, parseRepo, repoId } from "../shared/names.ts";
+import { domainNameFor, isSlug, parseRepo, repoId } from "../shared/names.ts";
 import { run } from "../shared/run.ts";
 import { INSTANCE } from "./paths.ts";
 import { config, ensureProxyUser, rootctl } from "./stack.ts";
@@ -48,8 +48,8 @@ const register = async (repo: string, key: Key) => {
   return "registered";
 };
 
-/** The domain a clone lands in: the one named (made if it is new), or one named after the
- *  repository, made for it. A domain that already holds the repository is reused, so a
+/** The domain a clone lands in: the one named (made if it is new), or `owner--repo`, made
+ *  for it. A domain that already holds the repository is reused, so a
  *  second clone changes nothing. */
 const domainFor = async (repo: string, named: string | undefined): Promise<{ slug: string; made: boolean; added: boolean } | { taken: string[] }> => {
   const existing = await rootctl<{ slug: string; repos: string[] }[]>("domain.list", {}, { quiet: true });
@@ -65,11 +65,9 @@ const domainFor = async (repo: string, named: string | undefined): Promise<{ slu
     return { slug, made: !there, added: true };
   };
   if (named !== undefined) return join(named);
-  // Already in a domain of its own name (a second clone): nothing to do.
-  const candidates = domainNamesFor(repoArg(repo));
-  for (const slug of candidates) if (holding(slug)?.repos.includes(repo)) return { slug, made: false, added: false };
-  for (const slug of candidates) if (!holding(slug)) return join(slug);
-  return { taken: candidates };
+  const slug = domainNameFor(repoArg(repo));
+  if (!holding(slug) || holding(slug)!.repos.includes(repo)) return join(slug);
+  return { taken: [slug] };
 };
 
 export const clone = async (name: string | undefined, options: { push: boolean; anonymous: boolean; domain?: string | false }, out: Out, json: boolean) => {
@@ -90,7 +88,7 @@ export const clone = async (name: string | undefined, options: { push: boolean; 
     out(domain.made ? `domain ${domain.slug}: made for ${repo}.` : domain.added ? `domain ${domain.slug}: ${repo} added.` : `domain ${domain.slug}: already holds ${repo}.`);
     return out(`next: desolate up ${domain.slug}   (or: desolate task ${domain.slug} "<what to do>")`);
   }
-  if (placed && "taken" in placed) out(`no domain was made: ${placed.taken.join(" and ")} are domains already, holding other repositories.`);
+  if (placed && "taken" in placed) out(`no domain was made: ${placed.taken.join(" and ")} is a domain already, holding other repositories.`);
   out(`next: desolate domain create <slug> --repo ${repo}   (or, to a domain you have: desolate domain <slug> add --repo ${repo}; or clone again with --domain <slug>)`);
 };
 

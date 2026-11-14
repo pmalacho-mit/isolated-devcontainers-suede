@@ -9,8 +9,11 @@ export const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 /** GitHub's own rules, narrowed: no leading dot or dash, no "..", no ".git" suffix. */
 const REPO_PART = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/;
 
+/** At most one `--`: it is the separator in a domain named `owner--repo`, which clone makes,
+ *  and a slug's single dashes collapse runs, so it is never ambiguous. Never `xn--` first: a
+ *  hostname label that starts so is punycode to a browser. */
 export const isSlug = (value: unknown): value is string =>
-  typeof value === "string" && SLUG.test(value) && !value.endsWith("-") && !value.includes("--");
+  typeof value === "string" && SLUG.test(value) && !value.endsWith("-") && value.split("--").length <= 2 && !value.startsWith("xn--") && !/-{3}/.test(value);
 
 export type Repo = { owner: string; name: string };
 
@@ -32,7 +35,10 @@ declare namespace isSlug {
     [args: [value: "Acme"], expected: false],
     [args: [value: "-acme"], expected: false],
     [args: [value: "acme-"], expected: false],
-    [args: [value: "a--b"], expected: false],
+    [args: [value: "acme--widgets"], expected: true],
+    [args: [value: "a--b--c"], expected: false],
+    [args: [value: "a---b"], expected: false],
+    [args: [value: "xn--widgets"], expected: false],
     [args: [value: "a.b"], expected: false],
     [args: [value: "x234567890123456789012345678901234567890"], expected: true],
     [args: [value: "x2345678901234567890123456789012345678901"], expected: false],
@@ -58,31 +64,29 @@ export const repoId = (repo: Repo) => `${repo.owner}/${repo.name}`;
 const slugFrom = (text: string) =>
   text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, 40).replace(/-+$/, "");
 
-/** The names `clone` tries, in order, for the domain it makes a repository: the
- *  repository's own name, then owner and name together. A slug, never `owner/repo` itself
- *  (it is a VM label, a hostname and a path; see the top of this file). */
-export const domainNamesFor = (repo: Repo): string[] =>
-  [...new Set([slugFrom(repo.name), slugFrom(`${repo.owner}-${repo.name}`)])]
-    .filter((name) => isSlug(name) && name !== "origin" && name !== "root");
+/** The domain `clone` makes a repository: `owner--repo`, each part a slug (its runs of
+ *  anything else one dash, so `--` is only ever the separator). Too long for a slug: cut, and
+ *  a hash of the whole keeps it apart from another cut the same way. Never `owner/repo`
+ *  itself: a domain's name is a VM label, a hostname and a path. */
+export const domainNameFor = (repo: Repo): string => {
+  const part = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "x";
+  let name = `${part(repo.owner)}--${part(repo.name)}`;
+  if (name.startsWith("xn--")) name = `gh-${name}`;
+  if (name.length > 40) name = `${name.slice(0, 33).replace(/-+$/, "")}-${hex(repoId(repo).toLowerCase(), 6)}`;
+  return name;
+};
 
-declare namespace domainNamesFor {
-  /** the repository's name first, lower-cased; then owner-name for when that is taken */
-  export type Names = Table<typeof domainNamesFor, [
-    [args: [repo: { owner: "acme"; name: "widgets" }], expected: ["widgets", "acme-widgets"]],
-    [args: [repo: { owner: "pmalacho-mit"; name: "suede.nests" }], expected: ["suede-nests", "pmalacho-mit-suede-nests"]],
-    [args: [repo: { owner: "Acme"; name: "My_App" }], expected: ["my-app", "acme-my-app"]],
-    [args: [repo: { owner: "acme"; name: "a--b" }], expected: ["a-b", "acme-a-b"]],
-  ]>;
-  /** names a domain may not have are skipped: `origin` and `root` are remotes in every clone */
-  export type Skips = Table<typeof domainNamesFor, [
-    [args: [repo: { owner: "acme"; name: "origin" }], expected: ["acme-origin"]],
-    [args: [repo: { owner: "acme"; name: "_" }], expected: ["acme"]],
+declare namespace domainNameFor {
+  /** owner and name, a double dash between */
+  export type Names = Table<typeof domainNameFor, [
+    [args: [repo: { owner: "acme"; name: "widgets" }], expected: "acme--widgets"],
+    [args: [repo: { owner: "pmalacho-mit"; name: "suede.nests" }], expected: "pmalacho-mit--suede-nests"],
+    [args: [repo: { owner: "Acme"; name: "My__App" }], expected: "acme--my-app"],
+    [args: [repo: { owner: "acme"; name: "a--b" }], expected: "acme--a-b"],
+    [args: [repo: { owner: "xn"; name: "app" }], expected: "gh-xn--app"],
   ]>;
 }
 
-/** A branch name desolate will carry across an owner boundary. Stricter than git's
- *  check-ref-format (which the importing side also runs): no leading dash, no shell or
- *  refspec metacharacters, so it is safe as an argv word and inside a refspec. */
 export const isBranch = (value: unknown): value is string =>
   typeof value === "string" &&
   value.length > 0 && value.length <= 200 &&
