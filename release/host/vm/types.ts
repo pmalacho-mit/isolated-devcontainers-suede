@@ -58,6 +58,9 @@ export interface Backend {
   check(): Promise<Check[]>;
   /** Make the base image available (build, fetch or verify it). Idempotent. */
   ensureImage(log: (line: string) => void): Promise<void>;
+  /** Why the base is older than this desolate's image (host/image.ts), or null when it is
+   *  current or there is none yet. Cheap: no VM is asked. */
+  baseStale?(): string | null;
   create(spec: VmSpec): Promise<void>;
   /** A new VM whose disk is a copy-on-write clone of `from`'s, with its own spec. */
   clone(from: string, spec: VmSpec): Promise<void>;

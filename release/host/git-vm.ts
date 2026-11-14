@@ -52,7 +52,20 @@ export const gitSpec = (): VmSpec => ({
 export const ensureGitVm = async (log: (line: string) => void = () => {}) => {
   const b = backend();
   for (const dir of [paths.git, paths.gitOut, paths.gitAnswers]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const info = await b.info(GIT_VM);
+  let info = await b.info(GIT_VM);
+  if (info.status !== "missing" && b.kind !== "fake") {
+    // Older than this desolate's image: made again. It has no network to be provisioned
+    // again in place, and nothing of its own to keep: the person's clones and what it
+    // hands the host are on the host (paths.git, gitOut), and its git identity is set below.
+    if (info.status !== "running") await b.start(GIT_VM);
+    const { imageFingerprint, stampOf } = await import("./image.ts");
+    const stamp = stampOf((await b.exec(GIT_VM, ["cat", "/opt/desolate/image-info"], { timeoutMs: 30_000 })).stdout);
+    if (stamp !== imageFingerprint()) {
+      log(`git VM: made from ${stamp ? `image ${stamp}` : "an unstamped image"}, older than this desolate's (${imageFingerprint()}); making it again (your clones are on the Mac, and kept)`);
+      await b.destroy(GIT_VM);
+      info = await b.info(GIT_VM);
+    }
+  }
   if (info.status === "missing") {
     log("git VM: making it (once)");
     await b.ensureImage(log);
