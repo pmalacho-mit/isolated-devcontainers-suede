@@ -59,7 +59,7 @@ _desolate() {
             status|board|list|offers|branches) if [ "$COMP_CWORD" -eq 2 ]; then words="$(_desolate_workspaces) $(_desolate_domains) --json"; fi ;;
             rm) if [ "$COMP_CWORD" -eq 2 ]; then words="$(_desolate_workspaces) $(_desolate_domains)"; fi ;;
             exec) if [ "$COMP_CWORD" -eq 2 ]; then words="$(_desolate_workspaces)"; else words="--checkout --vm --"; fi ;;
-            clone) if [ "$COMP_CWORD" -gt 2 ]; then words="--no-push --anonymous"; fi ;;
+            clone) if [ "$COMP_CWORD" -gt 2 ]; then words="--no-push --anonymous --domain --no-domain --keys-by-hand"; fi ;;
             fetch) words="$(_desolate_repos)" ;;
             upstream) if [ "$COMP_CWORD" -eq 2 ] || [ "$COMP_CWORD" -eq 4 ]; then words="$(_desolate_repos)"; else words="--from --no-wait --remote"; fi ;;
             review|push)

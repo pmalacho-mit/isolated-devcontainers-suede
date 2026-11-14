@@ -25,6 +25,20 @@ NODE=${DESOLATE_NODE:-node}
 need() { echo "tests/v3: $1" >&2; echo "  fix: $2" >&2; exit 1; }
 "$NODE" -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=18)?0:1)' 2>/dev/null \
   || need "node >= 22.18 is required (found: $("$NODE" --version 2>/dev/null || echo none))" "install a newer node, or set DESOLATE_NODE"
+# Inside a desolate workspace (developing desolate there): the tests' homes go on the VM's
+# own disk, at the same path for the VM's docker as for this container (/desolate/scratch,
+# workspace/start.sh). /workspaces is a share, where chmod on a socket fails, and a socket's
+# path must stay short; /tmp here is the container's, which the VM's docker cannot bind.
+if [ "${DESOLATE_WORKSPACE:-}" = 1 ] && [ -z "${TMPDIR:-}" ] && [ -w /desolate/scratch ]; then
+  export TMPDIR=/desolate/scratch/tests
+  mkdir -p "$TMPDIR"
+fi
+# A Chromium the setup script fetched where the distribution has none (arm64 Ubuntu's is a snap).
+if [ -z "${DESOLATE_CHROME:-}" ]; then
+  for c in /desolate/scratch/playwright/chromium-*/chrome-linux/chrome "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux/chrome; do
+    [ -x "$c" ] && export DESOLATE_CHROME=$c && break
+  done
+fi
 run_node_tests() { "$NODE" --disable-warning=ExperimentalWarning --test --test-concurrency=1 --test-reporter="${DESOLATE_TEST_REPORTER:-spec}" "$@"; }
 
 t1() {
