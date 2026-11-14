@@ -98,7 +98,10 @@ this workspace's VM: the project's own image, features and lifecycle commands, a
 the VM (and in the container, if the spec gives it one) is the VM's own daemon; containers
 you start reach the network the same way you do, through the workspace's proxy. A dev
 server you start is reachable by the person at the workspace's own hostname, on the port
-it listens on: tell them the port, not `localhost`.
+it listens on: tell them the port, not `localhost`. With a compose spec you are in its
+primary service: the other services are reached by their names, as the spec intends;
+what listens in your service, what a service publishes (`ports:`), and each
+`forwardPorts` entry written `service:port` reach the person the same way.
 
 If the project has no `devcontainer.json`, or it did not come up, you are in the VM itself,
 with what its base image has (git, git-lfs, node, python3, curl, jq, docker). The person

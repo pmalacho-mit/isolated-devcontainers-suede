@@ -8,6 +8,8 @@
 //   ports     which TCP ports are listening here (for the host's forwarder to publish), and
 //             which the host asks this VM to keep taken, so a dev server moves to the next
 //             number instead of colliding with one that cannot be shared by name.
+//   compose   a compose devcontainer's listeners, and its `service:port` forwards, mirrored
+//             onto this VM's loopback (bridge.ts), so they are listeners here like any other.
 //
 // The host speaks to it through `wsctl.ts`, over the VM layer's exec: port numbers in, taken
 // ports out, nothing else.
@@ -16,6 +18,7 @@ import * as os from "node:os";
 import { createServer } from "node:net";
 import type { Server } from "node:net";
 import { run, sleep } from "../shared/run.ts";
+import { tick as bridgeTick } from "./bridge.ts";
 import { branches, domainRepos, importDeliveries, syncRepo } from "./sync.ts";
 
 const SOCKET = "/run/desolate/wsd.sock";
@@ -125,3 +128,11 @@ const watch = async () => {
   }
 };
 void watch();
+
+const bridge = async () => {
+  for (;;) {
+    await bridgeTick().catch((error: unknown) => console.error(`wsd: compose ports: ${String(error)}`));
+    await sleep(1000);
+  }
+};
+void bridge();

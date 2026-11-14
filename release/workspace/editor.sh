@@ -29,12 +29,14 @@ listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 # WHERE the server runs. In the project's devcontainer when it can: there the editor's
 # language servers, tasks and terminal see the project's own toolchain, as in v2. That
-# needs a glibc container (the server is a glibc program) on the VM's network (so it
-# listens on the VM's loopback, behind the gate). Otherwise in the VM, with a terminal that
-# enters the container (enter.sh).
+# needs a glibc container (the server is a glibc program) whose loopback is the VM's, or
+# reaches it: a single container on the VM's network, or a compose service whose listeners
+# the VM mirrors (bridge.ts; .bridge is set only when that is up). Either way the server is
+# on a loopback, behind the gate. Otherwise in the VM, with a terminal that enters the
+# container (enter.sh).
 STATE=/run/desolate/devcontainer.json
 WHERE=vm
-if [ "$(jq -r '.state == "up" and .hostNetwork and .glibc and (.compose | not)' "$STATE" 2>/dev/null)" = true ]; then
+if [ "$(jq -r '.state == "up" and .glibc and (.hostNetwork or (.compose and .bridge != null))' "$STATE" 2>/dev/null)" = true ]; then
   WHERE=$(jq -r .containerId "$STATE")
 fi
 node --disable-warning=ExperimentalWarning "$HERE/editor-settings.ts" "$DATA/data/Machine/settings.json" "$([ "$WHERE" = vm ] && echo enter || echo plain)"
